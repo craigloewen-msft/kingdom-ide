@@ -1,13 +1,15 @@
 //! The kingdom map: a zoomable, pannable SVG view of every city.
 //!
-//! Deliberately simple for now — flat SVG, no canvas, no WebGL. The layout
-//! maths lives in `kingdom_core::layout` so it stays pure and testable; this
-//! module is only concerned with turning placements into shapes and wiring up
-//! the viewport transform.
+//! This module owns the viewport and the signals drawn *between* cities;
+//! [`city`] owns what a single city looks like. The layout maths lives in
+//! `kingdom_core::{layout, skyline}` so it stays pure and testable.
+
+mod city;
 
 use crate::app::KingdomState;
+use city::{CityGlyph, Detail};
 use kingdom_core::layout::{bounds_of, spiral_layout, CityPlacement};
-use kingdom_core::{ArchitectStatus, City, CityId};
+use kingdom_core::{City, CityId, Ward};
 use leptos::ev;
 use leptos::prelude::*;
 
@@ -39,9 +41,40 @@ pub fn KingdomMap() -> impl IntoView {
     let viewport = RwSignal::new(Viewport::default());
     // Drag origin: pointer position and viewport offset when the drag began.
     let dragging = RwSignal::new(Option::<(f64, f64, f64, f64)>::None);
+    // Rendered width of the map in CSS pixels, needed to turn world units into
+    // apparent size. Seeded with a sane default for the server-rendered pass.
+    let viewport_px = RwSignal::new(1200.0_f64);
 
     let cities = Memo::new(move |_| state.kingdom.get().cities);
     let placements = Memo::new(move |_| spiral_layout(&cities.get()));
+
+    // Level of detail follows how big a city actually looks on screen, not the
+    // raw zoom. The viewBox auto-fits the kingdom, so the same zoom value means
+    // very different apparent sizes in a 6-city and a 60-city kingdom; keying
+    // off zoom alone would hide the skyline exactly when there is room for it.
+    let detail = Memo::new(move |_| {
+        let places = placements.get();
+        if places.is_empty() {
+            return Detail::Full;
+        }
+
+        let b = bounds_of(&places);
+        // The viewBox is fitted to the kingdom's width, so world units map to
+        // screen pixels by roughly (viewport width / kingdom width).
+        let world_to_px = if b.width() > 0.0 {
+            viewport_px.get() / b.width()
+        } else {
+            1.0
+        };
+
+        let median_radius = {
+            let mut radii: Vec<f64> = places.iter().map(|p| p.radius).collect();
+            radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            radii[radii.len() / 2]
+        };
+
+        Detail::for_city_size(median_radius * 2.0 * world_to_px * viewport.get().zoom)
+    });
 
     // The SVG viewBox is sized to the kingdom's natural extent; zoom and pan
     // are then applied as a transform on the contents. This keeps the initial
@@ -86,10 +119,23 @@ pub fn KingdomMap() -> impl IntoView {
         viewport.update(|v| v.zoom = (v.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM));
     };
 
+    // Track the SVG's real width so the detail tier reflects what the King can
+    // actually see rather than an assumed viewport.
+    let svg_ref = NodeRef::<leptos::svg::Svg>::new();
+    Effect::new(move |_| {
+        if let Some(el) = svg_ref.get() {
+            let width = el.get_bounding_client_rect().width();
+            if width > 0.0 {
+                viewport_px.set(width);
+            }
+        }
+    });
+
     view! {
         <div class="map-wrap">
             <svg
                 class="kingdom-svg"
+                node_ref=svg_ref
                 viewBox=move || view_box.get()
                 preserveAspectRatio="xMidYMid meet"
                 on:wheel=on_wheel
@@ -128,7 +174,7 @@ pub fn KingdomMap() -> impl IntoView {
                 <g transform=transform>
                     <ContentionThreads placements=placements/>
                     <Throne/>
-                    <Cities placements=placements/>
+                    <Cities placements=placements detail=detail/>
                 </g>
             </svg>
 
@@ -142,10 +188,30 @@ pub fn KingdomMap() -> impl IntoView {
             </div>
 
             <div class="map-legend">
-                <span><i class="dot status-working"></i>"Working"</span>
-                <span><i class="dot status-review"></i>"Awaiting review"</span>
-                <span><i class="dot status-blocked"></i>"Blocked"</span>
-                <span><i class="dot status-idle"></i>"Idle"</span>
+                <div class="legend-row">
+                    <span><i class="dot status-working"></i>"Working"</span>
+                    <span><i class="dot status-review"></i>"Awaiting review"</span>
+                    <span><i class="dot status-blocked"></i>"Blocked"</span>
+                    <span><i class="dot status-idle"></i>"Idle"</span>
+                </div>
+                // Ward colours: what the code *is*, as opposed to what an agent
+                // is doing to it.
+                <div class="legend-row wards">
+                    {Ward::ALL.iter().map(|w| view! {
+                        <span>
+                            <i class="dot" style:background=w.tint()></i>
+                            {w.label()}
+                        </span>
+                    }).collect_view()}
+                </div>
+            </div>
+
+            <div class="map-zoomhint">
+                {move || match detail.get() {
+                    Detail::Distant => "Zoom in to see districts",
+                    Detail::Districts => "Zoom in to see buildings",
+                    Detail::Full => "Full detail",
+                }}
             </div>
         </div>
     }
@@ -227,7 +293,7 @@ fn ContentionThreads(placements: Memo<Vec<CityPlacement>>) -> impl IntoView {
 
 /// All the cities of the realm.
 #[component]
-fn Cities(placements: Memo<Vec<CityPlacement>>) -> impl IntoView {
+fn Cities(placements: Memo<Vec<CityPlacement>>, detail: Memo<Detail>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
 
     let entries = Memo::new(move |_| {
@@ -248,132 +314,8 @@ fn Cities(placements: Memo<Vec<CityPlacement>>) -> impl IntoView {
         >
             {
                 let (city, place) = entry;
-                view! { <CityGlyph city=city place=place/> }
+                view! { <CityGlyph city=city place=place detail=detail/> }
             }
         </For>
-    }
-}
-
-/// A single city: a keep with towers, banners for its stack, and a ring of
-/// architect pips showing who is working there and in what state.
-#[component]
-fn CityGlyph(city: City, place: CityPlacement) -> impl IntoView {
-    let state = expect_context::<KingdomState>();
-
-    let id = city.id.clone();
-    let is_selected = {
-        let id = id.clone();
-        move || state.selected.get().as_ref() == Some(&id)
-    };
-
-    let architects = {
-        let id = id.clone();
-        Memo::new(move |_| {
-            state
-                .kingdom
-                .get()
-                .architects_in(&id)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-    };
-
-    // A city is "astir" when anyone is actively working there; it gets a halo.
-    let astir = move || {
-        architects
-            .get()
-            .iter()
-            .any(|a| a.status == ArchitectStatus::Working)
-    };
-    let troubled = move || {
-        architects
-            .get()
-            .iter()
-            .any(|a| a.status == ArchitectStatus::Blocked)
-    };
-
-    let r = place.radius;
-    let select = move |_| state.selected.set(Some(id.clone()));
-
-    view! {
-        <g
-            class="city"
-            class:selected=is_selected
-            class:astir=astir
-            class:troubled=troubled
-            transform=format!("translate({} {})", place.x, place.y)
-            on:click=select
-        >
-            // Halo for active cities.
-            <Show when=astir>
-                <circle class="city-halo" r=r + 18.0/>
-            </Show>
-
-            <circle class="city-plot" r=r/>
-
-            // The keep: a simple blocky silhouette, scaled to the city.
-            <g class="keep" transform=format!("scale({})", r / 48.0)>
-                <rect x="-22" y="-6" width="44" height="30" rx="2" class="keep-body"/>
-                <rect x="-30" y="-18" width="13" height="42" rx="2" class="keep-tower"/>
-                <rect x="17" y="-18" width="13" height="42" rx="2" class="keep-tower"/>
-                <polygon points="-30,-18 -23.5,-30 -17,-18" class="keep-roof"/>
-                <polygon points="17,-18 23.5,-30 30,-18" class="keep-roof"/>
-                <rect x="-5" y="8" width="10" height="16" rx="1" class="keep-gate"/>
-
-                // Banner in the city's stack colour.
-                <line x1="0" y1="-6" x2="0" y2="-40" class="banner-pole"/>
-                <polygon
-                    points="0,-40 20,-34 0,-28"
-                    fill=city.kind.banner_color()
-                    class="banner-flag"
-                />
-            </g>
-
-            <text class="city-name" text-anchor="middle" y=r + 26.0>
-                {city.name.clone()}
-            </text>
-
-            // Architect pips, arranged along the top arc of the plot.
-            <g class="architect-ring">
-                <For
-                    each={move || architects.get().into_iter().enumerate().collect::<Vec<_>>()}
-                    key=|(_, a)| a.id.clone()
-                    let:entry
-                >
-                    {
-                        let (i, architect) = entry;
-                        let total = architects.get().len().max(1);
-                        // Spread pips across a 120-degree arc above the keep.
-                        let spread = 2.094_395_1_f64;
-                        let start = -std::f64::consts::FRAC_PI_2 - spread / 2.0;
-                        let step = if total > 1 {
-                            spread / (total - 1) as f64
-                        } else {
-                            0.0
-                        };
-                        let angle = start + step * i as f64;
-                        let ring = r + 14.0;
-
-                        view! {
-                            <circle
-                                class=format!("pip status-{}", architect.status.css_suffix())
-                                cx=ring * angle.cos()
-                                cy=ring * angle.sin()
-                                r="6"
-                            >
-                                <title>
-                                    {format!(
-                                        "{} \u{2014} {}: {}",
-                                        architect.name,
-                                        architect.status.label(),
-                                        architect.activity,
-                                    )}
-                                </title>
-                            </circle>
-                        }
-                    }
-                </For>
-            </g>
-        </g>
     }
 }

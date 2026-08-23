@@ -76,6 +76,188 @@ pub struct City {
     pub has_git: bool,
     /// Uncommitted changes, if known.
     pub dirty_files: usize,
+    /// The project's folder tree, from which the map builds its skyline.
+    ///
+    /// `None` when the structure was not scanned; the map then falls back to a
+    /// plain keep glyph, so every caller predating the skyline still works.
+    pub structure: Option<District>,
+}
+
+// ---------------------------------------------------------------------------
+// City structure -- the raw shape of a project on disk
+// ---------------------------------------------------------------------------
+
+/// One file in a project: a single building in its city.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Building {
+    pub name: String,
+    /// Path relative to the city root. This is the join key that lets a
+    /// [`Plan`]'s `touches` list light up an exact building on the map.
+    pub path: String,
+    pub ward: Ward,
+    /// Size in bytes, which drives the building's height.
+    pub bulk: u64,
+}
+
+/// One folder in a project: a district of its city.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct District {
+    pub name: String,
+    /// Path relative to the city root; empty for the root district.
+    pub path: String,
+    pub buildings: Vec<Building>,
+    pub children: Vec<District>,
+    /// Files the scanner pruned rather than listing individually.
+    ///
+    /// Carrying the remainder as a count and a weight (instead of dropping it)
+    /// is what keeps the map honest: a folder with ten thousand files still
+    /// renders as heavy, even though only its largest files are named.
+    pub extra_files: usize,
+    pub extra_bulk: u64,
+}
+
+impl District {
+    pub fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            buildings: Vec::new(),
+            children: Vec::new(),
+            extra_files: 0,
+            extra_bulk: 0,
+        }
+    }
+
+    /// Every file beneath this district, including pruned remainders.
+    pub fn total_files(&self) -> usize {
+        self.buildings.len()
+            + self.extra_files
+            + self
+                .children
+                .iter()
+                .map(District::total_files)
+                .sum::<usize>()
+    }
+
+    /// Total bytes beneath this district, including pruned remainders.
+    pub fn total_bulk(&self) -> u64 {
+        self.buildings.iter().map(|b| b.bulk).sum::<u64>()
+            + self.extra_bulk
+            + self.children.iter().map(District::total_bulk).sum::<u64>()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_files() == 0
+    }
+}
+
+/// The language a file is written in, which tints its building.
+///
+/// Colour is the fastest channel the King has for reading a city's composition
+/// at a glance, so this is a small, visually distinct set rather than an
+/// exhaustive language list; anything unrecognised falls to [`Ward::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Ward {
+    Rust,
+    Web,
+    Python,
+    Go,
+    Systems,
+    Shell,
+    Markup,
+    Style,
+    Config,
+    Docs,
+    Other,
+}
+
+impl Ward {
+    /// Every ward, in legend order.
+    pub const ALL: [Ward; 11] = [
+        Ward::Rust,
+        Ward::Web,
+        Ward::Python,
+        Ward::Go,
+        Ward::Systems,
+        Ward::Shell,
+        Ward::Markup,
+        Ward::Style,
+        Ward::Config,
+        Ward::Docs,
+        Ward::Other,
+    ];
+
+    /// Classifies a file by extension.
+    pub fn from_path(path: &str) -> Ward {
+        let name = path.rsplit('/').next().unwrap_or(path);
+
+        // Extensionless files that are nonetheless recognisable.
+        match name {
+            "Makefile" | "Dockerfile" | "Justfile" | "justfile" => return Ward::Config,
+            "LICENSE" | "NOTICE" | "AUTHORS" => return Ward::Docs,
+            _ => {}
+        }
+
+        let ext = match name.rsplit_once('.') {
+            // A leading dot means a dotfile, not an extension.
+            Some((stem, ext)) if !stem.is_empty() => ext.to_ascii_lowercase(),
+            _ => return Ward::Config,
+        };
+
+        match ext.as_str() {
+            "rs" => Ward::Rust,
+            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte" => Ward::Web,
+            "py" | "pyi" | "ipynb" => Ward::Python,
+            "go" => Ward::Go,
+            "c" | "h" | "cc" | "cpp" | "hpp" | "cxx" | "zig" | "java" | "kt" | "swift" | "cs" => {
+                Ward::Systems
+            }
+            "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" => Ward::Shell,
+            "html" | "htm" | "xml" | "svg" | "jsx.html" => Ward::Markup,
+            "css" | "scss" | "sass" | "less" | "styl" => Ward::Style,
+            "toml" | "json" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "lock" | "env" => {
+                Ward::Config
+            }
+            "md" | "mdx" | "txt" | "rst" | "adoc" => Ward::Docs,
+            _ => Ward::Other,
+        }
+    }
+
+    /// The building's face colour.
+    ///
+    /// Deliberately avoids the status palette (green/amber/red), which is
+    /// reserved for what agents are doing; ward colour says what the code *is*.
+    pub fn tint(&self) -> &'static str {
+        match self {
+            Ward::Rust => "#fb923c",
+            Ward::Web => "#38bdf8",
+            Ward::Python => "#60a5fa",
+            Ward::Go => "#2dd4bf",
+            Ward::Systems => "#c084fc",
+            Ward::Shell => "#a3e635",
+            Ward::Markup => "#f472b6",
+            Ward::Style => "#818cf8",
+            Ward::Config => "#94a3b8",
+            Ward::Docs => "#cbd5e1",
+            Ward::Other => "#546076",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Ward::Rust => "Rust",
+            Ward::Web => "JS/TS",
+            Ward::Python => "Python",
+            Ward::Go => "Go",
+            Ward::Systems => "Systems",
+            Ward::Shell => "Shell",
+            Ward::Markup => "Markup",
+            Ward::Style => "Styles",
+            Ward::Config => "Config",
+            Ward::Docs => "Docs",
+            Ward::Other => "Other",
+        }
+    }
 }
 
 /// What sort of project a city is, inferred from marker files.
