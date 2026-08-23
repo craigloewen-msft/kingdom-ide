@@ -424,6 +424,17 @@ pub enum PlanStatus {
 }
 
 impl PlanStatus {
+    /// Every state, in the order the map legend lists them: live states first,
+    /// then settled history.
+    pub const ALL: [PlanStatus; 6] = [
+        PlanStatus::Drafting,
+        PlanStatus::AwaitingReview,
+        PlanStatus::Blocked,
+        PlanStatus::Failed,
+        PlanStatus::Approved,
+        PlanStatus::Rejected,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
             PlanStatus::Drafting => "Drafting",

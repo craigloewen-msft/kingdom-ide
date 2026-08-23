@@ -9,7 +9,7 @@ mod city;
 use crate::app::KingdomState;
 use city::{CityGlyph, Detail};
 use kingdom_core::layout::{bounds_of, spiral_layout, CityPlacement};
-use kingdom_core::{City, CityId, Ward};
+use kingdom_core::{City, CityId, PlanStatus, Ward};
 use leptos::ev;
 use leptos::prelude::*;
 
@@ -188,14 +188,18 @@ pub fn KingdomMap() -> impl IntoView {
             </div>
 
             <div class="map-legend">
+                // Driven from the enum rather than hand-listed, so a new plan
+                // state cannot appear on the map without appearing here too.
                 <div class="legend-row">
-                    <span><i class="dot status-working"></i>"Working"</span>
-                    <span><i class="dot status-review"></i>"Awaiting review"</span>
-                    <span><i class="dot status-blocked"></i>"Blocked"</span>
-                    <span><i class="dot status-idle"></i>"Idle"</span>
+                    {PlanStatus::ALL.iter().map(|s| view! {
+                        <span>
+                            <i class=format!("dot status-{}", s.css_suffix())></i>
+                            {s.label()}
+                        </span>
+                    }).collect_view()}
                 </div>
-                // Ward colours: what the code *is*, as opposed to what an agent
-                // is doing to it.
+                // Ward colours: what the code *is*, as opposed to what is being
+                // proposed for it.
                 <div class="legend-row wards">
                     {Ward::ALL.iter().map(|w| view! {
                         <span>

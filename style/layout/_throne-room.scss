@@ -1,0 +1,20 @@
+// Throne room layout.
+//
+// Sidebar down the left, map filling the rest, chat docked across the bottom
+// of the map region.
+
+.throne-room {
+  display: grid;
+  // The first column is set inline from the sidebar width signal, so the
+  // resizer can drive it live. This is only the pre-hydration fallback.
+  grid-template-columns: 290px 1fr;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    "sidebar map"
+    "sidebar chat";
+  height: 100vh;
+}
+
+// While the rail is being dragged the pointer sweeps across the map; without
+// this it drags a text selection along with it.
+body.resizing { user-select: none; cursor: col-resize; }

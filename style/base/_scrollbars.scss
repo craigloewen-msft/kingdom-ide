@@ -1,0 +1,10 @@
+@use "../abstracts/tokens" as t;
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: t.$edge-bright;
+  border-radius: 5px;
+
+  &:hover { background: t.$ink-faint; }
+}

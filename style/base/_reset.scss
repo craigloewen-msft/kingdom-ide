@@ -1,0 +1,26 @@
+// Document-level defaults, plus the palette re-exported as CSS custom
+// properties so runtime code (and future themes) can reach it.
+
+@use "sass:map";
+@use "../abstracts/tokens" as t;
+
+:root {
+  @each $name, $value in t.$palette {
+    --#{$name}: #{$value};
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: t.$void;
+  color: t.$ink;
+  font-family: t.$font-sans;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+button { font-family: inherit; cursor: pointer; }
