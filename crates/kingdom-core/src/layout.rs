@@ -87,6 +87,11 @@ impl Bounds {
 
 /// Computes the extent of a set of placements, including each city's radius
 /// and a margin so nothing is flush against the viewport edge.
+///
+/// The margin is deliberately tight. It only has to stop a city's name and
+/// banner from being clipped; any more and the kingdom shrinks into the middle
+/// of the screen surrounded by dead space, which wastes the one view the King
+/// spends most of their time looking at.
 pub fn bounds_of(placements: &[CityPlacement]) -> Bounds {
     if placements.is_empty() {
         return Bounds {
@@ -97,7 +102,7 @@ pub fn bounds_of(placements: &[CityPlacement]) -> Bounds {
         };
     }
 
-    let margin = 140.0;
+    let margin = 55.0;
     let mut b = Bounds {
         min_x: f64::MAX,
         min_y: f64::MAX,
@@ -130,6 +135,7 @@ mod tests {
             file_count: files,
             has_git: false,
             dirty_files: 0,
+            structure: None,
         }
     }
 

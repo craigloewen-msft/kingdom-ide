@@ -114,8 +114,10 @@ crates/
   kingdom-core/     Domain model. No I/O, no framework deps. Compiles to
                     BOTH native and wasm32 — keep it that way.
     ids.rs          Newtyped IDs (CityId, ArchitectId, ...)
-    model.rs        Kingdom, City, Architect, Plan, Resource, Lease
+    model.rs        Kingdom, City, Architect, Plan, Resource, Lease,
+                    District/Building/Ward (a project's shape on disk)
     layout.rs       Deterministic map placement (pure maths)
+    skyline.rs      Deterministic per-city building placement (pure maths)
     sample.rs       Placeholder court data
 
   kingdom-app/      Server + UI in one crate, split by feature flag.
@@ -124,7 +126,7 @@ crates/
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
     app.rs          Shell, routing, shared UI state
-    components/     sidebar.rs, map.rs, chat.rs
+    components/     sidebar.rs, chat.rs, map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
 ```
@@ -175,8 +177,11 @@ build on top of a placeholder believing it is real.
 
 **Real:**
 - Scanning a dev folder into cities; stack detection; git presence; file counts
+- Scanning each project's folder tree into districts and buildings
 - Deterministic, non-overlapping map layout (tested)
-- Pan, zoom, city selection
+- Deterministic per-city skyline layout: treemap placement, isometric draw
+  order, caps with honest aggregation (tested)
+- Pan, zoom, city selection, level-of-detail switching
 - The client/server round trip for every `#[server]` function
 - Lease compatibility logic (tested)
 
@@ -222,9 +227,29 @@ detail. The existing tests are the model:
 - cities never overlap on the map (breaks legibility at scale)
 - layout is deterministic (breaks the King's spatial memory)
 - the lease compatibility matrix (breaks correctness of coordination)
+- buildings stay inside their city and never overlap (breaks legibility, and is
+  what extends the city non-overlap guarantee down to buildings)
+- the skyline is deterministic and independent of directory read order
+- every file is accounted for as a tower or inside a commons block (the map must
+  never silently under-report how much code a folder holds)
+- buildings are painted back to front (SVG has no depth buffer, so draw order is
+  the entire 3D illusion)
+- assets never outweigh code (a 40 MB video must not bury `src/`)
 
 Each pins something a user would actually notice breaking. Do not add tests
 that restate the implementation or assert trivial accessors.
+
+### Visual work
+The map is the product's face, so changes to it need to be *looked at*, not just
+compiled. Two habits that paid off building the skyline:
+
+- **Measure the DOM, do not eyeball it.** Reading rendered geometry back out of
+  the SVG and checking it against the invariant (e.g. every occlusion constraint
+  between every pair of buildings) catches real bugs and, just as usefully,
+  disproves imaginary ones.
+- **Treat impressionistic visual feedback as a lead, not a verdict.** "The draw
+  order looks wrong" was worth investigating; it was only worth *acting* on once
+  a measurement showed 17 genuinely mis-ordered pairs.
 
 ---
 

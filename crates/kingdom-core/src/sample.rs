@@ -93,7 +93,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Architect>, Vec<Plan>, Vec<Resour
                 } else {
                     PlanStatus::Draft
                 },
-                touches: vec!["src/lib.rs".into(), "src/main.rs".into()],
+                touches: notable_files(city, 3),
             });
         }
     }
@@ -142,5 +142,51 @@ fn plan_title(i: usize) -> &'static str {
         1 => "The Aqueduct",
         2 => "The New Foundations",
         _ => "The Curtain Wall",
+    }
+}
+
+/// Picks real files from a city to stand in as a plan's touched paths.
+///
+/// Hardcoded paths like `src/lib.rs` match nothing in most projects, which
+/// would leave the map's plan highlighting dead on arrival -- the same reason
+/// this module seeds a blocked architect rather than a tidy idle court: the
+/// states the UI exists to show have to be reachable on day one.
+fn notable_files(city: &City, want: usize) -> Vec<String> {
+    let Some(structure) = &city.structure else {
+        return Vec::new();
+    };
+
+    // Prefer source over config or docs: a plan touching `Cargo.lock` is not a
+    // convincing rehearsal of the King's review loop.
+    let mut found: Vec<(bool, u64, String)> = Vec::new();
+    collect(structure, &mut found);
+    found.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    found
+        .into_iter()
+        .take(want)
+        .map(|(_, _, path)| path)
+        .collect()
+}
+
+fn collect(district: &District, out: &mut Vec<(bool, u64, String)>) {
+    for b in &district.buildings {
+        let is_source = matches!(
+            b.ward,
+            Ward::Rust | Ward::Web | Ward::Python | Ward::Go | Ward::Systems
+        );
+        // Absurdly large files are almost always vendored or generated, and a
+        // plan claiming to touch one is not a believable rehearsal.
+        if b.bulk > 400_000 {
+            continue;
+        }
+        out.push((is_source, b.bulk, b.path.clone()));
+    }
+    for child in &district.children {
+        collect(child, out);
     }
 }
