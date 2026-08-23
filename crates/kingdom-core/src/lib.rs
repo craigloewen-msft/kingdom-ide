@@ -23,6 +23,7 @@ pub mod layout;
 pub mod model;
 pub mod sample;
 pub mod skyline;
+pub mod terrain;
 
 pub use ids::*;
 pub use model::*;

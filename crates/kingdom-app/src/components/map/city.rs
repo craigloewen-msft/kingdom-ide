@@ -17,7 +17,7 @@
 use crate::app::KingdomState;
 use kingdom_core::layout::CityPlacement;
 use kingdom_core::skyline::{iso, Lot, LotKind, Plate, Skyline};
-use kingdom_core::{ArchitectStatus, City, PlanStatus};
+use kingdom_core::{ArchitectStatus, City, CityId, PlanStatus};
 use leptos::prelude::*;
 use std::collections::HashSet;
 
@@ -32,36 +32,41 @@ const RIGHT_SHADE: f64 = 0.30;
 /// once, and at low zoom they would be sub-pixel noise anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
-    /// Silhouette only: the city reads as a mass and a banner.
-    Distant,
+    /// The realm seen whole: a city is a mass and a banner.
+    Realm,
     /// District plates and landmarks, but no individual buildings.
-    Districts,
-    /// The full skyline.
-    Full,
+    Province,
+    /// The full skyline, street by street.
+    Streets,
 }
 
 impl Detail {
     /// Chooses a tier from how large a city actually appears on screen.
     ///
-    /// Keying off raw zoom would be wrong: the map auto-fits the kingdom, so
+    /// Keying off raw zoom would be wrong: the map auto-fits the realm, so
     /// zoom 1.0 means "six cities, each huge" in one kingdom and "sixty cities,
     /// each tiny" in another. Using apparent size instead means a small kingdom
     /// shows its skyline immediately -- the whole point of the view -- while a
     /// large one still degrades to silhouettes before it can bury the browser.
     pub fn for_city_size(city_px: f64) -> Detail {
         if city_px < 26.0 {
-            Detail::Distant
+            Detail::Realm
         } else if city_px < 68.0 {
-            Detail::Districts
+            Detail::Province
         } else {
-            Detail::Full
+            Detail::Streets
         }
     }
 }
 
-/// A single city, drawn as a living metropolis.
+/// A single city, drawn as a living metropolis standing on the realm's ground.
 #[component]
-pub fn CityGlyph(city: City, place: CityPlacement, detail: Memo<Detail>) -> impl IntoView {
+pub fn CityGlyph(
+    city: City,
+    place: CityPlacement,
+    detail: Memo<Detail>,
+    visit: Callback<CityId>,
+) -> impl IntoView {
     let state = expect_context::<KingdomState>();
 
     let id = city.id.clone();
@@ -120,7 +125,16 @@ pub fn CityGlyph(city: City, place: CityPlacement, detail: Memo<Detail>) -> impl
     );
     let has_skyline = skyline.with_value(|s| !s.lots.is_empty());
 
-    let select = move |_| state.selected.set(Some(id.clone()));
+    let select = {
+        let id = id.clone();
+        move |ev: leptos::ev::MouseEvent| {
+            // The map's own click handler pulls the camera back out to survey
+            // the realm; without this a click on a city would immediately be
+            // undone by the click on the land behind it.
+            ev.stop_propagation();
+            visit.run(id.clone());
+        }
+    };
 
     let city_name = city.name.clone();
     let banner = city.kind.banner_color();
@@ -133,7 +147,12 @@ pub fn CityGlyph(city: City, place: CityPlacement, detail: Memo<Detail>) -> impl
             class:selected=is_selected
             class:astir=astir
             class:troubled=troubled
-            transform=format!("translate({} {})", place.x, place.y)
+            // The city stands on the ground plane at its own elevation, in the
+            // same isometric space as the terrain and every building inside it.
+            transform={
+                let (sx, sy) = iso(place.x, place.y, place.elevation);
+                format!("translate({sx:.2} {sy:.2})")
+            }
             on:click=select
         >
             <Show when=astir>
@@ -155,14 +174,14 @@ pub fn CityGlyph(city: City, place: CityPlacement, detail: Memo<Detail>) -> impl
                     return view! { <BareKeep radius=r/> }.into_any();
                 }
                 match d {
-                    Detail::Distant => view! {
+                    Detail::Realm => view! {
                         <Silhouette skyline=skyline/>
                     }.into_any(),
-                    Detail::Districts => view! {
+                    Detail::Province => view! {
                         <Districts skyline=skyline show_labels=false/>
                         <Landmark skyline=skyline/>
                     }.into_any(),
-                    Detail::Full => view! {
+                    Detail::Streets => view! {
                         <Districts skyline=skyline show_labels=true/>
                         <Buildings skyline=skyline under_plan=under_plan/>
                     }.into_any(),
@@ -179,7 +198,7 @@ pub fn CityGlyph(city: City, place: CityPlacement, detail: Memo<Detail>) -> impl
             <text class="city-name" text-anchor="middle" y=r * 0.62 + 26.0>
                 {city_name.clone()}
             </text>
-            <Show when={move || detail.get() != Detail::Distant}>
+            <Show when={move || detail.get() != Detail::Realm}>
                 <text class="city-meta" text-anchor="middle" y=r * 0.62 + 40.0>
                     {format!("{file_count} files")}
                 </text>

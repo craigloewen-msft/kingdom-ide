@@ -340,8 +340,9 @@ body.resizing { user-select: none; cursor: col-resize; }
   grid-area: map;
   position: relative;
   min-height: 0;
-  background:
-    radial-gradient(ellipse at 50% 45%, #101a2e 0%, $deep 55%, $void 100%);
+  // Deep ocean beyond the drawn sea, so the world has no visible edge however
+  // far the King pans.
+  background: $void;
 }
 
 .map-wrap { position: absolute; inset: 0; }
@@ -354,6 +355,85 @@ body.resizing { user-select: none; cursor: col-resize; }
   user-select: none;
 
   &.grabbing { cursor: grabbing; }
+}
+
+// --- The land ---------------------------------------------------------------
+//
+// Terrain is deliberately DECORATION, and is held to decoration's rules. The
+// elevation field means nothing -- it is noise -- so it earns its place only as
+// substrate: it exists so that the things which *do* carry meaning (a gilded
+// roof, a blocked architect, a contended port) read as objects standing in a
+// place rather than marks on a backdrop.
+//
+// The discipline that keeps that honest, and which any change here must respect:
+// every terrain colour is a desaturated slate or blue drawn from the existing
+// palette, and none may approach the saturation of a `Ward::tint()` or a
+// status colour. If the terrain ever competes with a signal for attention, the
+// terrain is wrong.
+
+.ocean {
+  // The sheen gradient is set inline; this only handles the shoreline edge.
+  stroke: none;
+}
+
+// Elevation bands, shore to peak. The steps are small on purpose: relief should
+// be felt more than seen, and high contrast here would turn the ground into the
+// loudest thing on screen.
+.land-band {
+  stroke-width: 1;
+  stroke-linejoin: round;
+}
+
+.band-0 {  // the coast
+  fill: #17253c;
+  stroke: #24405f;
+}
+
+.band-1 {
+  fill: #1b2b45;
+  stroke: rgba(45, 61, 92, 0.5);
+}
+
+.band-2 {
+  fill: #20324e;
+  stroke: rgba(45, 61, 92, 0.4);
+}
+
+.band-3 {
+  fill: #253a58;
+  stroke: rgba(45, 61, 92, 0.35);
+}
+
+.band-4 {  // the highlands
+  fill: #2b4363;
+  stroke: rgba(59, 77, 112, 0.4);
+}
+
+// Roads: the connective tissue. Before these existed the cities were, literally,
+// disjoint -- so they are load-bearing for the map reading as one realm rather
+// than as scattered islands.
+//
+// Each road is drawn twice: a wide dark casing beneath a narrower metalled
+// surface. That pairing is what makes a stroke read as a *road* cut into the
+// ground rather than as a line drawn on top of it.
+.roads {
+  pointer-events: none;
+}
+
+.road-casing {
+  fill: none;
+  stroke: #0e1728;
+  stroke-width: 6;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.road-surface {
+  fill: none;
+  stroke: #46587c;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  opacity: 0.75;
 }
 
 .throne-ring {
@@ -373,6 +453,7 @@ body.resizing { user-select: none; cursor: col-resize; }
 
 // A pulsing red thread drawn between two cities fighting over one resource.
 .contention-thread {
+  fill: none;
   stroke: $blocked;
   stroke-width: 2;
   stroke-dasharray: 6 8;
