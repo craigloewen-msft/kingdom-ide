@@ -20,7 +20,23 @@ leptos_router = { version = "0.8" }
 # Server-only (feature-gated so they never reach the wasm bundle).
 leptos_axum = { version = "0.8", optional = true }
 axum = { version = "0.8", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "process",
+    "time",
+], optional = true }
+# The model call. rustls rather than native-tls so there is no OpenSSL build
+# dependency; no default features keeps the wasm-irrelevant bulk out.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
+serde_json = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+dotenvy = { version = "0.15", optional = true }
+thiserror = { version = "2", optional = true }
 
 # Client-only.
 console_error_panic_hook = { version = "0.1", optional = true }
@@ -50,6 +66,11 @@ ssr = [
     "dep:axum",
     "dep:tokio",
     "dep:leptos_axum",
+    "dep:reqwest",
+    "dep:serde_json",
+    "dep:async-trait",
+    "dep:dotenvy",
+    "dep:thiserror",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",

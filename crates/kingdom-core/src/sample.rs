@@ -62,7 +62,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         };
         plan.status = status;
         plan.touches = notable_files(city, 3);
-        plan.say(Speaker::Court, &plan.summary.clone());
+        plan.say(Speaker::Court, plan.summary.clone());
         plan.leases = leases
             .into_iter()
             .map(|(resource, mode, reason)| Lease {
@@ -194,5 +194,56 @@ fn collect(district: &District, out: &mut Vec<(bool, u64, String)>) {
     }
     for child in &district.children {
         collect(child, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn city(id: &str, name: &str) -> City {
+        City {
+            id: CityId::new(id),
+            name: name.into(),
+            path: name.to_lowercase(),
+            kind: CityKind::Rust,
+            file_count: 10,
+            has_git: true,
+            dirty_files: 0,
+            structure: None,
+        }
+    }
+
+    /// The court must open showing trouble, not calm.
+    ///
+    /// A blocked plan and a contended resource are the states the whole product
+    /// exists to make visible. If the sample data ever settles into a tidy
+    /// all-quiet court, the most important visuals become unreachable during
+    /// development -- and a refactor is exactly when that would happen quietly.
+    #[test]
+    fn the_opening_court_always_shows_a_blockage_and_a_contention() {
+        let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
+        let (plans, resources) = populate_court(&cities);
+
+        assert!(
+            plans.iter().any(|p| p.status == PlanStatus::Blocked),
+            "a blocked plan must be visible on first run"
+        );
+        assert!(
+            resources.iter().any(|r| r.is_contended()),
+            "a contended resource must be visible on first run"
+        );
+
+        // Contention is only drawable if the waiting plan actually exists: a
+        // dangling PlanId would silently drop the red thread from the map.
+        for resource in &resources {
+            for waiter in &resource.waiting {
+                assert!(
+                    plans.iter().any(|p| &p.id == waiter),
+                    "resource {} waits on unknown plan {waiter}",
+                    resource.id
+                );
+            }
+        }
     }
 }

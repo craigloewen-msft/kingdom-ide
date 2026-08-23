@@ -460,6 +460,62 @@ impl PlanStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Model access -- what the King can see about how plans get drafted
+// ---------------------------------------------------------------------------
+
+/// Which backend drafts plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelProvider {
+    /// Deterministic, offline, no credential. The default, so a fresh clone
+    /// works with no setup.
+    Mock,
+    /// GitHub Copilot's chat completions API.
+    Copilot,
+}
+
+impl ModelProvider {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ModelProvider::Mock => "mock",
+            ModelProvider::Copilot => "copilot",
+        }
+    }
+}
+
+/// Whether a credential could be obtained.
+///
+/// This is a *description* of the credential's state, never the credential
+/// itself -- it crosses the wire to the browser, so it must stay free of
+/// anything secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CredentialState {
+    /// Not needed, or successfully obtained.
+    Ready,
+    /// Nothing configured to obtain one with.
+    Missing,
+    /// Something was configured, and it failed.
+    Failed,
+}
+
+/// What the dock's provider badge renders, and what its panel explains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelStatus {
+    pub provider: ModelProvider,
+    /// The model plans will be drafted with, e.g. `"claude-sonnet-4.6"`.
+    pub model: String,
+    pub credential: CredentialState,
+    /// Plain-language detail: where the credential came from, or what to set to
+    /// fix it. Safe to display.
+    pub detail: String,
+}
+
+impl ModelStatus {
+    pub fn is_ready(&self) -> bool {
+        self.credential == CredentialState::Ready
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Crown Resources & Leases -- the coordination core
 // ---------------------------------------------------------------------------
 
@@ -549,7 +605,7 @@ pub struct Lease {
     pub resource: ResourceId,
     pub holder: PlanId,
     pub mode: LeaseMode,
-    /// Why the architect needs it, in plain language.
+    /// Why the plan needs it, in plain language.
     pub reason: String,
 }
 

@@ -7,3 +7,6 @@ node_modules
 # Local kingdom state (which folder you opened, etc.)
 /.kingdom/
 .phoenix/
+
+# Local model configuration (may contain a credential)
+/.kingdom.env
