@@ -6,3 +6,4 @@ node_modules
 
 # Local kingdom state (which folder you opened, etc.)
 /.kingdom/
+.phoenix/
