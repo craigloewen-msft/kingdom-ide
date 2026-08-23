@@ -1,0 +1,37 @@
+//! The Axum server binary.
+
+#[cfg(feature = "ssr")]
+#[tokio::main]
+async fn main() {
+    use axum::Router;
+    use kingdom_app::app::{shell, App};
+    use leptos::prelude::*;
+    use leptos_axum::{generate_route_list, LeptosRoutes};
+
+    let conf = get_configuration(None).expect("failed to read Leptos configuration");
+    let leptos_options = conf.leptos_options;
+    let addr = leptos_options.site_addr;
+    let routes = generate_route_list(App);
+
+    let app = Router::new()
+        .leptos_routes(&leptos_options, routes, {
+            let opts = leptos_options.clone();
+            move || shell(opts.clone())
+        })
+        .fallback(leptos_axum::file_and_error_handler(shell))
+        .with_state(leptos_options);
+
+    println!("\n  \u{265a}  Kingdom IDE \u{2014} the throne room awaits at http://{addr}\n");
+
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("failed to bind");
+    axum::serve(listener, app.into_make_service())
+        .await
+        .expect("server error");
+}
+
+#[cfg(not(feature = "ssr"))]
+fn main() {
+    // The wasm target builds the library, not this binary.
+}

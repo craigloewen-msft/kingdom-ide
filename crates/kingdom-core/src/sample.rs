@@ -1,0 +1,146 @@
+//! Placeholder data for the throne room.
+//!
+//! Real architects and leases do not exist yet — no agents are actually being
+//! run. This module fabricates a plausible court so the UI can be built and
+//! judged against realistic shapes, including the states that matter most:
+//! a blocked architect and a contended resource.
+//!
+//! Cities, by contrast, are **real** and come from scanning the chosen folder.
+//! Only the agent layer is invented.
+
+use crate::ids::*;
+use crate::model::*;
+
+/// Fabricates a court of architects, plans and crown resources for the given
+/// cities, so the map has something to show on first run.
+pub fn populate_court(cities: &[City]) -> (Vec<Architect>, Vec<Plan>, Vec<Resource>) {
+    if cities.is_empty() {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    let port = ResourceId::new("res-port-3000");
+    let cargo = ResourceId::new("res-cargo-lock");
+    let gpu = ResourceId::new("res-gpu");
+
+    let mut architects = Vec::new();
+    let mut plans = Vec::new();
+
+    // Deliberately seed the interesting states rather than all-idle: the whole
+    // point of the map is showing trouble, so trouble must be visible on day one.
+    let scripted = [
+        (
+            "Vitruvius",
+            ArchitectStatus::Working,
+            "Refactoring the auth module",
+            vec![(port.clone(), LeaseMode::Exclusive, "Running the dev server")],
+        ),
+        (
+            "Imhotep",
+            ArchitectStatus::Blocked,
+            "Waiting on port 3000 to run integration tests",
+            vec![],
+        ),
+        (
+            "Hypatia",
+            ArchitectStatus::AwaitingReview,
+            "Proposed a new storage layer",
+            vec![(cargo.clone(), LeaseMode::Shared, "Building dependencies")],
+        ),
+        (
+            "Brunelleschi",
+            ArchitectStatus::Idle,
+            "Awaiting a decree",
+            vec![],
+        ),
+    ];
+
+    for (i, (name, status, activity, leases)) in scripted.into_iter().enumerate() {
+        let city = &cities[i % cities.len()];
+        let id = ArchitectId::new(format!("arch-{}", name.to_lowercase()));
+
+        architects.push(Architect {
+            id: id.clone(),
+            name: name.to_string(),
+            city: city.id.clone(),
+            status,
+            activity: activity.to_string(),
+            leases: leases
+                .into_iter()
+                .map(|(resource, mode, reason)| Lease {
+                    resource,
+                    holder: id.clone(),
+                    mode,
+                    reason: reason.to_string(),
+                })
+                .collect(),
+        });
+
+        if matches!(
+            status,
+            ArchitectStatus::AwaitingReview | ArchitectStatus::Working
+        ) {
+            plans.push(Plan {
+                id: PlanId::new(format!("plan-{i}")),
+                title: format!("{} of {}", plan_title(i), city.name),
+                summary: format!(
+                    "{name} proposes structural changes to {}. Awaiting royal assent.",
+                    city.name
+                ),
+                city: city.id.clone(),
+                author: id,
+                status: if status == ArchitectStatus::AwaitingReview {
+                    PlanStatus::AwaitingReview
+                } else {
+                    PlanStatus::Draft
+                },
+                touches: vec!["src/lib.rs".into(), "src/main.rs".into()],
+            });
+        }
+    }
+
+    let holders_of = |id: &ResourceId| -> Vec<Lease> {
+        architects
+            .iter()
+            .flat_map(|a| a.leases.iter())
+            .filter(|l| &l.resource == id)
+            .cloned()
+            .collect()
+    };
+
+    let resources = vec![
+        Resource {
+            id: port.clone(),
+            name: "Dev server :3000".into(),
+            kind: ResourceKind::Port(3000),
+            holders: holders_of(&port),
+            // Imhotep is queued behind Vitruvius: this is the contention the
+            // map renders as a red thread between two cities.
+            waiting: vec![ArchitectId::new("arch-imhotep")],
+        },
+        Resource {
+            id: cargo.clone(),
+            name: "Cargo build lock".into(),
+            kind: ResourceKind::BuildLock,
+            holders: holders_of(&cargo),
+            waiting: vec![],
+        },
+        Resource {
+            id: gpu.clone(),
+            name: "GPU 0".into(),
+            kind: ResourceKind::Gpu,
+            holders: vec![],
+            waiting: vec![],
+        },
+    ];
+
+    (architects, plans, resources)
+}
+
+fn plan_title(i: usize) -> &'static str {
+    match i % 4 {
+        0 => "The Great Refactoring",
+        1 => "The Aqueduct",
+        2 => "The New Foundations",
+        _ => "The Curtain Wall",
+    }
+}

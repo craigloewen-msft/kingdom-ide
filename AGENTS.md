@@ -1,0 +1,259 @@
+# AGENTS.md
+
+Guidance for any agent (or human) working on **Kingdom IDE**. Read this before
+writing code here. It explains not just the conventions but the reasoning
+behind them, because the reasoning is what tells you what to do in the cases
+this document does not cover.
+
+---
+
+## 1. What this product is
+
+Kingdom IDE is **not** an editor that happens to have AI in it. Editing code is
+a solved problem and not the reason this exists.
+
+Kingdom IDE is a **command surface for coordinating many agents at once**. It
+exists because of a specific, concrete failure: when several agents work across
+several projects on one machine, they collide. Two of them bind port 3000. Two
+of them run `cargo build` against the same target directory. One rewrites a file
+another is halfway through reading. The work is individually fine and
+collectively broken.
+
+The product answers three questions, in priority order:
+
+1. **What is every agent doing right now?**
+2. **What shared resources are they holding, and who is blocked behind whom?**
+3. **What are they proposing that I need to decide on?**
+
+If a change does not serve one of those three, it is probably not the most
+valuable thing to build next.
+
+### The guiding test
+
+> Does this make it easier for one person to know and steer what many agents are
+> doing?
+
+A beautiful file tree fails that test. A red line on the map between two
+projects fighting over a port passes it.
+
+---
+
+## 2. The metaphor, and why it is load-bearing
+
+The interface is a kingdom. This is not decoration; it is a deliberate choice
+about the **stance** the user takes toward their agents.
+
+| Metaphor | Type | What it really is |
+|---|---|---|
+| **Kingdom** | `Kingdom` | the dev folder you opened |
+| **City** | `City` | one project directory inside it |
+| **Architect** | `Architect` | an agent, always stationed in one city |
+| **Architectural Plan** | `Plan` | a proposal awaiting your review |
+| **Decree** | `Task` | work you start from the chat dock |
+| **Crown Resource** | `Resource` | a contended machine resource |
+| **Lease** | `Lease` | a granted claim on one |
+| **The King** | the user | the only one who approves anything |
+
+The point of the metaphor: **you are a sovereign reviewing proposals, not a
+typing-assisted programmer.** An architect brings you plans. You approve or
+reject. You do not draw the blueprints yourself. Every UI decision should
+reinforce that stance — the user's scarce resource is *attention and judgement*,
+not keystrokes.
+
+Use this vocabulary in type names, function names, UI copy, and commit
+messages. Consistency is what makes a metaphor explain itself instead of
+needing a glossary.
+
+---
+
+## 3. Crown Resources — the actual core
+
+**If you only read one section, read this one.**
+
+Everything else is a shell around resource arbitration. The map, the sidebar,
+the chat — all of it exists to make lease state legible.
+
+A `Resource` is anything two agents can fight over:
+
+- a **port** (`Port(3000)`)
+- a **database** or stateful service
+- the **GPU**
+- a **git worktree** or branch
+- a **build lock** (`~/.cargo`, `node_modules`, a shared `target/`)
+- a **path** on disk
+
+A `Lease` is a granted claim, held either `Exclusive` or `Shared`. The
+compatibility rule lives in `Resource::can_grant` and is pinned by a test:
+
+| Currently held | `Shared` request | `Exclusive` request |
+|---|---|---|
+| nothing | granted | granted |
+| shared only | granted | **refused** |
+| exclusive | **refused** | **refused** |
+
+### Rules for anyone extending this
+
+1. **Every new agent capability that touches something shared must acquire a
+   lease first.** Running a command, starting a server, writing a file. No
+   exceptions — an unleased side effect is invisible to the King, which defeats
+   the entire product.
+2. **Contention must be visible, never silently resolved.** When an agent waits,
+   the King must be able to see that it is waiting and why. Auto-resolving a
+   conflict quietly is a bug even when the resolution is correct.
+3. **Leases belong in `kingdom-core`.** The arbitration logic is pure, so it
+   stays testable and shared with the browser.
+
+---
+
+## 4. Architecture
+
+Rust end to end. Axum server, Leptos (WASM) browser UI, one shared domain crate.
+
+```
+crates/
+  kingdom-core/     Domain model. No I/O, no framework deps. Compiles to
+                    BOTH native and wasm32 — keep it that way.
+    ids.rs          Newtyped IDs (CityId, ArchitectId, ...)
+    model.rs        Kingdom, City, Architect, Plan, Resource, Lease
+    layout.rs       Deterministic map placement (pure maths)
+    sample.rs       Placeholder court data
+
+  kingdom-app/      Server + UI in one crate, split by feature flag.
+    main.rs         Axum binary          (feature: ssr)
+    lib.rs          wasm entry point     (feature: hydrate)
+    api.rs          #[server] functions  — the browser/server bridge
+    scan.rs         Filesystem scanning  (ssr only)
+    app.rs          Shell, routing, shared UI state
+    components/     sidebar.rs, map.rs, chat.rs
+
+style/main.scss     All styling
+```
+
+### Why one crate builds two targets
+
+`kingdom-app` compiles twice: natively with `--features ssr` into the Axum
+server, and to `wasm32` with `--features hydrate` into the browser bundle.
+A `#[server]` function is a real HTTP call on the client and a direct call on
+the server, from **one** signature.
+
+This is the main reason the project is Rust on both ends. There is no
+hand-written API client and no schema to keep in sync: change a field on
+`City` and both sides fail to compile together, rather than one side failing
+at runtime in front of a user.
+
+**Consequence to respect:** anything in `kingdom-core` must compile to wasm.
+No `tokio`, no `std::fs`, no native-only crates. Server-only code goes in
+`kingdom-app` behind `#[cfg(feature = "ssr")]`.
+
+```mermaid
+flowchart TB
+  subgraph Browser["Browser — wasm32, feature: hydrate"]
+    Map["Kingdom map (SVG, pan/zoom)"]
+    Side["Left rail: Cities / Architects / Plans / Resources"]
+    Chat["Bottom dock: Start a new task"]
+  end
+  subgraph Server["Axum — native, feature: ssr"]
+    SF["server functions"]
+    Scan["Kingdom scanner"]
+    Store["In-memory state"]
+  end
+  Core["kingdom-core — shared domain types"]
+  FS[("Your dev folder")]
+
+  Browser <-->|"typed calls"| Server
+  Scan --> FS
+  Core -.->|"compiled into both"| Browser
+  Core -.-> Server
+```
+
+---
+
+## 5. What is real today, and what is faked
+
+Being precise about this matters: the fastest way to waste effort here is to
+build on top of a placeholder believing it is real.
+
+**Real:**
+- Scanning a dev folder into cities; stack detection; git presence; file counts
+- Deterministic, non-overlapping map layout (tested)
+- Pan, zoom, city selection
+- The client/server round trip for every `#[server]` function
+- Lease compatibility logic (tested)
+
+**Faked — `kingdom_core::sample::populate_court`:**
+- All architects, their statuses and activities
+- All plans
+- All resources and leases
+
+**Not built at all:**
+- Spawning or running any real agent
+- Live updates (no WebSocket yet — state refreshes only on action)
+- Persistence (state is in memory; a restart empties the kingdom)
+- Plan approval/rejection actually doing anything
+- Editing files
+
+The placeholder court deliberately includes a **blocked architect** and a
+**contended resource**, because those are the states the UI exists to show. Do
+not "clean up" the sample data into a tidy all-idle court — it would make the
+most important visual states unreachable during development.
+
+---
+
+## 6. Conventions
+
+### Rust
+- Run `cargo fmt` and keep `cargo clippy` clean.
+- Newtyped IDs, never bare `String`, so the compiler catches mixups.
+- Pure logic goes in `kingdom-core` with a test. I/O goes in `kingdom-app`.
+- Comments explain **why**, not what. The code already says what.
+
+### Leptos 0.8 — two traps that will cost you time
+1. **Turbofish and `>` inside `view!`.** The macro parses `<` and `>` as tags,
+   so `each=move || xs.collect::<Vec<_>>()` and `when=move || n > 0` both fail
+   with confusing errors. Wrap the closure in braces:
+   `each={move || ...}`, `when={move || n > 0}`.
+2. **Closures used twice in a view must be `Copy`.** A plain closure capturing
+   an owned value is `FnOnce` and will not compile in two places. Use
+   `Memo::new(...)`, which is `Copy`.
+
+### Testing
+Test **invariants and behaviour a caller depends on**, not implementation
+detail. The existing tests are the model:
+- cities never overlap on the map (breaks legibility at scale)
+- layout is deterministic (breaks the King's spatial memory)
+- the lease compatibility matrix (breaks correctness of coordination)
+
+Each pins something a user would actually notice breaking. Do not add tests
+that restate the implementation or assert trivial accessors.
+
+---
+
+## 7. Running it
+
+```bash
+cargo leptos serve      # build + serve at http://127.0.0.1:3000
+cargo leptos watch      # same, with rebuild on change
+cargo test -p kingdom-core
+```
+
+The browser cannot hand a server a real filesystem path, so the opening screen
+asks the King to type one; the server reads it directly from disk. A native
+folder picker would require shipping as a desktop shell (Tauri) — a deliberate
+later decision, not an oversight.
+
+---
+
+## 8. Where to go next
+
+Roughly in order of value:
+
+1. **WebSocket live updates.** "Know what your agents are doing" is inherently a
+   push problem. Retrofitting this onto a poll-based UI later is painful — the
+   longer it waits, the more code assumes request/response.
+2. **A real lease broker.** Make `acquire`/`release` real, with a queue. This is
+   the first genuinely differentiating feature.
+3. **Spawn one real agent.** Even a single hardcoded subprocess that must take a
+   lease before it runs proves the whole model end to end.
+4. **Plan review UI.** Diff view, approve/reject. This is the King's core loop.
+5. **Persistence.** SQLite behind `api.rs`. Deliberately deferred — the schema
+   should follow a settled domain model, not lead it.

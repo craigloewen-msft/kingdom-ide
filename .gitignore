@@ -1,0 +1,8 @@
+/target
+/dist
+node_modules
+*.log
+.DS_Store
+
+# Local kingdom state (which folder you opened, etc.)
+/.kingdom/

@@ -1,0 +1,561 @@
+// Kingdom IDE — the throne room.
+//
+// Dark, map-first, deliberately restrained. The map is the hero; chrome sits
+// back so that colour on screen almost always means something (an agent's
+// state, a stack's banner, a contended resource).
+
+// --- Palette ---------------------------------------------------------------
+$void:        #070b14;
+$deep:        #0b1120;
+$panel:       #0f172a;
+$panel-2:     #16203a;
+$edge:        #1e293b;
+$edge-bright: #2d3d5c;
+
+$ink:         #e2e8f0;
+$ink-dim:     #94a3b8;
+$ink-faint:   #64748b;
+
+$gold:        #d4af37;
+$gold-dim:    #8a7327;
+
+$working:     #22c55e;
+$review:      #eab308;
+$blocked:     #ef4444;
+$idle:        #64748b;
+
+$radius: 8px;
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: $void;
+  color: $ink;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+button { font-family: inherit; cursor: pointer; }
+
+// --- Opening screen --------------------------------------------------------
+
+.choose-kingdom {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(ellipse at 50% 35%, rgba(30, 41, 59, 0.85), transparent 60%),
+    $void;
+}
+
+.choose-inner {
+  width: min(560px, 90vw);
+  text-align: center;
+}
+
+.crown-mark {
+  font-size: 64px;
+  color: $gold;
+  line-height: 1;
+  margin-bottom: 8px;
+  text-shadow: 0 0 30px rgba(212, 175, 55, 0.35);
+}
+
+.choose-inner h1 {
+  margin: 0 0 10px;
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.tagline {
+  color: $ink-dim;
+  line-height: 1.6;
+  margin: 0 0 28px;
+}
+
+.path-row { display: flex; gap: 10px; }
+
+.path-input {
+  flex: 1;
+  padding: 12px 14px;
+  background: $panel;
+  border: 1px solid $edge-bright;
+  border-radius: $radius;
+  color: $ink;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 14px;
+  outline: none;
+
+  &:focus { border-color: $gold-dim; }
+}
+
+.claim-btn {
+  padding: 12px 22px;
+  background: linear-gradient(180deg, $gold, #b8952f);
+  border: none;
+  border-radius: $radius;
+  color: #1a1206;
+  font-weight: 650;
+  white-space: nowrap;
+
+  &:disabled { opacity: 0.55; cursor: progress; }
+}
+
+.hint { color: $ink-faint; font-size: 12px; margin-top: 14px; }
+.error {
+  color: $blocked;
+  font-size: 13px;
+  margin-top: 14px;
+  font-family: ui-monospace, monospace;
+}
+
+// --- Throne room layout ----------------------------------------------------
+//
+// Sidebar down the left, map filling the rest, chat docked across the bottom
+// of the map region.
+
+.throne-room {
+  display: grid;
+  grid-template-columns: 290px 1fr;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    "sidebar map"
+    "sidebar chat";
+  height: 100vh;
+}
+
+// --- Sidebar ---------------------------------------------------------------
+
+.sidebar {
+  grid-area: sidebar;
+  background: $panel;
+  border-right: 1px solid $edge;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.kingdom-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 14px;
+  border-bottom: 1px solid $edge;
+}
+
+.crown-small { font-size: 26px; color: $gold; line-height: 1; }
+.kingdom-id { min-width: 0; }
+
+.kingdom-name {
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kingdom-path {
+  font-size: 11px;
+  color: $ink-faint;
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;  // keep the leaf folder visible when the path is long
+  text-align: left;
+}
+
+.panel-tabs {
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  gap: 2px;
+  border-bottom: 1px solid $edge;
+}
+
+.panel-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: $ink-dim;
+  text-align: left;
+  font-size: 13px;
+
+  &:hover { background: $panel-2; color: $ink; }
+
+  &.active {
+    background: $panel-2;
+    color: $gold;
+    box-shadow: inset 2px 0 0 $gold;
+  }
+}
+
+.tab-glyph { width: 16px; text-align: center; opacity: 0.9; }
+.tab-label { flex: 1; }
+
+.tab-count {
+  min-width: 20px;
+  padding: 1px 6px;
+  background: $edge-bright;
+  border-radius: 10px;
+  font-size: 11px;
+  text-align: center;
+  color: $ink;
+}
+
+.panel-body { flex: 1; overflow-y: auto; min-height: 0; }
+
+.registry { list-style: none; margin: 0; padding: 6px; }
+
+.registry-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+
+  &:hover { background: $panel-2; }
+  &.selected { background: $panel-2; box-shadow: inset 2px 0 0 $gold; }
+}
+
+.item-main { flex: 1; min-width: 0; }
+
+.item-title {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-sub {
+  font-size: 11px;
+  color: $ink-faint;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kind-dot,
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.git-mark { color: $ink-faint; }
+
+.agent-pip {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: rgba(34, 197, 94, 0.16);
+  color: $working;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+// Agent status colours, shared by the sidebar dots and the map pips.
+.status-working { background: $working; }
+.status-review  { background: $review; }
+.status-blocked { background: $blocked; }
+.status-idle    { background: $idle; }
+
+.lease-line {
+  font-size: 11px;
+  color: $gold-dim;
+  margin-top: 3px;
+}
+
+.plan-item { cursor: default; }
+
+.plan-foot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  font-size: 11px;
+  color: $ink-faint;
+}
+
+.plan-status { color: $review; }
+
+.resource-item {
+  cursor: default;
+
+  // Contention is the signal that matters most; it gets a red spine.
+  &.contended { box-shadow: inset 2px 0 0 $blocked; }
+}
+
+.res-glyph { font-size: 14px; width: 18px; text-align: center; }
+
+.contention-line {
+  font-size: 11px;
+  color: $blocked;
+  margin-top: 3px;
+}
+
+// --- Map -------------------------------------------------------------------
+
+.map-region {
+  grid-area: map;
+  position: relative;
+  min-height: 0;
+  background:
+    radial-gradient(ellipse at 50% 45%, #101a2e 0%, $deep 55%, $void 100%);
+}
+
+.map-wrap { position: absolute; inset: 0; }
+
+.kingdom-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  user-select: none;
+
+  &.grabbing { cursor: grabbing; }
+}
+
+.throne-ring {
+  fill: rgba(212, 175, 55, 0.07);
+  stroke: $gold;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 6;
+}
+
+.throne-glyph { fill: $gold; font-size: 34px; }
+
+.throne-label {
+  fill: $gold-dim;
+  font-size: 11px;
+  letter-spacing: 0.28em;
+}
+
+// A pulsing red thread drawn between two cities fighting over one resource.
+.contention-thread {
+  stroke: $blocked;
+  stroke-width: 2;
+  stroke-dasharray: 6 8;
+  opacity: 0.55;
+  animation: thread-crawl 1s linear infinite;
+}
+
+@keyframes thread-crawl {
+  to { stroke-dashoffset: -14; }
+}
+
+.city {
+  cursor: pointer;
+
+  .city-plot {
+    fill: #131f38;
+    stroke: $edge-bright;
+    stroke-width: 1.5;
+    transition: fill 0.15s, stroke 0.15s;
+  }
+
+  &:hover .city-plot { fill: #182642; stroke: $ink-faint; }
+
+  &.selected .city-plot {
+    stroke: $gold;
+    stroke-width: 2.5;
+    fill: #1b2748;
+  }
+
+  &.troubled .city-plot { stroke: $blocked; }
+}
+
+.city-halo {
+  fill: none;
+  stroke: $working;
+  stroke-width: 2;
+  opacity: 0.3;
+  animation: halo-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes halo-breathe {
+  0%, 100% { opacity: 0.14; }
+  50%      { opacity: 0.42; }
+}
+
+.keep-body,
+.keep-tower { fill: #33415c; stroke: #475569; stroke-width: 1; }
+.keep-roof  { fill: #64748b; }
+.keep-gate  { fill: #0f172a; }
+.banner-pole { stroke: #64748b; stroke-width: 1.5; }
+.banner-flag { stroke: none; }
+
+.city-name {
+  fill: $ink-dim;
+  font-size: 15px;
+  font-weight: 500;
+  pointer-events: none;
+}
+
+.city.selected .city-name { fill: $gold; }
+
+.pip { stroke: $deep; stroke-width: 1.5; }
+
+// SVG pips need `fill`, not `background`; restate the status colours here.
+circle.status-working { fill: $working; background: none; }
+circle.status-review  { fill: $review;  background: none; }
+circle.status-blocked { fill: $blocked; background: none; }
+circle.status-idle    { fill: $idle;    background: none; }
+
+.map-controls {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  button {
+    width: 34px;
+    height: 34px;
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid $edge-bright;
+    border-radius: 6px;
+    color: $ink-dim;
+    font-size: 16px;
+
+    &:hover { background: $panel-2; color: $gold; border-color: $gold-dim; }
+  }
+}
+
+.map-legend {
+  position: absolute;
+  bottom: 14px;
+  left: 16px;
+  display: flex;
+  gap: 16px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid $edge;
+  border-radius: $radius;
+  font-size: 11px;
+  color: $ink-dim;
+
+  span { display: flex; align-items: center; gap: 6px; }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+}
+
+// --- Chat dock -------------------------------------------------------------
+
+.chat-dock {
+  grid-area: chat;
+  background: $panel;
+  border-top: 1px solid $edge;
+  display: flex;
+  flex-direction: column;
+}
+
+.dock-handle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: $ink-dim;
+  text-align: left;
+
+  &:hover { background: $panel-2; }
+}
+
+.handle-title { font-weight: 600; color: $ink; font-size: 13px; }
+.handle-target { flex: 1; font-size: 12px; color: $gold-dim; }
+.handle-chevron { color: $ink-faint; }
+
+.chat-log {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 12px 16px;
+  border-top: 1px solid $edge;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-empty {
+  margin: 0;
+  color: $ink-faint;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.chat-msg {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.msg-who {
+  flex-shrink: 0;
+  width: 46px;
+  font-size: 11px;
+  color: $ink-faint;
+  padding-top: 2px;
+}
+
+.chat-msg.royal .msg-who { color: $gold; }
+.msg-body { color: $ink-dim; }
+.chat-msg.royal .msg-body { color: $ink; }
+
+.chat-input-row {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid $edge;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 11px 14px;
+  background: $deep;
+  border: 1px solid $edge-bright;
+  border-radius: $radius;
+  color: $ink;
+  font-size: 13px;
+  outline: none;
+
+  &::placeholder { color: $ink-faint; }
+  &:focus { border-color: $gold-dim; }
+}
+
+.send-btn {
+  padding: 11px 22px;
+  background: linear-gradient(180deg, $gold, #b8952f);
+  border: none;
+  border-radius: $radius;
+  color: #1a1206;
+  font-weight: 650;
+}
+
+// --- Scrollbars ------------------------------------------------------------
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: $edge-bright;
+  border-radius: 5px;
+
+  &:hover { background: $ink-faint; }
+}

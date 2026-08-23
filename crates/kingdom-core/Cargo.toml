@@ -1,0 +1,9 @@
+[package]
+name = "kingdom-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Domain model for Kingdom IDE: kingdoms, cities, architects, plans and crown resources."
+
+[dependencies]
+serde.workspace = true

@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["crates/kingdom-core", "crates/kingdom-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+kingdom-core = { path = "crates/kingdom-core" }
+serde = { version = "1", features = ["derive"] }
+
+# Release profile for the wasm bundle: optimise for size, since this ships to a browser.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# cargo-leptos configuration ------------------------------------------------
+# Drives the two-target build: a native SSR server binary + a wasm client bundle.
+[[workspace.metadata.leptos]]
+name = "kingdom-ide"
+bin-package = "kingdom-app"
+lib-package = "kingdom-app"
+
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/main.scss"
+assets-dir = "public"
+
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+
+browserquery = "defaults"
+watch = false
+env = "DEV"
+
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+lib-profile-release = "wasm-release"

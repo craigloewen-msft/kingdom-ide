@@ -1,0 +1,46 @@
+[package]
+name = "kingdom-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kingdom IDE: Axum SSR server and Leptos browser UI."
+
+[lib]
+# cdylib for the wasm bundle, rlib for the native server binary.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kingdom-core.workspace = true
+serde.workspace = true
+
+leptos = { version = "0.8" }
+leptos_meta = { version = "0.8" }
+leptos_router = { version = "0.8" }
+
+# Server-only (feature-gated so they never reach the wasm bundle).
+leptos_axum = { version = "0.8", optional = true }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+
+# Client-only.
+console_error_panic_hook = { version = "0.1", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+# Needed on both targets: the map reads element geometry to fit the view.
+web-sys = { version = "0.3", features = ["DomRect", "Element", "WheelEvent", "MouseEvent"] }
+
+[features]
+default = ["ssr"]
+hydrate = [
+    "leptos/hydrate",
+    "dep:console_error_panic_hook",
+    "dep:wasm-bindgen",
+]
+ssr = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:leptos_axum",
+    "leptos/ssr",
+    "leptos_meta/ssr",
+    "leptos_router/ssr",
+]
