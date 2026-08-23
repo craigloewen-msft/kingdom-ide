@@ -54,8 +54,9 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
     let cities = scan_kingdom(&root)
         .map_err(|e| ServerFnError::new(format!("Could not read {expanded}: {e}")))?;
 
-    // Cities are real; the court is still fabricated. See `kingdom_core::sample`.
-    let (architects, plans, resources) = kingdom_core::sample::populate_court(&cities);
+    // Cities are real; the starting court is still fabricated.
+    // See `kingdom_core::sample`.
+    let (plans, resources) = kingdom_core::sample::populate_court(&cities);
 
     let kingdom = Kingdom {
         name: root
@@ -65,7 +66,6 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
             .to_string(),
         root: root.to_string_lossy().to_string(),
         cities,
-        architects,
         plans,
         resources,
     };

@@ -11,10 +11,12 @@
 //! |---------------------|-------------|--------------------------------------------|
 //! | Kingdom             | [`Kingdom`] | the dev folder you opened                  |
 //! | City                | [`City`]    | one project directory inside it            |
-//! | Architect           | [`Architect`] | an agent, always scoped to a city        |
-//! | Architectural Plan  | [`Plan`]    | a proposal awaiting the King's review      |
-//! | Decree              | [`Task`]    | work the King starts from the chat dock    |
+//! | Architectural Plan  | [`Plan`]    | a proposal, drafted by a model, awaiting review |
 //! | Crown Resource      | [`Resource`] / [`Lease`] | contended machine resources   |
+//!
+//! A plan is deliberately both the unit of work and the unit of review. There
+//! is no separate agent entity: the King reviews proposals, not agents, and
+//! which model is drafting is an attribute of the plan.
 //!
 //! See `AGENTS.md` at the repository root for the philosophy behind this.
 

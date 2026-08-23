@@ -151,7 +151,8 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     <For each={move || plans.get()} key=|p: &Plan| p.id.clone() let:plan>
                         <li class="plan-row" title=plan.summary.clone()>
                             <span class="plan-title">{plan.title.clone()}</span>
-                            <span class=format!("plan-badge plan-{}", status_suffix(plan.status))>
+                            <span class="plan-model">{plan.model.clone()}</span>
+                            <span class=format!("plan-badge plan-{}", plan.status.css_suffix())>
                                 {plan.status.label()}
                             </span>
                         </li>
@@ -162,19 +163,10 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
     }
 }
 
-/// A plan is active while it is still in play: drafted or awaiting judgement.
-/// Approved and rejected plans are history, hidden unless the King asks.
+/// A plan is active while it is still in play. Approved and rejected plans are
+/// history, hidden unless the King asks.
 fn is_active(status: PlanStatus) -> bool {
-    matches!(status, PlanStatus::Draft | PlanStatus::AwaitingReview)
-}
-
-fn status_suffix(status: PlanStatus) -> &'static str {
-    match status {
-        PlanStatus::Draft => "draft",
-        PlanStatus::AwaitingReview => "review",
-        PlanStatus::Approved => "approved",
-        PlanStatus::Rejected => "rejected",
-    }
+    !matches!(status, PlanStatus::Approved | PlanStatus::Rejected)
 }
 
 /// The drag handle on the rail's right edge.

@@ -326,13 +326,25 @@ body.resizing { user-select: none; cursor: col-resize; }
 .plan-review   { color: $review; }
 .plan-approved { color: $working; }
 .plan-rejected { color: $blocked; }
-.plan-draft    { color: $ink-faint; }
+.plan-blocked  { color: $blocked; }
+.plan-failed   { color: #f97316; }
+.plan-drafting { color: $working; }
 
-// Agent status colours, used by the map pips and legend.
-.status-working { background: $working; }
-.status-review  { background: $review; }
-.status-blocked { background: $blocked; }
-.status-idle    { background: $idle; }
+// The model a plan is being drafted by. Quiet: it is provenance, not a verdict.
+.plan-model {
+  color: $ink-faint;
+  font-size: 10px;
+  font-variant: tabular-nums;
+  white-space: nowrap;
+}
+
+// Plan status colours, used by the map pips and legend.
+.status-drafting { background: $working; }
+.status-review   { background: $review; }
+.status-blocked  { background: $blocked; }
+.status-failed   { background: #f97316; }
+.status-approved { background: #38bdf8; }
+.status-rejected { background: $idle; }
 
 // --- Map -------------------------------------------------------------------
 
@@ -563,10 +575,12 @@ body.resizing { user-select: none; cursor: col-resize; }
 .pip { stroke: $deep; stroke-width: 1.5; }
 
 // SVG pips need `fill`, not `background`; restate the status colours here.
-circle.status-working { fill: $working; background: none; }
-circle.status-review  { fill: $review;  background: none; }
-circle.status-blocked { fill: $blocked; background: none; }
-circle.status-idle    { fill: $idle;    background: none; }
+circle.status-drafting { fill: $working; background: none; }
+circle.status-review   { fill: $review;  background: none; }
+circle.status-blocked  { fill: $blocked; background: none; }
+circle.status-failed   { fill: #f97316;  background: none; }
+circle.status-approved { fill: #38bdf8;  background: none; }
+circle.status-rejected { fill: $idle;    background: none; }
 
 .map-controls {
   position: absolute;

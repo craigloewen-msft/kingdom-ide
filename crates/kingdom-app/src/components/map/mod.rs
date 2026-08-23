@@ -230,8 +230,8 @@ fn Throne() -> impl IntoView {
     }
 }
 
-/// Red threads between cities whose architects are contending for the same
-/// crown resource. This is the map's most important signal.
+/// Red threads between cities whose plans are contending for the same crown
+/// resource. This is the map's most important signal.
 #[component]
 fn ContentionThreads(placements: Memo<Vec<CityPlacement>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -241,22 +241,21 @@ fn ContentionThreads(placements: Memo<Vec<CityPlacement>>) -> impl IntoView {
         let places = placements.get();
         let mut lines: Vec<(f64, f64, f64, f64)> = Vec::new();
 
-        // Index of city -> placement, by architect.
+        // Index of city -> placement, by plan. A plan knows its own city, so
+        // this is one lookup rather than the two the old architect layer needed.
         let city_index = |id: &CityId| kingdom.cities.iter().position(|c| &c.id == id);
-        let architect_city = |aid: &kingdom_core::ArchitectId| {
+        let plan_city = |pid: &kingdom_core::PlanId| {
             kingdom
-                .architects
+                .plans
                 .iter()
-                .find(|a| &a.id == aid)
-                .and_then(|a| city_index(&a.city))
+                .find(|p| &p.id == pid)
+                .and_then(|p| city_index(&p.city))
         };
 
         for resource in kingdom.contended_resources() {
             for holder in &resource.holders {
                 for waiter in &resource.waiting {
-                    if let (Some(h), Some(w)) =
-                        (architect_city(&holder.holder), architect_city(waiter))
-                    {
+                    if let (Some(h), Some(w)) = (plan_city(&holder.holder), plan_city(waiter)) {
                         if h != w {
                             if let (Some(a), Some(b)) = (places.get(h), places.get(w)) {
                                 lines.push((a.x, a.y, b.x, b.y));
