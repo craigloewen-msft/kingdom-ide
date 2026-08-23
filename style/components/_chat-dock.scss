@@ -1,0 +1,89 @@
+// The bottom dock: where the King issues a decree.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+.chat-dock {
+  grid-area: chat;
+  background: t.$panel;
+  border-top: 1px solid t.$edge;
+  display: flex;
+  flex-direction: column;
+}
+
+.dock-handle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: t.$ink-dim;
+  text-align: left;
+
+  &:hover { background: t.$panel-2; }
+}
+
+.handle-title { font-weight: 600; color: t.$ink; font-size: 13px; }
+.handle-target { flex: 1; font-size: 12px; color: t.$gold-dim; }
+.handle-chevron { color: t.$ink-faint; }
+
+.chat-log {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 12px 16px;
+  border-top: 1px solid t.$edge;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-empty {
+  margin: 0;
+  color: t.$ink-faint;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.chat-msg {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+
+  // The King's own words read brighter than an architect's reply.
+  &.royal {
+    .msg-who { color: t.$gold; }
+    .msg-body { color: t.$ink; }
+  }
+}
+
+.msg-who {
+  flex-shrink: 0;
+  width: 46px;
+  font-size: 11px;
+  color: t.$ink-faint;
+  padding-top: 2px;
+}
+
+.msg-body { color: t.$ink-dim; }
+
+.chat-input-row {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid t.$edge;
+}
+
+.chat-input {
+  @include m.field(11px 14px, 13px);
+  background: t.$deep;
+
+  // The dock's prompt sits against a darker fill than the opening screen's,
+  // where the UA default is too dim to read.
+  &::placeholder { color: t.$ink-faint; }
+}
+
+.send-btn { @include m.royal-button(11px 22px); }

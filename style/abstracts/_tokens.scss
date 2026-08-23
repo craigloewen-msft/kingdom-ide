@@ -1,0 +1,83 @@
+// Design tokens — the whole palette, in one place, emitting nothing on its own.
+//
+// Dark, map-first, deliberately restrained. The map is the hero; chrome sits
+// back so that colour on screen almost always means something (an agent's
+// state, a stack's banner, a contended resource).
+//
+// The palette is held as a *map* rather than loose variables so that
+// `base/_reset.scss` can mechanically emit each entry as a CSS custom
+// property. One source, two spellings: `$gold` for compile-time maths and
+// `var(--gold)` for anything that has to be reachable at runtime.
+
+@use "sass:map";
+
+$palette: (
+  // Surfaces, darkest first.
+  "void":        #070b14,
+  "deep":        #0b1120,
+  "panel":       #0f172a,
+  "panel-2":     #16203a,
+  "edge":        #1e293b,
+  "edge-bright": #2d3d5c,
+
+  // Text.
+  "ink":         #e2e8f0,
+  "ink-dim":     #94a3b8,
+  "ink-faint":   #64748b,
+
+  // The crown.
+  "gold":        #d4af37,
+  "gold-dim":    #8a7327,
+
+  // Architect status. These four must stay in step with
+  // `ArchitectStatus::colour` in kingdom-core, which returns the same hexes to
+  // SVG attributes the browser paints directly.
+  "working":     #22c55e,
+  "review":      #eab308,
+  "blocked":     #ef4444,
+  "idle":        #64748b,
+);
+
+@function colour($name) {
+  @if not map.has-key($palette, $name) {
+    @error "unknown palette colour: #{$name}";
+  }
+  @return map.get($palette, $name);
+}
+
+$void:        colour("void");
+$deep:        colour("deep");
+$panel:       colour("panel");
+$panel-2:     colour("panel-2");
+$edge:        colour("edge");
+$edge-bright: colour("edge-bright");
+
+$ink:         colour("ink");
+$ink-dim:     colour("ink-dim");
+$ink-faint:   colour("ink-faint");
+
+$gold:        colour("gold");
+$gold-dim:    colour("gold-dim");
+
+$working:     colour("working");
+$review:      colour("review");
+$blocked:     colour("blocked");
+$idle:        colour("idle");
+
+// The four architect states, keyed by the `.status-*` class suffix used in the
+// rail and on the map pips.
+$statuses: (
+  "working": $working,
+  "review":  $review,
+  "blocked": $blocked,
+  "idle":    $idle,
+);
+
+$radius: 8px;
+
+$font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+$font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+// Labels drawn over the map need their own backdrop or they vanish against a
+// bright roof; this is the colour they are haloed with.
+$label-halo: rgba(7, 11, 20, 0.9);

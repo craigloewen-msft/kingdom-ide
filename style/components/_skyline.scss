@@ -1,0 +1,122 @@
+// A city's interior: the skyline a project's folder tree is drawn as.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+// District plates: a folder as a plot of ground. Tinted by the ward holding
+// the most code, so a project's composition reads before any label does.
+// The border is drawn in the district's own colour and matters more than the
+// fill: without it a plate dissolves into the dark background and the folder
+// hierarchy -- the core semantic content of the map -- stops being readable.
+.district-plate {
+  stroke-width: 0.8;
+  stroke-opacity: 0.55;
+  transition: fill-opacity 0.15s;
+}
+
+.district:hover .district-plate { fill-opacity: 0.3 !important; }
+
+.district-label {
+  // Labels sit on top of buildings, so they need their own backdrop or they
+  // vanish against a bright roof.
+  @include m.map-label(1.4px);
+  stroke: rgba(7, 11, 20, 0.85);
+  fill: t.$ink-faint;
+  font-size: 4px;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+// A building is three faces of an extruded box. Side faces are shaded in Rust
+// (see `shade()`), so only the seams need styling here.
+.building {
+  polygon { stroke-width: 0.35; stroke: rgba(7, 11, 20, 0.55); }
+
+  .face-top { stroke: rgba(226, 232, 240, 0.18); }
+
+  &:hover .face-top {
+    stroke: t.$gold;
+    stroke-width: 1;
+  }
+
+  // Aggregated remainder: drawn flatter and duller so it never masquerades as
+  // a real file, while still carrying the folder's true mass.
+  &.commons polygon {
+    opacity: 0.55;
+    stroke-dasharray: 1 1;
+  }
+
+  &.cathedral .face-top {
+    stroke: rgba(212, 175, 55, 0.7);
+    stroke-width: 0.8;
+  }
+}
+
+// A building a pending plan proposes to alter. This is the King's review loop
+// made spatial: the gold marks exactly what is awaiting judgement.
+.roof-gilt {
+  fill: t.$gold;
+  stroke: #fde68a;
+  stroke-width: 0.6;
+  opacity: 0.85;
+  animation: gilt-pulse 1.8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes gilt-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.95; }
+}
+
+// The landmark spire marks the single largest file, so "where is the bulk of
+// my code?" stays answerable at mid zoom where individual buildings are gone.
+.landmark-top { stroke: rgba(212, 175, 55, 0.5); stroke-width: 0.6; }
+.landmark-spire { stroke: t.$gold-dim; stroke-width: 0.8; }
+.landmark-star  { fill: t.$gold; }
+
+// At distance a city is only its mass and its banner.
+.silhouette-block {
+  fill: #26344f;
+  stroke: #3b4d70;
+  stroke-width: 0.6;
+}
+
+// --- Signs of life ---------------------------------------------------------
+
+// A crane marks a city where an architect is actively building.
+.crane {
+  pointer-events: none;
+  animation: crane-sway 3.2s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.crane-mast, .crane-jib { stroke: t.$working; stroke-width: 1.4; opacity: 0.85; }
+.crane-cable { stroke: t.$working; stroke-width: 0.7; opacity: 0.6; }
+.crane-load  { fill: t.$working; opacity: 0.75; }
+
+@keyframes crane-sway {
+  0%, 100% { transform: rotate(-1.2deg); }
+  50%      { transform: rotate(1.2deg); }
+}
+
+.city-halo {
+  fill: none;
+  stroke: t.$working;
+  stroke-width: 2;
+  opacity: 0.3;
+  animation: halo-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes halo-breathe {
+  0%, 100% { opacity: 0.14; }
+  50%      { opacity: 0.42; }
+}
+
+// --- The keep and its banner -----------------------------------------------
+
+.keep-body,
+.keep-tower { fill: #33415c; stroke: #475569; stroke-width: 1; }
+.keep-roof  { fill: #64748b; }
+.keep-gate  { fill: #0f172a; }
+.banner-pole { stroke: #64748b; stroke-width: 1.5; }
+.banner-flag { stroke: none; }
