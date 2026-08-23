@@ -26,8 +26,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], option
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
-# Needed on both targets: the map reads element geometry to fit the view.
-web-sys = { version = "0.3", features = ["DomRect", "Element", "WheelEvent", "MouseEvent"] }
+# Needed on both targets: the map reads element geometry to fit the view, and
+# the sidebar persists its dragged width in localStorage.
+web-sys = { version = "0.3", features = [
+    "DomRect",
+    "DomTokenList",
+    "Element",
+    "HtmlElement",
+    "MouseEvent",
+    "Storage",
+    "WheelEvent",
+    "Window",
+] }
 
 [features]
 default = ["ssr"]
