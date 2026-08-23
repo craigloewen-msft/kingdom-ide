@@ -121,6 +121,8 @@ button { font-family: inherit; cursor: pointer; }
 
 .throne-room {
   display: grid;
+  // The first column is set inline from the sidebar width signal, so the
+  // resizer can drive it live. This is only the pre-hydration fallback.
   grid-template-columns: 290px 1fr;
   grid-template-rows: 1fr auto;
   grid-template-areas:
@@ -129,15 +131,34 @@ button { font-family: inherit; cursor: pointer; }
   height: 100vh;
 }
 
+// While the rail is being dragged the pointer sweeps across the map; without
+// this it drags a text selection along with it.
+body.resizing { user-select: none; cursor: col-resize; }
+
 // --- Sidebar ---------------------------------------------------------------
 
 .sidebar {
   grid-area: sidebar;
+  position: relative;  // anchors the resizer to the right edge
   background: $panel;
   border-right: 1px solid $edge;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;      // straddle the border so the grab area is easy to hit
+  width: 7px;
+  height: 100%;
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
+
+  &:hover, &.dragging { background: rgba(212, 175, 55, 0.35); }
 }
 
 .kingdom-header {
@@ -170,57 +191,54 @@ button { font-family: inherit; cursor: pointer; }
   text-align: left;
 }
 
-.panel-tabs {
+.sidebar-toolbar {
   display: flex;
-  flex-direction: column;
-  padding: 8px;
-  gap: 2px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
   border-bottom: 1px solid $edge;
 }
 
-.panel-tab {
+.toolbar-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: $ink-faint;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.filter-toggle {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 11px;
+  flex-shrink: 0;
+  border: 1px solid $edge;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.filter-btn {
+  padding: 3px 9px;
   background: transparent;
   border: none;
-  border-radius: 6px;
-  color: $ink-dim;
-  text-align: left;
-  font-size: 13px;
-
-  &:hover { background: $panel-2; color: $ink; }
-
-  &.active {
-    background: $panel-2;
-    color: $gold;
-    box-shadow: inset 2px 0 0 $gold;
-  }
-}
-
-.tab-glyph { width: 16px; text-align: center; opacity: 0.9; }
-.tab-label { flex: 1; }
-
-.tab-count {
-  min-width: 20px;
-  padding: 1px 6px;
-  background: $edge-bright;
-  border-radius: 10px;
+  color: $ink-faint;
   font-size: 11px;
-  text-align: center;
-  color: $ink;
+
+  &:hover { color: $ink; }
+  &.active { background: $panel-2; color: $gold; }
 }
 
-.panel-body { flex: 1; overflow-y: auto; min-height: 0; }
+.sidebar-body { flex: 1; overflow-y: auto; min-height: 0; }
 
 .registry { list-style: none; margin: 0; padding: 6px; }
+.city-branch { list-style: none; }
 
-.registry-item {
+.city-row {
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 9px 10px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
   border-radius: 6px;
   cursor: pointer;
 
@@ -228,84 +246,93 @@ button { font-family: inherit; cursor: pointer; }
   &.selected { background: $panel-2; box-shadow: inset 2px 0 0 $gold; }
 }
 
-.item-main { flex: 1; min-width: 0; }
+.city-chevron {
+  flex-shrink: 0;
+  width: 16px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: $ink-faint;
+  font-size: 10px;
+  line-height: 1;
 
-.item-title {
+  &:hover { color: $ink; }
+
+  // A city with nothing to show still reserves the column, so names stay
+  // aligned down the rail.
+  &.empty { visibility: hidden; }
+}
+
+.kind-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.city-name-text {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.item-sub {
+.plan-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 6px;
+  background: $edge;
+  border-radius: 9px;
+  color: $ink-dim;
   font-size: 11px;
-  color: $ink-faint;
-  margin-top: 2px;
+  line-height: 17px;
+  text-align: center;
+}
+
+.plan-list {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0 0 0 22px;
+}
+
+.plan-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-left: 1px solid $edge;
+}
+
+.plan-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: $ink-dim;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.kind-dot,
-.status-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
+.plan-badge {
   flex-shrink: 0;
-  margin-top: 4px;
+  font-size: 10px;
+  white-space: nowrap;
 }
 
-.git-mark { color: $ink-faint; }
+// Only a plan that wants the King's judgement gets a loud colour; settled
+// history stays quiet.
+.plan-review   { color: $review; }
+.plan-approved { color: $working; }
+.plan-rejected { color: $blocked; }
+.plan-draft    { color: $ink-faint; }
 
-.agent-pip {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  background: rgba(34, 197, 94, 0.16);
-  color: $working;
-  border-radius: 9px;
-  font-size: 11px;
-  line-height: 18px;
-  text-align: center;
-}
-
-// Agent status colours, shared by the sidebar dots and the map pips.
+// Agent status colours, used by the map pips and legend.
 .status-working { background: $working; }
 .status-review  { background: $review; }
 .status-blocked { background: $blocked; }
 .status-idle    { background: $idle; }
-
-.lease-line {
-  font-size: 11px;
-  color: $gold-dim;
-  margin-top: 3px;
-}
-
-.plan-item { cursor: default; }
-
-.plan-foot {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 5px;
-  font-size: 11px;
-  color: $ink-faint;
-}
-
-.plan-status { color: $review; }
-
-.resource-item {
-  cursor: default;
-
-  // Contention is the signal that matters most; it gets a red spine.
-  &.contended { box-shadow: inset 2px 0 0 $blocked; }
-}
-
-.res-glyph { font-size: 14px; width: 18px; text-align: center; }
-
-.contention-line {
-  font-size: 11px;
-  color: $blocked;
-  margin-top: 3px;
-}
 
 // --- Map -------------------------------------------------------------------
 

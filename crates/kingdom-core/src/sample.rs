@@ -98,6 +98,29 @@ pub fn populate_court(cities: &[City]) -> (Vec<Architect>, Vec<Plan>, Vec<Resour
         }
     }
 
+    // Settled plans, so the sidebar's "All" filter has history to reveal.
+    // Without at least one approved and one rejected plan, the filter looks
+    // broken rather than empty.
+    let first = &cities[0];
+    plans.push(Plan {
+        id: PlanId::new("plan-settled-approved"),
+        title: format!("The Old Ramparts of {}", first.name),
+        summary: "Hardened the error paths. Approved and built.".into(),
+        city: first.id.clone(),
+        author: ArchitectId::new("arch-vitruvius"),
+        status: PlanStatus::Approved,
+        touches: vec!["src/lib.rs".into()],
+    });
+    plans.push(Plan {
+        id: PlanId::new("plan-settled-rejected"),
+        title: format!("The Folly of {}", first.name),
+        summary: "Proposed rewriting the scanner. Refused.".into(),
+        city: first.id.clone(),
+        author: ArchitectId::new("arch-hypatia"),
+        status: PlanStatus::Rejected,
+        touches: vec!["src/scan.rs".into()],
+    });
+
     let holders_of = |id: &ResourceId| -> Vec<Lease> {
         architects
             .iter()

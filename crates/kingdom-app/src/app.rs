@@ -25,14 +25,9 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     }
 }
 
-/// Which sidebar section is selected, and therefore what the rail lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Panel {
-    Cities,
-    Architects,
-    Plans,
-    Resources,
-}
+/// Width the rail opens at, and the width a double-click on the resizer
+/// returns it to.
+pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 
 /// Shared UI state, provided via context so the three regions stay in sync
 /// without threading props through every layer.
@@ -40,11 +35,13 @@ pub enum Panel {
 pub struct KingdomState {
     /// The kingdom as last loaded from the server.
     pub kingdom: RwSignal<Kingdom>,
-    /// Which sidebar section is active.
-    pub panel: RwSignal<Panel>,
     /// The city the King has selected, if any. Highlighted on the map and
     /// used as the target for a new decree.
     pub selected: RwSignal<Option<CityId>>,
+    /// Current width of the left rail, in pixels. Driven by the resizer.
+    pub sidebar_width: RwSignal<f64>,
+    /// False shows only live plans; true also shows settled history.
+    pub show_all_plans: RwSignal<bool>,
     /// Set while a folder scan is in flight.
     pub loading: RwSignal<bool>,
     /// Most recent error, shown in the chat dock.
@@ -55,8 +52,9 @@ impl KingdomState {
     fn new() -> Self {
         Self {
             kingdom: RwSignal::new(Kingdom::unopened()),
-            panel: RwSignal::new(Panel::Cities),
             selected: RwSignal::new(None),
+            sidebar_width: RwSignal::new(DEFAULT_SIDEBAR_WIDTH),
+            show_all_plans: RwSignal::new(false),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
         }
@@ -90,7 +88,12 @@ pub fn App() -> impl IntoView {
             when=move || state.kingdom.get().is_open()
             fallback=move || view! { <ChooseKingdom/> }
         >
-            <div class="throne-room">
+            <div
+                class="throne-room"
+                style:grid-template-columns=move || {
+                    format!("{}px 1fr", state.sidebar_width.get())
+                }
+            >
                 <Sidebar/>
                 <main class="map-region">
                     <KingdomMap/>
