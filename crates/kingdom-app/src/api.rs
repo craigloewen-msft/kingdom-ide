@@ -6,18 +6,21 @@
 //! no schema to keep in sync, and a domain type change breaks the build rather
 //! than failing at runtime.
 
+use kingdom_core::{
+    Disposition, Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan, WorkspaceMode,
+};
 #[cfg(feature = "ssr")]
-use kingdom_core::PlanId;
-use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan, WorkspaceMode};
+use kingdom_core::{NoteKind, PlanId};
 use leptos::prelude::*;
 
-/// In-memory kingdom state.
+/// In-memory kingdom state, backed by the records on disk.
 ///
-/// A process-global `Mutex` is the right amount of machinery for a
-/// single-user local tool at this stage. It sits behind these server
-/// functions, so swapping in SQLite later touches only this module.
+/// A process-global `Mutex` is the right amount of machinery for a single-user
+/// local tool: it is the read path, and [`crate::store`] is the write-through
+/// behind it. Both sit behind these server functions, so swapping in SQLite
+/// later touches only that module.
 #[cfg(feature = "ssr")]
-mod store {
+mod state {
     use kingdom_core::Kingdom;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Mutex, OnceLock};
@@ -28,31 +31,56 @@ mod store {
         KINGDOM.get_or_init(|| Mutex::new(Kingdom::unopened()))
     }
 
-    /// Monotonic counter behind plan ids. Restarting empties the kingdom too,
-    /// so it does not need to survive the process.
+    /// Monotonic counter behind plan ids, seeded from the records on disk when a
+    /// kingdom is opened so a restart cannot reissue an id already in use.
     pub static PLAN_SEQ: AtomicU64 = AtomicU64::new(1);
 }
 
 /// Locks the kingdom, turning a poisoned mutex into a server error.
 #[cfg(feature = "ssr")]
 fn lock() -> Result<std::sync::MutexGuard<'static, Kingdom>, ServerFnError> {
-    store::get()
+    state::get()
         .lock()
         .map_err(|e| ServerFnError::new(format!("kingdom state poisoned: {e}")))
 }
 
 #[cfg(feature = "ssr")]
 fn next_plan_number() -> u64 {
-    store::PLAN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    state::PLAN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Applies a change to one plan and returns the result, so callers hand the
-/// browser the same value that was just stored.
+/// Applies a change to one plan, records it, and returns the result, so callers
+/// hand the browser the same value that was just stored.
+///
+/// The single funnel for plan mutations, which is why persistence hangs off it:
+/// a caller cannot change a plan and forget to write it.
 #[cfg(feature = "ssr")]
 fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) -> Option<Plan> {
+    let root = std::path::PathBuf::from(&kingdom.root);
     let plan = kingdom.plans.iter_mut().find(|p| &p.id == id)?;
     change(plan);
+    remember(&root, plan);
     Some(plan.clone())
+}
+
+/// Writes a plan to the records, turning a failed write into something the King
+/// can see rather than something that fails his decree.
+///
+/// Refusing the work because the disk was full would be a worse outcome than an
+/// unsaved plan he can see is unsaved -- the work itself is on a branch either
+/// way, and it is only the bookkeeping that was lost.
+#[cfg(feature = "ssr")]
+fn remember(root: &std::path::Path, plan: &mut Plan) {
+    if let Err(e) = crate::store::save(root, plan) {
+        plan.note(
+            NoteKind::Failed,
+            format!(
+                "Could not record this plan under {}: {e}. \
+                 It will be forgotten when the server restarts.",
+                root.display()
+            ),
+        );
+    }
 }
 
 /// Returns the currently open kingdom, or an empty one if none is open.
@@ -137,10 +165,28 @@ fn assemble(
     let cities = scan_kingdom(root)
         .map_err(|e| ServerFnError::new(format!("Could not read {}: {e}", root.display())))?;
 
-    // Cities are real -- scanned from disk, fake folder or not. The starting
-    // court is still fabricated; see `kingdom_core::sample`.
+    // Cities are rescanned every time -- disk is their source of truth. Plans
+    // are not: they are the one thing here that disk cannot tell us again.
+    let recorded = crate::store::load(root);
+    let seating_court = recorded.is_empty();
     let court = court.unwrap_or(kingdom_core::sample::populate_court);
-    let plans = court(&cities);
+    let plans = open_court(recorded, &cities, court);
+
+    // A fabricated court is fabricated exactly once per kingdom. Written
+    // immediately so the next open reads it back as ordinary history rather
+    // than seating a second one over the top of the first.
+    if seating_court && !plans.is_empty() {
+        if let Err(e) = crate::store::save_all(root, &plans) {
+            leptos::logging::warn!("could not record the opening court: {e}");
+        }
+    }
+
+    // Ids resume above whatever is already recorded, so a restart cannot reissue
+    // an id that a plan on disk is already using.
+    state::PLAN_SEQ.store(
+        crate::store::next_number(&plans),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let kingdom = Kingdom {
         name: root
@@ -157,6 +203,26 @@ fn assemble(
     *lock()? = kingdom.clone();
 
     Ok(kingdom)
+}
+
+/// The plans a freshly opened kingdom starts with.
+///
+/// A court is seated **only over an empty store**. Fabricating one every time
+/// would duplicate the whole opening court on the second open -- the King's
+/// real replies to a sample plan sitting beside a pristine copy of the same
+/// plan. Split out from [`assemble`] so the rule is testable without the
+/// process-global kingdom.
+#[cfg(feature = "ssr")]
+fn open_court(
+    recorded: Vec<Plan>,
+    cities: &[kingdom_core::City],
+    court: kingdom_core::mockdata::CourtFn,
+) -> Vec<Plan> {
+    if recorded.is_empty() {
+        court(cities)
+    } else {
+        recorded
+    }
 }
 
 /// Refuses any folder outside the sandbox when `KINGDOM_SANDBOX` is set.
@@ -291,7 +357,10 @@ pub async fn begin_plan(
         },
     );
 
-    lock()?.plans.push(plan.clone());
+    let mut kingdom = lock()?;
+    let root = std::path::PathBuf::from(&kingdom.root);
+    remember(&root, &mut plan);
+    kingdom.plans.push(plan.clone());
 
     Ok(plan)
 }
@@ -334,6 +403,19 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
     let plan_id = PlanId::new(plan);
     let mut kingdom = lock()?;
 
+    // A settled plan is history, and its workspace is gone from disk. A stale
+    // tab must not be able to reopen a conversation whose checkout no longer
+    // exists -- the reply would be drafted against nothing.
+    if let Some(existing) = kingdom.plan(&plan_id) {
+        if existing.status.is_settled() {
+            return Err(ServerFnError::new(format!(
+                "That plan is {} and its workspace has been cleared. \
+                 Start a new decree to carry the work on.",
+                existing.status.label().to_lowercase()
+            )));
+        }
+    }
+
     update(&mut kingdom, &plan_id, |p| {
         p.status = PlanStatus::Drafting;
         p.say(Speaker::King, prompt);
@@ -365,6 +447,13 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         // otherwise start a second one -- a duplicate model call, and a
         // duplicate bill.
         if existing.is_busy() {
+            return Ok(existing);
+        }
+
+        // Likewise a settled plan: the chamber mounts the same way for history
+        // as for live work, and drafting against a workspace that has been
+        // cleared from disk would brief the model on nothing.
+        if existing.status.is_settled() {
             return Ok(existing);
         }
 
@@ -463,6 +552,75 @@ fn settle(
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
+/// Closes a plan: lands its work, or sets it aside.
+///
+/// The two endings share this one function because they share their whole
+/// shape -- check the plan can be closed, do the git work, settle or report --
+/// and differ only in which disposal runs. Splitting them would duplicate the
+/// guards, and a guard that exists in one copy is a guard that will be missed
+/// in the other.
+///
+/// A refusal from git comes back as `Ok`, with the reason recorded in the
+/// plan's log. `Err` means the server could not do the work at all.
+#[server(FinishPlan, "/api")]
+pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerFnError> {
+    use crate::worktree::Finish;
+
+    let plan_id = PlanId::new(plan);
+
+    let (workspace, city_root, root) = {
+        let kingdom = lock()?;
+        let Some(existing) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+
+        // A draft in flight is mid-write: merging under it would land half a
+        // thought, and removing its worktree would pull the floor out.
+        if existing.is_busy() {
+            return Err(ServerFnError::new(
+                "This plan is still being drafted. Wait for it to finish.",
+            ));
+        }
+
+        // Already settled: its worktree is gone, so there is nothing left to do
+        // and repeating the disposal would only produce confusing git errors.
+        if existing.status.is_settled() {
+            return Ok(existing.clone());
+        }
+
+        let Some(city) = kingdom.city(&existing.city) else {
+            return Err(ServerFnError::new("That plan's city is gone."));
+        };
+
+        (
+            existing.workspace.clone(),
+            std::path::Path::new(&kingdom.root).join(&city.path),
+            std::path::PathBuf::from(&kingdom.root),
+        )
+    };
+
+    let finish = match how {
+        Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
+        Disposition::Archive => {
+            let patch = crate::store::archive_patch(&root, &plan_id);
+            crate::worktree::archive(&city_root, &workspace, &patch).await
+        }
+    }
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut kingdom = lock()?;
+    update(&mut kingdom, &plan_id, |p| match finish {
+        Finish::Settled(outcome) => {
+            p.note(NoteKind::Merge, outcome.summary());
+            p.settle(outcome);
+        }
+        // Nothing about the plan has changed, so nothing about its status
+        // does either: it is still awaiting review, because it is.
+        Finish::Refused(why) => p.note(NoteKind::Merge, why),
+    })
+    .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
+}
+
 /// How plans will be drafted: provider, model, and whether a credential works.
 ///
 /// Resolves the credential rather than merely checking it is configured, since
@@ -551,5 +709,47 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A kingdom is opened many times; its court is fabricated once.
+    ///
+    /// Without this the second open would seat a fresh court *over* the stored
+    /// one -- the King's real replies to a sample plan sitting beside a pristine
+    /// copy of the same plan, multiplying on every restart. The opening court
+    /// exists to give a new kingdom something to show, and a kingdom with
+    /// records is not new.
+    #[test]
+    fn a_court_is_seated_only_over_an_empty_store() {
+        use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
+
+        fn court(_: &[kingdom_core::City]) -> Vec<Plan> {
+            vec![Plan::opened(
+                PlanId::new("plan-fabricated"),
+                CityId::new("c1"),
+                "A fabricated decree",
+                &ModelChoice::new("mock", None),
+                Workspace::in_place("/dev/testburg"),
+            )]
+        }
+
+        let seated = open_court(Vec::new(), &[], court);
+        assert_eq!(
+            seated.len(),
+            1,
+            "a kingdom with no records gets an opening court"
+        );
+
+        let recorded = vec![Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "The King's own decree",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        )];
+        assert_eq!(
+            open_court(recorded.clone(), &[], court),
+            recorded,
+            "a kingdom with records keeps them, and gets no second court"
+        );
     }
 }

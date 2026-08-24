@@ -181,6 +181,19 @@
   &.note-failed { color: t.$failed; border-color: rgba(t.$failed, 0.4); }
   // Where the work is fenced in is reassurance, not an alarm.
   &.note-workspace { font-family: t.$font-mono; }
+  // A conflict is the King's to resolve, so it is louder than a workspace note
+  // and a different colour from a failed model call -- which is nobody's fault
+  // and needs only a retry. This one needs a decision.
+  &.note-merge {
+    max-width: 90%;
+    padding: 8px 14px;
+    border-radius: t.$radius;
+    color: t.$review;
+    border-color: rgba(t.$review, 0.45);
+    font-family: t.$font-mono;
+    text-align: left;
+    white-space: pre-wrap;
+  }
 }
 
 .msg-body {
@@ -201,6 +214,94 @@
   background: t.$panel;
   border-top: 1px solid t.$edge;
 }
+
+// --- Finishing -------------------------------------------------------------
+
+// Closing the plan sits beside sending to it, but reads quieter: it is the
+// rarer act, and the composer is what the King reaches for most.
+.done-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 0 14px;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  background: t.$panel-2;
+  color: t.$ink-dim;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+  }
+
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+.done-picker {
+  flex: 0 0 auto;
+  padding: 12px 20px 16px;
+  background: t.$panel;
+  border-top: 1px solid t.$edge;
+}
+
+.done-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.done-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$panel-2;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { border-color: t.$gold-dim; }
+}
+
+.done-name {
+  color: t.$ink;
+  font-size: 13px;
+}
+
+.done-detail {
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+// A settled plan is a record, not a place to type: this stands where the
+// composer was, so the chamber stops inviting work that can no longer land.
+.chamber-outcome {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 14px 20px;
+  background: t.$panel;
+  border-top: 1px solid t.$edge;
+  color: t.$ink-dim;
+  font-size: 13px;
+}
+
+.outcome-mark {
+  color: t.$merged;
+  font-size: 15px;
+}
+
+.outcome-text { font-family: t.$font-mono; }
 
 // --- Nothing there ---------------------------------------------------------
 

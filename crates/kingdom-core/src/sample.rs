@@ -73,34 +73,42 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
     }
 
     // Settled plans, so the sidebar's "All" filter has history to reveal.
-    // Without at least one approved and one rejected plan, the filter looks
+    // Without at least one merged and one archived plan, the filter looks
     // broken rather than empty.
     let first = &cities[0];
-    let mut approved = Plan::opened(
-        PlanId::new("plan-settled-approved"),
+    let mut merged = Plan::opened(
+        PlanId::new("plan-settled-merged"),
         first.id.clone(),
         "Harden the error paths",
         &mock,
         Workspace::in_place(&first.path),
     );
-    approved.title = format!("The Old Ramparts of {}", first.name);
-    approved.summary = "Hardened the error paths. Approved and built.".into();
-    approved.status = PlanStatus::Approved;
-    approved.touches = vec!["src/lib.rs".into()];
-    plans.push(approved);
+    merged.title = format!("The Old Ramparts of {}", first.name);
+    merged.summary = "Hardened the error paths. Landed on main.".into();
+    merged.touches = vec!["src/lib.rs".into()];
+    merged.settle(Outcome::Merged {
+        commit: "0000000fabricated".into(),
+        into: "main".into(),
+    });
+    plans.push(merged);
 
-    let mut rejected = Plan::opened(
-        PlanId::new("plan-settled-rejected"),
+    let mut archived = Plan::opened(
+        PlanId::new("plan-settled-archived"),
         first.id.clone(),
         "Rewrite the scanner from scratch",
         &mock,
         Workspace::in_place(&first.path),
     );
-    rejected.title = format!("The Folly of {}", first.name);
-    rejected.summary = "Proposed rewriting the scanner. Refused.".into();
-    rejected.status = PlanStatus::Rejected;
-    rejected.touches = vec!["src/scan.rs".into()];
-    plans.push(rejected);
+    archived.title = format!("The Folly of {}", first.name);
+    archived.summary = "Proposed rewriting the scanner. Set aside.".into();
+    archived.touches = vec!["src/scan.rs".into()];
+    archived.settle(Outcome::Archived {
+        branch: "kingdom/fabricated".into(),
+        tip: "0000000fabricated".into(),
+        base: "main".into(),
+        patch: None,
+    });
+    plans.push(archived);
 
     plans
 }
@@ -179,7 +187,7 @@ mod tests {
 
     /// The court must open showing something worth the King's attention.
     ///
-    /// A court of nothing but tidy approved plans makes the states the UI exists
+    /// A court of nothing but tidy settled plans makes the states the UI exists
     /// to render unreachable during development -- and a refactor is exactly
     /// when that would happen quietly. It used to be a blocked plan and a
     /// contended resource; with lease arbitration gone, a *failed* plan is the

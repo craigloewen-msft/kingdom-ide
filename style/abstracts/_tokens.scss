@@ -37,7 +37,7 @@ $palette: (
   "blocked":     #ef4444,
   "idle":        #64748b,
   "failed":      #f97316,
-  "approved":    #38bdf8,
+  "merged":      #38bdf8,
 );
 
 @function colour($name) {
@@ -66,21 +66,21 @@ $review:      colour("review");
 $blocked:     colour("blocked");
 $idle:        colour("idle");
 $failed:      colour("failed");
-$approved:    colour("approved");
+$merged:      colour("merged");
 
 // Every state a plan can be in, keyed by the `.status-*` / `.plan-*` class
 // suffix that `PlanStatus::css_suffix` emits. Stating them once here is what
 // keeps the rail badge and the map pip from drifting apart.
 //
-// Drafting reuses the working green and rejected the idle grey: a plan being
-// drawn up *is* work in progress, and a refused one is as quiet as an unstaffed
+// Drafting reuses the working green and archived the idle grey: a plan being
+// drawn up *is* work in progress, and one set aside is as quiet as an unstaffed
 // city.
 $statuses: (
   "drafting": $working,
   "review":   $review,
   "failed":   $failed,
-  "approved": $approved,
-  "rejected": $idle,
+  "merged":   $merged,
+  "archived": $idle,
 );
 
 // The land the realm stands on, shore to peak.

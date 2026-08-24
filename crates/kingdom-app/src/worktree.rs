@@ -1,15 +1,16 @@
-//! Preparing a place on disk for a plan to work.
+//! Preparing a place on disk for a plan to work, and disposing of it after.
 //!
 //! Server-only. Everything here shells out to `git` rather than linking a git
 //! library: the operations are few, the CLI's behaviour is the contract users
 //! already know, and its refusals are written in words worth showing the King
 //! verbatim.
 //!
-//! Nothing here removes a worktree. They persist under `.kingdom/` so the King
-//! can inspect or merge them; deciding when one is disposable is a separate
-//! question, and guessing at it would throw away real work.
+//! A worktree is disposable exactly when its work has been dealt with -- landed
+//! on the branch it was cut from, or preserved somewhere it can be recovered
+//! from. Until then it persists under `.kingdom/`, because guessing at that
+//! would throw away real work. [`merge`] and [`archive`] are the two answers.
 
-use kingdom_core::{Workspace, WorkspaceMode};
+use kingdom_core::{Outcome, Workspace, WorkspaceMode};
 use std::path::{Path, PathBuf};
 
 /// Folder inside a city where isolated worktrees are cut.
@@ -57,6 +58,14 @@ pub async fn prepare(city_root: &Path, mode: &WorkspaceMode) -> Result<Workspace
     // King's repository is not ours to commit to.
     exclude_worktree_dir(city_root);
 
+    // Recorded now, while it is unambiguously true. Asking at merge time would
+    // land the work wherever the King had wandered to since.
+    let base = git(city_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .ok()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD");
+
     let id = uuid::Uuid::new_v4().to_string();
     let dir: PathBuf = city_root.join(WORKTREE_DIR).join(&id);
     let dir_arg = dir.to_string_lossy().to_string();
@@ -88,7 +97,196 @@ pub async fn prepare(city_root: &Path, mode: &WorkspaceMode) -> Result<Workspace
         path: dir_arg,
         branch: Some(branch),
         id: Some(id),
+        base,
     })
+}
+
+/// What became of an attempt to finish a plan.
+///
+/// A refusal is **not** an `Err`. git declining to merge -- a conflict, a dirty
+/// tree, the wrong branch checked out -- is a real event in the plan's life and
+/// belongs in the plan's log, where the King is already looking. `Err` is kept
+/// for the server being unable to do the work at all.
+pub enum Finish {
+    /// It is done. The plan settles with this outcome.
+    Settled(Outcome),
+    /// It could not be done, in words worth showing verbatim. The plan keeps
+    /// whatever status it had, because nothing about it has changed.
+    Refused(String),
+}
+
+/// Lands a plan's work on the branch its workspace was cut from.
+///
+/// Every failure stops the whole thing and leaves the city exactly as it was:
+/// a refused merge is aborted, so there is never a half-merged working tree for
+/// the King to discover later.
+pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, WorktreeError> {
+    // Working in place, there is nothing to merge -- the work is already in the
+    // folder. Saying so plainly beats pretending to merge (a lie) or refusing
+    // (a plan the King cannot close).
+    let Some(branch) = workspace
+        .branch
+        .as_deref()
+        .filter(|_| workspace.is_isolated())
+    else {
+        return Ok(Finish::Settled(Outcome::Merged {
+            commit: head_of(city_root).await.unwrap_or_default(),
+            into: "this folder".to_string(),
+        }));
+    };
+
+    let Some(base) = workspace.base.as_deref() else {
+        return Ok(Finish::Refused(
+            "This plan does not record which branch it was cut from, so there is \
+             nowhere certain to merge it. Merge it by hand."
+                .to_string(),
+        ));
+    };
+
+    let worktree = PathBuf::from(&workspace.path);
+    commit_pending(&worktree, "Kingdom: work in progress").await?;
+
+    // Merging requires the base branch to be the one checked out here. Checking
+    // it out ourselves would move the King's working copy out from under him --
+    // precisely the collision this product exists to prevent.
+    let on = git(city_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await?
+        .trim()
+        .to_string();
+    if on != base {
+        return Ok(Finish::Refused(format!(
+            "This plan was cut from {base}, but {} has {on} checked out. \
+             Switch back to {base} and try again.",
+            city_root.file_name().unwrap_or_default().to_string_lossy(),
+        )));
+    }
+
+    // `--no-ff` because a plan is the unit of review: one merge commit per plan
+    // is what makes "what did that plan actually land?" answerable afterwards.
+    let message = format!("Merge {branch}");
+    let merged = git(city_root, &["merge", "--no-ff", "-m", &message, branch]).await;
+
+    if let Err(e) = merged {
+        // Leave the city exactly as it was found. A half-merged tree the King
+        // discovers hours later is far worse than a refusal he reads now.
+        let conflicts = git(city_root, &["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap_or_default();
+        let _ = git(city_root, &["merge", "--abort"]).await;
+
+        let mut refusal = e.to_string();
+        let paths: Vec<&str> = conflicts
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !paths.is_empty() {
+            refusal.push_str("\n\nConflicting files:\n");
+            for path in paths {
+                refusal.push_str(&format!("  {path}\n"));
+            }
+        }
+        return Ok(Finish::Refused(refusal));
+    }
+
+    let commit = head_of(city_root).await?;
+
+    // The work has landed, so the checkout is now genuinely disposable. `-d`
+    // rather than `-D`: the safe delete, which succeeds only *because* the
+    // branch is merged, so a bug here refuses rather than destroys.
+    git(
+        city_root,
+        &["worktree", "remove", "--force", &workspace.path],
+    )
+    .await?;
+    git(city_root, &["branch", "-d", branch]).await?;
+
+    Ok(Finish::Settled(Outcome::Merged {
+        commit,
+        into: base.to_string(),
+    }))
+}
+
+/// Sets a plan's work aside, preserved, and reclaims its checkout.
+///
+/// The promise is that the checkout goes and the work does not: the branch
+/// stays, and a patch of it is written to `patch_path` for the day the branch is
+/// pruned or the repository re-cloned.
+pub async fn archive(
+    city_root: &Path,
+    workspace: &Workspace,
+    patch_path: &Path,
+) -> Result<Finish, WorktreeError> {
+    // Nothing was isolated, so there is no checkout to reclaim and no branch to
+    // keep. Archiving is then purely a matter of record.
+    let (Some(branch), Some(base)) = (workspace.branch.as_deref(), workspace.base.as_deref())
+    else {
+        return Ok(Finish::Settled(Outcome::Archived {
+            branch: workspace.branch.clone().unwrap_or_else(|| "none".into()),
+            tip: head_of(city_root).await.unwrap_or_default(),
+            base: workspace.base.clone().unwrap_or_else(|| "none".into()),
+            patch: None,
+        }));
+    };
+
+    let worktree = PathBuf::from(&workspace.path);
+    // Committed first, or `worktree remove --force` would throw the work away --
+    // which would make archiving a destructive act wearing a gentle name.
+    commit_pending(&worktree, "Kingdom: archived work in progress").await?;
+
+    let tip = head_of(&worktree).await?;
+
+    // `format-patch` rather than `diff`: it keeps each commit's message and
+    // author and replays with `git am`. That is the difference between
+    // recovering a change and recovering the work.
+    let range = format!("{base}..{branch}");
+    let patch = match git(city_root, &["format-patch", "--stdout", &range]).await {
+        Ok(body) if !body.trim().is_empty() => {
+            let written = patch_path
+                .parent()
+                .is_none_or(|d| std::fs::create_dir_all(d).is_ok())
+                && std::fs::write(patch_path, &body).is_ok();
+            written.then(|| patch_path.to_string_lossy().to_string())
+        }
+        // A plan that changed nothing has no patch, and that is not a failure.
+        // Nor is an unwritable path: the branch is the primary record, and the
+        // patch is the belt to its braces.
+        _ => None,
+    };
+
+    git(
+        city_root,
+        &["worktree", "remove", "--force", &workspace.path],
+    )
+    .await?;
+
+    Ok(Finish::Settled(Outcome::Archived {
+        branch: branch.to_string(),
+        tip,
+        base: base.to_string(),
+        patch,
+    }))
+}
+
+/// Commits whatever is uncommitted in a worktree, if anything is.
+///
+/// Both endings do this first. Refusing until the King tidies up would strand
+/// work behind a UI that offers no way to tidy; a commit on a throwaway branch
+/// is fully reversible, and a discarded edit is not.
+async fn commit_pending(worktree: &Path, message: &str) -> Result<bool, WorktreeError> {
+    let dirty = git(worktree, &["status", "--porcelain"]).await?;
+    if dirty.trim().is_empty() {
+        return Ok(false);
+    }
+
+    git(worktree, &["add", "-A"]).await?;
+    git(worktree, &["commit", "-m", message]).await?;
+    Ok(true)
+}
+
+/// The commit a repository's HEAD points at.
+async fn head_of(repo: &Path) -> Result<String, WorktreeError> {
+    Ok(git(repo, &["rev-parse", "HEAD"]).await?.trim().to_string())
 }
 
 /// Local branches in a repository, HEAD's branch first.
@@ -258,6 +456,15 @@ mod tests {
             "fix/parser"
         );
 
+        // Where it was cut from, recorded while it is unambiguously true. This
+        // is what a later merge trusts instead of asking the city's HEAD, which
+        // by then may have moved.
+        assert_eq!(
+            fresh.base.as_deref(),
+            Some("main"),
+            "a workspace records the branch it was cut from"
+        );
+
         // Isolation must not itself dirty the repo it is isolating.
         assert_eq!(
             git(root, &["status", "--porcelain"]).await.unwrap().trim(),
@@ -274,5 +481,146 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outcome = prepare(dir.path(), &WorkspaceMode::Fresh).await;
         assert!(matches!(outcome, Err(WorktreeError::NotARepo(_))));
+    }
+
+    /// Writes a file in a repository and commits it.
+    async fn commit(repo: &Path, name: &str, body: &str) {
+        std::fs::write(repo.join(name), body).unwrap();
+        git(repo, &["add", "."]).await.unwrap();
+        git(repo, &["commit", "-m", &format!("edit {name}")])
+            .await
+            .unwrap();
+    }
+
+    /// The invariant the whole feature rests on: a merge that cannot be done
+    /// must leave the King's project exactly as it was found.
+    ///
+    /// A half-merged working tree discovered hours later is far worse than a
+    /// refusal read now -- the King would have no way of telling which of the
+    /// files in front of him were his own work and which an agent's. So the
+    /// abort matters as much as the refusal, and both are pinned here along
+    /// with the worktree surviving, so the work is still there to retry with.
+    #[tokio::test]
+    async fn a_conflicted_merge_leaves_the_city_exactly_as_it_was() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        let workspace = prepare(root, &WorkspaceMode::Fresh).await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+
+        // The same file, edited two different ways.
+        commit(&worktree, "README.md", "the plan's version").await;
+        commit(root, "README.md", "the King's version").await;
+
+        let before = head_of(root).await.unwrap();
+
+        let finish = merge(root, &workspace).await.unwrap();
+        let Finish::Refused(why) = finish else {
+            panic!("a conflicting merge must be refused, not performed");
+        };
+        assert!(
+            why.contains("README.md"),
+            "the refusal must name the conflicting file; got: {why}"
+        );
+
+        assert_eq!(
+            head_of(root).await.unwrap(),
+            before,
+            "a refused merge must not move the city's HEAD"
+        );
+        assert_eq!(
+            git(root, &["status", "--porcelain"]).await.unwrap().trim(),
+            "",
+            "a refused merge must leave no conflict markers behind"
+        );
+        assert!(
+            !root.join(".git").join("MERGE_HEAD").exists(),
+            "a refused merge must be aborted, not left half-done"
+        );
+        assert!(
+            worktree.join("README.md").is_file(),
+            "the plan's work must survive a refusal, so it can be retried"
+        );
+    }
+
+    /// The happy path, and the answer to the question this module deferred:
+    /// a worktree is disposable exactly when its work has landed.
+    #[tokio::test]
+    async fn a_clean_merge_lands_the_work_and_disposes_of_the_worktree() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        let workspace = prepare(root, &WorkspaceMode::Fresh).await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        let branch = workspace.branch.clone().unwrap();
+
+        // Uncommitted on purpose: the King should not have to tidy up before he
+        // can finish, and a UI that offers no way to tidy would strand the work.
+        std::fs::write(worktree.join("tower.rs"), "fn build() {}").unwrap();
+
+        let finish = merge(root, &workspace).await.unwrap();
+        let Finish::Settled(Outcome::Merged { commit, into }) = finish else {
+            panic!("a clean merge must settle as merged");
+        };
+
+        assert_eq!(into, "main");
+        assert_eq!(commit, head_of(root).await.unwrap());
+        assert!(
+            root.join("tower.rs").is_file(),
+            "the work must actually be in the project afterwards"
+        );
+        assert!(
+            !worktree.exists(),
+            "a landed worktree is disposable, and must be disposed of"
+        );
+        assert!(
+            !branches(root).await.contains(&branch),
+            "the plan's branch goes with its worktree once merged"
+        );
+    }
+
+    /// Archiving's whole promise: the checkout goes, the work does not.
+    ///
+    /// "This didn't work out" must never mean "and so it was deleted". Both
+    /// records are checked, because the branch is the primary one and the patch
+    /// is what survives the branch being pruned or the repo re-cloned.
+    #[tokio::test]
+    async fn archiving_keeps_the_work_recoverable() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        let workspace = prepare(root, &WorkspaceMode::Fresh).await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        std::fs::write(worktree.join("folly.rs"), "fn doomed() {}").unwrap();
+
+        let patch_path = dir.path().join("archive").join("plan-1.patch");
+        let finish = archive(root, &workspace, &patch_path).await.unwrap();
+        let Finish::Settled(Outcome::Archived {
+            branch, tip, patch, ..
+        }) = finish
+        else {
+            panic!("archiving must settle as archived");
+        };
+
+        assert!(
+            !worktree.exists(),
+            "reclaiming the checkout is the point of archiving"
+        );
+        assert_eq!(
+            git(root, &["rev-parse", &branch]).await.unwrap().trim(),
+            tip,
+            "the branch must survive, at the tip the outcome recorded"
+        );
+        assert!(
+            !root.join("folly.rs").exists(),
+            "archived work must not land in the project"
+        );
+
+        let patch = patch.expect("a plan that changed something has a patch");
+        let body = std::fs::read_to_string(&patch).expect("the patch is on disk");
+        assert!(
+            body.contains("folly.rs") && body.contains("fn doomed()"),
+            "the patch must carry the work, or it recovers nothing"
+        );
     }
 }

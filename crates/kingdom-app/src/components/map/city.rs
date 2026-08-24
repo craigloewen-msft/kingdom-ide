@@ -103,7 +103,7 @@ pub fn CityGlyph(
                 .get()
                 .plans
                 .iter()
-                .filter(|p| p.city == id && p.status != PlanStatus::Rejected)
+                .filter(|p| p.city == id && p.status != PlanStatus::Archived)
                 .flat_map(|p| p.touches.iter().cloned())
                 .collect::<HashSet<String>>()
         })
