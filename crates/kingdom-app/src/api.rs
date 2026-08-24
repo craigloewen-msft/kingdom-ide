@@ -816,6 +816,13 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     }
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+    // Only once the work has actually landed. A refused merge leaves the plan
+    // in play, and killing the court's dev server under a plan the King is
+    // about to retry would take away the thing he needs to see to fix it.
+    if matches!(finish, Finish::Settled(_)) {
+        crate::tools::tmux::dismiss(&plan_id).await;
+    }
+
     let mut kingdom = lock()?;
     update(&mut kingdom, &plan_id, |p| match finish {
         Finish::Settled(outcome) => {

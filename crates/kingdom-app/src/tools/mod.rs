@@ -25,6 +25,7 @@ pub mod patch;
 pub mod read_file;
 pub mod search;
 pub mod think;
+pub mod tmux;
 
 use kingdom_core::{DeedOutcome, Workspace};
 use serde_json::Value;
@@ -42,6 +43,8 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(read_file::ReadFile),
         Box::new(search::Search),
         Box::new(bash::Bash),
+        Box::new(tmux::TmuxRun),
+        Box::new(tmux::Tmux),
         Box::new(patch::Patch),
         Box::new(ask_user_question::AskUserQuestion),
     ]
