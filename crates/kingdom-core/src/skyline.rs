@@ -102,7 +102,7 @@ pub enum LotKind {
 /// A placed building, in city-local coordinates (origin = city centre).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lot {
-    /// Path relative to the city root; the join key for [`crate::Plan`] touches.
+    /// Path relative to the city root, which is what identifies this building.
     pub path: String,
     pub name: String,
     /// Centre of the footprint.

@@ -52,22 +52,6 @@
   }
 }
 
-// A building a pending plan proposes to alter. This is the King's review loop
-// made spatial: the gold marks exactly what is awaiting judgement.
-.roof-gilt {
-  fill: t.$gold;
-  stroke: #fde68a;
-  stroke-width: 0.6;
-  opacity: 0.85;
-  animation: gilt-pulse 1.8s ease-in-out infinite;
-  pointer-events: none;
-}
-
-@keyframes gilt-pulse {
-  0%, 100% { opacity: 0.45; }
-  50%      { opacity: 0.95; }
-}
-
 // The landmark spire marks the single largest file, so "where is the bulk of
 // my code?" stays answerable at mid zoom where individual buildings are gone.
 .landmark-top { stroke: rgba(212, 175, 55, 0.5); stroke-width: 0.6; }

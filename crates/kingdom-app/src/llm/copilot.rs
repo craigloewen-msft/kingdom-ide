@@ -388,7 +388,6 @@ impl Model for CopilotModel {
         Ok(Draft {
             title: headline(&text, &brief.city.name),
             summary: first_sentence(&text),
-            touches: mentioned_paths(&text, &brief.city.notable_paths),
             body: text,
         })
     }
@@ -451,20 +450,6 @@ fn first_sentence(text: &str) -> String {
         Some(i) => truncate(&prose[..=i], 200),
         None => truncate(prose, 200),
     }
-}
-
-/// Which of the project's real files the reply actually names.
-///
-/// Matching against the scanned paths rather than parsing arbitrary strings out
-/// of the prose means a hallucinated filename can never light up a building that
-/// does not exist on the map.
-fn mentioned_paths(text: &str, known: &[String]) -> Vec<String> {
-    known
-        .iter()
-        .filter(|p| text.contains(p.as_str()))
-        .take(8)
-        .cloned()
-        .collect()
 }
 
 fn truncate(text: &str, max: usize) -> String {

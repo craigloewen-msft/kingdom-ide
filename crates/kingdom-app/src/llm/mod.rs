@@ -95,8 +95,6 @@ pub struct Draft {
     pub title: String,
     /// One or two lines, shown on hover.
     pub summary: String,
-    /// Paths the plan proposes to touch, which light up on the map.
-    pub touches: Vec<String>,
     /// The full reply, shown in the dock.
     pub body: String,
 }

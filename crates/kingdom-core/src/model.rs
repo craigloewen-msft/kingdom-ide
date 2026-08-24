@@ -93,8 +93,8 @@ pub struct City {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Building {
     pub name: String,
-    /// Path relative to the city root. This is the join key that lets a
-    /// [`Plan`]'s `touches` list light up an exact building on the map.
+    /// Path relative to the city root, which is what identifies this exact
+    /// building on the map.
     pub path: String,
     pub ward: Ward,
     /// Size in bytes, which drives the building's height.
@@ -389,9 +389,6 @@ pub struct Plan {
     pub city: CityId,
     pub title: String,
     pub summary: String,
-    /// Files the plan proposes to touch. This is the join key that lights up
-    /// exact buildings on the map.
-    pub touches: Vec<String>,
     /// The decree that opened this plan, verbatim.
     pub prompt: String,
     /// Which model is drafting it, e.g. `"mock"` or `"copilot/claude-opus-5"`.
@@ -432,11 +429,7 @@ impl Plan {
             city,
             title: title_from_prompt(&prompt),
             summary: String::new(),
-            touches: Vec::new(),
-            transcript: vec![Entry::Said(Utterance {
-                speaker: Speaker::King,
-                body: prompt.clone(),
-            })],
+            transcript: vec![Entry::Said(Utterance::new(Speaker::King, prompt.clone()))],
             prompt,
             model: choice.model.clone(),
             effort: choice.effort,
@@ -467,18 +460,12 @@ impl Plan {
     /// Records words a participant produced. These, and only these, are ever
     /// sent to a model.
     pub fn say(&mut self, speaker: Speaker, body: impl Into<String>) {
-        self.transcript.push(Entry::Said(Utterance {
-            speaker,
-            body: body.into(),
-        }));
+        self.transcript.push(Entry::Said(Utterance::new(speaker, body)));
     }
 
     /// Records something Kingdom itself reports. Never leaves the machine.
     pub fn note(&mut self, kind: NoteKind, body: impl Into<String>) {
-        self.transcript.push(Entry::Note(Note {
-            kind,
-            body: body.into(),
-        }));
+        self.transcript.push(Entry::Note(Note::new(kind, body)));
     }
 
     /// Just the utterances, in order.
@@ -533,6 +520,22 @@ pub enum Entry {
 pub struct Utterance {
     pub speaker: Speaker,
     pub body: String,
+    /// When these words entered the log. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
+impl Utterance {
+    /// Records words as said *now*, which is the only way a caller should make
+    /// one: an utterance whose time is chosen by hand is an utterance that can
+    /// disagree with its own position in the log.
+    pub fn new(speaker: Speaker, body: impl Into<String>) -> Self {
+        Self {
+            speaker,
+            body: body.into(),
+            at: Timestamp::now(),
+        }
+    }
 }
 
 /// Something that happened, reported by Kingdom itself.
@@ -540,6 +543,53 @@ pub struct Utterance {
 pub struct Note {
     pub kind: NoteKind,
     pub body: String,
+    /// When this happened. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
+impl Note {
+    /// Records something as having happened *now*, for the same reason as
+    /// [`Utterance::new`].
+    pub fn new(kind: NoteKind, body: impl Into<String>) -> Self {
+        Self {
+            kind,
+            body: body.into(),
+            at: Timestamp::now(),
+        }
+    }
+}
+
+/// When something entered a plan's log: milliseconds since the Unix epoch, UTC.
+///
+/// A bare integer rather than a date type, because this crate compiles to wasm
+/// and every calendar crate wants a clock the browser does not hand out the
+/// same way. Turning this into a local wall-clock time is the browser's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Timestamp(pub i64);
+
+impl Timestamp {
+    /// The current time, where there is a clock to read.
+    ///
+    /// `None` on wasm, and that absence is deliberately not papered over with a
+    /// zero: **the browser never authors a log entry**. Every utterance and note
+    /// is made server-side, so the wasm arm is unreachable in practice, and a
+    /// `0` sentinel would render an impossible line as "01:00, 1 Jan 1970"
+    /// rather than as the missing thing it actually is.
+    pub fn now() -> Option<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| Timestamp(d.as_millis() as i64))
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

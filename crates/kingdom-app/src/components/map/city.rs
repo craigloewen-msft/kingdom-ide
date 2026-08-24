@@ -10,16 +10,14 @@
 //! Cities used to be one generic keep, identical for a 30-file library and a
 //! 5,000-file monorepo, so "Vitruvius is refactoring the auth module" had
 //! nowhere on screen to *be*. Giving every file a stable location turns agent
-//! activity from prose into geography: the district glows, the exact building a
-//! plan would touch is gilded, and contention threads land on the district in
-//! dispute rather than on a vague circle.
+//! activity from prose into geography: the district glows, and contention
+//! threads land on the district in dispute rather than on a vague circle.
 
 use crate::app::KingdomState;
 use kingdom_core::layout::CityPlacement;
 use kingdom_core::skyline::{iso, Lot, LotKind, Plate, Skyline};
 use kingdom_core::{City, CityId, PlanStatus};
 use leptos::prelude::*;
-use std::collections::HashSet;
 
 /// How much of a building's side face is darkened, per side.
 ///
@@ -93,22 +91,6 @@ pub fn CityGlyph(
     // draft is what genuinely marks a city as needing the King's eye.
     let troubled = move || plans.get().iter().any(|p| p.status == PlanStatus::Failed);
 
-    // Paths a pending plan proposes to touch: these buildings get gilded, which
-    // is what makes "what am I being asked to approve?" a place on the map.
-    let under_plan = {
-        let id = id.clone();
-        Memo::new(move |_| {
-            state
-                .kingdom
-                .get()
-                .plans
-                .iter()
-                .filter(|p| p.city == id && p.status != PlanStatus::Rejected)
-                .flat_map(|p| p.touches.iter().cloned())
-                .collect::<HashSet<String>>()
-        })
-    };
-
     let r = place.radius;
     let skyline = StoredValue::new(
         city.structure
@@ -176,7 +158,7 @@ pub fn CityGlyph(
                     }.into_any(),
                     Detail::Streets => view! {
                         <Districts skyline=skyline show_labels=true/>
-                        <Buildings skyline=skyline under_plan=under_plan/>
+                        <Buildings skyline=skyline/>
                     }.into_any(),
                 }
             }}
@@ -279,7 +261,7 @@ fn plate_points(plate: &Plate) -> String {
 
 /// Every building in the city, back to front.
 #[component]
-fn Buildings(skyline: StoredValue<Skyline>, under_plan: Memo<HashSet<String>>) -> impl IntoView {
+fn Buildings(skyline: StoredValue<Skyline>) -> impl IntoView {
     let lots = skyline.with_value(|s| s.lots.clone());
     let cathedral = skyline.with_value(|s| s.cathedral);
 
@@ -287,7 +269,7 @@ fn Buildings(skyline: StoredValue<Skyline>, under_plan: Memo<HashSet<String>>) -
         <g class="buildings">
             {lots.into_iter().enumerate().map(|(i, lot)| {
                 let is_cathedral = cathedral == Some(i);
-                view! { <BuildingGlyph lot=lot under_plan=under_plan cathedral=is_cathedral/> }
+                view! { <BuildingGlyph lot=lot cathedral=is_cathedral/> }
             }).collect_view()}
         </g>
     }
@@ -295,7 +277,7 @@ fn Buildings(skyline: StoredValue<Skyline>, under_plan: Memo<HashSet<String>>) -
 
 /// One building: three faces of an extruded isometric box.
 #[component]
-fn BuildingGlyph(lot: Lot, under_plan: Memo<HashSet<String>>, cathedral: bool) -> impl IntoView {
+fn BuildingGlyph(lot: Lot, cathedral: bool) -> impl IntoView {
     let hw = lot.width / 2.0;
     let hd = lot.depth / 2.0;
     let h = lot.height;
@@ -324,9 +306,6 @@ fn BuildingGlyph(lot: Lot, under_plan: Memo<HashSet<String>>, cathedral: bool) -
     ];
 
     let tint = lot.ward.tint();
-    let path = lot.path.clone();
-    // A Memo is Copy, so it can be read in both the class and the Show below.
-    let touched = Memo::new(move |_| under_plan.get().contains(&path));
 
     let title = match lot.kind {
         LotKind::Tower => format!("{} \u{2014} {}", lot.path, lot.ward.label()),
@@ -338,17 +317,12 @@ fn BuildingGlyph(lot: Lot, under_plan: Memo<HashSet<String>>, cathedral: bool) -
             class="building"
             class:commons={lot.kind == LotKind::Commons}
             class:cathedral=cathedral
-            class:touched=move || touched.get()
         >
             <polygon class="face-left" points=points(&left) fill=shade(tint, LEFT_SHADE)/>
             <polygon class="face-right" points=points(&right) fill=shade(tint, RIGHT_SHADE)/>
             <polygon class="face-top" points=points(&top) fill=tint>
                 <title>{title}</title>
             </polygon>
-            // Gilded roof: this is a building a pending plan would alter.
-            <Show when=move || touched.get()>
-                <polygon class="roof-gilt" points=points(&top)/>
-            </Show>
         </g>
     }
 }

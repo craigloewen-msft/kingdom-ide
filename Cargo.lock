@@ -977,6 +977,7 @@ dependencies = [
  "axum",
  "console_error_panic_hook",
  "dotenvy",
+ "js-sys",
  "kingdom-core",
  "leptos",
  "leptos_axum",

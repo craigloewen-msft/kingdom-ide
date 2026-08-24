@@ -128,11 +128,15 @@ impl Model for MockModel {
             ))),
 
             Scenario::Plan | Scenario::Slow => {
-                let touches: Vec<String> = city.notable_paths.iter().take(3).cloned().collect();
-                let listed = if touches.is_empty() {
+                // Still named in the reply *body*: that is chat output, and it
+                // is what makes the mock a useful rehearsal. What it no longer
+                // does is hand back a structured file list as though a model's
+                // guess were fact.
+                let named: Vec<&String> = city.notable_paths.iter().take(3).collect();
+                let listed = if named.is_empty() {
                     "  (no files were scanned in this project)\n".to_string()
                 } else {
-                    touches
+                    named
                         .iter()
                         .map(|p| format!("  - {p}\n"))
                         .collect::<String>()
@@ -141,10 +145,9 @@ impl Model for MockModel {
                     title: format!("Works upon {}", city.name),
                     summary: format!(
                         "Proposes changes to {} file(s) in {}.",
-                        touches.len(),
+                        named.len(),
                         city.name
                     ),
-                    touches,
                     body: format!(
                         "On the decree \"{}\":\n\n\
                          {} is a {} project of {} files. I would begin here:\n\n{}\n\
@@ -161,7 +164,6 @@ impl Model for MockModel {
             Scenario::Survey => Ok(Draft {
                 title: format!("Survey of {}", city.name),
                 summary: format!("A reading of {} as it stands.", city.name),
-                touches: Vec::new(),
                 body: format!(
                     "On the decree \"{}\":\n\n\
                      {} sits at {}. It is a {} project of {} files, {}.\n\n\

@@ -114,7 +114,7 @@ fn detect_kind(path: &Path) -> CityKind {
 /// Walks one project into a district tree, bounded by depth and `budget`.
 ///
 /// `rel` is the path relative to the city root, which is what the map uses to
-/// match a [`kingdom_core::Plan`]'s `touches` entries to a building.
+/// identify a building.
 fn survey(dir: &Path, name: &str, rel: &str, depth: usize, budget: &mut usize) -> District {
     let mut district = District::new(name, rel);
 
