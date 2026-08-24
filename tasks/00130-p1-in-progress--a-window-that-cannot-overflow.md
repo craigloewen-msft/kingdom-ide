@@ -87,6 +87,29 @@ rounds this was unreachable. At 500 it is ordinary.
 
 ## Shape of the change
 
+### 0. What task 00120 already built
+
+00120 landed on main while this was being written, and it supplies most of the
+plumbing this task assumed it would have to add:
+
+- `Model::context_window() -> usize` on the trait, read live from the catalogue
+  entry `open()` already fetches. Zero means undeclared.
+- `Answer { reply, tokens }` — `take_turn` reports what the turn cost.
+- `Plan::context: Option<ContextUsage>`, persisted, with `percent()` saturating
+  at 100.
+- `converse` already writes it once per round, in a write of its own.
+
+So step 1 below is the only place a number still has to be found, and steps 2
+and 3 are unchanged.
+
+One detail worth keeping deliberately: `converse` updates `p.context` *after*
+`take_turn` returns `Ok`, so a turn refused for length never records a reading.
+An exhausted plan therefore keeps the last **successful** measurement in its
+header — perhaps 87%, not 100%. That is honest rather than untidy: the request
+that overflowed was larger than anything ever counted, and writing 100% would be
+inventing the one number this design refuses to invent. The status says what
+happened; the bar says what was last measured.
+
 ### 1. Classify the refusal
 
 `ModelError` gains a variant for it, and `copilot.rs` reads the provider's error
@@ -152,12 +175,21 @@ against 500 rounds, and `store.rs` is where that weighing belongs.
   a real feature with real questions (what may be dropped, what must never be).
   Continuation into a fresh plan is the smaller honest version and does not
   foreclose it.
-- **Pre-emptive refusal against a token threshold.** This was the previous draft
-  of this task and Phoenix's design says it is the wrong instinct: it invents a
-  number to guess with when the provider already knows the answer.
-- **Task 00120's context bar.** Still worth merging — knowing the window is
-  filling is genuinely useful — but it is now an instrument only, not the thing
-  that makes this correct. It should not block this.
+- **Pre-emptive refusal against a token threshold.** An earlier draft proposed
+  this, and the reason given was that it would mean estimating tokens. 00120
+  removes that objection — `p.context` is now a *measured* count against a
+  declared window, so a threshold could be checked honestly.
+
+  It stays out of scope on a better argument. The last reading is the cost of
+  the turn that *finished*; refusing on it means predicting the size of the
+  round that has not happened yet, whose increment is whatever the next tool
+  results weigh. Set the threshold low and conversations die that the provider
+  would have accepted; set it high and it never fires before the refusal does.
+  The provider's "no" is ground truth and costs one round-trip to obtain — and
+  after step 2 that round-trip lands somewhere useful instead of somewhere
+  fatal. Pre-empting is an optimisation on top of classification, never a
+  substitute for it: a single enormous tool result can overflow a fresh
+  conversation with no prior reading that could have caught it.
 - **Lowering `MOST_ROUNDS`.** 500 was a deliberate call in task 00081 and real
   work needs the rope.
 
