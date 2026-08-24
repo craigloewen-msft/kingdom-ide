@@ -132,30 +132,46 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 /// pointing the tool at real files the default first act.
 #[server(EnterProvingGrounds, "/api")]
 pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
+    let name = fixture.unwrap_or_else(|| kingdom_core::mockdata::DEFAULT_FIXTURE.to_string());
+    open_fixture(&name).map_err(ServerFnError::new)
+}
+
+/// Seeds a named proving ground if it is not already standing, and opens it.
+///
+/// Not `async`, and not a `#[server]` function, because the server itself needs
+/// this too: `KINGDOM_REALM` opens a realm at boot, where there is no browser to
+/// call anything. Both paths go through here rather than each doing its own
+/// seed-then-scan, for the same reason [`assemble`] is shared -- two ways of
+/// opening a realm would differ in some detail nobody notices until one of them
+/// is wrong.
+///
+/// Errors are plain `String`s so the boot path can print one without dragging
+/// `ServerFnError` into a context that has no server function in it.
+#[cfg(feature = "ssr")]
+pub fn open_fixture(name: &str) -> Result<Kingdom, String> {
     use kingdom_core::mockdata;
 
-    let name = fixture.unwrap_or_else(|| mockdata::DEFAULT_FIXTURE.to_string());
-    let spec = mockdata::fixture(&name).ok_or_else(|| {
-        ServerFnError::new(format!(
+    let spec = mockdata::fixture(name).ok_or_else(|| {
+        format!(
             "No such realm: {name}. Known realms: {}.",
             mockdata::fixture_names().join(", ")
-        ))
+        )
     })?;
 
-    let root = crate::mock::fixture_path(&name);
+    let root = crate::mock::fixture_path(name);
 
     // Only seed when it is not already there, so entering twice is instant and
     // does not silently discard a fixture the user has been poking at.
     if !crate::mock::is_proving_ground(&root) {
         crate::mock::seed(&spec, &root)
-            .map_err(|e| ServerFnError::new(format!("Could not raise the proving grounds: {e}")))?;
+            .map_err(|e| format!("Could not raise the proving grounds: {e}"))?;
     }
 
     let root = root
         .canonicalize()
-        .map_err(|e| ServerFnError::new(format!("Could not resolve {}: {e}", root.display())))?;
+        .map_err(|e| format!("Could not resolve {}: {e}", root.display()))?;
 
-    assemble(&root, Some(spec.starter_plans))
+    assemble(&root, Some(spec.starter_plans)).map_err(|e| e.to_string())
 }
 
 /// Every fixture the user can enter, for the opening screen.
