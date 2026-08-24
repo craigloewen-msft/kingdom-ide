@@ -12,6 +12,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 kingdom-core.workspace = true
 serde.workspace = true
+# Needed on both targets: a `Deed`'s arguments are JSON, so the chamber renders
+# them and the watch socket parses plans off the wire.
+serde_json.workspace = true
 
 leptos = { version = "0.8" }
 leptos_meta = { version = "0.8" }
@@ -36,7 +39,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ], optional = true }
-serde_json = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 dotenvy = { version = "0.15", optional = true }
 thiserror = { version = "2", optional = true }
@@ -80,17 +82,12 @@ hydrate = [
     "dep:console_error_panic_hook",
     "dep:wasm-bindgen",
     "dep:js-sys",
-    # The chamber parses plans off the watch socket. Server functions are typed
-    # end to end and need no such thing; a socket frame is text, and this is
-    # what turns it back into a `Plan`.
-    "dep:serde_json",
 ]
 ssr = [
     "dep:axum",
     "dep:tokio",
     "dep:leptos_axum",
     "dep:reqwest",
-    "dep:serde_json",
     "dep:async-trait",
     "dep:dotenvy",
     "dep:thiserror",

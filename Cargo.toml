@@ -10,6 +10,9 @@ license = "MIT"
 [workspace.dependencies]
 kingdom-core = { path = "crates/kingdom-core" }
 serde = { version = "1", features = ["derive"] }
+# A tool call's arguments are the model's JSON, not a shape we declared, so the
+# domain stores them as JSON. Pure Rust and no I/O, so it still compiles to wasm.
+serde_json = "1"
 
 # Release profile for the wasm bundle: optimise for size, since this ships to a browser.
 [profile.wasm-release]

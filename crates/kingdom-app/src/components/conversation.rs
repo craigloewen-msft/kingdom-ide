@@ -387,10 +387,121 @@ fn Transcript(plan: Plan) -> impl IntoView {
                         </div>
                     }
                     .into_any(),
+                    // Also not a bubble, and for the first half of the same
+                    // reason -- but a deed is the court *working*, which is the
+                    // thing the King most wants to watch, so it gets its own
+                    // shape rather than a note's.
+                    Entry::Did(d) => view! { <DeedLine deed=d/> }.into_any(),
                 }
             }
         </For>
     }
+}
+
+/// One tool call, collapsed to a line the King can skim and expand when it
+/// matters.
+///
+/// Collapsed by default because a transcript that renders every command's full
+/// output inline is unreadable at exactly the moment it becomes interesting:
+/// the King is watching for *what the court is doing*, and a thousand lines of
+/// build log buries that. The summary line is the answer; the detail is one
+/// click away for when it is not.
+#[component]
+fn DeedLine(deed: kingdom_core::Deed) -> impl IntoView {
+    use kingdom_core::DeedOutcome;
+
+    let (open, set_open) = signal(false);
+
+    let running = deed.in_flight();
+    let state = match &deed.outcome {
+        Some(o) => o.css_suffix(),
+        None => "running",
+    };
+    let mark = match state {
+        "done" => "\u{2713}",
+        "refused" => "\u{2715}",
+        _ => "\u{25cf}",
+    };
+    let at = clock(deed.at);
+    let tool = deed.tool.clone();
+
+    // The arguments matter more than the tool's name -- "bash" tells the King
+    // nothing, `cargo test` tells him everything -- so the most telling
+    // argument is promoted onto the collapsed line.
+    let gist = telling_argument(&deed.input);
+    // `StoredValue` because these sit inside `Show` bodies, which must be `Fn`:
+    // a closure that moves an owned String is `FnOnce` and can only render once.
+    let input = StoredValue::new(pretty(&deed.input));
+    let output = StoredValue::new(match &deed.outcome {
+        Some(DeedOutcome::Done { output }) => output.clone(),
+        Some(DeedOutcome::Refused { reason }) => reason.clone(),
+        None => String::new(),
+    });
+    let has_output = !output.read_value().is_empty();
+
+    view! {
+        <div class=format!("chat-deed deed-{state}")>
+            <button class="deed-line" on:click=move |_| set_open.update(|o| *o = !*o)>
+                <span class="deed-at">{at}</span>
+                <span class="deed-mark">{mark}</span>
+                <span class="deed-tool">{tool}</span>
+                <span class="deed-gist">{gist}</span>
+                <Show when=move || running>
+                    <span class="deed-running">"working\u{2026}"</span>
+                </Show>
+                <span class="deed-chevron">
+                    {move || if open.get() { "\u{2303}" } else { "\u{2304}" }}
+                </span>
+            </button>
+
+            <Show when=move || open.get()>
+                <div class="deed-detail">
+                    <pre class="deed-input">{move || input.get_value()}</pre>
+                    <Show when=move || has_output>
+                        <pre class="deed-output">{move || output.get_value()}</pre>
+                    </Show>
+                </div>
+            </Show>
+        </div>
+    }
+}
+
+/// The one argument worth showing on a collapsed deed line.
+///
+/// Every tool names its subject differently, and there is no shared field to
+/// rely on. Rather than teach this component about each tool's schema -- which
+/// would have to be updated every time a tool is added, and would be silently
+/// wrong when it was not -- it prefers a short list of conventional names and
+/// otherwise shows the first string it finds. Being approximate is fine here:
+/// the exact arguments are one click away.
+fn telling_argument(input: &serde_json::Value) -> String {
+    const PREFERRED: &[&str] = &["cmd", "path", "pattern", "url", "selector", "query"];
+
+    let Some(fields) = input.as_object() else {
+        return String::new();
+    };
+
+    let found = PREFERRED
+        .iter()
+        .find_map(|k| fields.get(*k).and_then(|v| v.as_str()))
+        .or_else(|| fields.values().find_map(|v| v.as_str()));
+
+    match found {
+        Some(text) => ellipsise(text, 80),
+        None => String::new(),
+    }
+}
+
+fn pretty(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn ellipsise(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    format!("{}\u{2026}", text.chars().take(max).collect::<String>())
 }
 
 /// A log entry's time as a bare `HH:MM` in the King's own timezone.

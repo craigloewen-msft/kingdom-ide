@@ -193,6 +193,120 @@
   white-space: pre-wrap;
 }
 
+// --- What the court did ------------------------------------------------------
+//
+// A tool call is neither counsel nor a notice: it is the court *working*, which
+// is the thing the King most wants to watch. So it gets its own shape — full
+// width, monospaced, left-aligned like a terminal line rather than centred like
+// a note.
+//
+// Collapsed by default. A transcript that renders every command's output inline
+// is unreadable at exactly the moment it becomes interesting: a thousand lines
+// of build log buries the one fact worth having, which is what the court is
+// doing right now.
+.chat-deed {
+  align-self: stretch;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$panel;
+  overflow: hidden;
+}
+
+.deed-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: none;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { background: rgba(255, 255, 255, 0.03); }
+}
+
+.deed-at {
+  flex-shrink: 0;
+  width: 34px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
+.deed-mark {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.deed-tool {
+  flex-shrink: 0;
+  color: t.$ink-dim;
+}
+
+// The argument, not the tool name, is what tells the King what is happening —
+// so it takes the room and truncates rather than wrapping, keeping every deed
+// one scannable line.
+.deed-gist {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deed-running {
+  flex-shrink: 0;
+  color: t.$working;
+  animation: deed-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes deed-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1; }
+}
+
+.deed-chevron {
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+// A call still running is the live one, so it is the only deed that draws the
+// eye. A refusal is the King's to notice; a completed call is history and stays
+// quiet, however much output it produced.
+.chat-deed.deed-running { border-color: rgba(t.$working, 0.45); }
+.chat-deed.deed-refused {
+  border-color: rgba(t.$failed, 0.4);
+
+  .deed-mark { color: t.$failed; }
+}
+.chat-deed.deed-done .deed-mark { color: t.$review; }
+
+.deed-detail {
+  border-top: 1px solid t.$edge;
+
+  pre {
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 320px;
+    overflow: auto;
+    color: t.$ink-faint;
+    font-family: t.$font-mono;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+}
+
+.deed-output {
+  border-top: 1px solid t.$edge;
+  color: t.$ink-dim;
+}
+
 // --- Something went wrong just now -----------------------------------------
 //
 // Outside the log on purpose. An error is not something anybody said, and a

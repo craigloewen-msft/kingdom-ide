@@ -515,15 +515,64 @@ impl Plan {
 
     /// Just the utterances, in order.
     ///
-    /// The single doorway between a plan's log and anything that talks to a
-    /// model. Because it yields [`Utterance`] rather than [`Entry`], a caller
-    /// downstream of it *cannot* forward a note by accident -- the exclusion is
-    /// the type, not a filter each caller has to remember.
+    /// What the King and the court *said*, with tool calls and Kingdom's own
+    /// notices both left out. Useful for questions about the conversation --
+    /// "has the court replied yet?" -- rather than for building a request.
+    /// [`Plan::turns`] is what a model is handed.
     pub fn said(&self) -> impl Iterator<Item = &Utterance> {
         self.transcript.iter().filter_map(|e| match e {
             Entry::Said(u) => Some(u),
+            Entry::Note(_) | Entry::Did(_) => None,
+        })
+    }
+
+    /// Everything addressed to a model, in order: what was said and what was
+    /// done, interleaved exactly as it happened.
+    ///
+    /// The single doorway between a plan's log and anything that talks to a
+    /// model. Because it yields [`Turn`] rather than [`Entry`], a caller
+    /// downstream of it *cannot* forward a note by accident -- the exclusion is
+    /// the type, not a filter each caller has to remember.
+    ///
+    /// Order is the point, and is why this is not two separate iterators: a
+    /// provider rebuilding the conversation must see a tool call before its
+    /// result and both before the words that followed them, or the model is
+    /// handed a history that never happened.
+    pub fn turns(&self) -> impl Iterator<Item = Turn<'_>> {
+        self.transcript.iter().filter_map(|e| match e {
+            Entry::Said(u) => Some(Turn::Said(u)),
+            Entry::Did(d) => Some(Turn::Did(d)),
             Entry::Note(_) => None,
         })
+    }
+
+    /// Records a tool call as begun, before it has run.
+    ///
+    /// Written down *before* the work rather than after it, so the chamber can
+    /// show a command while it is still running. A deed recorded only on
+    /// completion would make a five-minute build look like five minutes of an
+    /// agent doing nothing at all, which is the exact question this product
+    /// exists to answer.
+    pub fn begin_deed(&mut self, deed: Deed) {
+        self.transcript.push(Entry::Did(deed));
+    }
+
+    /// Settles a tool call that was begun earlier.
+    ///
+    /// Returns false if there is no such call still in flight, which the caller
+    /// should treat as a bug rather than ignore: it means a result arrived for
+    /// something never recorded as started, and the log the King reads is
+    /// missing an event the model believes happened.
+    pub fn settle_deed(&mut self, id: &str, outcome: DeedOutcome) -> bool {
+        for entry in self.transcript.iter_mut().rev() {
+            if let Entry::Did(deed) = entry {
+                if deed.id == id && deed.in_flight() {
+                    deed.outcome = Some(outcome);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -542,8 +591,8 @@ fn title_from_prompt(prompt: &str) -> String {
     }
 }
 
-/// One line of a plan's chat log: either something was said, or something
-/// happened.
+/// One line of a plan's chat log: something was said, something was done, or
+/// something happened.
 ///
 /// A notice is deliberately **not** a third [`Speaker`]. Nothing utters it,
 /// nothing can reply to it, and it is never part of the exchange -- it is
@@ -551,13 +600,128 @@ fn title_from_prompt(prompt: &str) -> String {
 /// would have to be excluded by hand at every match, and the first place that
 /// forgot would feed Kingdom's own plumbing back to a model as its own prior
 /// words. Splitting it out one level up makes that mistake unrepresentable.
+///
+/// A [`Deed`] is not a speaker either, for the first half of the same reason:
+/// nobody said it. But it parts company with a note on the second half -- a
+/// deed **does** go back to the model, because a tool result the model is never
+/// shown is a tool call it will immediately make again. So the log now holds
+/// three kinds of thing and exactly two of them are addressed to a model; see
+/// [`Plan::turns`], which is the only door between this log and one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Entry {
-    /// Words a participant produced. These, and only these, go to a model.
+    /// Words a participant produced.
     Said(Utterance),
     /// Something Kingdom itself reports: a failed call or a workspace cut.
     /// Never sent anywhere.
     Note(Note),
+    /// Something the court did with its own hands, and what came back.
+    Did(Deed),
+}
+
+/// A tool call the court made, and its result.
+///
+/// Both halves live in one entry rather than two. A call and its outcome are
+/// one event in the King's reading of the chamber -- "it ran the tests, and they
+/// failed" -- and splitting them would let the log hold a result with no call,
+/// or two results for one call, neither of which is a thing that can happen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Deed {
+    /// The provider's own correlation id for this call.
+    ///
+    /// Not ours to invent: it is what the next request must quote back so the
+    /// model can match a result to the call it made. Two calls in one turn are
+    /// otherwise indistinguishable.
+    pub id: String,
+    /// Which instrument: `"bash"`, `"patch"`, `"browser_click"`.
+    pub tool: String,
+    /// The arguments, as the model sent them.
+    ///
+    /// JSON rather than a typed shape because this is not a shape we declared --
+    /// each tool has its own, and a model is perfectly capable of sending one
+    /// that fits none of them. When the arguments will not even parse, the raw
+    /// text is kept here as a JSON string: a record of what was actually
+    /// attempted is worth more than a tidy `None`.
+    pub input: serde_json::Value,
+    /// What came back. `None` while the call is still running, which is a state
+    /// the chamber renders -- it is how the King sees what an agent is doing
+    /// *right now* rather than only what it did.
+    pub outcome: Option<DeedOutcome>,
+    /// When the call was made. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
+impl Deed {
+    /// Records a call as made *now* and still in flight, for the same reason as
+    /// [`Utterance::new`].
+    pub fn begun(
+        id: impl Into<String>,
+        tool: impl Into<String>,
+        input: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            tool: tool.into(),
+            input,
+            outcome: None,
+            at: Timestamp::now(),
+        }
+    }
+
+    /// True while this call is still running.
+    pub fn in_flight(&self) -> bool {
+        self.outcome.is_none()
+    }
+
+    /// What the model should be told this call produced.
+    ///
+    /// A refusal is reported to the model as text rather than withheld, because
+    /// "that path is outside the workspace" is information it can act on: the
+    /// alternative is a model that retries the same rejected call forever,
+    /// having been told only silence.
+    pub fn report(&self) -> &str {
+        match &self.outcome {
+            Some(DeedOutcome::Done { output }) => output,
+            Some(DeedOutcome::Refused { reason }) => reason,
+            None => "",
+        }
+    }
+}
+
+/// How a tool call ended.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DeedOutcome {
+    /// The tool ran. Note that a command exiting non-zero is still `Done` --
+    /// a failing test suite is a successful tool call with bad news in it, and
+    /// conflating the two would have the chamber cry error over exactly the
+    /// result the King asked for.
+    Done { output: String },
+    /// The tool would not run: unknown name, unparseable arguments, or a path
+    /// outside the workspace.
+    Refused { reason: String },
+}
+
+impl DeedOutcome {
+    /// Suffix for the CSS class the chamber styles a settled deed with.
+    pub fn css_suffix(&self) -> &'static str {
+        match self {
+            DeedOutcome::Done { .. } => "done",
+            DeedOutcome::Refused { .. } => "refused",
+        }
+    }
+}
+
+/// One turn of the exchange between the King and the court: the entries that
+/// are addressed to a model, and only those.
+///
+/// This exists so that "what goes to the model" is a type rather than a filter
+/// each caller remembers to apply. A [`Note`] cannot be built into one, so a
+/// caller downstream of [`Plan::turns`] cannot replay Kingdom's own plumbing to
+/// a model as its prior words even by accident.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Turn<'a> {
+    Said(&'a Utterance),
+    Did(&'a Deed),
 }
 
 /// Something a participant said.
@@ -1148,5 +1312,87 @@ mod transcript_tests {
             .rposition(|u| u.speaker == Speaker::King)
             .expect("the King has spoken");
         assert_eq!(said[i].body, "Second question");
+    }
+
+    /// The same exclusion, now that the log holds a third kind of thing. A deed
+    /// must reach the model (a tool result it never sees is a tool call it
+    /// makes again) while a note still must not, and both must arrive in the
+    /// order they happened -- a provider that sees a result before its call is
+    /// rebuilding a conversation that never took place.
+    #[test]
+    fn deeds_reach_the_model_in_order_and_notes_still_do_not() {
+        let mut plan = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Run the tests",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+        plan.begin_deed(Deed::begun(
+            "call-1",
+            "bash",
+            serde_json::json!({ "cmd": "cargo test" }),
+        ));
+        plan.note(NoteKind::Failed, "The disk filled up.");
+        assert!(plan.settle_deed("call-1", DeedOutcome::Done { output: "ok".into() }));
+        plan.say(Speaker::Court, "The tests pass.");
+
+        let turns: Vec<_> = plan
+            .turns()
+            .map(|t| match t {
+                Turn::Said(u) => format!("said:{}", u.body),
+                Turn::Did(d) => format!("did:{}:{}", d.tool, d.report()),
+            })
+            .collect();
+
+        assert_eq!(
+            turns,
+            vec![
+                "said:Run the tests",
+                "did:bash:ok",
+                "said:The tests pass.",
+            ],
+            "a deed reaches the model, in place; a note does not reach it at all"
+        );
+    }
+
+    /// Plans are the one thing disk cannot tell us again, so a record written
+    /// before deeds existed must still load. `Entry` is externally tagged, which
+    /// makes a new variant additive -- but "should be additive" and "is" are
+    /// different claims, and the cost of being wrong is a kingdom that will not
+    /// open.
+    #[test]
+    fn a_plan_recorded_before_the_court_had_hands_still_loads() {
+        let before_deeds = r#"{
+            "id": "plan-old",
+            "city": "c1",
+            "title": "An older plan",
+            "summary": "Drawn up before any of this",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [
+                { "Said": { "speaker": "King", "body": "Do the thing", "at": 1 } },
+                { "Note": { "kind": "Workspace", "body": "Working in /tmp", "at": 2 } }
+            ],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan =
+            serde_json::from_str(before_deeds).expect("an older plan record must still load");
+
+        assert_eq!(plan.transcript.len(), 2);
+        assert_eq!(
+            plan.turns().count(),
+            1,
+            "the note is still excluded, and nothing invented a deed that never happened"
+        );
     }
 }
