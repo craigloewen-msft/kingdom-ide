@@ -52,6 +52,21 @@ impl Kingdom {
         self.plans.iter().filter(move |p| &p.city == id)
     }
 
+    /// Files a plan into the kingdom, replacing whatever was there under its id.
+    ///
+    /// The receiving half of push: the server proclaims a whole plan and the
+    /// browser absorbs it. Replacing rather than merging is the point -- see
+    /// `herald.rs` for why the wire carries whole plans rather than deltas.
+    ///
+    /// An unknown id is appended rather than dropped, so a plan opened in one
+    /// tab appears in another without a full refetch.
+    pub fn absorb(&mut self, plan: Plan) {
+        match self.plans.iter_mut().find(|p| p.id == plan.id) {
+            Some(existing) => *existing = plan,
+            None => self.plans.push(plan),
+        }
+    }
+
     pub fn plan(&self, id: &PlanId) -> Option<&Plan> {
         self.plans.iter().find(|p| &p.id == id)
     }

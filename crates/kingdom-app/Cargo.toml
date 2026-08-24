@@ -19,12 +19,15 @@ leptos_router = { version = "0.8" }
 
 # Server-only (feature-gated so they never reach the wasm bundle).
 leptos_axum = { version = "0.8", optional = true }
-axum = { version = "0.8", optional = true }
+# `ws` for the chamber's push channel; see `watch.rs`.
+axum = { version = "0.8", features = ["ws"], optional = true }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
     "net",
     "process",
+    # `broadcast`, which the herald fans a plan's changes out over.
+    "sync",
     "time",
 ], optional = true }
 # The model call. rustls rather than native-tls so there is no OpenSSL build
@@ -55,8 +58,11 @@ web-sys = { version = "0.3", features = [
     "DomTokenList",
     "Element",
     "HtmlElement",
+    "Location",
+    "MessageEvent",
     "MouseEvent",
     "Storage",
+    "WebSocket",
     "WheelEvent",
     "Window",
 ] }
@@ -74,6 +80,10 @@ hydrate = [
     "dep:console_error_panic_hook",
     "dep:wasm-bindgen",
     "dep:js-sys",
+    # The chamber parses plans off the watch socket. Server functions are typed
+    # end to end and need no such thing; a socket frame is text, and this is
+    # what turns it back into a `Plan`.
+    "dep:serde_json",
 ]
 ssr = [
     "dep:axum",

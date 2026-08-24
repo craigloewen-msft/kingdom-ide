@@ -29,6 +29,13 @@ async fn main() {
     let routes = generate_route_list(App);
 
     let app = Router::new()
+        // Before the Leptos routes, because this is not one: the chamber's
+        // push channel is a plain Axum handler and must not be swallowed by
+        // the SSR fallback.
+        .route(
+            kingdom_app::watch::ROUTE,
+            axum::routing::get(kingdom_app::watch::upgrade),
+        )
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();
             move || shell(opts.clone())

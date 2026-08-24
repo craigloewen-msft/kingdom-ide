@@ -47,18 +47,37 @@ fn next_plan_number() -> u64 {
     state::PLAN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Applies a change to one plan, records it, and returns the result, so callers
-/// hand the browser the same value that was just stored.
+/// Applies a change to one plan, records it, proclaims it, and returns the
+/// result, so callers hand the browser the same value that was just stored.
 ///
-/// The single funnel for plan mutations, which is why persistence hangs off it:
-/// a caller cannot change a plan and forget to write it.
+/// The single funnel for plan mutations, which is why both persistence and push
+/// hang off it: a caller cannot change a plan and forget to write it, and
+/// equally cannot change a plan and forget to tell the chamber watching it.
+/// See [`crate::herald`] for why that second one had to live here rather than
+/// at each call site.
 #[cfg(feature = "ssr")]
 fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) -> Option<Plan> {
     let root = std::path::PathBuf::from(&kingdom.root);
     let plan = kingdom.plans.iter_mut().find(|p| &p.id == id)?;
     change(plan);
     remember(&root, plan);
+    // After `remember`, not before: a failed write appends a note to the plan,
+    // and the chamber should be told the thing that was actually stored rather
+    // than an optimistic version of it.
+    crate::herald::proclaim(plan);
     Some(plan.clone())
+}
+
+/// One plan as the server currently has it.
+///
+/// Exists for the watch socket's opening message, which needs a plan without
+/// going through a `#[server]` function -- it is already inside the server.
+/// Returns `None` rather than erroring for an unknown id: a chamber may connect
+/// to a plan that has since been forgotten, and an empty stream is the honest
+/// answer.
+#[cfg(feature = "ssr")]
+pub fn snapshot(id: &PlanId) -> Option<Plan> {
+    lock().ok()?.plan(id).cloned()
 }
 
 /// Writes a plan to the records, turning a failed write into something the King

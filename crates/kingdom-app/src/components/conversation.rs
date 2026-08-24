@@ -11,14 +11,6 @@ use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker, Timest
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
-/// How often to ask the server whether a draft has landed.
-///
-/// A deliberate stopgap for WebSocket push, which is the next thing on
-/// `AGENTS.md`'s list. Delete this and `poll_while` when push lands -- do not
-/// grow it into a general polling layer.
-#[cfg(feature = "hydrate")]
-const POLL_MS: u64 = 1000;
-
 #[component]
 pub fn Conversation() -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -89,14 +81,12 @@ pub fn Conversation() -> impl IntoView {
         }
     });
 
-    // A draft started by another page (a reload mid-flight, most likely) has
-    // nobody here awaiting it, so poll until it settles.
-    poll_while(drafting, move || {
-        leptos::task::spawn_local(async move {
-            if let Ok(k) = get_kingdom().await {
-                state.kingdom.set(k);
-            }
-        });
+    // Whatever the server says about this plan, as it says it. A draft started
+    // by another page -- a reload mid-flight, a second tab -- lands here just
+    // the same, because the chamber is watching the plan rather than awaiting
+    // its own request.
+    watch_plan(plan_id, move |updated| {
+        state.kingdom.update(|k| k.absorb(updated));
     });
 
     // The King's words land first, then the court is asked -- so his half of
@@ -445,34 +435,145 @@ fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bo
     }
 }
 
-/// Runs `refresh` on a timer for as long as `active` reads true.
+/// Watches one plan over the push socket, handing each proclamation to `absorb`.
 ///
-/// Browser-only: under SSR there is no timer to run and nothing to observe.
-fn poll_while(active: Memo<bool>, refresh: impl Fn() + Clone + 'static) {
+/// Browser-only: under SSR there is no socket and the first render is served
+/// from server state directly.
+///
+/// Reconnection is a plain fixed-delay retry with no backoff ladder and no
+/// give-up: the server is on loopback, so a dropped socket means it is
+/// restarting, and the honest response is to keep trying until it is back. The
+/// reconnect costs nothing to get right because the socket's opening message is
+/// the whole plan -- there is no cursor to resume from and nothing that can be
+/// missed while it was down. See `herald.rs`.
+fn watch_plan(plan_id: Memo<Option<PlanId>>, absorb: impl Fn(Plan) + Clone + 'static) {
     #[cfg(feature = "hydrate")]
-    Effect::new(
-        move |previous: Option<Option<leptos::leptos_dom::helpers::IntervalHandle>>| {
-            // Clear whatever the last run started before deciding again, so a
-            // timer can never outlive the state that justified it.
-            if let Some(Some(h)) = previous {
-                h.clear();
-            }
+    Effect::new(move |previous: Option<Option<PlanWatch>>| {
+        // Close the previous socket before opening another, so moving between
+        // chambers cannot leave a socket behind feeding a plan nobody is
+        // looking at.
+        drop(previous);
 
-            if !active.get() {
-                return None;
-            }
-
-            let refresh = refresh.clone();
-            leptos::leptos_dom::helpers::set_interval_with_handle(
-                refresh,
-                std::time::Duration::from_millis(POLL_MS),
-            )
-            .ok()
-        },
-    );
+        let id = plan_id.get()?;
+        Some(PlanWatch::open(&id, absorb.clone()))
+    });
 
     #[cfg(not(feature = "hydrate"))]
     {
-        let _ = (active, refresh);
+        let _ = (plan_id, absorb);
+    }
+}
+
+/// An open watch on one plan, which closes itself when dropped.
+#[cfg(feature = "hydrate")]
+struct PlanWatch {
+    socket: web_sys::WebSocket,
+    /// Kept alive for the socket's lifetime: a closure passed to JS and then
+    /// dropped on the Rust side would be called after being freed.
+    _on_message: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _on_close: wasm_bindgen::closure::Closure<dyn FnMut()>,
+    /// Cleared on drop, so a retry queued by a closing socket does not reopen
+    /// a chamber the King has already left.
+    retry: std::rc::Rc<std::cell::Cell<Option<i32>>>,
+}
+
+#[cfg(feature = "hydrate")]
+impl PlanWatch {
+    /// How long to wait before reopening a dropped socket.
+    const RETRY_MS: i32 = 1000;
+
+    fn open(id: &PlanId, absorb: impl Fn(Plan) + Clone + 'static) -> Self {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+
+        let socket = web_sys::WebSocket::new(&Self::url(id))
+            .expect("the chamber's watch socket should be constructible");
+
+        let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new({
+            let absorb = absorb.clone();
+            move |event: web_sys::MessageEvent| {
+                let Some(text) = event.data().as_string() else {
+                    return;
+                };
+                // A message that will not parse means the server sent a shape
+                // this bundle does not know -- a stale tab after a rebuild,
+                // most likely. Dropping it leaves the chamber showing the last
+                // good state, which is better than tearing it down.
+                if let Ok(plan) = serde_json::from_str::<Plan>(&text) {
+                    absorb(plan);
+                }
+            }
+        });
+        socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+        let retry = std::rc::Rc::new(std::cell::Cell::new(None));
+        let on_close = Closure::<dyn FnMut()>::new({
+            let id = id.clone();
+            let retry = retry.clone();
+            move || {
+                let Some(window) = web_sys::window() else {
+                    return;
+                };
+                let reopen = Closure::once_into_js({
+                    let id = id.clone();
+                    let absorb = absorb.clone();
+                    let retry = retry.clone();
+                    move || {
+                        retry.set(None);
+                        // Reopening replaces this watch's socket in place. The
+                        // effect that owns it is not re-run, because nothing it
+                        // tracked changed -- the King is still in the same
+                        // chamber.
+                        //
+                        // Deliberately leaked: the reopened watch outlives this
+                        // callback and has no owner to hand it back to. Bounded
+                        // by the number of disconnects in one chamber visit,
+                        // and the socket it holds is closed by the browser when
+                        // the page goes.
+                        std::mem::forget(PlanWatch::open(&id, absorb));
+                    }
+                });
+                if let Ok(handle) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    reopen.unchecked_ref(),
+                    Self::RETRY_MS,
+                ) {
+                    retry.set(Some(handle));
+                }
+            }
+        });
+        socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+        Self {
+            socket,
+            _on_message: on_message,
+            _on_close: on_close,
+            retry,
+        }
+    }
+
+    /// The socket's address, derived from the page's own origin so it follows
+    /// the server wherever it is served from, and upgrades to `wss` when the
+    /// page itself is secure.
+    fn url(id: &PlanId) -> String {
+        let location = web_sys::window().expect("a browser has a window").location();
+        let secure = location.protocol().map(|p| p == "https:").unwrap_or(false);
+        let host = location.host().unwrap_or_default();
+        let scheme = if secure { "wss" } else { "ws" };
+        format!("{scheme}://{host}/watch/plan/{id}")
+    }
+}
+
+#[cfg(feature = "hydrate")]
+impl Drop for PlanWatch {
+    fn drop(&mut self) {
+        // Order matters: clear the close handler before closing, or closing
+        // deliberately would schedule the reconnect this drop exists to stop.
+        self.socket.set_onclose(None);
+        self.socket.set_onmessage(None);
+        let _ = self.socket.close();
+
+        if let (Some(handle), Some(window)) = (self.retry.take(), web_sys::window()) {
+            window.clear_timeout_with_handle(handle);
+        }
     }
 }

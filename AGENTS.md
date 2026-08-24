@@ -82,6 +82,8 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
+    herald.rs       Proclaiming a plan's changes to its watchers (ssr only)
+    watch.rs        The chamber's push socket (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     mock.rs         Seeding a realm onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
@@ -148,7 +150,9 @@ flowchart TB
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
-- Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
+- Live updates beyond a plan's own chamber. The chamber is pushed to over a
+  WebSocket (`herald.rs`, `watch.rs`), but the map and the rail still only
+  learn of a change when something refetches the kingdom.
 - **Any resource arbitration at all** — see §3
 
 The placeholder court deliberately includes a **failed plan** and a plan **mid

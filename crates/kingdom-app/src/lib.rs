@@ -9,6 +9,8 @@ pub mod app;
 pub mod components;
 
 #[cfg(feature = "ssr")]
+pub mod herald;
+#[cfg(feature = "ssr")]
 pub mod llm;
 #[cfg(feature = "ssr")]
 pub mod mock;
@@ -16,6 +18,8 @@ pub mod mock;
 pub mod scan;
 #[cfg(feature = "ssr")]
 pub mod store;
+#[cfg(feature = "ssr")]
+pub mod watch;
 #[cfg(feature = "ssr")]
 pub mod worktree;
 
