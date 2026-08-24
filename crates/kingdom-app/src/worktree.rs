@@ -209,9 +209,11 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
 
 /// Sets a plan's work aside, preserved, and reclaims its checkout.
 ///
-/// The promise is that the checkout goes and the work does not: the branch
-/// stays, and a patch of it is written to `patch_path` for the day the branch is
-/// pruned or the repository re-cloned.
+/// The promise is that the checkout goes and the work does not: a patch of the
+/// branch is written to `patch_path`, replayable with `git am`, and it is that
+/// patch -- not the branch -- that is the record. Once it is safely on disk the
+/// branch goes too, so archiving a dozen plans does not leave a dozen
+/// `kingdom/<uuid>` entries in the King's `git branch`.
 pub async fn archive(
     city_root: &Path,
     workspace: &Workspace,
@@ -221,11 +223,14 @@ pub async fn archive(
     // keep. Archiving is then purely a matter of record.
     let (Some(branch), Some(base)) = (workspace.branch.as_deref(), workspace.base.as_deref())
     else {
+        let tip = head_of(city_root).await.unwrap_or_default();
         return Ok(Finish::Settled(Outcome::Archived {
             branch: workspace.branch.clone().unwrap_or_else(|| "none".into()),
-            tip: head_of(city_root).await.unwrap_or_default(),
+            base_commit: tip.clone(),
+            tip,
             base: workspace.base.clone().unwrap_or_else(|| "none".into()),
             patch: None,
+            pruned: false,
         }));
     };
 
@@ -236,11 +241,20 @@ pub async fn archive(
 
     let tip = head_of(&worktree).await?;
 
+    // The branch `base` names will have moved by the time anyone restores, so
+    // the sha is recorded now -- it is what the patch was cut from, and what a
+    // `git am` would have to sit on top of.
+    let base_commit = git(city_root, &["rev-parse", base])
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
     // `format-patch` rather than `diff`: it keeps each commit's message and
     // author and replays with `git am`. That is the difference between
-    // recovering a change and recovering the work.
+    // recovering a change and recovering the work. `--binary` because without
+    // it git writes "Binary files differ", which restores nothing.
     let range = format!("{base}..{branch}");
-    let patch = match git(city_root, &["format-patch", "--stdout", &range]).await {
+    let patch = match git(city_root, &["format-patch", "--binary", "--stdout", &range]).await {
         Ok(body) if !body.trim().is_empty() => {
             let written = patch_path
                 .parent()
@@ -249,8 +263,8 @@ pub async fn archive(
             written.then(|| patch_path.to_string_lossy().to_string())
         }
         // A plan that changed nothing has no patch, and that is not a failure.
-        // Nor is an unwritable path: the branch is the primary record, and the
-        // patch is the belt to its braces.
+        // Nor is an unwritable path -- but in both cases the branch is then the
+        // only record there is, and must be left alone.
         _ => None,
     };
 
@@ -260,11 +274,25 @@ pub async fn archive(
     )
     .await?;
 
+    // Two conditions, both load-bearing. Without a patch the branch is the only
+    // copy of the work. And a branch Kingdom did not create is the King's own:
+    // deleting that would be destroying his work, not tidying up after ours.
+    let pruned = if patch.is_some() && branch.starts_with(BRANCH_PREFIX) {
+        // `-D`, because the branch was never merged -- that is the whole point.
+        // A failure here is untidiness, not lost work, so it does not fail the
+        // archive; the branch simply stays, and the outcome says so.
+        git(city_root, &["branch", "-D", branch]).await.is_ok()
+    } else {
+        false
+    };
+
     Ok(Finish::Settled(Outcome::Archived {
         branch: branch.to_string(),
         tip,
         base: base.to_string(),
+        base_commit,
         patch,
+        pruned,
     }))
 }
 
@@ -581,9 +609,10 @@ mod tests {
 
     /// Archiving's whole promise: the checkout goes, the work does not.
     ///
-    /// "This didn't work out" must never mean "and so it was deleted". Both
-    /// records are checked, because the branch is the primary one and the patch
-    /// is what survives the branch being pruned or the repo re-cloned.
+    /// "This didn't work out" must never mean "and so it was deleted". The
+    /// branch is reclaimed along with the checkout -- but only because the patch
+    /// has been written first, so what is checked here is that the patch really
+    /// does carry the work it is now solely responsible for.
     #[tokio::test]
     async fn archiving_keeps_the_work_recoverable() {
         let dir = repo().await;
@@ -596,7 +625,12 @@ mod tests {
         let patch_path = dir.path().join("archive").join("plan-1.patch");
         let finish = archive(root, &workspace, &patch_path).await.unwrap();
         let Finish::Settled(Outcome::Archived {
-            branch, tip, patch, ..
+            branch,
+            tip,
+            base_commit,
+            patch,
+            pruned,
+            ..
         }) = finish
         else {
             panic!("archiving must settle as archived");
@@ -606,21 +640,59 @@ mod tests {
             !worktree.exists(),
             "reclaiming the checkout is the point of archiving"
         );
-        assert_eq!(
-            git(root, &["rev-parse", &branch]).await.unwrap().trim(),
-            tip,
-            "the branch must survive, at the tip the outcome recorded"
+        assert!(pruned, "the plan's branch goes with its worktree");
+        assert!(
+            !branches(root).await.contains(&branch),
+            "an archived plan must not leave its branch cluttering the city"
         );
         assert!(
             !root.join("folly.rs").exists(),
             "archived work must not land in the project"
         );
 
+        // The shas are the only remaining coordinates of the work, so they have
+        // to be real ones: `tip` for `git show`, `base_commit` for `git am` to
+        // sit on top of.
+        for sha in [&tip, &base_commit] {
+            assert!(
+                git(root, &["cat-file", "-e", sha]).await.is_ok(),
+                "the outcome must record a commit that exists; got: {sha}"
+            );
+        }
+
         let patch = patch.expect("a plan that changed something has a patch");
         let body = std::fs::read_to_string(&patch).expect("the patch is on disk");
         assert!(
             body.contains("folly.rs") && body.contains("fn doomed()"),
             "the patch must carry the work, or it recovers nothing"
+        );
+    }
+
+    /// The destructive edge of pruning: a plan working on a branch the King
+    /// named is working on *his* branch, which almost certainly has a life
+    /// beyond this plan. Tidying up after ourselves must never reach that far.
+    #[tokio::test]
+    async fn archiving_never_deletes_a_branch_the_king_named() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        git(root, &["branch", "fix/parser"]).await.unwrap();
+        let workspace = prepare(root, &WorkspaceMode::Branch("fix/parser".into()))
+            .await
+            .unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        std::fs::write(worktree.join("parser.rs"), "fn parse() {}").unwrap();
+
+        let patch_path = dir.path().join("archive").join("plan-2.patch");
+        let finish = archive(root, &workspace, &patch_path).await.unwrap();
+        let Finish::Settled(Outcome::Archived { pruned, .. }) = finish else {
+            panic!("archiving must settle as archived");
+        };
+
+        assert!(!pruned, "the King's own branch is not ours to reclaim");
+        assert!(
+            branches(root).await.contains(&"fix/parser".to_string()),
+            "archiving must leave a branch the King named exactly where it was"
         );
     }
 }

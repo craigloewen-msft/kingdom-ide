@@ -103,7 +103,9 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         branch: "kingdom/fabricated".into(),
         tip: "0000000fabricated".into(),
         base: "main".into(),
+        base_commit: "0000000fabricatedbase".into(),
         patch: None,
+        pruned: false,
     });
     plans.push(archived);
 
