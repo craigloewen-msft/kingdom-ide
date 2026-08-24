@@ -24,6 +24,9 @@ panic = "abort"
 [[workspace.metadata.leptos]]
 name = "kingdom-ide"
 bin-package = "kingdom-app"
+# Disambiguates the server binary from `kingdom-seed`, which lives in the same
+# package but is a one-shot CLI cargo-leptos should not try to serve.
+bin-target = "kingdom-app"
 lib-package = "kingdom-app"
 
 site-root = "target/site"

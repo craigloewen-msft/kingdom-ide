@@ -123,12 +123,17 @@ crates/
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
     sample.rs       Placeholder court data
+    mockdata/       The Proving Grounds: synthetic realms, in Rust
+                    mod.rs (RealmSpec + expansion), realms.rs (THE FAKE DATA),
+                    build.rs (terse constructors), court.rs (opening courts)
 
   kingdom-app/      Server + UI in one crate, split by feature flag.
     main.rs         Axum binary          (feature: ssr)
+    bin/kingdom-seed.rs   Seeds a proving ground   (feature: ssr)
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
+    mock.rs         Seeding a realm onto disk (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
                     catalogue.rs (live /models list), credential.rs,
@@ -213,6 +218,28 @@ build on top of a placeholder believing it is real.
   withdrawn degrades to the default rather than failing the decree.
 - **Credential resolution** from `KINGDOM_API_KEY` or a helper command
   (`agency auth github` by default), with the contract tested.
+- **The Proving Grounds.** Synthetic dev folders, defined in Rust in
+  `kingdom-core/src/mockdata/realms.rs`, materialised on disk by
+  `kingdom-app/src/mock.rs` and then read by the **ordinary scanner** — so a
+  fixture exercises `scan.rs` for real rather than faking a `Vec<City>` above
+  it. Expansion is deterministic (per-file seeding, so an edit changes only what
+  it names) and files above 64 KB are sparse, which is what lets a realm hold a
+  40 MB asset for kilobytes. Four realms ship: `kingdom-mirror` (the everyday
+  one), `crowded` (40 cities), `monorepo` (every cap in `scan.rs`) and
+  `contended` (a three-way resource fight).
+- **A sandbox that is enforced, not remembered.** Three layers: a `.kingdom-mock`
+  marker without which the seeder refuses to write into or clear any non-empty
+  directory (no flag overrides this); `KINGDOM_SANDBOX=1`, under which
+  `open_kingdom` refuses any canonicalised path outside the sandbox root; and
+  `Kingdom.sandbox`, which puts a **PROVING GROUNDS** tag in the rail so a fake
+  realm can never quietly pass for real work.
+
+**Working on Kingdom IDE with Kingdom IDE?** Do it in a proving ground. Press
+"Enter the Proving Grounds" on the opening screen, or seed one from the CLI, and
+set `KINGDOM_SANDBOX=1` so the server enforces it rather than trusting you to
+remember. This matters more with every capability added: the moment plans get
+hands (§8 item 3), whatever folder is open is what an agent will be running
+commands against.
 
 **Faked — `kingdom_core::sample::populate_court`:**
 - The *opening* court: the plans and resources a kingdom starts with, before the
@@ -297,7 +324,16 @@ compiled. Two habits that paid off building the skyline:
 cargo leptos serve      # build + serve at http://127.0.0.1:3000
 cargo leptos watch      # same, with rebuild on change
 cargo test -p kingdom-core
+cargo test -p kingdom-app --features ssr --no-default-features
+
+# Raise a proving ground: a synthetic dev folder, safe to work against.
+cargo run -p kingdom-app --bin kingdom-seed -- --list
+cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror [--force]
 ```
+
+To change the fake data, edit `crates/kingdom-core/src/mockdata/realms.rs` and
+re-seed with `--force`. It is plain Rust with terse builders — no config format,
+no parser, and a mistyped realm fails to compile rather than at seed time.
 
 The browser cannot hand a server a real filesystem path, so the opening screen
 asks the King to type one; the server reads it directly from disk. A native

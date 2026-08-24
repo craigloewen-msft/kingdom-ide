@@ -64,7 +64,6 @@ pub async fn get_kingdom() -> Result<Kingdom, ServerFnError> {
 /// Opens a dev folder as the kingdom: scans it for cities and seats a court.
 #[server(OpenKingdom, "/api")]
 pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
-    use crate::scan::scan_kingdom;
     use std::path::PathBuf;
 
     let expanded = expand_home(&path);
@@ -76,12 +75,72 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
         )));
     }
 
-    let cities = scan_kingdom(&root)
-        .map_err(|e| ServerFnError::new(format!("Could not read {expanded}: {e}")))?;
+    enforce_sandbox(&root)?;
+    assemble(&root, None)
+}
 
-    // Cities are real; the starting court is still fabricated.
-    // See `kingdom_core::sample`.
-    let (plans, resources) = kingdom_core::sample::populate_court(&cities);
+/// Seeds a proving ground if needed and opens it.
+///
+/// The one-click path from a cold clone to a populated map. It exists so the
+/// *safe* option is also the *easy* one: the opening screen otherwise demands an
+/// absolute path to real work before showing anything at all, which makes
+/// pointing the tool at real files the default first act.
+#[server(EnterProvingGrounds, "/api")]
+pub async fn enter_proving_grounds(realm: Option<String>) -> Result<Kingdom, ServerFnError> {
+    use kingdom_core::mockdata;
+
+    let name = realm.unwrap_or_else(|| mockdata::DEFAULT_REALM.to_string());
+    let spec = mockdata::realm(&name).ok_or_else(|| {
+        ServerFnError::new(format!(
+            "No such realm: {name}. Known realms: {}.",
+            mockdata::realm_names().join(", ")
+        ))
+    })?;
+
+    let root = crate::mock::realm_path(&name);
+
+    // Only seed when it is not already there, so entering twice is instant and
+    // does not silently discard a realm the King has been poking at.
+    if !crate::mock::is_proving_ground(&root) {
+        crate::mock::seed(&spec, &root)
+            .map_err(|e| ServerFnError::new(format!("Could not raise the proving grounds: {e}")))?;
+    }
+
+    let root = root
+        .canonicalize()
+        .map_err(|e| ServerFnError::new(format!("Could not resolve {}: {e}", root.display())))?;
+
+    assemble(&root, Some(spec.court))
+}
+
+/// Every realm the King can enter, for the opening screen.
+#[server(ListRealms, "/api")]
+pub async fn list_realms() -> Result<Vec<(String, String)>, ServerFnError> {
+    Ok(kingdom_core::mockdata::realms()
+        .into_iter()
+        .map(|r| (r.name.to_string(), r.blurb.to_string()))
+        .collect())
+}
+
+/// Scans a folder and seats a court over it, then stores it as the kingdom.
+///
+/// Shared by the real-folder and proving-ground paths so the two cannot drift:
+/// a proving ground goes through exactly the same scanner, and the only
+/// difference is which court is seated and the `sandbox` flag.
+#[cfg(feature = "ssr")]
+fn assemble(
+    root: &std::path::Path,
+    court: Option<kingdom_core::mockdata::CourtFn>,
+) -> Result<Kingdom, ServerFnError> {
+    use crate::scan::scan_kingdom;
+
+    let cities = scan_kingdom(root)
+        .map_err(|e| ServerFnError::new(format!("Could not read {}: {e}", root.display())))?;
+
+    // Cities are real -- scanned from disk, fake folder or not. The starting
+    // court is still fabricated; see `kingdom_core::sample`.
+    let court = court.unwrap_or(kingdom_core::sample::populate_court);
+    let (plans, resources) = court(&cities);
 
     let kingdom = Kingdom {
         name: root
@@ -93,11 +152,81 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
         cities,
         plans,
         resources,
+        sandbox: crate::mock::is_proving_ground(root),
     };
 
     *lock()? = kingdom.clone();
 
     Ok(kingdom)
+}
+
+/// Refuses any folder outside the sandbox when `KINGDOM_SANDBOX` is set.
+///
+/// This is the setting for a session where Kingdom IDE is working on Kingdom
+/// IDE. It turns "I meant to open the fake one" from something the King must
+/// remember into something the server enforces -- and when plans get hands, it
+/// is the wall that keeps an agent's first destructive command inside the
+/// proving grounds.
+///
+/// Both sides are `canonicalize`d before comparing. Comparing the strings as
+/// typed would let `sandbox/../../home/you/dev` through, which is precisely the
+/// case that matters.
+#[cfg(feature = "ssr")]
+fn enforce_sandbox(root: &std::path::Path) -> Result<(), ServerFnError> {
+    if !sandbox_enforced() {
+        return Ok(());
+    }
+    within_sandbox(&crate::mock::sandbox_root(), root).map_err(ServerFnError::new)
+}
+
+/// Whether `requested` lies inside `sandbox`, both fully resolved.
+///
+/// Split out from [`enforce_sandbox`] so the containment rule can be tested
+/// directly: the environment variable it keys off is process-global, and a test
+/// that mutated it would race every other test in the binary.
+///
+/// Both sides are `canonicalize`d before comparing, which is the whole substance
+/// of the check. Comparing the strings as typed would admit
+/// `sandbox/../../home/you/dev` -- a path that *starts with* the sandbox root
+/// and resolves nowhere near it.
+#[cfg(feature = "ssr")]
+fn within_sandbox(sandbox: &std::path::Path, requested: &std::path::Path) -> Result<(), String> {
+    // A sandbox root that cannot be resolved contains nothing, so nothing may be
+    // opened. Failing *open* here would quietly disable the whole protection at
+    // exactly the moment it is misconfigured.
+    let allowed = sandbox.canonicalize().map_err(|e| {
+        format!(
+            "KINGDOM_SANDBOX is set but the sandbox root {} is unusable: {e}. \
+             Seed a realm first.",
+            sandbox.display()
+        )
+    })?;
+
+    let requested = requested
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve {}: {e}", requested.display()))?;
+
+    if !requested.starts_with(&allowed) {
+        return Err(format!(
+            "KINGDOM_SANDBOX is set: only folders inside {} may be opened. {} is outside it.",
+            allowed.display(),
+            requested.display()
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn sandbox_enforced() -> bool {
+    matches!(
+        std::env::var("KINGDOM_SANDBOX")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// Opens a plan and returns immediately, before any drafting happens.
@@ -349,4 +478,52 @@ fn expand_home(path: &str) -> String {
         }
     }
     trimmed.to_string()
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Containment must survive traversal, not merely prefix-matching.
+    ///
+    /// This is the wall that keeps a session working on Kingdom IDE from
+    /// opening the King's real projects -- and, once plans have hands, the wall
+    /// that keeps an agent's first destructive command inside the proving
+    /// grounds. The `..` case is the one that matters: a check written as a
+    /// `starts_with` on the strings as typed would happily admit
+    /// `<sandbox>/../../dev`, which is both a prefix match and completely
+    /// outside the sandbox.
+    #[test]
+    fn the_sandbox_cannot_be_walked_out_of() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("kingdom-sandbox-{unique}"));
+        let sandbox = base.join("realms");
+        let realm = sandbox.join("kingdom-mirror");
+        let outside = base.join("real-work");
+        std::fs::create_dir_all(&realm).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert!(
+            within_sandbox(&sandbox, &realm).is_ok(),
+            "a realm inside the sandbox must be openable"
+        );
+
+        assert!(
+            within_sandbox(&sandbox, &outside).is_err(),
+            "a folder outside the sandbox must be refused"
+        );
+
+        // Lexically inside, actually outside.
+        let traversal: PathBuf = sandbox.join("..").join("real-work");
+        assert!(
+            within_sandbox(&sandbox, &traversal).is_err(),
+            "a path that walks out with .. must be refused, not prefix-matched"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

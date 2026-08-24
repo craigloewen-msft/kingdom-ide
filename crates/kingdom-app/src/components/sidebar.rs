@@ -45,6 +45,19 @@ pub fn Sidebar() -> impl IntoView {
                 <div class="crown-small">"♚"</div>
                 <div class="kingdom-id">
                     <div class="kingdom-name">{move || state.kingdom.get().name}</div>
+                    // A proving ground is *designed* to be indistinguishable
+                    // from a real kingdom on the map, which makes an unlabelled
+                    // one a trap -- for the King glancing at it, and for anyone
+                    // reading a screenshot of it later. So the label sits with
+                    // the kingdom's identity, not somewhere it scrolls away.
+                    <Show when=move || state.kingdom.get().sandbox>
+                        <div
+                            class="sandbox-tag"
+                            title="Synthetic data. Nothing in this kingdom is real work."
+                        >
+                            "PROVING GROUNDS"
+                        </div>
+                    </Show>
                     <div class="kingdom-path" title=move || state.kingdom.get().root>
                         {move || state.kingdom.get().root}
                     </div>

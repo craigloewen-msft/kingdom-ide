@@ -18,8 +18,23 @@ The point is not editing code. The point is answering three questions at a glanc
 cargo leptos serve
 ```
 
-Then open <http://127.0.0.1:3000> and give it the path to the folder that holds
-your projects.
+Then open <http://127.0.0.1:3000>.
+
+You can point it at the folder that holds your projects — or, better while
+exploring, press **"Enter the Proving Grounds"** for a synthetic dev folder
+generated on demand. Nothing real is touched, and the same realm comes out the
+same way every time.
+
+```bash
+# Or from the CLI:
+cargo run -p kingdom-app --bin kingdom-seed -- --list
+cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror
+```
+
+Set `KINGDOM_SANDBOX=1` and the server will refuse to open anything outside the
+proving grounds — worth doing whenever you use Kingdom IDE to work on Kingdom
+IDE. The fake data is plain Rust in `crates/kingdom-core/src/mockdata/realms.rs`;
+edit it and re-seed with `--force`.
 
 ## Stack
 
@@ -56,4 +71,5 @@ metaphor, and an honest breakdown of what is real versus faked.
 
 ```bash
 cargo test -p kingdom-core
+cargo test -p kingdom-app --features ssr --no-default-features
 ```

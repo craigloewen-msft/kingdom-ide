@@ -61,3 +61,72 @@
   margin-top: 14px;
   font-family: ui-monospace, monospace;
 }
+
+// --- The Proving Grounds ----------------------------------------------------
+// Quiet, but never fine print. Gold is reserved for the one royal action on
+// screen ("Claim Kingdom"), so this stays outlined -- it is the *safe* path, not
+// the primary one, and it should read as an alternative rather than a warning.
+
+.proving-grounds { margin-top: 34px; }
+
+.pg-rule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  color: t.$ink-faint;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+
+  &::before,
+  &::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: t.$edge;
+  }
+}
+
+.pg-btn {
+  padding: 11px 22px;
+  background: transparent;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+
+  &:hover:not(:disabled) {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+    background: rgba(212, 175, 55, 0.06);
+  }
+
+  &:disabled { opacity: 0.5; cursor: progress; }
+}
+
+.pg-realms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+// The other realms: reachable, but not competing with the default one.
+.pg-realm {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid t.$edge;
+  border-radius: 999px;
+  color: t.$ink-faint;
+  font-size: 11px;
+  font-family: t.$font-mono;
+  cursor: pointer;
+
+  &:hover:not(:disabled) { color: t.$ink-dim; border-color: t.$ink-faint; }
+  &:disabled { opacity: 0.5; cursor: progress; }
+}

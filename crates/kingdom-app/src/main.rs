@@ -1,5 +1,11 @@
 //! The Axum server binary.
 
+// Leptos builds one deeply-nested generic type per `view!` tree, and the realm
+// view has grown nested enough to exceed rustc's default query depth while
+// laying out the SSR future. Raising the limit is the compiler's own suggested
+// fix and costs nothing at runtime.
+#![recursion_limit = "512"]
+
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {

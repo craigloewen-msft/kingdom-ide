@@ -255,6 +255,23 @@ fn ChooseKingdom() -> impl IntoView {
 
     let submit = move || claim.dispatch(path.get());
 
+    // Raising a proving ground is the safe path, so it gets its own action
+    // rather than being something the King must first read about and then type
+    // a path to reach.
+    let realms = Resource::new(|| (), |_| crate::api::list_realms());
+    let enter = Action::new(move |realm: &Option<String>| {
+        let realm = realm.clone();
+        async move {
+            state.loading.set(true);
+            state.error.set(None);
+            match crate::api::enter_proving_grounds(realm).await {
+                Ok(k) => state.kingdom.set(k),
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+            state.loading.set(false);
+        }
+    });
+
     view! {
         <div class="choose-kingdom">
             <div class="choose-inner">
@@ -293,6 +310,54 @@ fn ChooseKingdom() -> impl IntoView {
                 <Show when=move || state.error.get().is_some()>
                     <p class="error">{move || state.error.get().unwrap_or_default()}</p>
                 </Show>
+
+                // Deliberately below the real-folder path but unmissable. The
+                // screen otherwise demands a path to real work before showing
+                // anything at all, which makes pointing the tool at real files
+                // the default first act -- exactly what this should not be.
+                <div class="proving-grounds">
+                    <div class="pg-rule"><span>"or"</span></div>
+                    <button
+                        class="pg-btn"
+                        on:click=move |_| { enter.dispatch(None); }
+                        disabled=move || state.loading.get()
+                    >
+                        "⚔ Enter the Proving Grounds"
+                    </button>
+                    <p class="hint">
+                        "A synthetic dev folder, generated on demand. Nothing real is \
+                         touched, and the same realm comes out the same way every time."
+                    </p>
+                    <div class="pg-realms">
+                        <Suspense>
+                            {move || {
+                                realms
+                                    .get()
+                                    .and_then(|r| r.ok())
+                                    .map(|list| {
+                                        list.into_iter()
+                                            .skip(1)
+                                            .map(|(name, blurb)| {
+                                                let id = name.clone();
+                                                view! {
+                                                    <button
+                                                        class="pg-realm"
+                                                        title=blurb
+                                                        disabled=move || state.loading.get()
+                                                        on:click=move |_| {
+                                                            enter.dispatch(Some(id.clone()));
+                                                        }
+                                                    >
+                                                        {name}
+                                                    </button>
+                                                }
+                                            })
+                                            .collect_view()
+                                    })
+                            }}
+                        </Suspense>
+                    </div>
+                </div>
             </div>
         </div>
     }

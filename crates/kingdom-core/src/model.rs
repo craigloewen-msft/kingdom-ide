@@ -17,6 +17,15 @@ pub struct Kingdom {
     pub cities: Vec<City>,
     pub plans: Vec<Plan>,
     pub resources: Vec<Resource>,
+    /// True when this kingdom is a seeded proving ground rather than real work.
+    ///
+    /// The UI renders this loudly. A synthetic realm is *designed* to be
+    /// indistinguishable from a real one on the map, which makes an unlabelled
+    /// one a trap -- for the King glancing at it, and equally for a model shown
+    /// a screenshot of it later. Same instinct as `AGENTS.md` being explicit
+    /// about what is real versus faked, applied to the running UI.
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 impl Kingdom {
@@ -28,6 +37,7 @@ impl Kingdom {
             cities: Vec::new(),
             plans: Vec::new(),
             resources: Vec::new(),
+            sandbox: false,
         }
     }
 

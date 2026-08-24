@@ -47,6 +47,25 @@
   letter-spacing: 0.03em;
 }
 
+// Marks a synthetic kingdom.
+//
+// Loud on purpose. A proving ground is designed to be indistinguishable from a
+// real kingdom on the map, so this tag is the only thing telling the King --
+// or anyone reading a screenshot later -- that none of it is real. Amber rather
+// than red: it is a statement of fact, not a fault.
+.sandbox-tag {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 6px;
+  border: 1px solid rgba(234, 179, 8, 0.45);
+  border-radius: 3px;
+  background: rgba(234, 179, 8, 0.1);
+  color: t.$review;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
 .kingdom-path {
   @include m.truncate;
   font-size: 11px;

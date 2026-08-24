@@ -11,6 +11,8 @@ pub mod components;
 #[cfg(feature = "ssr")]
 pub mod llm;
 #[cfg(feature = "ssr")]
+pub mod mock;
+#[cfg(feature = "ssr")]
 pub mod scan;
 
 /// Entry point for the wasm bundle. Called by the browser once the script loads.
