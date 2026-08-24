@@ -55,9 +55,15 @@ pub struct ToolSpec {
 }
 
 impl ToolSpec {
-    /// Describes every tool the court has.
-    pub fn all() -> Vec<Self> {
-        crate::tools::all()
+    /// Describes every tool available under a remit.
+    ///
+    /// Goes through [`crate::tools::all`] rather than filtering here, so the
+    /// list a model is *shown* and the list it may *run* are the same list.
+    /// Two filters would eventually disagree, and the direction that fails
+    /// quietly is the dangerous one: a tool offered but refused is confusing,
+    /// while a tool refused but runnable is a hole in the boundary.
+    pub fn all(remit: crate::tools::Remit) -> Vec<Self> {
+        crate::tools::all(remit)
             .iter()
             .map(|t| Self {
                 name: t.name().to_string(),

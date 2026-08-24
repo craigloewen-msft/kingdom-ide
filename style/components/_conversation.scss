@@ -311,6 +311,165 @@
   color: t.$ink-dim;
 }
 
+// --- Errands the court sent --------------------------------------------------
+//
+// Rendered as a small roster rather than as a deed line, because the King's
+// question here is not "what command ran" but "who is out there, and how are
+// they getting on". Each row is a way into that agent's own conversation.
+//
+// Sits between a deed and a question in weight: it is the court working, like a
+// deed, but it is also several live things at once and needs the room to say so.
+.chat-errands {
+  align-self: stretch;
+  flex-shrink: 0;
+  padding: 10px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$panel;
+
+  // Errands still out are the live thing in the chamber, so the box draws the
+  // eye exactly while that is true — the same rule a running deed follows.
+  &.running { border-color: rgba(t.$working, 0.4); }
+}
+
+.errands-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: t.$ink-dim;
+  font-size: 11px;
+}
+
+.errands-mark { opacity: 0.75; }
+
+.errand-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.errand-row + .errand-row { margin-top: 2px; }
+
+.errand-link,
+.errand-row.pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  color: t.$ink-faint;
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.errand-link:hover {
+  background: rgba(255, 255, 255, 0.04);
+
+  .errand-task { color: t.$ink; }
+}
+
+.errand-row.pending { opacity: 0.55; }
+
+.errand-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: t.$ink-faint;
+}
+
+// A working errand pulses, for the same reason a running deed does: it is the
+// difference between "an agent is out there" and "an agent was out there".
+.errand-dot.status-drafting { animation: deed-pulse 1.4s ease-in-out infinite; }
+
+// The task is what identifies an errand — its title is derived from the same
+// text — so it takes the room and truncates rather than wrapping, keeping the
+// roster scannable however many were sent.
+.errand-task {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: t.$ink-dim;
+}
+
+.errand-state {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+  font-family: t.$font-mono;
+}
+
+// --- Standing inside an errand -----------------------------------------------
+//
+// The one visual difference between an errand's chamber and a plan's. Without
+// it the two are indistinguishable, and the King has no way of knowing he is
+// reading a conversation the court is having with itself rather than one of
+// his own — or of getting back to the work it belongs to.
+//
+// Above the header rather than inside it, so it reads as a frame around the
+// chamber rather than as another piece of plan metadata.
+.errand-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(t.$gold, 0.3);
+  background: rgba(t.$gold, 0.06);
+}
+
+.errand-banner-mark {
+  flex-shrink: 0;
+  color: t.$gold;
+  opacity: 0.8;
+}
+
+.errand-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.errand-banner-who {
+  color: t.$gold;
+  font-size: 11px;
+}
+
+.errand-parent {
+  color: t.$gold;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+
+  &:hover { opacity: 0.8; }
+}
+
+.errand-banner-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
+.errand-banner-note {
+  flex-shrink: 0;
+  color: t.$ink-faint;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.chamber-outcome.errand-outcome {
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
 // --- A question the court has stopped to ask ---------------------------------
 //
 // Not a deed line, though it is recorded as one. A deed is something to watch;

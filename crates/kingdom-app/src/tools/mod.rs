@@ -25,6 +25,7 @@ pub mod browser;
 pub mod patch;
 pub mod read_file;
 pub mod search;
+pub mod spawn_agents;
 pub mod think;
 pub mod tmux;
 
@@ -32,43 +33,85 @@ use kingdom_core::{DeedOutcome, Workspace};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-/// Every tool the court has.
+/// How much of the world a plan is allowed to touch.
+///
+/// The second boundary in this module, and it sits beside the path check for
+/// the same reason: it is a rule about what a tool call may do, so it belongs
+/// at the seam every tool call passes through rather than inside the tools.
+///
+/// It exists because errands share their parent's worktree. Several agents
+/// writing to one checkout at once is precisely the collision this product
+/// exists to prevent, and nothing here arbitrates -- so instead of detecting it
+/// after the fact, [`Remit::Survey`] makes it unrepresentable. That is what lets
+/// errands run in parallel without any lease machinery behind them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remit {
+    /// Reads and reports, and cannot touch the world.
+    ///
+    /// No writing, no commands, no browser -- and no sending errands of its
+    /// own, which is what keeps the fan-out one level deep. A tree of agents
+    /// needs an answer to "who is blocked behind whom" that Kingdom does not
+    /// have yet.
+    Survey,
+    /// Everything the court has.
+    Full,
+}
+
+/// Every tool available under a given remit.
 ///
 /// A plain list rather than a registry with registration macros, for the same
 /// reason `llm::providers()` is: a literal is the version of this a reader can
 /// take in at a glance, and a tool that is not in this list does not exist.
 /// Order is the order the model is shown them in.
-pub fn all() -> Vec<Box<dyn Tool>> {
-    vec![
+///
+/// This is the *only* definition of what a remit permits. Both the list a model
+/// is shown ([`crate::llm::ToolSpec::all`]) and the list it may actually run
+/// ([`invoke`]) come through here, which is what stops the two disagreeing -- a
+/// model that invents `bash` under a survey remit must not be handed `bash`.
+pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
+    let full = matches!(remit, Remit::Full);
+    let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(think::Think),
         Box::new(read_file::ReadFile),
         Box::new(search::Search),
-        Box::new(bash::Bash),
-        Box::new(tmux::TmuxRun),
-        Box::new(tmux::Tmux),
-        Box::new(patch::Patch),
-        Box::new(browser::BrowserNavigate),
-        Box::new(browser::BrowserClick),
-        Box::new(browser::BrowserType),
-        Box::new(browser::BrowserKeyPress),
-        Box::new(browser::BrowserEval),
-        Box::new(browser::BrowserWaitForSelector),
-        Box::new(browser::BrowserTakeScreenshot),
-        Box::new(browser::BrowserResize),
-        Box::new(browser::BrowserRecentConsoleLogs),
-        Box::new(browser::BrowserClearConsoleLogs),
-        Box::new(ask_user_question::AskUserQuestion),
-    ]
+    ];
+
+    if full {
+        tools.extend::<Vec<Box<dyn Tool>>>(vec![
+            Box::new(bash::Bash),
+            Box::new(tmux::TmuxRun),
+            Box::new(tmux::Tmux),
+            Box::new(patch::Patch),
+            Box::new(browser::BrowserNavigate),
+            Box::new(browser::BrowserClick),
+            Box::new(browser::BrowserType),
+            Box::new(browser::BrowserKeyPress),
+            Box::new(browser::BrowserEval),
+            Box::new(browser::BrowserWaitForSelector),
+            Box::new(browser::BrowserTakeScreenshot),
+            Box::new(browser::BrowserResize),
+            Box::new(browser::BrowserRecentConsoleLogs),
+            Box::new(browser::BrowserClearConsoleLogs),
+            Box::new(spawn_agents::SpawnAgents),
+            Box::new(ask_user_question::AskUserQuestion),
+        ]);
+    }
+
+    tools
 }
 
-/// Runs one tool call by name, inside the workspace's bounds.
+/// Runs one tool call by name, inside the workspace's bounds and its remit.
 ///
 /// The single point where a name from a model becomes work on a real machine.
 /// An unknown name is a refusal reported back to the model rather than an
 /// error: models hallucinate tool names, and being told "there is no such tool"
 /// is something a model can recover from in one turn.
+///
+/// A tool outside the remit gets that same answer, deliberately. It *is* the
+/// truth from where the model is standing -- it was never shown the tool -- and
+/// it is a refusal that reads as recoverable rather than as a wall.
 pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> DeedOutcome {
-    match all().into_iter().find(|t| t.name() == tool) {
+    match all(shop.remit()).into_iter().find(|t| t.name() == tool) {
         Some(t) => t.run(input, shop).await,
         None => Refusal::NoSuchTool(tool.to_string()).into(),
     }
@@ -94,6 +137,8 @@ pub struct Workshop {
     /// The deed this call is recorded as, once it is running. `None` outside a
     /// turn, which is the case tests construct.
     deed: Option<String>,
+    /// How much of the world this plan may touch. See [`Remit`].
+    remit: Remit,
 }
 
 /// A refusal: the tool would not run, and why.
@@ -127,12 +172,26 @@ impl From<Refusal> for DeedOutcome {
 }
 
 impl Workshop {
+    /// A workshop with the court's full hands, which is what a plan the King
+    /// decreed gets.
     pub fn new(workspace: Workspace) -> Self {
         Self {
             workspace,
             plan: kingdom_core::PlanId::new(String::new()),
             deed: None,
+            remit: Remit::Full,
         }
+    }
+
+    /// Narrows what this workshop may do. See [`Remit`].
+    pub fn under(mut self, remit: Remit) -> Self {
+        self.remit = remit;
+        self
+    }
+
+    /// How much of the world this plan may touch.
+    pub fn remit(&self) -> Remit {
+        self.remit
     }
 
     /// Names the plan these tools work for.
@@ -339,5 +398,43 @@ mod tests {
             workshop().resolve("/dev/city-old/secrets"),
             Err(Refusal::OutsideWorkspace { .. })
         ));
+    }
+
+    /// The invariant errands rest on.
+    ///
+    /// Errands run in parallel inside their parent's worktree, which is only
+    /// safe because they cannot write. That is enforced here, at the seam, and
+    /// nowhere else -- so this is where it is worth pinning, beside the path
+    /// check it sits next to for the same reason.
+    ///
+    /// The refusal matters as much as the absence: a model under a survey remit
+    /// was never shown `bash`, but models invent tool names, and one that
+    /// invents this one must not be handed it.
+    #[tokio::test]
+    async fn a_survey_cannot_reach_the_tools_that_touch_the_world() {
+        let surveying = workshop().under(Remit::Survey);
+
+        for forbidden in ["bash", "patch", "tmux_run", "browser_navigate", "spawn_agents"] {
+            assert!(
+                !all(Remit::Survey).iter().any(|t| t.name() == forbidden),
+                "{forbidden} must not be offered to a survey"
+            );
+            assert!(
+                matches!(
+                    invoke(forbidden, serde_json::json!({}), &surveying).await,
+                    DeedOutcome::Refused { .. }
+                ),
+                "{forbidden} must be refused even when a survey asks for it by name"
+            );
+        }
+
+        // The other half: a survey is not crippled. It exists to read and
+        // report, and it must still be able to.
+        for allowed in ["think", "read_file", "search"] {
+            assert!(
+                all(Remit::Survey).iter().any(|t| t.name() == allowed),
+                "{allowed} is how a survey does its job"
+            );
+        }
     }
 }

@@ -93,9 +93,10 @@ crates/
                     provider + its /models catalogue), catalogue.rs (assembles
                     one catalogue from every provider), credential.rs
     tools/          What the court can do with its own hands (ssr only)
-                    mod.rs (Tool trait, Workshop = the workspace boundary),
+                    mod.rs (Tool trait, Workshop = the workspace boundary,
+                    Remit = how much of the world a plan may touch),
                     think, read_file, search, bash, tmux, patch, browser,
-                    ask_user_question
+                    spawn_agents (errands), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -153,6 +154,12 @@ flowchart TB
   issued any decree. Plans he opens himself are entirely real.
 
 **Not built at all:**
+- **Errands with hands, and errands that send errands.** An errand is read-only
+  (`tools::Remit::Survey`), which is what makes running several of them in one
+  worktree safe without arbitrating anything. Both extensions need the same
+  missing piece: the moment an errand can write, two of them can collide, and
+  that is the resource question above. `Remit::Full` is the seam either would
+  arrive at.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
@@ -173,10 +180,6 @@ flowchart TB
   makes the browser tools half a feature. The blocker is not the tool — it is
   that `Brief` and `copilot.rs` build text-only messages, so this needs the
   model layer to carry image content blocks first.
-- `spawn_agents`. Kingdom has no notion of a sub-plan. A spawned agent is
-  either a real `Plan` — and then: does it appear on the map, does it own a
-  worktree, who merges it? — or it is something invisible, which breaks the
-  product's first question. That is a design decision, not a port.
 - `keyword_search`. Wants a model call of its own. Genuinely useful, but
   `search` plus `read_file` cover most of the ground, so it earns its place
   only once someone finds the gap.
