@@ -7,12 +7,53 @@
 
 use crate::api::{approve_plan, draft_plan, finish_plan, get_kingdom, say, set_aside_plan};
 use crate::app::KingdomState;
+use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use crate::components::BrowserView;
 use kingdom_core::{
     Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Proposal, Speaker, Timestamp,
+    ToolCall,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
+
+/// How wide the spyglass may be dragged. Narrower than the minimum and the
+/// court's 1024-wide page is scaled past reading; wider and the transcript
+/// stops being the thing under review.
+const SPYGLASS_BOUNDS: Bounds = Bounds {
+    min: 320.0,
+    max: 900.0,
+    default: 480.0,
+};
+
+const SPYGLASS_WIDTH_KEY: &str = "kingdom.spyglass_width";
+
+/// The browser deed the panel should caption itself with, if any.
+///
+/// The one in flight, or failing that the last one that finished -- so a panel
+/// opened between calls says what was just done rather than nothing at all.
+///
+/// Scanned from the back because this runs on every plan update, and a busy
+/// turn's transcript is long: the answer is nearly always within a few entries
+/// of the end.
+fn browsing(transcript: &[Entry]) -> Option<ToolCall> {
+    let mut latest = None;
+    for entry in transcript.iter().rev() {
+        let Entry::Tool(call) = entry else { continue };
+        if !call.tool.starts_with("browser_") {
+            continue;
+        }
+        if call.in_flight() {
+            return Some(call.clone());
+        }
+        // Keep the first settled one seen -- it is the most recent -- but keep
+        // looking, because an in-flight call behind it is the better answer. A
+        // turn can issue two browser calls at once, and then either is honest.
+        if latest.is_none() {
+            latest = Some(call.clone());
+        }
+    }
+    latest
+}
 
 #[component]
 pub fn Conversation() -> impl IntoView {
@@ -340,262 +381,294 @@ fn ConversationBody(
     // user's direct control over whether Chrome is painting for an audience.
     let (watching, set_watching) = signal(false);
 
+    // How wide the panel is, in pixels. A plain local signal rather than
+    // something on `KingdomState`: like the rail's collapse set, it is a view
+    // preference and nothing outside this view reads it.
+    let spyglass_width = RwSignal::new(SPYGLASS_BOUNDS.default);
+    restore_width(spyglass_width, SPYGLASS_WIDTH_KEY, SPYGLASS_BOUNDS);
+
+    // What the court is doing to the page right now, for the panel's caption.
+    // Read off the live plan, so it moves during a turn like everything else
+    // the watch socket carries.
+    let browser_deed = Memo::new(move |_| live.get().and_then(|p| browsing(&p.transcript)));
+
     view! {
-        <header class="chamber-header" class:subagent=is_subagent>
-            // For a subagent, "back" is the plan that sent it rather than the
-            // fixture: that is where the user came from, and where he has to go
-            // to steer the work. Retargeting the arrow he already knows beats
-            // adding a second one beside it.
-            <a
-                class="back-link"
-                href=move || back.get().0
-                title=move || back.get().1
-            >"\u{2190}"</a>
-            <div class="chamber-id">
-                // Where he is, above what he is reading -- the ordinary
-                // breadcrumb shape. Present only for a subagent, because for a
-                // plan the user opened there is no "above" to name.
-                <Show when=move || is_subagent>
-                    <div class="chamber-crumb">
-                        <span class="crumb-mark">"\u{26b1}"</span>
-                        "Errand of "
-                        {move || match parent.get() {
-                            Some((id, title)) => view! {
-                                <a class="crumb-parent" href=format!("/plan/{id}")>{title}</a>
-                            }
-                            .into_any(),
-                            // The parent is not in the kingdom this browser has
-                            // loaded -- a deep link, most likely. Still say what
-                            // this is; the alternative reads as an ordinary plan.
-                            None => view! {
-                                <span class="crumb-parent">"another plan"</span>
-                            }
-                            .into_any(),
-                        }}
-                    </div>
-                </Show>
-                // A subagent's title is cut from its task, so the full wording
-                // goes on hover rather than onto a line of its own.
-                <h1
-                    class="chamber-title"
-                    title=move || if is_subagent { task.get_value() } else { String::new() }
-                >{move || title.get()}</h1>
-                <div class="chamber-meta">
-                    <span class="chamber-city">
-                        {move || city.get().unwrap_or_else(|| "unknown city".into())}
-                    </span>
-                    <span class="chamber-model">{plan.choice().label()}</span>
-                    // Isolation the user cannot see is isolation he cannot
-                    // trust, so where this plan works is stated next to what is
-                    // drafting it, with the full path on hover.
-                    <span
-                        class="chamber-workspace"
-                        class:isolated=workspace_isolated
-                        title=workspace_path
-                    >
-                        {workspace_label}
-                    </span>
-                </div>
-            </div>
-            <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
-                {move || {
-                    // A subagent is never reviewed and never merged: it reports
-                    // to the model that sent it. Same states, honest words.
-                    //
-                    // A plan with something in front of the user is the other
-                    // case where "Awaiting review" is too vague to be useful --
-                    // it does not say that the wait is on *them*, or that there
-                    // is a button. A label, deliberately, and not a sixth
-                    // `PlanStatus`: nothing about the state machine changed.
-                    match (is_subagent, status.get()) {
-                        (true, PlanStatus::AwaitingReview) => "Reported",
-                        (true, PlanStatus::Drafting) => "Working",
-                        (false, PlanStatus::AwaitingReview) if proposal.get().is_some() => {
-                            "Proposal"
-                        }
-                        (_, s) => s.label(),
-                    }
-                }}
-            </span>
-            // The model's browser is headless, so without this the user's only
-            // evidence of a browser flow is a list of tool names. Offered on
-            // every plan rather than only those known to hold a session:
-            // Kingdom has no field saying which do, and the panel's own
-            // "no browser" state answers the question honestly for the rest.
-            <button
-                class="spyglass-toggle"
-                class:open=move || watching.get()
-                title="Watch this plan's browser"
-                on:click=move |_| set_watching.update(|w| *w = !*w)
-            >
-                "\u{1F50D}"
-            </button>
-        </header>
-
-        <Show when=move || watching.get()>
-            <BrowserView plan=id.get_value()/>
-        </Show>
-
-        // Everything the user and the model have exchanged, oldest first, and
-        // nothing else. Plan *state* -- the summary, the status -- lives in the
-        // header or the rail; mixing it into this column put blocks derived
-        // from the newest reply above the prompt that opened the plan.
-        <div class="chamber-log" node_ref=log_ref>
-            <Transcript live=live/>
-
-            <Show when={move || drafting.get()}>
-                <div class="chat-msg drafting">
-                    <span class="msg-at"></span>
-                    <span class="msg-who">"Court"</span>
-                    <span class="msg-body">"Drawing up the plan\u{2026}"</span>
-                </div>
-            </Show>
-        </div>
-
-        // Outside the log, because an error is not something anybody said. A
-        // drafting failure is already recorded in the transcript as a note, in
-        // its proper place in time; this strip is for what just went wrong.
-        <Show when={move || state.error.get().is_some()}>
-            <div class="chamber-error">
-                {move || state.error.get().unwrap_or_default()}
-            </div>
-        </Show>
-
-        // The King's move, when the court has put something to him. Above the
-        // composer rather than inside the log for the same reason the error
-        // strip is: the log is what was said and done, and this is a decision
-        // still to make. It sits where his attention already is.
-        <Show when=move || proposal.get().is_some()>
-            {move || proposal.get().map(|put| view! {
-                <ProposalCard
-                    proposal=put
-                    busy=drafting
-                    on_accept=accept
-                    on_set_aside=set_aside
-                />
-            })}
-        </Show>
-
-        // A settled plan is a record, not a place to type. The composer goes
-        // and the outcome takes its place, so the conversation says what became
-        // of the work rather than inviting more of it.
-        //
-        // A subagent is a record for a different reason: it answers to the
-        // model that sent it, and a second person steering it would leave the
-        // parent reading a report on a conversation that changed under it.
-        <Show
-            when={move || !settled.get() && !is_subagent}
-            fallback={move || view! {
-                <Show
-                    when=move || !is_subagent
-                    fallback=move || view! {
-                        <div class="chamber-outcome errand-outcome">
-                            <span class="outcome-text">
-                                "This errand reports to the plan that sent it. \
-                                 To steer the work, speak there."
+        // A flex row: the chamber's own column, and the spyglass beside it.
+        // Side by side rather than stacked, because the transcript and the
+        // page it describes are read together -- stacking them made each one
+        // shorter to make room for the other.
+        <div class="chamber-frame">
+            <div class="chamber-column">
+                <header class="chamber-header" class:subagent=is_subagent>
+                    // For a subagent, "back" is the plan that sent it rather than the
+                    // fixture: that is where the user came from, and where he has to go
+                    // to steer the work. Retargeting the arrow he already knows beats
+                    // adding a second one beside it.
+                    <a
+                        class="back-link"
+                        href=move || back.get().0
+                        title=move || back.get().1
+                    >"\u{2190}"</a>
+                    <div class="chamber-id">
+                        // Where he is, above what he is reading -- the ordinary
+                        // breadcrumb shape. Present only for a subagent, because for a
+                        // plan the user opened there is no "above" to name.
+                        <Show when=move || is_subagent>
+                            <div class="chamber-crumb">
+                                <span class="crumb-mark">"\u{26b1}"</span>
+                                "Errand of "
+                                {move || match parent.get() {
+                                    Some((id, title)) => view! {
+                                        <a class="crumb-parent" href=format!("/plan/{id}")>{title}</a>
+                                    }
+                                    .into_any(),
+                                    // The parent is not in the kingdom this browser has
+                                    // loaded -- a deep link, most likely. Still say what
+                                    // this is; the alternative reads as an ordinary plan.
+                                    None => view! {
+                                        <span class="crumb-parent">"another plan"</span>
+                                    }
+                                    .into_any(),
+                                }}
+                            </div>
+                        </Show>
+                        // A subagent's title is cut from its task, so the full wording
+                        // goes on hover rather than onto a line of its own.
+                        <h1
+                            class="chamber-title"
+                            title=move || if is_subagent { task.get_value() } else { String::new() }
+                        >{move || title.get()}</h1>
+                        <div class="chamber-meta">
+                            <span class="chamber-city">
+                                {move || city.get().unwrap_or_else(|| "unknown city".into())}
+                            </span>
+                            <span class="chamber-model">{plan.choice().label()}</span>
+                            // Isolation the user cannot see is isolation he cannot
+                            // trust, so where this plan works is stated next to what is
+                            // drafting it, with the full path on hover.
+                            <span
+                                class="chamber-workspace"
+                                class:isolated=workspace_isolated
+                                title=workspace_path
+                            >
+                                {workspace_label}
                             </span>
                         </div>
-                    }
-                >
-                    <div class="chamber-outcome">
-                        <span class="outcome-mark">"\u{2713}"</span>
-                        <span class="outcome-text">{move || outcome.get()}</span>
+                    </div>
+                    <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
+                        {move || {
+                            // A subagent is never reviewed and never merged: it reports
+                            // to the model that sent it. Same states, honest words.
+                            //
+                            // A plan with something in front of the user is the other
+                            // case where "Awaiting review" is too vague to be useful --
+                            // it does not say that the wait is on *them*, or that there
+                            // is a button. A label, deliberately, and not a sixth
+                            // `PlanStatus`: nothing about the state machine changed.
+                            match (is_subagent, status.get()) {
+                                (true, PlanStatus::AwaitingReview) => "Reported",
+                                (true, PlanStatus::Drafting) => "Working",
+                                (false, PlanStatus::AwaitingReview) if proposal.get().is_some() => {
+                                    "Proposal"
+                                }
+                                (_, s) => s.label(),
+                            }
+                        }}
+                    </span>
+                    // The model's browser is headless, so without this the user's only
+                    // evidence of a browser flow is a list of tool names. Offered on
+                    // every plan rather than only those known to hold a session:
+                    // Kingdom has no field saying which do, and the panel's own
+                    // "no browser" state answers the question honestly for the rest.
+                    <button
+                        class="spyglass-toggle"
+                        class:open=move || watching.get()
+                        title="Watch this plan's browser"
+                        on:click=move |_| set_watching.update(|w| *w = !*w)
+                    >
+                        "\u{1F50D}"
+                    </button>
+                </header>
+
+                // Everything the user and the model have exchanged, oldest first, and
+                // nothing else. Plan *state* -- the summary, the status -- lives in the
+                // header or the rail; mixing it into this column put blocks derived
+                // from the newest reply above the prompt that opened the plan.
+                <div class="chamber-log" node_ref=log_ref>
+                    <Transcript live=live/>
+
+                    <Show when={move || drafting.get()}>
+                        <div class="chat-msg drafting">
+                            <span class="msg-at"></span>
+                            <span class="msg-who">"Court"</span>
+                            <span class="msg-body">"Drawing up the plan\u{2026}"</span>
+                        </div>
+                    </Show>
+                </div>
+
+                // Outside the log, because an error is not something anybody said. A
+                // drafting failure is already recorded in the transcript as a note, in
+                // its proper place in time; this strip is for what just went wrong.
+                <Show when={move || state.error.get().is_some()}>
+                    <div class="chamber-error">
+                        {move || state.error.get().unwrap_or_default()}
                     </div>
                 </Show>
-            }}
-        >
-            <div class="chamber-composer">
-                <input
-                    class="decree-input"
-                    r#type="text"
-                    placeholder=move || {
-                        // The composer says which conversation this is. While
-                        // the court is drawing something up, "ask for a change"
-                        // would be inviting him to steer work that has not
-                        // started -- and once a plan is in front of him, the
-                        // useful thing to type is what he would change *about
-                        // the plan*.
-                        if permissions.get().is_full() {
-                            "Say more, or ask for a change\u{2026}"
-                        } else if proposal.get().is_some() {
-                            "Say what you would change about this plan\u{2026}"
-                        } else {
-                            "Say more about what you want\u{2026}"
-                        }
-                    }
-                    prop:value=move || reply.get()
-                    disabled={move || drafting.get()}
-                    on:input=move |ev| set_reply.set(event_target_value(&ev))
-                    on:keydown=move |ev| {
-                        if ev.key() == "Enter" { submit(); }
-                    }
-                />
-                <button
-                    class="start-btn"
-                    disabled={move || drafting.get()}
-                    on:click=move |_| submit()
-                >
-                    {move || if drafting.get() { "Drafting\u{2026}" } else { "Send" }}
-                </button>
 
-                // Closing the plan sits beside sending to it, because they are
-                // the two things the user does from here.
-                <button
-                    class="done-btn"
-                    title="Finish with this plan"
-                    disabled={move || drafting.get() || finish.pending().get()}
-                    on:click=move |_| set_showing_done.update(|s| *s = !*s)
-                >
-                    {move || if finish.pending().get() { "Closing\u{2026}" } else { "Done" }}
-                    <span class="chip-chevron">"\u{2304}"</span>
-                </button>
-            </div>
+                // The King's move, when the court has put something to him. Above the
+                // composer rather than inside the log for the same reason the error
+                // strip is: the log is what was said and done, and this is a decision
+                // still to make. It sits where his attention already is.
+                <Show when=move || proposal.get().is_some()>
+                    {move || proposal.get().map(|put| view! {
+                        <ProposalCard
+                            proposal=put
+                            busy=drafting
+                            on_accept=accept
+                            on_set_aside=set_aside
+                        />
+                    })}
+                </Show>
 
-            // Two rows and no confirmation dialog: both endings are recoverable
-            // -- one makes a revertable merge commit, the other keeps a patch of
-            // the work -- and a modal would spend the user's attention to
-            // prevent nothing.
-            <Show when={move || showing_done.get()}>
-                <div class="done-picker">
-                    <div class="picker-head">
-                        <span class="picker-title">"Finish with this plan"</span>
+                // A settled plan is a record, not a place to type. The composer goes
+                // and the outcome takes its place, so the conversation says what became
+                // of the work rather than inviting more of it.
+                //
+                // A subagent is a record for a different reason: it answers to the
+                // model that sent it, and a second person steering it would leave the
+                // parent reading a report on a conversation that changed under it.
+                <Show
+                    when={move || !settled.get() && !is_subagent}
+                    fallback={move || view! {
+                        <Show
+                            when=move || !is_subagent
+                            fallback=move || view! {
+                                <div class="chamber-outcome errand-outcome">
+                                    <span class="outcome-text">
+                                        "This errand reports to the plan that sent it. \
+                                         To steer the work, speak there."
+                                    </span>
+                                </div>
+                            }
+                        >
+                            <div class="chamber-outcome">
+                                <span class="outcome-mark">"\u{2713}"</span>
+                                <span class="outcome-text">{move || outcome.get()}</span>
+                            </div>
+                        </Show>
+                    }}
+                >
+                    <div class="chamber-composer">
+                        <input
+                            class="decree-input"
+                            r#type="text"
+                            placeholder=move || {
+                                // The composer says which conversation this is. While
+                                // the court is drawing something up, "ask for a change"
+                                // would be inviting him to steer work that has not
+                                // started -- and once a plan is in front of him, the
+                                // useful thing to type is what he would change *about
+                                // the plan*.
+                                if permissions.get().is_full() {
+                                    "Say more, or ask for a change\u{2026}"
+                                } else if proposal.get().is_some() {
+                                    "Say what you would change about this plan\u{2026}"
+                                } else {
+                                    "Say more about what you want\u{2026}"
+                                }
+                            }
+                            prop:value=move || reply.get()
+                            disabled={move || drafting.get()}
+                            on:input=move |ev| set_reply.set(event_target_value(&ev))
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" { submit(); }
+                            }
+                        />
                         <button
-                            class="picker-close"
-                            on:click=move |_| set_showing_done.set(false)
-                        >"\u{2715}"</button>
+                            class="start-btn"
+                            disabled={move || drafting.get()}
+                            on:click=move |_| submit()
+                        >
+                            {move || if drafting.get() { "Drafting\u{2026}" } else { "Send" }}
+                        </button>
+
+                        // Closing the plan sits beside sending to it, because they are
+                        // the two things the user does from here.
+                        <button
+                            class="done-btn"
+                            title="Finish with this plan"
+                            disabled={move || drafting.get() || finish.pending().get()}
+                            on:click=move |_| set_showing_done.update(|s| *s = !*s)
+                        >
+                            {move || if finish.pending().get() { "Closing\u{2026}" } else { "Done" }}
+                            <span class="chip-chevron">"\u{2304}"</span>
+                        </button>
                     </div>
 
-                    <ul class="done-list">
-                        <li>
-                            <button
-                                class="done-row"
-                                on:click=move |_| close_with(Disposition::Merge)
-                            >
-                                <span class="done-name">
-                                    {move || format!("Merge into {}", base.get_value())}
-                                </span>
-                                <span class="done-detail">
-                                    "Lands this work in the project and clears the \
-                                     worktree. Stops and explains if git refuses."
-                                </span>
-                            </button>
-                        </li>
-                        <li>
-                            <button
-                                class="done-row"
-                                on:click=move |_| close_with(Disposition::Archive)
-                            >
-                                <span class="done-name">"Archive"</span>
-                                <span class="done-detail">
-                                    "Sets this aside. The work is kept as a \
-                                     patch and the branch cleared away."
-                                </span>
-                            </button>
-                        </li>
-                    </ul>
-                </div>
+                    // Two rows and no confirmation dialog: both endings are recoverable
+                    // -- one makes a revertable merge commit, the other keeps a patch of
+                    // the work -- and a modal would spend the user's attention to
+                    // prevent nothing.
+                    <Show when={move || showing_done.get()}>
+                        <div class="done-picker">
+                            <div class="picker-head">
+                                <span class="picker-title">"Finish with this plan"</span>
+                                <button
+                                    class="picker-close"
+                                    on:click=move |_| set_showing_done.set(false)
+                                >"\u{2715}"</button>
+                            </div>
+
+                            <ul class="done-list">
+                                <li>
+                                    <button
+                                        class="done-row"
+                                        on:click=move |_| close_with(Disposition::Merge)
+                                    >
+                                        <span class="done-name">
+                                            {move || format!("Merge into {}", base.get_value())}
+                                        </span>
+                                        <span class="done-detail">
+                                            "Lands this work in the project and clears the \
+                                             worktree. Stops and explains if git refuses."
+                                        </span>
+                                    </button>
+                                </li>
+                                <li>
+                                    <button
+                                        class="done-row"
+                                        on:click=move |_| close_with(Disposition::Archive)
+                                    >
+                                        <span class="done-name">"Archive"</span>
+                                        <span class="done-detail">
+                                            "Sets this aside. The work is kept as a \
+                                             patch and the branch cleared away."
+                                        </span>
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
+                    </Show>
+                </Show>
+            </div>
+
+            // The handle exists only while the panel does: a divider with
+            // nothing on one side of it is a control that does nothing.
+            <Show when=move || watching.get()>
+                <Resizer
+                    width=spyglass_width
+                    grows=Grows::Leftwards
+                    bounds=SPYGLASS_BOUNDS
+                    storage_key=SPYGLASS_WIDTH_KEY
+                    class="spyglass-resizer"
+                />
+                <BrowserView
+                    plan=id.get_value()
+                    deed=browser_deed
+                    width=spyglass_width
+                />
             </Show>
-        </Show>
+        </div>
     }
 }
 
@@ -1149,13 +1222,17 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
 
 /// The one argument worth showing on a collapsed tool call line.
 ///
+/// Shared with the spyglass, which captions its picture with the same deed the
+/// transcript is showing. Two different answers to "which argument matters"
+/// would have the two disagree about the same call.
+///
 /// Every tool names its subject differently, and there is no shared field to
 /// rely on. Rather than teach this component about each tool's schema -- which
 /// would have to be updated every time a tool is added, and would be silently
 /// wrong when it was not -- it prefers a short list of conventional names and
 /// otherwise shows the first string it finds. Being approximate is fine here:
 /// the exact arguments are one click away.
-fn telling_argument(input: &serde_json::Value) -> String {
+pub(super) fn telling_argument(input: &serde_json::Value) -> String {
     const PREFERRED: &[&str] = &["cmd", "path", "pattern", "url", "selector", "query"];
 
     let Some(fields) = input.as_object() else {
@@ -1368,5 +1445,41 @@ impl Drop for PlanWatch {
         if let (Some(handle), Some(window)) = (self.retry.take(), web_sys::window()) {
             window.clear_timeout_with_handle(handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kingdom_core::ToolOutcome;
+    use serde_json::json;
+
+    fn call(tool: &str, settled: bool) -> Entry {
+        let mut c = ToolCall::started(tool, tool, json!({ "selector": ".btn" }));
+        if settled {
+            c.outcome = Some(ToolOutcome::done("ok"));
+        }
+        Entry::Tool(c)
+    }
+
+    /// The caption must name what the court is doing *now* when there is such a
+    /// thing, and what it last did when there is not. Getting this backwards
+    /// leaves the panel confidently captioning a live page with a stale call --
+    /// wrong without looking wrong, which is why it is the one thing tested.
+    #[test]
+    fn the_caption_prefers_the_call_still_running() {
+        let in_flight = browsing(&[
+            call("browser_navigate", true),
+            call("browser_click", false),
+            call("bash", false),
+        ]);
+        assert_eq!(in_flight.unwrap().tool, "browser_click");
+
+        let settled = browsing(&[call("browser_navigate", true), call("browser_click", true)]);
+        assert_eq!(settled.unwrap().tool, "browser_click");
+
+        // A plan that has never browsed has nothing to caption, and a running
+        // non-browser deed is not evidence that it has.
+        assert!(browsing(&[call("bash", false)]).is_none());
     }
 }

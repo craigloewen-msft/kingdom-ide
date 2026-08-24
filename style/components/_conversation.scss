@@ -3,6 +3,9 @@
 // Header, then a scrolling log, then the composer. The log is the only part
 // that scrolls, so the plan's identity and the King's input are always in
 // reach however long the conversation runs.
+//
+// That column is now one of two: the spyglass sits beside it when open. The
+// column below is unchanged by that — it simply no longer owns the full width.
 
 @use "../abstracts/tokens" as t;
 @use "../abstracts/mixins" as m;
@@ -13,6 +16,25 @@
   height: 100%;
   min-height: 0;
   background: t.$deep;
+}
+
+// The two columns: everything the chamber always had, and the panel beside it.
+.chamber-frame {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+// The conversation proper. Takes what the spyglass does not, and `min-width: 0`
+// so a long unbroken line in the transcript pushes the panel off screen rather
+// than being allowed to.
+.chamber-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 
 // --- Header ----------------------------------------------------------------
