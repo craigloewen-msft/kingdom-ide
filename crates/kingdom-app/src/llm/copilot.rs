@@ -561,7 +561,6 @@ impl Model for CopilotModel {
         }
 
         Ok(Reply::Spoke(Draft {
-            title: headline(&text, &brief.system_prompt.city.name),
             summary: first_sentence(&text),
             body: text,
         }))
@@ -633,22 +632,6 @@ fn provider_message(body: &str) -> Option<String> {
         .as_str()
         .map(|s| s.to_string())
         .or_else(|| v["message"].as_str().map(|s| s.to_string()))
-}
-
-/// A sidebar headline. Models often lead with a markdown heading; use it when
-/// present, otherwise fall back to something honest rather than a truncated
-/// mid-sentence fragment.
-fn headline(text: &str, city: &str) -> String {
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix('#') {
-            let cleaned = rest.trim_start_matches('#').trim();
-            if !cleaned.is_empty() {
-                return truncate(cleaned, 60);
-            }
-        }
-    }
-    format!("Counsel on {city}")
 }
 
 fn first_sentence(text: &str) -> String {

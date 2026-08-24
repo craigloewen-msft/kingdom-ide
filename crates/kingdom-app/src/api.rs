@@ -979,7 +979,11 @@ fn settle(
         plan.working_on = None;
         match &outcome {
             Ok(draft) => {
-                plan.title = draft.title.clone();
+                // The title is deliberately *not* touched here. It was written
+                // once from the decree and is rewritten only when the court
+                // proposes -- see `Plan::propose`. Setting it from whatever
+                // heading the model happened to lead this reply with made the
+                // rail label change under the user on every turn.
                 plan.summary = draft.summary.clone();
                 plan.status = PlanStatus::AwaitingReview;
                 plan.say(Speaker::Assistant, draft.body.clone());

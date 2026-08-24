@@ -167,8 +167,6 @@ impl CityBrief {
 /// A drafted plan.
 #[derive(Debug, Clone)]
 pub struct Draft {
-    /// Short headline for the sidebar.
-    pub title: String,
     /// One or two lines, shown on hover.
     pub summary: String,
     /// The full reply, shown in the dock.
