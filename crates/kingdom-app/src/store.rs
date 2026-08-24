@@ -170,11 +170,20 @@ fn reconcile(mut plan: Plan) -> Plan {
 /// Atomic: serialised beside the target and renamed over it, because a
 /// half-written document is worse than a missing one -- it is the one state
 /// [`load`] cannot tell from corruption.
+///
+/// **Pictures are not written.** A deed that looked at an image carries the
+/// bytes in memory so the model can be shown them for the rest of the turn, but
+/// this file is rewritten on *every* update to the plan -- so persisting them
+/// would mean rewriting a megabyte per screenshot for the life of the plan, to
+/// store something nothing ever reads back. The words survive (`"Image loaded:
+/// <path> (N bytes)"`) and so does the file in the workspace, so a reloaded
+/// plan can still say what was looked at. It simply cannot show it again
+/// without looking again, which is what `read_image` is for.
 pub fn save(root: &Path, plan: &Plan) -> std::io::Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir)?;
 
-    let body = serde_json::to_vec_pretty(plan)
+    let body = serde_json::to_vec_pretty(&without_images(plan))
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let final_path = dir.join(format!("{}.json", plan.id));
@@ -183,6 +192,23 @@ pub fn save(root: &Path, plan: &Plan) -> std::io::Result<()> {
     std::fs::rename(&tmp, &final_path)?;
 
     Ok(())
+}
+
+/// A copy of this plan with every deed's images stripped, ready for disk.
+///
+/// Cloned rather than stripping in place because the caller's plan is the live
+/// one, still being shown to a model this turn: blinding it as a side effect of
+/// saving would be a memory bug disguised as a storage decision.
+fn without_images(plan: &Plan) -> Plan {
+    use kingdom_core::Entry;
+
+    let mut plan = plan.clone();
+    for entry in &mut plan.transcript {
+        if let Entry::Did(deed) = entry {
+            deed.outcome = deed.outcome.take().map(kingdom_core::DeedOutcome::without_images);
+        }
+    }
+    plan
 }
 
 /// Writes every plan, and stamps the kingdom record.
@@ -353,4 +379,127 @@ mod tests {
             "a call left in flight would be replayed to the model as still running, forever"
         );
     }
+
+    /// Two things disk must get right about a picture, pinned together because
+    /// they are the same decision seen from either side.
+    ///
+    /// A screenshot must not be *written*: this file is rewritten on every
+    /// update to the plan, so persisting image payloads would cost a megabyte
+    /// per screenshot per save, forever, to store something nothing reads back.
+    /// And a document written before images existed must still *load*, because
+    /// the alternative is a King whose court vanishes after an upgrade.
+    #[test]
+    fn a_picture_is_shown_but_never_filed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let mut seen = plan("plan-1");
+        seen.status = kingdom_core::PlanStatus::AwaitingReview;
+        seen.begin_deed(kingdom_core::Deed::begun(
+            "call-1",
+            "read_image",
+            serde_json::json!({ "path": "shot.png" }),
+        ));
+        seen.settle_deed(
+            "call-1",
+            kingdom_core::DeedOutcome::seen(
+                "Looked at shot.png (3 bytes).",
+                vec![kingdom_core::DeedImage {
+                    media_type: "image/png".into(),
+                    data: "QUJD".repeat(1000),
+                }],
+            ),
+        );
+
+        save(root, &seen).unwrap();
+
+        // The live plan keeps its picture: saving must not blind the court
+        // mid-turn.
+        assert_eq!(
+            seen.turns()
+                .filter_map(|t| match t {
+                    kingdom_core::Turn::Did(d) => Some(d.shown().len()),
+                    _ => None,
+                })
+                .sum::<usize>(),
+            1,
+            "saving must not strip the plan the caller still holds"
+        );
+
+        let raw = std::fs::read_to_string(root.join(".kingdom/plans/plan-1.json")).unwrap();
+        assert!(
+            !raw.contains("QUJD"),
+            "image payloads must never reach disk"
+        );
+        assert!(
+            raw.contains("Looked at shot.png"),
+            "the words must survive, so a reloaded plan can say what was looked at"
+        );
+
+        let reloaded = load(root);
+        let deed = reloaded[0]
+            .turns()
+            .find_map(|t| match t {
+                kingdom_core::Turn::Did(d) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("the deed itself is still recorded");
+        assert!(deed.shown().is_empty());
+        assert_eq!(deed.report(), "Looked at shot.png (3 bytes).");
+    }
+
+    /// A plan document written before deeds could carry images -- no `images`
+    /// key anywhere -- must still load. Written as literal JSON rather than by
+    /// round-tripping today's types, because a round trip would serialise the
+    /// *current* shape and prove nothing about the old one.
+    #[test]
+    fn a_plan_recorded_before_images_existed_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".kingdom/plans")).unwrap();
+
+        let old = r#"{
+            "id": "plan-1",
+            "city": "testburg",
+            "title": "Do the thing",
+            "slug": "do-the-thing",
+            "summary": "",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [
+                { "Did": {
+                    "id": "call-1",
+                    "tool": "bash",
+                    "input": { "cmd": "cargo test" },
+                    "outcome": { "Done": { "output": "ok" } },
+                    "at": 1787000000000
+                } }
+            ],
+            "status": "AwaitingReview",
+            "outcome": null,
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null,
+                "base": null
+            },
+            "working_on": null
+        }"#;
+        std::fs::write(root.join(".kingdom/plans/plan-1.json"), old).unwrap();
+
+        let loaded = load(root);
+        assert_eq!(loaded.len(), 1, "an older document must not be skipped");
+        let deed = loaded[0]
+            .turns()
+            .find_map(|t| match t {
+                kingdom_core::Turn::Did(d) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("its deed must survive the upgrade");
+        assert_eq!(deed.report(), "ok");
+        assert!(deed.shown().is_empty(), "absent means no pictures, not a parse failure");
+    }
 }
+

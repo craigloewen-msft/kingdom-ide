@@ -93,6 +93,7 @@ mod tests {
             recommended,
             efforts: Vec::new(),
             can_act: true,
+            can_see: false,
         }
     }
 

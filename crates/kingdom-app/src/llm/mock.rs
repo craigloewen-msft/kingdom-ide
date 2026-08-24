@@ -49,6 +49,12 @@ impl Provider for MockProvider {
                 // point of it: without a model that can act and needs no
                 // credential, the loop is only testable against a paid gateway.
                 can_act: true,
+                // Claimed for the same reason: `read_image` must be reachable
+                // without a credential, or the only way to exercise the image
+                // path is against a real gateway. The mock discards what it is
+                // shown -- it has no eyes -- but the tool runs and the picture
+                // travels, which is the part worth testing offline.
+                can_see: true,
             }],
             credential: CredentialState::Ready,
             detail: "The offline mock needs no credential.".to_string(),
@@ -124,6 +130,10 @@ impl Scenario {
 
 #[async_trait::async_trait]
 impl Model for MockModel {
+    fn can_see(&self) -> bool {
+        true
+    }
+
     async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError> {
         let prompt = latest_decree(brief);
         let scenario = Scenario::for_prompt(&prompt);
@@ -388,9 +398,7 @@ mod tests {
             acts[0].tool.clone(),
             acts[0].input.clone(),
         );
-        deed.outcome = Some(kingdom_core::DeedOutcome::Done {
-            output: "a conclusion was reached".into(),
-        });
+        deed.outcome = Some(kingdom_core::DeedOutcome::done("a conclusion was reached"));
         brief.turns.push(Turn::Did(deed));
 
         let draft = spoken(model.take_turn(&brief).await.unwrap());

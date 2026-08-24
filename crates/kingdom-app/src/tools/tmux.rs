@@ -198,12 +198,10 @@ impl Tool for TmuxRun {
             Err(reason) => return Refusal::Refused(reason).into(),
         };
         if !started.status.success() {
-            return DeedOutcome::Done {
-                output: format!(
-                    "tmux would not open a window for `{cmd}`:\n{}",
-                    text(&started.stderr)
-                ),
-            };
+            return DeedOutcome::done(format!(
+                "tmux would not open a window for `{cmd}`:\n{}",
+                text(&started.stderr)
+            ));
         }
 
         let window = text(&started.stdout).trim().to_string();
@@ -225,9 +223,7 @@ impl Tool for TmuxRun {
             None => None,
         };
 
-        DeedOutcome::Done {
-            output: report(&socket, &window, &name, cmd, readiness.as_ref(), seen).await,
-        }
+        DeedOutcome::done(report(&socket, &window, &name, cmd, readiness.as_ref(), seen).await)
     }
 }
 
@@ -282,9 +278,7 @@ impl Tool for Tmux {
             // A tmux that ran and complained has told the court something it
             // needs -- "can't find window @7" is how it learns the window is
             // gone. Only a call that never ran is a refusal.
-            Ok(out) => DeedOutcome::Done {
-                output: joined(&out),
-            },
+            Ok(out) => DeedOutcome::done(joined(&out)),
         }
     }
 }
@@ -743,7 +737,7 @@ mod tests {
 
     fn done(outcome: DeedOutcome) -> String {
         match outcome {
-            DeedOutcome::Done { output } => output,
+            DeedOutcome::Done { output, .. } => output,
             DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }

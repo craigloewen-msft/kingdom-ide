@@ -145,9 +145,7 @@ impl Tool for Bash {
             Ok(Op::Wait) => match job(&input) {
                 Ok(job) => {
                     let waited = job.settle(wait_seconds(&input)).await;
-                    DeedOutcome::Done {
-                        output: job.report(waited, DEFAULT_PEEK_LINES),
-                    }
+                    DeedOutcome::done(job.report(waited, DEFAULT_PEEK_LINES))
                 }
                 Err(refusal) => refusal.into(),
             },
@@ -230,9 +228,7 @@ async fn start(input: &Value, shop: &Workshop) -> DeedOutcome {
     }
 
     let settled = job.settle(wait_seconds(input)).await;
-    DeedOutcome::Done {
-        output: job.report(settled, usize::MAX),
-    }
+    DeedOutcome::done(job.report(settled, usize::MAX))
 }
 
 fn peek(input: &Value) -> DeedOutcome {
@@ -245,9 +241,7 @@ fn peek(input: &Value) -> DeedOutcome {
         .and_then(Value::as_u64)
         .map_or(DEFAULT_PEEK_LINES, |n| (n as usize).max(1));
 
-    DeedOutcome::Done {
-        output: job.report(job.finished(), lines),
-    }
+    DeedOutcome::done(job.report(job.finished(), lines))
 }
 
 fn kill(input: &Value) -> DeedOutcome {
@@ -268,9 +262,7 @@ fn kill(input: &Value) -> DeedOutcome {
         }
     };
 
-    DeedOutcome::Done {
-        output: job.signal(signal),
-    }
+    DeedOutcome::done(job.signal(signal))
 }
 
 /// Drops handles that finished long ago.
@@ -630,7 +622,7 @@ mod tests {
     async fn bash(root: &std::path::Path, input: Value) -> String {
         let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
         match Bash.run(input, &shop).await {
-            DeedOutcome::Done { output } => output,
+            DeedOutcome::Done { output, .. } => output,
             DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
@@ -657,7 +649,7 @@ mod tests {
             .await;
 
         match outcome {
-            DeedOutcome::Done { output } => {
+            DeedOutcome::Done { output, .. } => {
                 assert!(output.contains("exit code: 3"), "{output}");
                 assert!(output.contains("nope"), "stderr belongs in the output: {output}");
             }

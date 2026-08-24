@@ -704,11 +704,38 @@ impl Deed {
     /// having been told only silence.
     pub fn report(&self) -> &str {
         match &self.outcome {
-            Some(DeedOutcome::Done { output }) => output,
+            Some(DeedOutcome::Done { output, .. }) => output,
             Some(DeedOutcome::Refused { reason }) => reason,
             None => "",
         }
     }
+
+    /// What this call produced that a model could look at.
+    ///
+    /// Empty for all but a handful of tools, and empty for every call still in
+    /// flight. A provider that cannot carry an image ignores this and sends
+    /// [`Deed::report`] alone, which is why the two are separate accessors.
+    pub fn shown(&self) -> &[DeedImage] {
+        match &self.outcome {
+            Some(DeedOutcome::Done { images, .. }) => images,
+            _ => &[],
+        }
+    }
+}
+
+/// An image a tool produced, for a model with eyes.
+///
+/// Base64 rather than bytes because this type crosses the wasm boundary and is
+/// serialised into a plan document; a `Vec<u8>` would become a JSON array of
+/// integers, which is several times larger than the base64 it is trying to
+/// avoid. No `data:` prefix -- the media type is a field, and gluing the two
+/// together is the wire format's job, not the domain's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeedImage {
+    /// `image/png`, `image/jpeg`, and so on.
+    pub media_type: String,
+    /// The image, base64-encoded.
+    pub data: String,
 }
 
 /// How a tool call ended.
@@ -718,18 +745,68 @@ pub enum DeedOutcome {
     /// a failing test suite is a successful tool call with bad news in it, and
     /// conflating the two would have the chamber cry error over exactly the
     /// result the King asked for.
-    Done { output: String },
+    Done {
+        output: String,
+        /// Pictures the tool produced.
+        ///
+        /// A separate channel from `output` rather than encoded into it. The
+        /// text is what the chamber renders and what a model without vision is
+        /// told; a megabyte of base64 spliced into it would be unreadable in
+        /// the one place and useless in the other. Keeping them apart is also
+        /// what lets the store drop the pictures and keep the words -- see
+        /// `store.rs`.
+        ///
+        /// Almost every tool leaves this empty, so it is skipped on the wire:
+        /// a document written before this field existed still loads, and one
+        /// written after is not littered with `"images": []`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<DeedImage>,
+    },
     /// The tool would not run: unknown name, unparseable arguments, or a path
     /// outside the workspace.
     Refused { reason: String },
 }
 
 impl DeedOutcome {
+    /// A tool that ran and produced words.
+    ///
+    /// The constructor exists so that the next field added to `Done` is one
+    /// line of change rather than forty. Nearly every tool wants this; the two
+    /// that have pictures to show reach for [`DeedOutcome::seen`] instead.
+    pub fn done(output: impl Into<String>) -> Self {
+        DeedOutcome::Done {
+            output: output.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// A tool that ran and produced something to look at.
+    ///
+    /// The words are still required: they are what the chamber shows, what the
+    /// store keeps, and what a model that cannot see is given instead.
+    pub fn seen(output: impl Into<String>, images: Vec<DeedImage>) -> Self {
+        DeedOutcome::Done {
+            output: output.into(),
+            images,
+        }
+    }
+
     /// Suffix for the CSS class the chamber styles a settled deed with.
     pub fn css_suffix(&self) -> &'static str {
         match self {
             DeedOutcome::Done { .. } => "done",
             DeedOutcome::Refused { .. } => "refused",
+        }
+    }
+
+    /// The same outcome with nothing to look at.
+    ///
+    /// For the write path: a plan's record on disk keeps what was said about an
+    /// image, not the image. See the note in `store.rs`.
+    pub fn without_images(self) -> Self {
+        match self {
+            DeedOutcome::Done { output, .. } => DeedOutcome::done(output),
+            refused => refused,
         }
     }
 }
@@ -1168,6 +1245,17 @@ pub struct ModelOption {
     /// gateway refuses.
     #[serde(default)]
     pub can_act: bool,
+    /// Whether this model can be shown a picture.
+    ///
+    /// Same shape and same asymmetry as [`ModelOption::can_act`]: a model that
+    /// cannot see is still perfectly good at everything else, so it stays in
+    /// the picker and is simply never offered `read_image`. Sending an image to
+    /// one that cannot take it fails the whole turn with a gateway error, while
+    /// withholding it from one that could merely means the King's court works
+    /// the way it did last week. The costs of guessing wrong are not
+    /// symmetric, so absent is taken as "no".
+    #[serde(default)]
+    pub can_see: bool,
 }
 
 /// Everything the picker needs, plus why it might be shorter than expected.
@@ -1248,6 +1336,7 @@ mod tests {
                     recommended: false,
                     efforts: Vec::new(),
                     can_act: true,
+                    can_see: false,
                 },
                 ModelOption {
                     id: "copilot/claude-opus-5".into(),
@@ -1257,6 +1346,7 @@ mod tests {
                     recommended: true,
                     efforts: vec![ModelEffort::Low, ModelEffort::High],
                     can_act: true,
+                    can_see: true,
                 },
             ],
             default_id: "copilot/claude-opus-5".into(),
@@ -1394,7 +1484,7 @@ mod transcript_tests {
             serde_json::json!({ "cmd": "cargo test" }),
         ));
         plan.note(NoteKind::Failed, "The disk filled up.");
-        assert!(plan.settle_deed("call-1", DeedOutcome::Done { output: "ok".into() }));
+        assert!(plan.settle_deed("call-1", DeedOutcome::done("ok")));
         plan.say(Speaker::Court, "The tests pass.");
 
         let turns: Vec<_> = plan

@@ -66,6 +66,26 @@ impl ToolSpec {
             })
             .collect()
     }
+
+    /// Describes the tools this model can actually make use of.
+    ///
+    /// The one seam where a model's capabilities narrow the tool list, so that
+    /// the reasoning lives in a single place rather than in each caller. Today
+    /// that means withholding `read_image` from a model with no vision: it
+    /// would call the tool, be handed a result it cannot look at, and have
+    /// spent one of the King's turns discovering that.
+    pub fn for_model(model: &dyn Model) -> Vec<Self> {
+        if !model.can_act() {
+            // Not merely "no tools worth offering" -- sending a `tools` array to
+            // a gateway that does not accept one fails the request outright.
+            return Vec::new();
+        }
+        let sighted = model.can_see();
+        Self::all()
+            .into_iter()
+            .filter(|t| sighted || t.name != "read_image")
+            .collect()
+    }
 }
 
 /// The facts about a project worth spending tokens on.
@@ -199,6 +219,16 @@ pub trait Model: Send + Sync {
     /// what stops a gateway rejecting the request outright.
     fn can_act(&self) -> bool {
         true
+    }
+
+    /// Whether this model can be shown an image.
+    ///
+    /// Defaults to *false*, the opposite of [`Model::can_act`], because the
+    /// costs are the opposite way round. A provider that silently ignores a
+    /// tool it was given wastes nothing; a provider handed an image it cannot
+    /// parse rejects the whole request. A backend that can see says so.
+    fn can_see(&self) -> bool {
+        false
     }
 }
 

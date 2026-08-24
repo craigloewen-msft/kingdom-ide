@@ -292,9 +292,7 @@ Everything is literal: no newline is added or trimmed for you."#
 
         store_clipboards(shop.plan().as_str(), clipboards);
 
-        DeedOutcome::Done {
-            output: format!("Patched {}.\n\n{}", input.path, bounded(&diff)),
-        }
+        DeedOutcome::done(format!("Patched {}.\n\n{}", input.path, bounded(&diff)))
     }
 }
 
@@ -924,7 +922,7 @@ mod tests {
             .await;
 
         match outcome {
-            DeedOutcome::Done { output } => assert!(output.contains("+// end"), "{output}"),
+            DeedOutcome::Done { output, .. } => assert!(output.contains("+// end"), "{output}"),
             DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
         assert_eq!(

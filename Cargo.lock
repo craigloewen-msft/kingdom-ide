@@ -1144,6 +1144,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "console_error_panic_hook",
  "dotenvy",
  "globset",

@@ -63,11 +63,9 @@ fn bad(tool: &str, detail: impl Into<String>) -> DeedOutcome {
 }
 fn outcome(result: Result<String, BrowserError>) -> DeedOutcome {
     match result {
-        Ok(output) => DeedOutcome::Done { output },
+        Ok(output) => DeedOutcome::done(output),
         Err(BrowserError::ChromeUnavailable(reason)) => Refusal::Refused(reason).into(),
-        Err(error) => DeedOutcome::Done {
-            output: error.to_string(),
-        },
+        Err(error) => DeedOutcome::done(error.to_string()),
     }
 }
 fn parse<T: for<'de> Deserialize<'de>>(tool: &str, input: Value) -> Result<T, DeedOutcome> {
@@ -184,7 +182,7 @@ impl Tool for BrowserTakeScreenshot {
         "browser_take_screenshot"
     }
     fn description(&self) -> String {
-        "Capture the page or one element to a PNG file in the workspace. Returns only its path; image bytes never enter a model request.".into()
+        "Capture the page or one element to a PNG file in the workspace. Returns its path; call read_image on that path to actually look at it.".into()
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"selector":{"type":"string"},"timeout":{"type":"string"}}})
@@ -465,7 +463,7 @@ impl Tool for BrowserRecentConsoleLogs {
                     .map(|_| format!("Console logs saved to {}.", path.display())),
             )
         } else {
-            DeedOutcome::Done { output: value }
+            DeedOutcome::done(value)
         }
     }
 }
@@ -555,7 +553,7 @@ mod tests {
         let counted = BrowserEval
             .run(serde_json::json!({ "expression": "window.hits" }), &shop)
             .await;
-        let DeedOutcome::Done { output } = counted else {
+        let DeedOutcome::Done { output, .. } = counted else {
             panic!("eval should succeed: {counted:?}");
         };
         assert!(

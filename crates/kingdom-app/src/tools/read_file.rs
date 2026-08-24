@@ -120,9 +120,7 @@ impl Tool for ReadFile {
             .and_then(Value::as_u64)
             .map_or(DEFAULT_LIMIT, |n| n as usize);
 
-        DeedOutcome::Done {
-            output: window(&text, offset, limit),
-        }
+        DeedOutcome::done(window(&text, offset, limit))
     }
 }
 
@@ -181,7 +179,7 @@ mod tests {
 
     async fn read(root: &Path, input: Value) -> String {
         match ReadFile.run(input, &shop(root)).await {
-            DeedOutcome::Done { output } => output,
+            DeedOutcome::Done { output, .. } => output,
             DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
@@ -236,7 +234,7 @@ mod tests {
 
         match outcome {
             DeedOutcome::Refused { reason } => assert!(reason.contains("outside"), "{reason}"),
-            DeedOutcome::Done { output } => panic!("read a file outside the workspace: {output}"),
+            DeedOutcome::Done { output, .. } => panic!("read a file outside the workspace: {output}"),
         }
     }
 }

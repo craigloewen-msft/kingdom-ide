@@ -61,6 +61,11 @@ libc = { version = "0.2", optional = true }
 # the model can confirm it without re-reading the file.
 similar = { version = "2", optional = true }
 
+# Encoding an image for a model that can see one, and decoding the base64 JPEG
+# frames CDP delivers to the spyglass. Server-only: nothing in the wasm bundle
+# handles image bytes.
+base64 = { version = "0.22", optional = true }
+
 # Client-only.
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -113,6 +118,7 @@ ssr = [
     "dep:regex",
     "dep:libc",
     "dep:similar",
+    "dep:base64",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",

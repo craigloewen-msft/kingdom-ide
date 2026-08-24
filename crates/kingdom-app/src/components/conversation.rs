@@ -664,7 +664,7 @@ fn DeedLine(deed: kingdom_core::Deed) -> impl IntoView {
     // a closure that moves an owned String is `FnOnce` and can only render once.
     let input = StoredValue::new(pretty(&deed.input));
     let output = StoredValue::new(match &deed.outcome {
-        Some(DeedOutcome::Done { output }) => output.clone(),
+        Some(DeedOutcome::Done { output, .. }) => output.clone(),
         Some(DeedOutcome::Refused { reason }) => reason.clone(),
         None => String::new(),
     });

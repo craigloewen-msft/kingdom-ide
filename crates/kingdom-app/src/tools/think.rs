@@ -63,8 +63,6 @@ impl Tool for Think {
             .into();
         }
 
-        DeedOutcome::Done {
-            output: thoughts.to_string(),
-        }
+        DeedOutcome::done(thoughts)
     }
 }

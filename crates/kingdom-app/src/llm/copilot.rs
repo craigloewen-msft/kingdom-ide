@@ -148,20 +148,21 @@ impl Provider for CopilotProvider {
         // and a plan opened last week must not keep sending tools to something
         // that has since stopped accepting them. The catalogue is cached, so
         // this is normally free.
-        let can_act = self
+        let entry = self
             .catalogue()
             .await
             .options
-            .iter()
-            .find(|o| o.id == choice.model)
-            .map(|o| o.can_act)
-            .unwrap_or(false);
+            .into_iter()
+            .find(|o| o.id == choice.model);
+        let can_act = entry.as_ref().is_some_and(|o| o.can_act);
+        let can_see = entry.as_ref().is_some_and(|o| o.can_see);
 
         Ok(Box::new(CopilotModel::new(
             cred.token,
             &choice.model,
             choice.effort,
             can_act,
+            can_see,
         )))
     }
 }
@@ -271,6 +272,15 @@ fn parse_one(model: &Value) -> Option<ModelOption> {
         can_act: capabilities["supports"]["tool_calls"]
             .as_bool()
             .unwrap_or(false),
+        // Copilot spells this on the model itself rather than under `supports`,
+        // so both are read: the catalogue is not ours and has moved this sort
+        // of flag before. Absent from both is taken as "cannot see", for the
+        // same asymmetry as `can_act` above.
+        can_see: capabilities["supports"]["vision"]
+            .as_bool()
+            .or_else(|| capabilities["vision"].as_bool())
+            .or_else(|| model["vision"].as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -309,6 +319,8 @@ pub struct CopilotModel {
     effort: Option<ModelEffort>,
     /// Whether this model takes tools, as its catalogue entry declared.
     can_act: bool,
+    /// Whether this model can be shown an image, as its catalogue declared.
+    can_see: bool,
     http: reqwest::Client,
 }
 
@@ -318,12 +330,14 @@ impl CopilotModel {
         id: impl Into<String>,
         effort: Option<ModelEffort>,
         can_act: bool,
+        can_see: bool,
     ) -> Self {
         Self {
             token,
             id: id.into(),
             effort,
             can_act,
+            can_see,
             http: reqwest::Client::new(),
         }
     }
@@ -383,7 +397,10 @@ fn request_body(
 /// a `tool` message carrying its result. Both are required -- a result with no
 /// preceding call is rejected by the gateway, and a call with no result leaves
 /// the model believing it is still waiting.
-fn messages(brief: &Brief) -> Vec<Value> {
+///
+/// A call that produced a *picture* becomes three, and the third is a lie told
+/// carefully. See [`shown`].
+fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
     let mut out = vec![json!({
         "role": "system",
         "content": system_prompt(brief),
@@ -424,11 +441,66 @@ fn messages(brief: &Brief) -> Vec<Value> {
                         deed.report()
                     },
                 }));
+                // Belt as well as braces: `ToolSpec::for_model` already keeps
+                // `read_image` away from a model with no vision, so a deed with
+                // pictures should be unreachable here. Checking anyway costs a
+                // branch and avoids failing a whole turn if that filter is ever
+                // bypassed.
+                if can_see {
+                    if let Some(message) = shown(deed) {
+                        out.push(message);
+                    }
+                }
             }
         }
     }
 
     out
+}
+
+/// The pictures from a tool result, as a message a model will actually look at.
+///
+/// **Why this is a `user` message.** Chat-completions has no image part for a
+/// `role:"tool"` message -- its content is a string, full stop. The image
+/// therefore has to arrive as the one role the format *does* accept
+/// `image_url` parts on. Phoenix hits this same wall and gives up, dropping the
+/// images outright (`phoenix-llm/src/openai.rs`); a shown picture is worth a
+/// synthetic turn.
+///
+/// **Why this is safe.** The message is built here, from a [`Deed`], and exists
+/// only inside this request body. It is never a `Turn::Said`, never an
+/// `Utterance`, never in the transcript. That containment is the whole defence:
+/// the doc on [`kingdom_core::Turn`] argues that Kingdom's plumbing must not be
+/// replayed to a model in the King's voice, and a `user` message the King never
+/// said is exactly that hazard -- so it is never allowed to exist as a domain
+/// value where something could mistake it for one.
+///
+/// **What should replace it.** Copilot's Responses API carries images natively
+/// on a `FunctionCallOutput`, with no invented turn. That is the correct wire
+/// format and the eventual answer here; it is a rewrite of this module's
+/// request and response shapes, which is why this shim exists in the meantime.
+fn shown(deed: &kingdom_core::Deed) -> Option<Value> {
+    let images = deed.shown();
+    if images.is_empty() {
+        return None;
+    }
+
+    // The leading text matters: a bare picture with no antecedent leaves the
+    // model to guess why it is suddenly looking at something.
+    let mut parts = vec![json!({
+        "type": "text",
+        "text": format!("The image from the {} call above:", deed.tool),
+    })];
+    parts.extend(images.iter().map(|image| {
+        json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!("data:{};base64,{}", image.media_type, image.data),
+            }
+        })
+    }));
+
+    Some(json!({ "role": "user", "content": parts }))
 }
 
 #[async_trait::async_trait]
@@ -443,7 +515,7 @@ impl Model for CopilotModel {
             .json(&request_body(
                 self.api_name(),
                 self.effort,
-                messages(brief),
+                messages(brief, self.can_see),
                 &brief.tools,
             ))
             .send()
@@ -501,6 +573,10 @@ impl Model for CopilotModel {
 
     fn can_act(&self) -> bool {
         self.can_act
+    }
+
+    fn can_see(&self) -> bool {
+        self.can_see
     }
 }
 
@@ -617,6 +693,139 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A brief holding one settled tool call, optionally with a picture.
+    fn brief_with_deed(images: Vec<kingdom_core::DeedImage>) -> Brief {
+        let mut deed = kingdom_core::Deed::begun(
+            "call-1",
+            "read_image",
+            serde_json::json!({ "path": "shot.png" }),
+        );
+        deed.outcome = Some(kingdom_core::DeedOutcome::seen("Looked at shot.png.", images));
+
+        Brief {
+            city: crate::llm::CityBrief {
+                name: "Testburg".into(),
+                path: "/dev/testburg".into(),
+                stack: "Rust".into(),
+                file_count: 1,
+                has_git: false,
+                dirty_files: 0,
+                notable_paths: Vec::new(),
+            },
+            turns: vec![Turn::Did(deed)],
+            tools: Vec::new(),
+        }
+    }
+
+    fn a_picture() -> Vec<kingdom_core::DeedImage> {
+        vec![kingdom_core::DeedImage {
+            media_type: "image/png".into(),
+            data: "QUJD".into(),
+        }]
+    }
+
+    /// The shape chat-completions demands, which nothing but the live gateway
+    /// would otherwise check.
+    ///
+    /// A `role:"tool"` message cannot carry an image part, so the picture has to
+    /// follow as a `user` message -- and the tool message must stay a plain
+    /// string, because that is the part the format is strict about. Getting
+    /// either half wrong is an opaque 400 that costs the King a whole turn, so
+    /// both are asserted rather than just "the image is in there somewhere".
+    #[test]
+    fn a_picture_follows_its_tool_result_as_a_user_message() {
+        let messages = messages(&brief_with_deed(a_picture()), true);
+
+        let tool = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("the call still needs its result");
+        assert!(
+            tool["content"].is_string(),
+            "a tool message's content must stay a plain string: {tool}"
+        );
+
+        let carrying = messages
+            .last()
+            .expect("the image message comes last, after the result it belongs to");
+        assert_eq!(carrying["role"], "user");
+        let parts = carrying["content"]
+            .as_array()
+            .expect("image content is an array of parts");
+        assert_eq!(
+            parts[0]["type"], "text",
+            "a bare picture with no antecedent leaves the model guessing why"
+        );
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(
+            parts[1]["image_url"]["url"], "data:image/png;base64,QUJD",
+            "the data URL is what the format actually reads"
+        );
+    }
+
+    /// Two independent guards, because each fails silently on its own.
+    ///
+    /// A model with no vision must never be sent an image -- that is a rejected
+    /// request, not a degraded one. And a call that produced no picture must not
+    /// grow a stray empty `user` turn, which would put words in the King's mouth
+    /// for every ordinary `bash` call in the transcript.
+    #[test]
+    fn nothing_is_shown_to_a_model_that_cannot_see_or_for_a_call_with_no_picture() {
+        let blind = messages(&brief_with_deed(a_picture()), false);
+        assert!(
+            !blind.iter().any(|m| m["role"] == "user"),
+            "a model without vision must not be sent the image at all: {blind:?}"
+        );
+
+        let textual = messages(&brief_with_deed(Vec::new()), true);
+        assert!(
+            !textual.iter().any(|m| m["role"] == "user"),
+            "an ordinary tool result must not invent a turn the King never took"
+        );
+    }
+
+    /// Where a model's declared vision lives in the payload is not settled --
+    /// the catalogue is not ours, and this sort of flag has moved between
+    /// `capabilities.supports` and the model itself before. All three spellings
+    /// are read, and absence means "cannot see".
+    ///
+    /// Worth pinning because both failure directions are silent: read the wrong
+    /// key and every model looks blind, so `read_image` is quietly never
+    /// offered and the feature simply does not exist. Guess the other way and
+    /// the King's turn dies on a gateway rejection.
+    #[test]
+    fn vision_is_recognised_wherever_the_catalogue_declares_it() {
+        let seeing = |model: serde_json::Value| parse_one(&model).expect("a usable model").can_see;
+
+        let base = |supports: serde_json::Value, extra: serde_json::Value| {
+            let mut capabilities = serde_json::json!({
+                "type": "chat",
+                "limits": {"max_context_window_tokens": 1000},
+                "supports": supports,
+            });
+            if let Some(pairs) = extra.as_object() {
+                for (k, v) in pairs {
+                    capabilities[k] = v.clone();
+                }
+            }
+            serde_json::json!({ "id": "m", "name": "M", "capabilities": capabilities })
+        };
+
+        assert!(seeing(base(
+            serde_json::json!({"vision": true}),
+            serde_json::json!({})
+        )));
+        assert!(seeing(base(
+            serde_json::json!({}),
+            serde_json::json!({"vision": true})
+        )));
+        assert!(
+            !seeing(base(serde_json::json!({}), serde_json::json!({}))),
+            "undeclared must mean blind: sending an image to a model that \
+             cannot take one fails the whole turn"
+        );
+    }
 
     /// The `/models` shape is not ours and cannot fail at compile time, so the
     /// filters that keep unusable models out of the picker are pinned here.
@@ -735,7 +944,7 @@ mod tests {
     /// sending `copilot/claude-opus-5` as the model name earns a 404.
     #[test]
     fn the_recorded_id_is_namespaced_and_the_wire_name_is_not() {
-        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true);
+        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true, true);
         assert_eq!(model.id(), "copilot/claude-opus-5");
         assert_eq!(model.api_name(), "claude-opus-5");
     }

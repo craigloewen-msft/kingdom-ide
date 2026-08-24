@@ -180,7 +180,7 @@ impl Tool for AskUserQuestion {
         }
 
         match tokio::time::timeout(PATIENCE, rx).await {
-            Ok(Ok(answer)) => DeedOutcome::Done { output: answer },
+            Ok(Ok(answer)) => DeedOutcome::done(answer),
 
             // Timed out, or the waiting half was dropped. Either way nothing is
             // going to answer, so the entry is cleaned up rather than left to
@@ -242,9 +242,7 @@ mod tests {
 
         assert_eq!(
             asking.await.unwrap(),
-            DeedOutcome::Done {
-                output: "Left".to_string()
-            },
+            DeedOutcome::done("Left"),
         );
     }
 

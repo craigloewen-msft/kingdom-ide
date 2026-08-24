@@ -24,6 +24,7 @@ pub mod bash;
 pub mod browser;
 pub mod patch;
 pub mod read_file;
+pub mod read_image;
 pub mod search;
 pub mod think;
 pub mod tmux;
@@ -54,6 +55,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(browser::BrowserEval),
         Box::new(browser::BrowserWaitForSelector),
         Box::new(browser::BrowserTakeScreenshot),
+        Box::new(read_image::ReadImage),
         Box::new(browser::BrowserResize),
         Box::new(browser::BrowserRecentConsoleLogs),
         Box::new(browser::BrowserClearConsoleLogs),

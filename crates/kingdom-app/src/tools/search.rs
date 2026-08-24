@@ -180,7 +180,7 @@ impl Tool for Search {
         // would block a worker thread for as long as the tree takes, stalling
         // every other plan's model call on the same executor.
         match tokio::task::spawn_blocking(move || hunt.run()).await {
-            Ok(output) => DeedOutcome::Done { output },
+            Ok(output) => DeedOutcome::done(output),
             Err(e) => Refusal::Refused(format!("the search did not finish: {e}")).into(),
         }
     }
@@ -389,7 +389,7 @@ mod tests {
     async fn search(root: &Path, input: Value) -> String {
         let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
         match Search.run(input, &shop).await {
-            DeedOutcome::Done { output } => output,
+            DeedOutcome::Done { output, .. } => output,
             DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }

@@ -558,13 +558,10 @@ async fn converse(
     };
 
     // A model that cannot call tools still drafts perfectly good prose, so it
-    // gets a prose-only turn rather than an error. Sending tools to a gateway
-    // that does not accept them fails the whole request opaquely.
-    let tools = if model.can_act() {
-        ToolSpec::all()
-    } else {
-        Vec::new()
-    };
+    // gets a prose-only turn rather than an error, and one that cannot see is
+    // simply not offered the tool that hands back a picture. Both narrowings
+    // live in `ToolSpec::for_model`, so the reasoning is in one place.
+    let tools = ToolSpec::for_model(model.as_ref());
     let shop = Workshop::new(workspace).for_plan(plan_id.clone());
 
     for round in 0..MOST_ROUNDS {
