@@ -237,6 +237,17 @@ fn ConversationBody(
     let permissions =
         Memo::new(move |_| live.get().map(|p| p.permissions).unwrap_or(Permissions::Full));
 
+    // How full the model's window is, read live because it moves every round --
+    // including mid tool loop, which is when it is worth watching. `None` until
+    // the court has answered once, and always `None` for a provider that
+    // reports no usage or declares no window; the header simply says nothing
+    // rather than drawing a bar over a number nobody measured.
+    let context = Memo::new(move |_| {
+        let usage = live.get()?.context?;
+        let percent = usage.percent()?;
+        Some((percent, kingdom_core::window_label(usage.window), usage.tokens))
+    });
+
     // A subagent is settled once and never changes, so it is read off the
     // snapshot rather than the live signal.
     let subagent = StoredValue::new(plan.spawned_by.clone());
@@ -406,6 +417,32 @@ fn ConversationBody(
                     >
                         {workspace_label}
                     </span>
+                    // How much of the model's window this conversation is
+                    // filling. A long chamber creeps toward the limit with no
+                    // other warning than the refusal at the end of it, so this
+                    // sits with the other provenance facts rather than
+                    // announcing itself.
+                    <Show when=move || context.get().is_some()>
+                        {move || context.get().map(|(percent, window, tokens)| view! {
+                            <span
+                                class="chamber-context"
+                                title=format!(
+                                    "{tokens} tokens of this model's {window} context window, \
+                                     as the provider counted them on the last turn",
+                                )
+                            >
+                                <span class="context-track">
+                                    <span
+                                        class="context-fill"
+                                        style=format!("width: {percent}%")
+                                    ></span>
+                                </span>
+                                <span class="context-label">
+                                    {format!("{percent}% of {window}")}
+                                </span>
+                            </span>
+                        })}
+                    </Show>
                 </div>
             </div>
             <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>

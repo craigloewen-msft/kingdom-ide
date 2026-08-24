@@ -10,7 +10,8 @@
 //! nowhere to go.
 
 use super::{
-    credential, Act, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply, ToolSpec,
+    credential, Act, Answer, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply,
+    ToolSpec,
 };
 use kingdom_core::{CredentialState, ModelChoice, ModelEffort, ModelOption, Speaker, Turn};
 use serde_json::{json, Value};
@@ -156,6 +157,10 @@ impl Provider for CopilotProvider {
             .find(|o| o.id == choice.model);
         let can_act = entry.as_ref().is_some_and(|o| o.can_act);
         let can_see = entry.as_ref().is_some_and(|o| o.can_see);
+        // Read from the same live entry, and for the same reason: a plan opened
+        // last week must be measured against the window the model has today,
+        // not the one it had when the plan was recorded.
+        let context_window = entry.as_ref().map_or(0, |o| o.context_window);
 
         Ok(Box::new(CopilotModel::new(
             cred.token,
@@ -163,6 +168,7 @@ impl Provider for CopilotProvider {
             choice.effort,
             can_act,
             can_see,
+            context_window,
         )))
     }
 }
@@ -321,6 +327,9 @@ pub struct CopilotModel {
     can_act: bool,
     /// Whether this model can be shown an image, as its catalogue declared.
     can_see: bool,
+    /// How much this model will hold, as its catalogue declared. `0` when it
+    /// declared nothing, which yields no reading rather than a guess.
+    context_window: usize,
     http: reqwest::Client,
 }
 
@@ -331,6 +340,7 @@ impl CopilotModel {
         effort: Option<ModelEffort>,
         can_act: bool,
         can_see: bool,
+        context_window: usize,
     ) -> Self {
         Self {
             token,
@@ -338,6 +348,7 @@ impl CopilotModel {
             effort,
             can_act,
             can_see,
+            context_window,
             http: reqwest::Client::new(),
         }
     }
@@ -505,7 +516,7 @@ fn shown(tool_call: &kingdom_core::ToolCall) -> Option<Value> {
 
 #[async_trait::async_trait]
 impl Model for CopilotModel {
-    async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError> {
+    async fn take_turn(&self, brief: &Brief) -> Result<Answer, ModelError> {
         let response = self
             .http
             .post(ENDPOINT)
@@ -542,6 +553,9 @@ impl Model for CopilotModel {
             .map_err(|e| ModelError::Transport(format!("unreadable response: {e}")))?;
 
         let message = &parsed["choices"][0]["message"];
+        // Read once, before either ending: how full the window is is true of the
+        // turn, not of the way it happened to end.
+        let tokens = tokens_used(&parsed);
 
         // Tool calls take precedence over any prose alongside them. A model
         // often narrates what it is about to do in the same message; treating
@@ -549,7 +563,10 @@ impl Model for CopilotModel {
         // model still had work it wanted to do.
         let acts = parse_acts(&message["tool_calls"]);
         if !acts.is_empty() {
-            return Ok(Reply::Acts(acts));
+            return Ok(Answer {
+                reply: Reply::Acts(acts),
+                tokens,
+            });
         }
 
         let text = message["content"].as_str().unwrap_or_default().trim().to_string();
@@ -560,10 +577,13 @@ impl Model for CopilotModel {
             ));
         }
 
-        Ok(Reply::Spoke(Draft {
-            summary: first_sentence(&text),
-            body: text,
-        }))
+        Ok(Answer {
+            reply: Reply::Spoke(Draft {
+                summary: first_sentence(&text),
+                body: text,
+            }),
+            tokens,
+        })
     }
 
     fn id(&self) -> &str {
@@ -577,6 +597,27 @@ impl Model for CopilotModel {
     fn can_see(&self) -> bool {
         self.can_see
     }
+
+    fn context_window(&self) -> usize {
+        self.context_window
+    }
+}
+
+/// How many tokens a reply says it cost, if it says.
+///
+/// `total_tokens` first, `prompt_tokens` second. The prompt alone is what was
+/// *sent* and understates the window by a whole reply -- and the reply is
+/// already part of the exchange the next turn will resend, so the total is the
+/// honest reading of how full the window stands once this turn is over.
+///
+/// `None` rather than `0` when the block is absent. Zero would be drawn as an
+/// empty window, which is a claim about the conversation; absence is the truth.
+fn tokens_used(response: &Value) -> Option<usize> {
+    let usage = &response["usage"];
+    usage["total_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens"].as_u64())
+        .map(|t| t as usize)
 }
 
 /// Reads the `tool_calls` array into calls we can actually make.
@@ -901,12 +942,41 @@ mod tests {
         );
     }
 
+    /// The `usage` block is the only honest source of how full the window is,
+    /// and like the rest of the `/chat/completions` shape it is not ours and
+    /// cannot fail at compile time.
+    ///
+    /// The absent case is the one that matters. `None` means "no bar"; a `0`
+    /// would be drawn as an empty window, which is a *claim* about a
+    /// conversation that may in fact be nearly full -- the exact misreading the
+    /// bar exists to prevent.
+    #[test]
+    fn how_full_the_window_is_comes_from_the_reply_or_not_at_all() {
+        let with_total = serde_json::json!({
+            "usage": {"prompt_tokens": 900, "completion_tokens": 100, "total_tokens": 1000}
+        });
+        assert_eq!(
+            tokens_used(&with_total),
+            Some(1000),
+            "the total is what the next turn will resend, so it is what fills the window"
+        );
+
+        let prompt_only = serde_json::json!({"usage": {"prompt_tokens": 900}});
+        assert_eq!(tokens_used(&prompt_only), Some(900));
+
+        assert_eq!(
+            tokens_used(&serde_json::json!({"choices": []})),
+            None,
+            "a reply that says nothing about usage must yield no reading, not zero"
+        );
+    }
+
     /// The plan records a namespaced id, but the gateway must receive a bare
     /// name. Storing one and deriving the other is what stops them drifting --
     /// sending `copilot/claude-opus-5` as the model name earns a 404.
     #[test]
     fn the_recorded_id_is_namespaced_and_the_wire_name_is_not() {
-        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true, true);
+        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true, true, 0);
         assert_eq!(model.id(), "copilot/claude-opus-5");
         assert_eq!(model.api_name(), "claude-opus-5");
     }

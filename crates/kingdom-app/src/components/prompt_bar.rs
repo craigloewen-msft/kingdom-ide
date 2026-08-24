@@ -357,10 +357,7 @@ KINGDOM_MODEL=copilot/claude-opus-5";
                                     </span>
                                     <span class="model-vendor">{option.vendor.clone()}</span>
                                     <span class="model-window">
-                                        {match option.context_window {
-                                            0 => String::new(),
-                                            w => format!("{}K", w / 1000),
-                                        }}
+                                        {kingdom_core::window_label(option.context_window)}
                                     </span>
                                 </button>
                             </li>

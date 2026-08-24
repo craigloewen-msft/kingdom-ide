@@ -83,6 +83,43 @@
   &.isolated { color: t.$gold-dim; }
 }
 
+// How full the model's context window this conversation is. Deliberately as
+// quiet as its neighbours: it is provenance, not an alarm. A header that
+// changed colour on its own would pull the King's eye away from the log, which
+// is where the work actually is — so the fill stays one tone the whole way
+// across and the number is left to say how close the limit is.
+.chamber-context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  // The row aligns on the baseline, and this item has no text of its own to
+  // sit on — the track is a bare box, so the baseline is taken from its
+  // bottom edge and the whole chip hangs a few pixels low beside the model
+  // and the workspace. Centring this one item is what puts it back in line.
+  align-self: center;
+}
+
+.context-track {
+  width: 46px;
+  height: 3px;
+  border-radius: 2px;
+  background: t.$edge-bright;
+  overflow: hidden;
+}
+
+.context-fill {
+  display: block;
+  height: 100%;
+  background: t.$gold-dim;
+}
+
+.context-label {
+  font-family: t.$font-mono;
+  font-size: 11px;
+  color: t.$ink-faint;
+}
+
 // --- Log -------------------------------------------------------------------
 //
 // The log is the conversation and nothing but the conversation, oldest at the

@@ -644,11 +644,35 @@ pub(crate) async fn converse(
             tools: tools.clone(),
         };
 
-        match model.take_turn(&brief).await {
-            Ok(Reply::Spoke(draft)) => return settle(plan_id, Ok(draft)),
+        let answer = match model.take_turn(&brief).await {
+            Ok(answer) => answer,
             Err(e) => return settle(plan_id, Err(e)),
+        };
 
-            Ok(Reply::Acts(acts)) => {
+        // Recorded before the reply is acted on, and in a write of its own.
+        // Folding it into the tool-call recording below would tie it to *acts*
+        // rather than to rounds: a round with three calls would write the same
+        // reading three times, and a round that only speaks would never write
+        // it at all.
+        //
+        // Being its own `update` also means `events::publish` pushes it, so the
+        // header's bar climbs while a long tool loop is still running -- which
+        // is exactly when the user wants to see it moving.
+        //
+        // Both numbers or neither: a count with no window is a percentage of
+        // nothing. See `kingdom_core::ContextUsage`.
+        if let Some(tokens) = answer.tokens {
+            let window = model.context_window();
+            let mut kingdom = lock()?;
+            update(&mut kingdom, &plan_id, |p| {
+                p.context = Some(kingdom_core::ContextUsage { tokens, window });
+            });
+        }
+
+        match answer.reply {
+            Reply::Spoke(draft) => return settle(plan_id, Ok(draft)),
+
+            Reply::Acts(acts) => {
                 for act in acts {
                     // Recorded *before* it runs, and published by `update`, so
                     // the conversation shows the command while it is still
