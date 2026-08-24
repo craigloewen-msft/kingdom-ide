@@ -1,0 +1,55 @@
+// Shared treatments. A mixin lives here only when two or more components would
+// otherwise restate the same rule set and be expected to change together.
+
+@use "tokens" as t;
+
+// One-line text that must not push its flex row wider than the rail.
+@mixin truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// Text input: the opening screen's path field and the chat dock's decree box.
+@mixin field($padding, $size) {
+  flex: 1;
+  padding: $padding;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  color: t.$ink;
+  font-size: $size;
+  outline: none;
+
+  &:focus { border-color: t.$gold-dim; }
+}
+
+// The one gold call-to-action. There is deliberately only ever one of these on
+// screen at a time — gold means "the King acts here".
+@mixin royal-button($padding) {
+  padding: $padding;
+  background: linear-gradient(180deg, t.$gold, #b8952f);
+  border: none;
+  border-radius: t.$radius;
+  color: #1a1206;
+  font-weight: 650;
+}
+
+// A readable panel floating over the map without hiding it.
+@mixin glass-panel {
+  position: absolute;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  font-size: 11px;
+}
+
+// SVG text has no background, so legibility over the skyline comes from
+// painting a halo underneath the glyphs.
+@mixin map-label($width) {
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: t.$label-halo;
+  stroke-width: $width;
+  stroke-linejoin: round;
+}

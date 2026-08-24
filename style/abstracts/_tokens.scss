@@ -1,0 +1,125 @@
+// Design tokens — the whole palette, in one place, emitting nothing on its own.
+//
+// Dark, map-first, deliberately restrained. The map is the hero; chrome sits
+// back so that colour on screen almost always means something (an agent's
+// state, a stack's banner, a contended resource).
+//
+// The palette is held as a *map* rather than loose variables so that
+// `base/_reset.scss` can mechanically emit each entry as a CSS custom
+// property. One source, two spellings: `$gold` for compile-time maths and
+// `var(--gold)` for anything that has to be reachable at runtime.
+
+@use "sass:map";
+
+$palette: (
+  // Surfaces, darkest first.
+  "void":        #070b14,
+  "deep":        #0b1120,
+  "panel":       #0f172a,
+  "panel-2":     #16203a,
+  "edge":        #1e293b,
+  "edge-bright": #2d3d5c,
+
+  // Text.
+  "ink":         #e2e8f0,
+  "ink-dim":     #94a3b8,
+  "ink-faint":   #64748b,
+
+  // The crown.
+  "gold":        #d4af37,
+  "gold-dim":    #8a7327,
+
+  // Plan status. These must stay in step with `PlanStatus::color` in
+  // kingdom-core, which returns the same hexes to SVG attributes the browser
+  // paints directly.
+  "working":     #22c55e,
+  "review":      #eab308,
+  "blocked":     #ef4444,
+  "idle":        #64748b,
+  "failed":      #f97316,
+  "approved":    #38bdf8,
+);
+
+@function colour($name) {
+  @if not map.has-key($palette, $name) {
+    @error "unknown palette colour: #{$name}";
+  }
+  @return map.get($palette, $name);
+}
+
+$void:        colour("void");
+$deep:        colour("deep");
+$panel:       colour("panel");
+$panel-2:     colour("panel-2");
+$edge:        colour("edge");
+$edge-bright: colour("edge-bright");
+
+$ink:         colour("ink");
+$ink-dim:     colour("ink-dim");
+$ink-faint:   colour("ink-faint");
+
+$gold:        colour("gold");
+$gold-dim:    colour("gold-dim");
+
+$working:     colour("working");
+$review:      colour("review");
+$blocked:     colour("blocked");
+$idle:        colour("idle");
+$failed:      colour("failed");
+$approved:    colour("approved");
+
+// Every state a plan can be in, keyed by the `.status-*` / `.plan-*` class
+// suffix that `PlanStatus::css_suffix` emits. Stating them once here is what
+// keeps the rail badge and the map pip from drifting apart.
+//
+// Drafting reuses the working green and rejected the idle grey: a plan being
+// drawn up *is* work in progress, and a refused one is as quiet as an unstaffed
+// city.
+$statuses: (
+  "drafting": $working,
+  "review":   $review,
+  "blocked":  $blocked,
+  "failed":   $failed,
+  "approved": $approved,
+  "rejected": $idle,
+);
+
+// The land the realm stands on, shore to peak.
+//
+// Terrain is deliberately DECORATION and is held to decoration's rules. The
+// elevation field means nothing -- it is noise -- so it earns its place only as
+// substrate: it exists so the things that *do* carry meaning (a gilded roof, a
+// blocked plan, a contended port) read as objects standing in a place rather
+// than as marks on a backdrop.
+//
+// Hence these are deliberately NOT in `$palette`. Every entry there is a colour
+// that means something, and putting land tones beside them would invite a
+// future change to reach for one where a signal was wanted. They live here as a
+// closed set of desaturated slates, none of which may approach the saturation
+// of a `Ward::tint()` or a status colour. If the terrain ever competes with a
+// signal for attention, the terrain is wrong.
+//
+// Ordered shore -> highland, indexed by the band number `Land` emits.
+$terrain: (
+  #17253c,
+  #1b2b45,
+  #20324e,
+  #253a58,
+  #2b4363,
+);
+
+// Shorelines and contour edges.
+$terrain-edge: #24405f;
+
+// Roads: a dark casing under a lighter metalled surface.
+$road-casing:  #0e1728;
+$road-surface: #46587c;
+
+$radius: 8px;
+
+$font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+$font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+// Labels drawn over the map need their own backdrop or they vanish against a
+// bright roof; this is the colour they are haloed with.
+$label-halo: rgba(7, 11, 20, 0.9);

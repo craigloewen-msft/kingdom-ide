@@ -1,130 +1,113 @@
 //! Placeholder data for the throne room.
 //!
-//! Real architects and leases do not exist yet — no agents are actually being
-//! run. This module fabricates a plausible court so the UI can be built and
-//! judged against realistic shapes, including the states that matter most:
-//! a blocked architect and a contended resource.
+//! Cities are **real** and come from scanning the chosen folder. Plans opened
+//! from the chat dock are **real** too, and drafted by an actual model. What
+//! this module fabricates is a *starting* court, so a freshly opened kingdom
+//! has something to show before the King has issued a single decree.
 //!
-//! Cities, by contrast, are **real** and come from scanning the chosen folder.
-//! Only the agent layer is invented.
+//! It deliberately seeds a **blocked plan** and a **contended resource**. Those
+//! are the states the whole product exists to make visible, so they have to be
+//! reachable on day one -- tidying this into an all-quiet court would make the
+//! most important visuals unreachable during development.
 
 use crate::ids::*;
 use crate::model::*;
 
-/// Fabricates a court of architects, plans and crown resources for the given
-/// cities, so the map has something to show on first run.
-pub fn populate_court(cities: &[City]) -> (Vec<Architect>, Vec<Plan>, Vec<Resource>) {
+/// Fabricates a court of plans and crown resources for the given cities, so the
+/// map has something to show on first run.
+pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
     if cities.is_empty() {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new());
     }
 
     let port = ResourceId::new("res-port-3000");
     let cargo = ResourceId::new("res-cargo-lock");
     let gpu = ResourceId::new("res-gpu");
 
-    let mut architects = Vec::new();
-    let mut plans = Vec::new();
-
-    // Deliberately seed the interesting states rather than all-idle: the whole
-    // point of the map is showing trouble, so trouble must be visible on day one.
+    // Each scripted plan: (id, decree, status, the leases it holds).
     let scripted = [
         (
-            "Vitruvius",
-            ArchitectStatus::Working,
-            "Refactoring the auth module",
+            "plan-ramparts",
+            "Refactor the auth module",
+            PlanStatus::Drafting,
             vec![(port.clone(), LeaseMode::Exclusive, "Running the dev server")],
         ),
         (
-            "Imhotep",
-            ArchitectStatus::Blocked,
-            "Waiting on port 3000 to run integration tests",
+            "plan-aqueduct",
+            "Run the integration tests end to end",
+            PlanStatus::Blocked,
             vec![],
         ),
         (
-            "Hypatia",
-            ArchitectStatus::AwaitingReview,
-            "Proposed a new storage layer",
+            "plan-foundations",
+            "Design a new storage layer",
+            PlanStatus::AwaitingReview,
             vec![(cargo.clone(), LeaseMode::Shared, "Building dependencies")],
-        ),
-        (
-            "Brunelleschi",
-            ArchitectStatus::Idle,
-            "Awaiting a decree",
-            vec![],
         ),
     ];
 
-    for (i, (name, status, activity, leases)) in scripted.into_iter().enumerate() {
+    let mut plans = Vec::new();
+    for (i, (id, prompt, status, leases)) in scripted.into_iter().enumerate() {
         let city = &cities[i % cities.len()];
-        let id = ArchitectId::new(format!("arch-{}", name.to_lowercase()));
+        let id = PlanId::new(id);
 
-        architects.push(Architect {
-            id: id.clone(),
-            name: name.to_string(),
-            city: city.id.clone(),
-            status,
-            activity: activity.to_string(),
-            leases: leases
-                .into_iter()
-                .map(|(resource, mode, reason)| Lease {
-                    resource,
-                    holder: id.clone(),
-                    mode,
-                    reason: reason.to_string(),
-                })
-                .collect(),
-        });
+        let mut plan = Plan::opened(id.clone(), city.id.clone(), prompt, "mock");
+        plan.title = format!("{} of {}", plan_title(i), city.name);
+        plan.summary = match status {
+            PlanStatus::Blocked => format!(
+                "Waiting on the dev server port before it can test {}.",
+                city.name
+            ),
+            _ => format!("Proposes structural changes to {}.", city.name),
+        };
+        plan.status = status;
+        plan.touches = notable_files(city, 3);
+        plan.say(Speaker::Court, plan.summary.clone());
+        plan.leases = leases
+            .into_iter()
+            .map(|(resource, mode, reason)| Lease {
+                resource,
+                holder: id.clone(),
+                mode,
+                reason: reason.to_string(),
+            })
+            .collect();
 
-        if matches!(
-            status,
-            ArchitectStatus::AwaitingReview | ArchitectStatus::Working
-        ) {
-            plans.push(Plan {
-                id: PlanId::new(format!("plan-{i}")),
-                title: format!("{} of {}", plan_title(i), city.name),
-                summary: format!(
-                    "{name} proposes structural changes to {}. Awaiting royal assent.",
-                    city.name
-                ),
-                city: city.id.clone(),
-                author: id,
-                status: if status == ArchitectStatus::AwaitingReview {
-                    PlanStatus::AwaitingReview
-                } else {
-                    PlanStatus::Draft
-                },
-                touches: notable_files(city, 3),
-            });
-        }
+        plans.push(plan);
     }
 
     // Settled plans, so the sidebar's "All" filter has history to reveal.
     // Without at least one approved and one rejected plan, the filter looks
     // broken rather than empty.
     let first = &cities[0];
-    plans.push(Plan {
-        id: PlanId::new("plan-settled-approved"),
-        title: format!("The Old Ramparts of {}", first.name),
-        summary: "Hardened the error paths. Approved and built.".into(),
-        city: first.id.clone(),
-        author: ArchitectId::new("arch-vitruvius"),
-        status: PlanStatus::Approved,
-        touches: vec!["src/lib.rs".into()],
-    });
-    plans.push(Plan {
-        id: PlanId::new("plan-settled-rejected"),
-        title: format!("The Folly of {}", first.name),
-        summary: "Proposed rewriting the scanner. Refused.".into(),
-        city: first.id.clone(),
-        author: ArchitectId::new("arch-hypatia"),
-        status: PlanStatus::Rejected,
-        touches: vec!["src/scan.rs".into()],
-    });
+    let mut approved = Plan::opened(
+        PlanId::new("plan-settled-approved"),
+        first.id.clone(),
+        "Harden the error paths",
+        "mock",
+    );
+    approved.title = format!("The Old Ramparts of {}", first.name);
+    approved.summary = "Hardened the error paths. Approved and built.".into();
+    approved.status = PlanStatus::Approved;
+    approved.touches = vec!["src/lib.rs".into()];
+    plans.push(approved);
+
+    let mut rejected = Plan::opened(
+        PlanId::new("plan-settled-rejected"),
+        first.id.clone(),
+        "Rewrite the scanner from scratch",
+        "mock",
+    );
+    rejected.title = format!("The Folly of {}", first.name);
+    rejected.summary = "Proposed rewriting the scanner. Refused.".into();
+    rejected.status = PlanStatus::Rejected;
+    rejected.touches = vec!["src/scan.rs".into()];
+    plans.push(rejected);
 
     let holders_of = |id: &ResourceId| -> Vec<Lease> {
-        architects
+        plans
             .iter()
-            .flat_map(|a| a.leases.iter())
+            .flat_map(|p| p.leases.iter())
             .filter(|l| &l.resource == id)
             .cloned()
             .collect()
@@ -136,9 +119,9 @@ pub fn populate_court(cities: &[City]) -> (Vec<Architect>, Vec<Plan>, Vec<Resour
             name: "Dev server :3000".into(),
             kind: ResourceKind::Port(3000),
             holders: holders_of(&port),
-            // Imhotep is queued behind Vitruvius: this is the contention the
-            // map renders as a red thread between two cities.
-            waiting: vec![ArchitectId::new("arch-imhotep")],
+            // The aqueduct plan is queued behind the ramparts plan: this is the
+            // contention the map renders as a red thread between two cities.
+            waiting: vec![PlanId::new("plan-aqueduct")],
         },
         Resource {
             id: cargo.clone(),
@@ -156,7 +139,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Architect>, Vec<Plan>, Vec<Resour
         },
     ];
 
-    (architects, plans, resources)
+    (plans, resources)
 }
 
 fn plan_title(i: usize) -> &'static str {
@@ -172,7 +155,7 @@ fn plan_title(i: usize) -> &'static str {
 ///
 /// Hardcoded paths like `src/lib.rs` match nothing in most projects, which
 /// would leave the map's plan highlighting dead on arrival -- the same reason
-/// this module seeds a blocked architect rather than a tidy idle court: the
+/// this module seeds a blocked plan rather than a tidy idle court: the
 /// states the UI exists to show have to be reachable on day one.
 fn notable_files(city: &City, want: usize) -> Vec<String> {
     let Some(structure) = &city.structure else {
@@ -211,5 +194,56 @@ fn collect(district: &District, out: &mut Vec<(bool, u64, String)>) {
     }
     for child in &district.children {
         collect(child, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn city(id: &str, name: &str) -> City {
+        City {
+            id: CityId::new(id),
+            name: name.into(),
+            path: name.to_lowercase(),
+            kind: CityKind::Rust,
+            file_count: 10,
+            has_git: true,
+            dirty_files: 0,
+            structure: None,
+        }
+    }
+
+    /// The court must open showing trouble, not calm.
+    ///
+    /// A blocked plan and a contended resource are the states the whole product
+    /// exists to make visible. If the sample data ever settles into a tidy
+    /// all-quiet court, the most important visuals become unreachable during
+    /// development -- and a refactor is exactly when that would happen quietly.
+    #[test]
+    fn the_opening_court_always_shows_a_blockage_and_a_contention() {
+        let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
+        let (plans, resources) = populate_court(&cities);
+
+        assert!(
+            plans.iter().any(|p| p.status == PlanStatus::Blocked),
+            "a blocked plan must be visible on first run"
+        );
+        assert!(
+            resources.iter().any(|r| r.is_contended()),
+            "a contended resource must be visible on first run"
+        );
+
+        // Contention is only drawable if the waiting plan actually exists: a
+        // dangling PlanId would silently drop the red thread from the map.
+        for resource in &resources {
+            for waiter in &resource.waiting {
+                assert!(
+                    plans.iter().any(|p| &p.id == waiter),
+                    "resource {} waits on unknown plan {waiter}",
+                    resource.id
+                );
+            }
+        }
     }
 }

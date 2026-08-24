@@ -2,8 +2,9 @@
 
 **A command surface for coordinating many coding agents at once.**
 
-Open your dev folder. Every project inside becomes a **city**. Agents working in
-them are **architects**, who submit **plans** for your approval. You are the King.
+Open your dev folder. Every project inside becomes a **city**. Work is proposed
+as **architectural plans**, drafted by a model, which you approve or reject. You
+are the King.
 
 The point is not editing code. The point is answering three questions at a glance:
 
@@ -36,8 +37,17 @@ style/main.scss       styling
 ## Status
 
 Early. Project scanning, the map, and the client/server round trip are real.
-Architects, plans and resource leases are **placeholder data** — no agent is
-actually spawned yet.
+So is drafting: a decree opens a plan, takes a lease on the city's files, and
+calls a model with that project's real scan data.
+
+Out of the box an offline **mock** model drafts every plan, so a fresh clone
+works with no credential and no network. To use a real model, copy
+`.kingdom.env.example` to `.kingdom.env` and set `KINGDOM_MODEL_PROVIDER=copilot`
+plus either a token (`KINGDOM_API_KEY`) or a command that prints one
+(`KINGDOM_API_KEY_HELPER`, defaulting to `agency auth github`).
+
+Plans still cannot *do* anything beyond replying — no tool use, no edits — and
+the court a kingdom opens with is placeholder data.
 
 See [AGENTS.md](./AGENTS.md) for the architecture, the philosophy behind the
 metaphor, and an honest breakdown of what is real versus faked.

@@ -21,7 +21,7 @@ use city::{CityGlyph, Detail};
 use kingdom_core::layout::{realm_bounds, settle_kingdom, Realm};
 use kingdom_core::skyline::iso;
 use kingdom_core::terrain::{contours, Band, BANDS};
-use kingdom_core::{City, CityId, Ward};
+use kingdom_core::{City, CityId, PlanStatus, Ward};
 use leptos::ev;
 use leptos::prelude::*;
 
@@ -374,14 +374,18 @@ pub fn KingdomMap() -> impl IntoView {
             </div>
 
             <div class="map-legend">
+                // Driven from the enum rather than hand-listed, so a new plan
+                // state cannot appear on the map without appearing here too.
                 <div class="legend-row">
-                    <span><i class="dot status-working"></i>"Working"</span>
-                    <span><i class="dot status-review"></i>"Awaiting review"</span>
-                    <span><i class="dot status-blocked"></i>"Blocked"</span>
-                    <span><i class="dot status-idle"></i>"Idle"</span>
+                    {PlanStatus::ALL.iter().map(|s| view! {
+                        <span>
+                            <i class=format!("dot status-{}", s.css_suffix())></i>
+                            {s.label()}
+                        </span>
+                    }).collect_view()}
                 </div>
-                // Ward colours: what the code *is*, as opposed to what an agent
-                // is doing to it.
+                // Ward colours: what the code *is*, as opposed to what is being
+                // proposed for it.
                 <div class="legend-row wards">
                     {Ward::ALL.iter().map(|w| view! {
                         <span>
@@ -575,8 +579,8 @@ fn Throne(realm: Memo<Realm>) -> impl IntoView {
     }
 }
 
-/// Red threads between cities whose architects are contending for the same
-/// crown resource. This is the map's most important signal.
+/// Red threads between cities whose plans are contending for the same crown
+/// resource. This is the map's most important signal.
 ///
 /// The thread follows the **road** between the two cities rather than cutting
 /// across country, so contention reads as traffic on a real network. That the
@@ -590,21 +594,21 @@ fn ContentionThreads(realm: Memo<Realm>) -> impl IntoView {
         let r = realm.get();
         let mut paths: Vec<String> = Vec::new();
 
+        // Index of city -> placement, by plan. A plan knows its own city, so
+        // this is one lookup rather than the two the old architect layer needed.
         let city_index = |id: &CityId| kingdom.cities.iter().position(|c| &c.id == id);
-        let architect_city = |aid: &kingdom_core::ArchitectId| {
+        let plan_city = |pid: &kingdom_core::PlanId| {
             kingdom
-                .architects
+                .plans
                 .iter()
-                .find(|a| &a.id == aid)
-                .and_then(|a| city_index(&a.city))
+                .find(|p| &p.id == pid)
+                .and_then(|p| city_index(&p.city))
         };
 
         for resource in kingdom.contended_resources() {
             for holder in &resource.holders {
                 for waiter in &resource.waiting {
-                    let (Some(h), Some(w)) =
-                        (architect_city(&holder.holder), architect_city(waiter))
-                    else {
+                    let (Some(h), Some(w)) = (plan_city(&holder.holder), plan_city(waiter)) else {
                         continue;
                     };
                     if h == w {

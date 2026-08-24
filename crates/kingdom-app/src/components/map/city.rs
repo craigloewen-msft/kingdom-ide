@@ -17,7 +17,7 @@
 use crate::app::KingdomState;
 use kingdom_core::layout::CityPlacement;
 use kingdom_core::skyline::{iso, Lot, LotKind, Plate, Skyline};
-use kingdom_core::{ArchitectStatus, City, CityId, PlanStatus};
+use kingdom_core::{City, CityId, PlanStatus};
 use leptos::prelude::*;
 use std::collections::HashSet;
 
@@ -75,30 +75,21 @@ pub fn CityGlyph(
         move || state.selected.get().as_ref() == Some(&id)
     };
 
-    let architects = {
+    let plans = {
         let id = id.clone();
         Memo::new(move |_| {
             state
                 .kingdom
                 .get()
-                .architects_in(&id)
+                .plans_in(&id)
+                .filter(|p| p.is_live())
                 .cloned()
                 .collect::<Vec<_>>()
         })
     };
 
-    let astir = move || {
-        architects
-            .get()
-            .iter()
-            .any(|a| a.status == ArchitectStatus::Working)
-    };
-    let troubled = move || {
-        architects
-            .get()
-            .iter()
-            .any(|a| a.status == ArchitectStatus::Blocked)
-    };
+    let astir = move || plans.get().iter().any(|p| p.status == PlanStatus::Drafting);
+    let troubled = move || plans.get().iter().any(|p| p.status == PlanStatus::Blocked);
 
     // Paths a pending plan proposes to touch: these buildings get gilded, which
     // is what makes "what am I being asked to approve?" a place on the map.
@@ -188,7 +179,7 @@ pub fn CityGlyph(
                 }
             }}
 
-            // Cranes mark cities where an architect is actively building.
+            // Cranes mark cities where a plan is actively drafting.
             <Show when=astir>
                 <Crane radius=r/>
             </Show>
@@ -204,7 +195,7 @@ pub fn CityGlyph(
                 </text>
             </Show>
 
-            <ArchitectPips architects=architects radius=r/>
+            <PlanPips plans=plans radius=r/>
         </g>
     }
 }
@@ -460,7 +451,7 @@ fn Landmark(skyline: StoredValue<Skyline>) -> impl IntoView {
     })
 }
 
-/// A construction crane, shown while an architect is working here.
+/// A construction crane, shown while a plan is drafting here.
 #[component]
 fn Crane(radius: f64) -> impl IntoView {
     let h = radius * 0.85;
@@ -499,19 +490,19 @@ fn Banner(radius: f64, color: &'static str) -> impl IntoView {
     }
 }
 
-/// Status pips for the architects stationed here.
+/// Status pips for the plans in play here.
 #[component]
-fn ArchitectPips(architects: Memo<Vec<kingdom_core::Architect>>, radius: f64) -> impl IntoView {
+fn PlanPips(plans: Memo<Vec<kingdom_core::Plan>>, radius: f64) -> impl IntoView {
     view! {
-        <g class="architect-ring">
+        <g class="plan-ring">
             <For
-                each={move || architects.get().into_iter().enumerate().collect::<Vec<_>>()}
-                key=|(_, a)| a.id.clone()
+                each={move || plans.get().into_iter().enumerate().collect::<Vec<_>>()}
+                key=|(_, p)| p.id.clone()
                 let:entry
             >
                 {
-                    let (i, architect) = entry;
-                    let total = architects.get().len().max(1);
+                    let (i, plan) = entry;
+                    let total = plans.get().len().max(1);
                     let spread = 2.094_395_1_f64;
                     let start = -std::f64::consts::FRAC_PI_2 - spread / 2.0;
                     let step = if total > 1 { spread / (total - 1) as f64 } else { 0.0 };
@@ -520,17 +511,17 @@ fn ArchitectPips(architects: Memo<Vec<kingdom_core::Architect>>, radius: f64) ->
 
                     view! {
                         <circle
-                            class=format!("pip status-{}", architect.status.css_suffix())
+                            class=format!("pip status-{}", plan.status.css_suffix())
                             cx=ring * angle.cos()
                             cy=ring * angle.sin() * 0.6 - radius * 0.28
                             r="6"
                         >
                             <title>
                                 {format!(
-                                    "{} \u{2014} {}: {}",
-                                    architect.name,
-                                    architect.status.label(),
-                                    architect.activity,
+                                    "{} \u{2014} {} ({})",
+                                    plan.title,
+                                    plan.status.label(),
+                                    plan.model,
                                 )}
                             </title>
                         </circle>

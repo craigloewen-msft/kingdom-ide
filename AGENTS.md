@@ -47,12 +47,16 @@ about the **stance** the user takes toward their agents.
 |---|---|---|
 | **Kingdom** | `Kingdom` | the dev folder you opened |
 | **City** | `City` | one project directory inside it |
-| **Architect** | `Architect` | an agent, always stationed in one city |
-| **Architectural Plan** | `Plan` | a proposal awaiting your review |
-| **Decree** | `Task` | work you start from the chat dock |
+| **Architectural Plan** | `Plan` | a proposal, drafted by a model, awaiting your review |
 | **Crown Resource** | `Resource` | a contended machine resource |
 | **Lease** | `Lease` | a granted claim on one |
 | **The King** | the user | the only one who approves anything |
+
+There is deliberately **no agent noun**. An earlier design had an `Architect`
+entity that owned plans, which meant two state machines to keep in sync for no
+gain: the King never reviews an architect, he reviews a plan. A `Plan` is now
+both the unit of work and the unit of review, and which model is drafting it is
+just a field on it.
 
 The point of the metaphor: **you are a sovereign reviewing proposals, not a
 typing-assisted programmer.** An architect brings you plans. You approve or
@@ -113,8 +117,8 @@ Rust end to end. Axum server, Leptos (WASM) browser UI, one shared domain crate.
 crates/
   kingdom-core/     Domain model. No I/O, no framework deps. Compiles to
                     BOTH native and wasm32 — keep it that way.
-    ids.rs          Newtyped IDs (CityId, ArchitectId, ...)
-    model.rs        Kingdom, City, Architect, Plan, Resource, Lease,
+    ids.rs          Newtyped IDs (CityId, PlanId, ResourceId)
+    model.rs        Kingdom, City, Plan, Resource, Lease,
                     District/Building/Ward (a project's shape on disk)
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
@@ -125,6 +129,9 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
+    llm/            Drafting plans with a model (ssr only)
+                    mod.rs (Model trait, Brief), mock.rs, copilot.rs,
+                    credential.rs, broker.rs (leases)
     app.rs          Shell, routing, shared UI state
     components/     sidebar.rs, chat.rs, map/ (mod.rs + city.rs)
 
@@ -151,7 +158,7 @@ No `tokio`, no `std::fs`, no native-only crates. Server-only code goes in
 flowchart TB
   subgraph Browser["Browser — wasm32, feature: hydrate"]
     Map["Kingdom map (SVG, pan/zoom)"]
-    Side["Left rail: Cities / Architects / Plans / Resources"]
+    Side["Left rail: Cities / Plans / Resources"]
     Chat["Bottom dock: Start a new task"]
   end
   subgraph Server["Axum — native, feature: ssr"]
@@ -184,23 +191,36 @@ build on top of a placeholder believing it is real.
 - Pan, zoom, city selection, level-of-detail switching
 - The client/server round trip for every `#[server]` function
 - Lease compatibility logic (tested)
+- **Drafting a plan with a real model.** A decree opens a plan, takes a `Shared`
+  lease on the city's path, calls the model with that project's real scan data,
+  and settles the plan at `AwaitingReview` (or `Blocked`/`Failed`), releasing the
+  lease on every path. Two providers: an offline deterministic `mock` (the
+  default) and GitHub Copilot.
+- **Credential resolution** from `KINGDOM_API_KEY` or a helper command
+  (`agency auth github` by default), with the contract tested.
 
 **Faked — `kingdom_core::sample::populate_court`:**
-- All architects, their statuses and activities
-- All plans
-- All resources and leases
+- The *opening* court: the plans and resources a kingdom starts with, before the
+  King has issued any decree. Plans he opens himself are entirely real.
 
 **Not built at all:**
-- Spawning or running any real agent
+- Agents that *do* anything beyond replying: no tool use, no commands, no edits
 - Live updates (no WebSocket yet — state refreshes only on action)
 - Persistence (state is in memory; a restart empties the kingdom)
 - Plan approval/rejection actually doing anything
-- Editing files
+- A lease *queue* — refusal is surfaced, never resolved
 
-The placeholder court deliberately includes a **blocked architect** and a
-**contended resource**, because those are the states the UI exists to show. Do
-not "clean up" the sample data into a tidy all-idle court — it would make the
-most important visual states unreachable during development.
+The placeholder court deliberately includes a **blocked plan** and a **contended
+resource**, because those are the states the UI exists to show. Do not "clean
+up" the sample data into a tidy all-quiet court — it would make the most
+important visual states unreachable during development. A test pins this.
+
+### Configuring model access
+
+Copy `.kingdom.env.example` to `.kingdom.env` (gitignored). With nothing set,
+the offline mock drafts every plan, so a fresh clone works with no credential
+and no network. The dock's provider badge reports whether a credential actually
+resolves, not merely whether one is configured.
 
 ---
 
@@ -273,12 +293,15 @@ later decision, not an oversight.
 Roughly in order of value:
 
 1. **WebSocket live updates.** "Know what your agents are doing" is inherently a
-   push problem. Retrofitting this onto a poll-based UI later is painful — the
-   longer it waits, the more code assumes request/response.
-2. **A real lease broker.** Make `acquire`/`release` real, with a queue. This is
-   the first genuinely differentiating feature.
-3. **Spawn one real agent.** Even a single hardcoded subprocess that must take a
-   lease before it runs proves the whole model end to end.
-4. **Plan review UI.** Diff view, approve/reject. This is the King's core loop.
+   push problem, and this is now the binding constraint: drafting happens inside
+   the request, so the King watches a spinner instead of watching work. Everything
+   else on this list is easier once it lands.
+2. **A lease queue.** `acquire`/`release` are real; what is missing is what
+   happens *after* a refusal. Today a blocked plan sits visible but inert.
+3. **Give a plan hands.** Tool use: run a command, read a file, propose a diff —
+   each taking its own lease first. This is where the lease model stops being
+   theory.
+4. **Plan review UI.** Diff view, approve/reject that does something. This is the
+   King's core loop and it is still a stub.
 5. **Persistence.** SQLite behind `api.rs`. Deliberately deferred — the schema
    should follow a settled domain model, not lead it.

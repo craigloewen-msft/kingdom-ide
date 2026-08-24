@@ -1,0 +1,228 @@
+// The map surface and its chrome: the canvas, the land the realm stands on,
+// the roads between cities, the throne at the centre, and the floating
+// controls/legend.
+//
+// What is *inside* a city — districts, buildings, cranes — lives in
+// `_skyline.scss`, mirroring the `map/mod.rs` / `map/city.rs` split in Rust.
+
+@use "sass:list";
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+.map-region {
+  grid-area: map;
+  position: relative;
+  min-height: 0;
+  // Deep ocean beyond the drawn sea, so the world has no visible edge however
+  // far the King pans. The map paints its own water now, so a gradient here
+  // would show through as a second, contradicting horizon.
+  background: t.$void;
+}
+
+.map-wrap { position: absolute; inset: 0; }
+
+.kingdom-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  user-select: none;
+
+  &.grabbing { cursor: grabbing; }
+}
+
+// --- The land --------------------------------------------------------------
+//
+// See `$terrain` in the tokens for why these colours are deliberately kept out
+// of the meaningful palette.
+
+.ocean {
+  // The sheen gradient is set inline; this only suppresses the default edge.
+  stroke: none;
+}
+
+// Elevation bands, shore to peak. Emitted from the token list rather than
+// hand-written, so adding a band to `terrain::BANDS` cannot leave an unstyled
+// (and therefore invisible) ring on the map.
+.land-band {
+  stroke-width: 1;
+  stroke-linejoin: round;
+}
+
+@for $i from 0 through 4 {
+  .band-#{$i} {
+    fill: list.nth(t.$terrain, $i + 1);
+    // The shore is the only hard edge; inland contours fade back so relief is
+    // felt rather than counted off.
+    stroke: if($i == 0, t.$terrain-edge, rgba(45, 61, 92, 0.45));
+  }
+}
+
+// Roads: the connective tissue. Before these existed the cities were, literally,
+// disjoint -- so they are load-bearing for the map reading as one realm rather
+// than as scattered islands.
+//
+// Each road is drawn twice: a wide dark casing beneath a narrower metalled
+// surface. That pairing is what makes a stroke read as a *road* cut into the
+// ground rather than as a line drawn on top of it.
+.roads { pointer-events: none; }
+
+.road-casing {
+  fill: none;
+  stroke: t.$road-casing;
+  stroke-width: 6;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.road-surface {
+  fill: none;
+  stroke: t.$road-surface;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+
+// --- The throne ------------------------------------------------------------
+
+.throne-ring {
+  fill: rgba(212, 175, 55, 0.07);
+  stroke: t.$gold;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 6;
+}
+
+.throne-glyph { fill: t.$gold; font-size: 34px; }
+
+.throne-label {
+  fill: t.$gold-dim;
+  font-size: 11px;
+  letter-spacing: 0.28em;
+}
+
+// A pulsing red thread drawn between two cities fighting over one resource.
+// Now a curved path following the road between them, so it must not be filled.
+.contention-thread {
+  fill: none;
+  stroke: t.$blocked;
+  stroke-width: 2;
+  stroke-dasharray: 6 8;
+  opacity: 0.55;
+  animation: thread-crawl 1s linear infinite;
+}
+
+@keyframes thread-crawl {
+  to { stroke-dashoffset: -14; }
+}
+
+// --- Cities ----------------------------------------------------------------
+
+.city {
+  cursor: pointer;
+
+  .city-plot {
+    fill: #131f38;
+    stroke: t.$edge-bright;
+    stroke-width: 1.5;
+    transition: fill 0.15s, stroke 0.15s;
+  }
+
+  &:hover .city-plot { fill: #182642; stroke: t.$ink-faint; }
+
+  &.selected .city-plot {
+    stroke: t.$gold;
+    stroke-width: 2.5;
+    fill: #1b2748;
+  }
+
+  &.troubled .city-plot { stroke: t.$blocked; }
+}
+
+// The repo boundary, made literal: only git projects are walled.
+.city-walls {
+  fill: none;
+  stroke: #3b4d70;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.city.selected .city-walls { stroke: t.$gold-dim; opacity: 0.9; }
+
+.city-name {
+  @include m.map-label(3px);
+  fill: t.$ink-dim;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.city-meta {
+  @include m.map-label(2.5px);
+  fill: t.$ink-faint;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.city.selected .city-name { fill: t.$gold; }
+
+.pip { stroke: t.$deep; stroke-width: 1.5; }
+
+// --- Floating chrome -------------------------------------------------------
+
+.map-controls {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  button {
+    width: 34px;
+    height: 34px;
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid t.$edge-bright;
+    border-radius: 6px;
+    color: t.$ink-dim;
+    font-size: 16px;
+
+    &:hover { background: t.$panel-2; color: t.$gold; border-color: t.$gold-dim; }
+  }
+}
+
+.map-legend {
+  @include m.glass-panel;
+  bottom: 14px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: t.$ink-dim;
+
+  .legend-row { display: flex; gap: 14px; flex-wrap: wrap; }
+
+  // Ward colours say what the code *is*; they sit quieter than the status row,
+  // which says what an agent is doing to it.
+  .legend-row.wards {
+    gap: 9px;
+    padding-top: 6px;
+    border-top: 1px solid t.$edge;
+    font-size: 10px;
+    color: t.$ink-faint;
+    max-width: 420px;
+  }
+
+  span { display: flex; align-items: center; gap: 6px; }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+}
+
+.map-zoomhint {
+  @include m.glass-panel;
+  bottom: 14px;
+  right: 16px;
+  padding: 6px 10px;
+  color: t.$ink-faint;
+  pointer-events: none;
+}

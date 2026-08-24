@@ -15,7 +15,6 @@ pub struct Kingdom {
     /// Absolute path to the dev folder on the host machine.
     pub root: String,
     pub cities: Vec<City>,
-    pub architects: Vec<Architect>,
     pub plans: Vec<Plan>,
     pub resources: Vec<Resource>,
 }
@@ -27,7 +26,6 @@ impl Kingdom {
             name: "No Kingdom".into(),
             root: String::new(),
             cities: Vec::new(),
-            architects: Vec::new(),
             plans: Vec::new(),
             resources: Vec::new(),
         }
@@ -41,9 +39,13 @@ impl Kingdom {
         self.cities.iter().find(|c| &c.id == id)
     }
 
-    /// Architects currently stationed in a given city.
-    pub fn architects_in<'a>(&'a self, id: &'a CityId) -> impl Iterator<Item = &'a Architect> + 'a {
-        self.architects.iter().filter(move |a| &a.city == id)
+    /// Plans drawn up in a given city.
+    pub fn plans_in<'a>(&'a self, id: &'a CityId) -> impl Iterator<Item = &'a Plan> + 'a {
+        self.plans.iter().filter(move |p| &p.city == id)
+    }
+
+    pub fn plan(&self, id: &PlanId) -> Option<&Plan> {
+        self.plans.iter().find(|p| &p.id == id)
     }
 
     /// Plans still awaiting the King's judgement.
@@ -53,7 +55,7 @@ impl Kingdom {
             .filter(|p| p.status == PlanStatus::AwaitingReview)
     }
 
-    /// Every resource that more than one architect is currently contending for.
+    /// Every resource that more than one plan is currently contending for.
     ///
     /// This is the signal the map draws in red: it is the moment two agents are
     /// about to trip over each other.
@@ -301,122 +303,227 @@ impl CityKind {
 }
 
 // ---------------------------------------------------------------------------
-// Architects (agents)
+// Plans -- the unit of work AND the unit of review
 // ---------------------------------------------------------------------------
 
-/// An agent at work in the kingdom. Always stationed in exactly one city.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Architect {
-    pub id: ArchitectId,
-    pub name: String,
-    /// The city this architect is working in.
-    pub city: CityId,
-    pub status: ArchitectStatus,
-    /// One-line description of what it is doing right now.
-    pub activity: String,
-    /// Crown resources this architect currently holds.
-    pub leases: Vec<Lease>,
-}
-
-/// What an architect is doing. Drives both the sidebar badge and the map glow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArchitectStatus {
-    /// Available, awaiting a decree.
-    Idle,
-    /// Actively working.
-    Working,
-    /// Has submitted a plan and is waiting on the King.
-    AwaitingReview,
-    /// Cannot proceed: wants a resource another architect holds.
-    Blocked,
-}
-
-impl ArchitectStatus {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ArchitectStatus::Idle => "Idle",
-            ArchitectStatus::Working => "Working",
-            ArchitectStatus::AwaitingReview => "Awaiting review",
-            ArchitectStatus::Blocked => "Blocked",
-        }
-    }
-
-    pub fn color(&self) -> &'static str {
-        match self {
-            ArchitectStatus::Idle => "#64748b",
-            ArchitectStatus::Working => "#22c55e",
-            ArchitectStatus::AwaitingReview => "#eab308",
-            ArchitectStatus::Blocked => "#ef4444",
-        }
-    }
-
-    /// CSS class suffix, e.g. `status-working`.
-    pub fn css_suffix(&self) -> &'static str {
-        match self {
-            ArchitectStatus::Idle => "idle",
-            ArchitectStatus::Working => "working",
-            ArchitectStatus::AwaitingReview => "review",
-            ArchitectStatus::Blocked => "blocked",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Plans
-// ---------------------------------------------------------------------------
-
-/// An architectural plan: an agent's proposal, submitted for royal review.
+/// An architectural plan: a proposal drafted by a model, awaiting the King's
+/// review.
+///
+/// A plan is deliberately the *only* agent-shaped noun in the model. An earlier
+/// design had a separate `Architect` entity that owned plans, but the King never
+/// reviews an architect -- he reviews a plan. Collapsing the two removes a state
+/// machine that had to be kept in sync with this one for no gain: which model is
+/// drafting is an attribute of the work, not an actor with a life of its own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: PlanId,
+    /// The city this plan is drawn up for.
+    pub city: CityId,
     pub title: String,
     pub summary: String,
-    pub city: CityId,
-    pub author: ArchitectId,
-    pub status: PlanStatus,
-    /// Files the plan proposes to touch.
+    /// Files the plan proposes to touch. This is the join key that lights up
+    /// exact buildings on the map.
     pub touches: Vec<String>,
+    /// The decree that opened this plan, verbatim.
+    pub prompt: String,
+    /// Which model is drafting it, e.g. `"mock"` or `"claude-sonnet-4.6"`.
+    pub model: String,
+    /// The conversation so far, King and court alternating.
+    pub transcript: Vec<Utterance>,
+    pub status: PlanStatus,
+    /// Crown resources this plan holds while drafting.
+    pub leases: Vec<Lease>,
+}
+
+impl Plan {
+    /// A plan that has just been opened by a decree, before any drafting.
+    pub fn opened(
+        id: PlanId,
+        city: CityId,
+        prompt: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        let prompt = prompt.into();
+        Self {
+            id,
+            city,
+            title: title_from_prompt(&prompt),
+            summary: String::new(),
+            touches: Vec::new(),
+            transcript: vec![Utterance {
+                speaker: Speaker::King,
+                body: prompt.clone(),
+            }],
+            prompt,
+            model: model.into(),
+            status: PlanStatus::Drafting,
+            leases: Vec::new(),
+        }
+    }
+
+    /// True while the plan is still in play, as opposed to settled history.
+    pub fn is_live(&self) -> bool {
+        !matches!(self.status, PlanStatus::Approved | PlanStatus::Rejected)
+    }
+
+    pub fn say(&mut self, speaker: Speaker, body: impl Into<String>) {
+        self.transcript.push(Utterance {
+            speaker,
+            body: body.into(),
+        });
+    }
+}
+
+/// A first-line title for a freshly opened plan, before the model has proposed
+/// a better one. Keeps the sidebar readable during the seconds a draft takes.
+fn title_from_prompt(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    if trimmed.chars().count() <= 60 {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(57).collect();
+    // Break on a word boundary so the ellipsis does not land mid-word.
+    match cut.rsplit_once(' ') {
+        Some((head, _)) if head.chars().count() > 20 => format!("{head}…"),
+        _ => format!("{cut}…"),
+    }
+}
+
+/// One line of a plan's conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Utterance {
+    pub speaker: Speaker,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Speaker {
+    /// The user.
+    King,
+    /// The model drafting the plan.
+    Court,
+}
+
+/// Where a plan stands.
+///
+/// This absorbs what a separate architect status used to carry: `Drafting` is
+/// an agent working, `Blocked` is an agent that could not get a lease. They were
+/// always two views of one state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlanStatus {
-    Draft,
+    /// A model is drafting it right now.
+    Drafting,
+    /// Drafted, and waiting on the King.
     AwaitingReview,
+    /// Cannot proceed: wants a crown resource another plan holds.
+    Blocked,
+    /// The model could not be reached, or refused.
+    Failed,
     Approved,
     Rejected,
 }
 
 impl PlanStatus {
+    /// Every state, in the order the map legend lists them: live states first,
+    /// then settled history.
+    pub const ALL: [PlanStatus; 6] = [
+        PlanStatus::Drafting,
+        PlanStatus::AwaitingReview,
+        PlanStatus::Blocked,
+        PlanStatus::Failed,
+        PlanStatus::Approved,
+        PlanStatus::Rejected,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
-            PlanStatus::Draft => "Draft",
+            PlanStatus::Drafting => "Drafting",
             PlanStatus::AwaitingReview => "Awaiting review",
+            PlanStatus::Blocked => "Blocked",
+            PlanStatus::Failed => "Failed",
             PlanStatus::Approved => "Approved",
             PlanStatus::Rejected => "Rejected",
+        }
+    }
+
+    pub fn color(&self) -> &'static str {
+        match self {
+            PlanStatus::Drafting => "#22c55e",
+            PlanStatus::AwaitingReview => "#eab308",
+            PlanStatus::Blocked => "#ef4444",
+            PlanStatus::Failed => "#f97316",
+            PlanStatus::Approved => "#38bdf8",
+            PlanStatus::Rejected => "#64748b",
+        }
+    }
+
+    /// CSS class suffix, e.g. `status-drafting`.
+    pub fn css_suffix(&self) -> &'static str {
+        match self {
+            PlanStatus::Drafting => "drafting",
+            PlanStatus::AwaitingReview => "review",
+            PlanStatus::Blocked => "blocked",
+            PlanStatus::Failed => "failed",
+            PlanStatus::Approved => "approved",
+            PlanStatus::Rejected => "rejected",
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tasks (decrees)
+// Model access -- what the King can see about how plans get drafted
 // ---------------------------------------------------------------------------
 
-/// A unit of work issued by the King from the chat dock.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Task {
-    pub id: TaskId,
-    /// What the King asked for, verbatim.
-    pub prompt: String,
-    /// Target city, if one was chosen.
-    pub city: Option<CityId>,
-    pub status: TaskStatus,
+/// Which backend drafts plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelProvider {
+    /// Deterministic, offline, no credential. The default, so a fresh clone
+    /// works with no setup.
+    Mock,
+    /// GitHub Copilot's chat completions API.
+    Copilot,
 }
 
+impl ModelProvider {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ModelProvider::Mock => "mock",
+            ModelProvider::Copilot => "copilot",
+        }
+    }
+}
+
+/// Whether a credential could be obtained.
+///
+/// This is a *description* of the credential's state, never the credential
+/// itself -- it crosses the wire to the browser, so it must stay free of
+/// anything secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskStatus {
-    Pending,
-    Assigned,
-    Complete,
+pub enum CredentialState {
+    /// Not needed, or successfully obtained.
+    Ready,
+    /// Nothing configured to obtain one with.
+    Missing,
+    /// Something was configured, and it failed.
+    Failed,
+}
+
+/// What the dock's provider badge renders, and what its panel explains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelStatus {
+    pub provider: ModelProvider,
+    /// The model plans will be drafted with, e.g. `"claude-sonnet-4.6"`.
+    pub model: String,
+    pub credential: CredentialState,
+    /// Plain-language detail: where the credential came from, or what to set to
+    /// fix it. Safe to display.
+    pub detail: String,
+}
+
+impl ModelStatus {
+    pub fn is_ready(&self) -> bool {
+        self.credential == CredentialState::Ready
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +542,8 @@ pub struct Resource {
     pub kind: ResourceKind,
     /// Leases currently granted over this resource.
     pub holders: Vec<Lease>,
-    /// Architects queued for it, in request order.
-    pub waiting: Vec<ArchitectId>,
+    /// Plans queued for it, in request order.
+    pub waiting: Vec<PlanId>,
 }
 
 impl Resource {
@@ -507,9 +614,9 @@ impl ResourceKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lease {
     pub resource: ResourceId,
-    pub holder: ArchitectId,
+    pub holder: PlanId,
     pub mode: LeaseMode,
-    /// Why the architect needs it, in plain language.
+    /// Why the plan needs it, in plain language.
     pub reason: String,
 }
 
@@ -545,7 +652,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, m)| Lease {
                     resource: ResourceId::new("r"),
-                    holder: ArchitectId::new(format!("a{i}")),
+                    holder: PlanId::new(format!("p{i}")),
                     mode: *m,
                     reason: String::new(),
                 })

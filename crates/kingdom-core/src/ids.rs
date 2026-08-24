@@ -1,8 +1,8 @@
 //! Newtyped identifiers.
 //!
 //! These are all thin wrappers over `String` rather than a single shared `Id`
-//! type, so that the compiler rejects passing a [`CityId`] where an
-//! [`ArchitectId`] is expected. Cheap to add now, invasive to add later.
+//! type, so that the compiler rejects passing a [`CityId`] where a
+//! [`PlanId`] is expected. Cheap to add now, invasive to add later.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -42,16 +42,8 @@ id_type!(
     CityId
 );
 id_type!(
-    /// Identifies an agent.
-    ArchitectId
-);
-id_type!(
-    /// Identifies an architectural plan awaiting review.
+    /// Identifies an architectural plan: the unit of work and of review.
     PlanId
-);
-id_type!(
-    /// Identifies a unit of work started by the King.
-    TaskId
 );
 id_type!(
     /// Identifies a contended machine resource.
