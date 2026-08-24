@@ -82,12 +82,87 @@ pub fn load(root: &Path) -> Vec<Plan> {
         // rest of it while he works out what happened to that one.
         .filter_map(|p| std::fs::read_to_string(&p).ok())
         .filter_map(|raw| serde_json::from_str::<Plan>(&raw).ok())
+        .map(reconcile)
         .collect();
 
     // Numeric order, so the rail lists a kingdom's plans in the order they were
     // opened rather than in whatever order the directory happened to yield.
     plans.sort_by_key(|p| (plan_number(&p.id).unwrap_or(u64::MAX), p.id.to_string()));
     plans
+}
+
+/// Repairs a plan whose turn died with the process that was taking it.
+///
+/// A plan is marked `Drafting` for as long as the court is working, and the
+/// mark is cleared when the turn ends. If the server stops in between -- a
+/// crash, a rebuild, Ctrl-C -- the record on disk keeps a status that says
+/// "working" with nothing working on it, and the plan is *stuck*: the chamber
+/// disables its composer while a plan is drafting, so the King cannot even say
+/// something to nudge it. Nothing on the running server can fix it, because
+/// the task that would have is gone.
+///
+/// Reconciling on load is the only place with enough information to know: a
+/// process that has just started cannot have a turn already in flight, so any
+/// plan claiming one was interrupted. The work it did is still in its
+/// workspace; only the conversation was cut off, which is why this leaves a
+/// note rather than discarding anything.
+///
+/// This matters far more than it used to. A turn was one HTTP call and the
+/// window was a second or two; a turn is now a loop that can run for minutes.
+fn reconcile(mut plan: Plan) -> Plan {
+    use kingdom_core::{DeedOutcome, Entry, NoteKind, PlanStatus, Speaker};
+
+    if plan.status != PlanStatus::Drafting {
+        return plan;
+    }
+
+    // A plan the King opened but whose first turn never began looks exactly the
+    // same on disk: `Drafting`, busy with nothing. It is *not* damaged -- the
+    // chamber starts it on mount -- so touching it here would mark a perfectly
+    // healthy new plan as failed before it had a chance. The difference is
+    // whether anything but the King has been in the log.
+    let had_begun = plan
+        .transcript
+        .iter()
+        .any(|e| !matches!(e, Entry::Said(u) if u.speaker == Speaker::King));
+
+    if !had_begun {
+        return plan;
+    }
+
+    // A call recorded as begun but never settled is one the process died
+    // during. Left in flight it would be replayed to the model forever as a
+    // command still running, so it is closed with the truth.
+    let orphans: Vec<String> = plan
+        .transcript
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Did(d) if d.in_flight() => Some(d.id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in orphans {
+        plan.settle_deed(
+            &id,
+            DeedOutcome::Refused {
+                reason: "The server stopped while this was running. Whether it \
+                         finished is unknown."
+                    .to_string(),
+            },
+        );
+    }
+
+    plan.working_on = None;
+    plan.status = PlanStatus::Failed;
+    plan.summary = "Interrupted when the server stopped.".to_string();
+    plan.note(
+        NoteKind::Failed,
+        "This plan was mid-turn when the server stopped, so the court never \
+         finished. Anything it had already done is still in its workspace. Say \
+         something to set it going again.",
+    );
+
+    plan
 }
 
 /// Writes one plan, replacing whatever was recorded for it before.
@@ -187,6 +262,10 @@ mod tests {
 
         let mut first = plan("plan-1");
         first.say(Speaker::Court, "Here is what I propose.");
+        // Settled out of Drafting, as it would be once the court had replied.
+        // Left mid-turn it would be *repaired* on load rather than returned
+        // verbatim, which is the neighbouring test's business, not this one's.
+        first.status = kingdom_core::PlanStatus::AwaitingReview;
         let mut ninth = plan("plan-9");
         ninth.settle(Outcome::Archived {
             branch: "kingdom/abc".into(),
@@ -218,5 +297,58 @@ mod tests {
         let reloaded = load(root);
         assert_eq!(reloaded.len(), 3, "saving a plan again replaces its record");
         assert_eq!(reloaded[1].title, "A better title");
+    }
+
+    /// A turn that died with the process leaves a record claiming to be working
+    /// with nothing working on it, and that plan is *unusable*: the chamber
+    /// disables its composer while a plan drafts, so the King cannot even nudge
+    /// it, and nothing on the fresh server knows to. Load is the only place
+    /// with the standing to fix it -- a process that has just started cannot
+    /// have a turn in flight.
+    ///
+    /// The two halves must both hold. A freshly opened plan looks identical on
+    /// disk (Drafting, not busy) and is perfectly healthy, so failing that one
+    /// would break every plan the King opens just before a restart.
+    #[test]
+    fn an_interrupted_turn_is_repaired_but_an_unstarted_one_is_left_alone() {
+        use kingdom_core::{Deed, NoteKind, PlanStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Opened a moment before the server stopped: nothing has happened yet.
+        let unstarted = plan("plan-1");
+
+        // Mid-turn: the court had spoken and a tool call was still running.
+        let mut interrupted = plan("plan-2");
+        interrupted.say(Speaker::Court, "I will look into it.");
+        interrupted.begin_deed(Deed::begun("call-1", "bash", serde_json::json!({})));
+        interrupted.working_on = Some("bash: cargo test".into());
+
+        save_all(root, &[unstarted, interrupted]).unwrap();
+        let loaded = load(root);
+
+        assert_eq!(
+            loaded[0].status,
+            PlanStatus::Drafting,
+            "a plan whose first turn had not begun is healthy and must be left to start"
+        );
+
+        let repaired = &loaded[1];
+        assert_eq!(repaired.status, PlanStatus::Failed);
+        assert!(
+            !repaired.is_busy(),
+            "the busy mark must be cleared, or the plan stays stuck forever"
+        );
+        assert!(
+            repaired.transcript.iter().any(
+                |e| matches!(e, kingdom_core::Entry::Note(n) if n.kind == NoteKind::Failed)
+            ),
+            "the King must be told why, not just find a plan that failed silently"
+        );
+        assert!(
+            repaired.turns().all(|t| !matches!(t, kingdom_core::Turn::Did(d) if d.in_flight())),
+            "a call left in flight would be replayed to the model as still running, forever"
+        );
     }
 }

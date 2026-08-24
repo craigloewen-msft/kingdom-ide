@@ -19,6 +19,8 @@ pub mod scan;
 #[cfg(feature = "ssr")]
 pub mod store;
 #[cfg(feature = "ssr")]
+pub mod tools;
+#[cfg(feature = "ssr")]
 pub mod watch;
 #[cfg(feature = "ssr")]
 pub mod worktree;

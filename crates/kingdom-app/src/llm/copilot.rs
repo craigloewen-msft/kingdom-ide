@@ -9,8 +9,10 @@
 //! scope until the WebSocket layer exists -- without push, a streamed reply has
 //! nowhere to go.
 
-use super::{credential, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue};
-use kingdom_core::{CredentialState, ModelChoice, ModelEffort, ModelOption, Speaker};
+use super::{
+    credential, Act, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply, ToolSpec,
+};
+use kingdom_core::{CredentialState, ModelChoice, ModelEffort, ModelOption, Speaker, Turn};
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -141,10 +143,25 @@ impl Provider for CopilotProvider {
 
     async fn open(&self, choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
         let cred = credential::resolve(Some(credential::DEFAULT_COPILOT_HELPER)).await?;
+        // Read from the catalogue rather than recorded on the plan: whether a
+        // model takes tools is a fact about the model that can change under us,
+        // and a plan opened last week must not keep sending tools to something
+        // that has since stopped accepting them. The catalogue is cached, so
+        // this is normally free.
+        let can_act = self
+            .catalogue()
+            .await
+            .options
+            .iter()
+            .find(|o| o.id == choice.model)
+            .map(|o| o.can_act)
+            .unwrap_or(false);
+
         Ok(Box::new(CopilotModel::new(
             cred.token,
             &choice.model,
             choice.effort,
+            can_act,
         )))
     }
 }
@@ -247,6 +264,13 @@ fn parse_one(model: &Value) -> Option<ModelOption> {
         context_window,
         recommended: RECOMMENDED.contains(&api_name),
         efforts,
+        // Absent is taken as "no", not as "probably": a model that cannot take
+        // tools and is sent them anyway fails the whole turn with an opaque
+        // gateway error, where one that can and is not merely answers in prose.
+        // The costs of guessing wrong are not symmetric.
+        can_act: capabilities["supports"]["tool_calls"]
+            .as_bool()
+            .unwrap_or(false),
     })
 }
 
@@ -283,15 +307,23 @@ pub struct CopilotModel {
     /// `None` means the model's own default, which is a *different request*
     /// from any explicit level -- see [`request_body`].
     effort: Option<ModelEffort>,
+    /// Whether this model takes tools, as its catalogue entry declared.
+    can_act: bool,
     http: reqwest::Client,
 }
 
 impl CopilotModel {
-    pub fn new(token: String, id: impl Into<String>, effort: Option<ModelEffort>) -> Self {
+    pub fn new(
+        token: String,
+        id: impl Into<String>,
+        effort: Option<ModelEffort>,
+        can_act: bool,
+    ) -> Self {
         Self {
             token,
             id: id.into(),
             effort,
+            can_act,
             http: reqwest::Client::new(),
         }
     }
@@ -312,44 +344,108 @@ impl CopilotModel {
 /// specific level that only some models accept. Conflating the two either
 /// silently changes how hard the model thinks or earns an opaque 400, so the
 /// distinction is carried all the way down to the wire.
-fn request_body(model: &str, effort: Option<ModelEffort>, messages: Vec<Value>) -> Value {
+fn request_body(
+    model: &str,
+    effort: Option<ModelEffort>,
+    messages: Vec<Value>,
+    tools: &[ToolSpec],
+) -> Value {
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "max_tokens": 2048,
+        "max_tokens": 4096,
     });
     if let Some(effort) = effort {
         body["reasoning_effort"] = json!(effort.wire_name());
     }
+    // Absent rather than empty when there are none. Some gateways reject
+    // `"tools": []` outright, and "this turn has no tools" and "this model has
+    // no tools" are the same request as far as the wire is concerned.
+    if !tools.is_empty() {
+        body["tools"] = json!(tools
+            .iter()
+            .map(|t| json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.schema,
+                }
+            }))
+            .collect::<Vec<_>>());
+    }
     body
+}
+
+/// Rebuilds the conversation as Copilot's message list.
+///
+/// A tool call becomes *two* messages: the assistant turn that requested it and
+/// a `tool` message carrying its result. Both are required -- a result with no
+/// preceding call is rejected by the gateway, and a call with no result leaves
+/// the model believing it is still waiting.
+fn messages(brief: &Brief) -> Vec<Value> {
+    let mut out = vec![json!({
+        "role": "system",
+        "content": system_prompt(brief),
+    })];
+
+    for turn in &brief.turns {
+        match turn {
+            Turn::Said(u) => out.push(json!({
+                "role": match u.speaker {
+                    Speaker::King => "user",
+                    Speaker::Court => "assistant",
+                },
+                "content": u.body,
+            })),
+            Turn::Did(deed) => {
+                out.push(json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [{
+                        "id": deed.id,
+                        "type": "function",
+                        "function": {
+                            "name": deed.tool,
+                            "arguments": deed.input.to_string(),
+                        }
+                    }],
+                }));
+                out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": deed.id,
+                    // A call still in flight cannot happen here -- the loop
+                    // settles every deed before asking again -- but saying so
+                    // beats sending an empty result, which the model would read
+                    // as a command that printed nothing.
+                    "content": if deed.in_flight() {
+                        "(still running)"
+                    } else {
+                        deed.report()
+                    },
+                }));
+            }
+        }
+    }
+
+    out
 }
 
 #[async_trait::async_trait]
 impl Model for CopilotModel {
-    async fn draft(&self, brief: &Brief) -> Result<Draft, ModelError> {
-        let mut messages = vec![json!({
-            "role": "system",
-            "content": system_prompt(brief),
-        })];
-
-        for turn in &brief.transcript {
-            messages.push(json!({
-                "role": match turn.speaker {
-                    Speaker::King => "user",
-                    Speaker::Court => "assistant",
-                },
-                "content": turn.body,
-            }));
-        }
-        messages.push(json!({ "role": "user", "content": brief.prompt }));
-
+    async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError> {
         let response = self
             .http
             .post(ENDPOINT)
             .bearer_auth(&self.token)
             .header("Copilot-Integration-Id", INTEGRATION_ID)
             .header("Editor-Version", EDITOR_VERSION)
-            .json(&request_body(self.api_name(), self.effort, messages))
+            .json(&request_body(
+                self.api_name(),
+                self.effort,
+                messages(brief),
+                &brief.tools,
+            ))
             .send()
             .await
             .map_err(|e| ModelError::Transport(e.to_string()))?;
@@ -373,11 +469,18 @@ impl Model for CopilotModel {
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| ModelError::Transport(format!("unreadable response: {e}")))?;
 
-        let text = parsed["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let message = &parsed["choices"][0]["message"];
+
+        // Tool calls take precedence over any prose alongside them. A model
+        // often narrates what it is about to do in the same message; treating
+        // that narration as the finished answer would settle the plan while the
+        // court still had work it wanted to do.
+        let acts = parse_acts(&message["tool_calls"]);
+        if !acts.is_empty() {
+            return Ok(Reply::Acts(acts));
+        }
+
+        let text = message["content"].as_str().unwrap_or_default().trim().to_string();
 
         if text.is_empty() {
             return Err(ModelError::Refused(
@@ -385,16 +488,49 @@ impl Model for CopilotModel {
             ));
         }
 
-        Ok(Draft {
+        Ok(Reply::Spoke(Draft {
             title: headline(&text, &brief.city.name),
             summary: first_sentence(&text),
             body: text,
-        })
+        }))
     }
 
     fn id(&self) -> &str {
         &self.id
     }
+
+    fn can_act(&self) -> bool {
+        self.can_act
+    }
+}
+
+/// Reads the `tool_calls` array into calls we can actually make.
+///
+/// `arguments` arrives as a *string* of JSON rather than JSON, and a model is
+/// perfectly capable of producing one that does not parse. Rather than drop
+/// such a call -- leaving the model waiting forever for a result to a call
+/// nothing recorded -- the raw text is kept as a JSON string. The tool then
+/// refuses it for the honest reason, and the model is told what it actually
+/// sent.
+fn parse_acts(tool_calls: &Value) -> Vec<Act> {
+    tool_calls
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|call| {
+            let name = call["function"]["name"].as_str()?;
+            let raw = call["function"]["arguments"].as_str().unwrap_or("{}");
+            Some(Act {
+                // A call with no id cannot be answered -- the result would have
+                // nothing to quote back -- so it is skipped rather than given
+                // one we invented.
+                id: call["id"].as_str()?.to_string(),
+                tool: name.to_string(),
+                input: serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+            })
+        })
+        .collect()
 }
 
 /// The system prompt.
@@ -404,14 +540,32 @@ impl Model for CopilotModel {
 /// work, and sending it only nudges the model into answering in costume instead
 /// of answering the question.
 fn system_prompt(brief: &Brief) -> String {
-    format!(
-        "You are a senior software engineer helping with one project.\n\n\
-         {}\n\
-         Answer concisely and concretely, referring to real files above where relevant. \
-         You cannot run commands or edit files: you are writing a proposal for review. \
-         Do not invent files that are not listed.",
+    let mut out = format!(
+        "You are a senior software engineer helping with one project.\n\n{}\n",
         brief.city.render()
-    )
+    );
+
+    if brief.tools.is_empty() {
+        out.push_str(
+            "Answer concisely and concretely, referring to real files above where relevant. \
+             You cannot run commands or edit files: you are writing a proposal for review. \
+             Do not invent files that are not listed.",
+        );
+    } else {
+        // The file list is a starting point once tools exist, not the whole
+        // world -- telling a model with a filesystem in its hands not to name
+        // unlisted files would forbid it from reading anything it discovered.
+        out.push_str(
+            "You have tools and are working in the directory above. Use them: read \
+             before you change, and check your work by running it rather than by \
+             assuming. The file list is a starting point, not the whole project. \
+             When you have finished, reply with what you did and what it means \
+             for the reader -- concisely, and without repeating the output of \
+             commands they can already see.",
+        );
+    }
+
+    out
 }
 
 /// Pulls `{"error":{"message":…}}` out of an error body, falling back to the
@@ -537,6 +691,16 @@ mod tests {
             options[1].efforts.is_empty(),
             "a model that declares no reasoning_effort must offer no effort control"
         );
+
+        // Sending tools to a model that does not take them fails the whole turn
+        // with an opaque gateway error; not sending them to one that does
+        // merely gets prose. The costs are not symmetric, so an undeclared
+        // capability must read as "no".
+        assert!(
+            !opus.can_act,
+            "a model that does not declare tool_calls must not be sent tools"
+        );
+        assert!(options[1].can_act, "a declared capability must be honoured");
     }
 
     /// "The model's own default" and "explicitly the lowest level" are two
@@ -545,16 +709,21 @@ mod tests {
     /// body is where that distinction has to survive.
     #[test]
     fn effort_reaches_the_wire_only_when_the_king_chose_one() {
-        let native = request_body("claude-opus-5", None, Vec::new());
+        let native = request_body("claude-opus-5", None, Vec::new(), &[]);
         assert!(
             native.get("reasoning_effort").is_none(),
             "no chosen effort must send no field, not a fabricated default"
         );
 
-        let chosen = request_body("claude-opus-5", Some(ModelEffort::Xhigh), Vec::new());
+        let chosen = request_body(
+            "claude-opus-5",
+            Some(ModelEffort::Xhigh),
+            Vec::new(),
+            &[],
+        );
         assert_eq!(chosen["reasoning_effort"], "xhigh");
 
-        let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new());
+        let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new(), &[]);
         assert_eq!(
             explicit_none["reasoning_effort"], "none",
             "an explicit `none` is a level in its own right, not the absent case"
@@ -566,7 +735,7 @@ mod tests {
     /// sending `copilot/claude-opus-5` as the model name earns a 404.
     #[test]
     fn the_recorded_id_is_namespaced_and_the_wire_name_is_not() {
-        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None);
+        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true);
         assert_eq!(model.id(), "copilot/claude-opus-5");
         assert_eq!(model.api_name(), "claude-opus-5");
     }

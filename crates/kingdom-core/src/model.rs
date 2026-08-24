@@ -538,10 +538,10 @@ impl Plan {
     /// provider rebuilding the conversation must see a tool call before its
     /// result and both before the words that followed them, or the model is
     /// handed a history that never happened.
-    pub fn turns(&self) -> impl Iterator<Item = Turn<'_>> {
+    pub fn turns(&self) -> impl Iterator<Item = Turn> + '_ {
         self.transcript.iter().filter_map(|e| match e {
-            Entry::Said(u) => Some(Turn::Said(u)),
-            Entry::Did(d) => Some(Turn::Did(d)),
+            Entry::Said(u) => Some(Turn::Said(u.clone())),
+            Entry::Did(d) => Some(Turn::Did(d.clone())),
             Entry::Note(_) => None,
         })
     }
@@ -718,10 +718,15 @@ impl DeedOutcome {
 /// each caller remembers to apply. A [`Note`] cannot be built into one, so a
 /// caller downstream of [`Plan::turns`] cannot replay Kingdom's own plumbing to
 /// a model as its prior words even by accident.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Turn<'a> {
-    Said(&'a Utterance),
-    Did(&'a Deed),
+///
+/// Owned rather than borrowed because its one consumer builds a request inside
+/// a detached task that outlives the lock the plan was read under. Cloning a
+/// transcript costs a handful of small allocations on the way into an HTTP call
+/// to a language model, which is not a cost worth a lifetime parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Turn {
+    Said(Utterance),
+    Did(Deed),
 }
 
 /// Something a participant said.
@@ -1110,6 +1115,19 @@ pub struct ModelOption {
     /// control at all, and the picker hides the row rather than offering
     /// levels that would be refused.
     pub efforts: Vec<ModelEffort>,
+    /// Whether this model can be handed tools.
+    ///
+    /// A model that cannot is still offered -- it drafts perfectly good prose,
+    /// and the King choosing a cheaper model should get a weaker answer rather
+    /// than an error. What it changes is the request: sending tools to a model
+    /// that does not take them earns an opaque rejection from the gateway, so
+    /// the turn is built without them and the system prompt says so.
+    ///
+    /// Defaults to false on the wire so a record written before this field
+    /// existed degrades to the safe direction: prose, rather than a request the
+    /// gateway refuses.
+    #[serde(default)]
+    pub can_act: bool,
 }
 
 /// Everything the picker needs, plus why it might be shorter than expected.
@@ -1189,6 +1207,7 @@ mod tests {
                     context_window: 0,
                     recommended: false,
                     efforts: Vec::new(),
+                    can_act: true,
                 },
                 ModelOption {
                     id: "copilot/claude-opus-5".into(),
@@ -1197,6 +1216,7 @@ mod tests {
                     context_window: 1_000_000,
                     recommended: true,
                     efforts: vec![ModelEffort::Low, ModelEffort::High],
+                    can_act: true,
                 },
             ],
             default_id: "copilot/claude-opus-5".into(),

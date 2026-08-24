@@ -206,6 +206,10 @@
 // doing right now.
 .chat-deed {
   align-self: stretch;
+  // The log is a column flexbox, so a tall child gets *shrunk* to fit rather
+  // than scrolled to. Prose bubbles never notice; an expanded deed holding a
+  // screen of command output collapses to its own borders.
+  flex-shrink: 0;
   border: 1px solid t.$edge;
   border-radius: t.$radius;
   background: t.$panel;

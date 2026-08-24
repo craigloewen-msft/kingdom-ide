@@ -440,29 +440,42 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
-/// Draws up the plan: marks it busy, calls the model, settles.
+/// How many times the court may act before it must speak.
 ///
-/// The whole turn happens inside the request because there is no push channel
-/// yet -- the browser has nowhere to receive progress. When the WebSocket layer
-/// lands this becomes spawn-and-notify.
+/// A loop that never ends is the failure mode worth being loud about: an agent
+/// retrying a broken command against a paid model spends real money producing
+/// nothing, and it does so quietly. Reaching this is recorded as a note, so the
+/// King sees the plan stopped rather than finding a plausible answer that was
+/// actually a truncation.
+#[cfg(feature = "ssr")]
+const MOST_ROUNDS: usize = 24;
+
+/// Draws up the plan: marks it busy, then takes turns with the model until it
+/// has something to say.
+///
+/// A turn is no longer one call. The court may act -- read a file, run a
+/// command -- and each act is recorded, run, and answered before the model is
+/// asked again. The request stays open for the whole conversation, but nothing
+/// waits on it: every step is proclaimed to the chamber as it happens, which is
+/// what makes a five-minute turn watchable instead of a spinner.
 #[server(DraftPlan, "/api")]
 pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
-    use crate::llm::{Brief, CityBrief};
-    use kingdom_core::{PlanStatus, Speaker};
+    use kingdom_core::PlanStatus;
 
     let plan_id = PlanId::new(plan);
 
-    let (brief, transcript, prompt, choice) = {
+    let (city_brief, workspace, city_name, choice) = {
         let mut kingdom = lock()?;
 
         let Some(existing) = kingdom.plan(&plan_id).cloned() else {
             return Err(ServerFnError::new("That plan is no longer in the records."));
         };
 
-        // A plan already busy means a draft is in flight: the conversation view
+        // A plan already busy means a turn is in flight: the conversation view
         // kicks drafting off on mount, so a reload or a second tab would
         // otherwise start a second one -- a duplicate model call, and a
-        // duplicate bill.
+        // duplicate bill. More serious now than it was: a second loop would
+        // also run the same commands twice.
         if existing.is_busy() {
             return Ok(existing);
         }
@@ -479,18 +492,8 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         };
         // Briefed on the workspace it actually holds, not the project it was cut
         // from: an isolated plan naming files in somebody else's checkout would
-        // be worse than useless.
-        let brief = CityBrief::from_city(&city, &existing.workspace);
-
-        // The message being answered is the last thing the King *said*;
-        // everything said before it is the context leading up to it. Kingdom's
-        // own notices are not in this sequence at all -- `said()` is the only
-        // door between a plan's log and a model, and it does not open for them.
-        let said: Vec<_> = existing.said().cloned().collect();
-        let (transcript, prompt) = match said.iter().rposition(|u| u.speaker == Speaker::King) {
-            Some(i) => (said[..i].to_vec(), said[i].body.clone()),
-            None => (Vec::new(), existing.prompt.clone()),
-        };
+        // be worse than useless. The same workspace bounds every tool it runs.
+        let city_brief = crate::llm::CityBrief::from_city(&city, &existing.workspace);
 
         update(&mut kingdom, &plan_id, |p| {
             p.status = PlanStatus::Drafting;
@@ -500,37 +503,181 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         // Drafting keeps whatever the plan is already being drawn by: switching
         // model silently mid-conversation would make the transcript a record of
         // nothing in particular. The choice was settled when the plan opened.
-        (brief, transcript, prompt, existing.choice())
+        (
+            city_brief,
+            existing.workspace.clone(),
+            city.name,
+            existing.choice(),
+        )
     };
 
     // Spawned rather than awaited inline, because the plan is already marked
-    // busy. If the browser navigates away mid-draft, Axum drops this request's
-    // future -- which would cancel the model call *after* the mark and *before*
-    // it is cleared, leaving a plan permanently Drafting that no later decree
-    // could restart. A detached task loses only the reply, never the clearing.
+    // busy. If the browser navigates away mid-turn, Axum drops this request's
+    // future -- which would cancel the conversation *after* the mark and
+    // *before* it is cleared, leaving a plan permanently Drafting that no later
+    // decree could restart. A detached task loses only this caller's view of
+    // the result, never the clearing; and since every step is pushed to the
+    // chamber, that view was never the only way to see it.
     let handle = tokio::spawn(async move {
-        let outcome = match crate::llm::open(&choice).await {
-            Ok(model) => {
-                model
-                    .draft(&Brief {
-                        city: brief,
-                        transcript,
-                        prompt,
-                    })
-                    .await
-            }
-            // A missing credential surfaces as a failed plan the King can see
-            // and retry, rather than an error attached to nothing.
-            Err(e) => Err(e),
-        };
-
-        settle(plan_id, outcome)
+        converse(plan_id, city_brief, workspace, city_name, choice).await
     });
 
     handle
         .await
         .map_err(|e| ServerFnError::new(format!("drafting task failed: {e}")))?
 }
+
+/// Takes turns with the model until it speaks, runs out of rope, or fails.
+///
+/// The loop lives here rather than behind the [`crate::llm::Model`] trait
+/// because this is where the plan is. A provider running its own tools would do
+/// so with nothing recording them: the chamber would show a long silence and
+/// then an answer, and a crash mid-way would leave no trace of what had already
+/// been done to the workspace.
+#[cfg(feature = "ssr")]
+async fn converse(
+    plan_id: PlanId,
+    city: crate::llm::CityBrief,
+    workspace: kingdom_core::Workspace,
+    city_name: String,
+    choice: kingdom_core::ModelChoice,
+) -> Result<Plan, ServerFnError> {
+    use crate::llm::{Brief, Reply, ToolSpec};
+    use crate::tools::Workshop;
+    use kingdom_core::{Deed, NoteKind};
+
+    let model = match crate::llm::open(&choice).await {
+        Ok(model) => model,
+        // A missing credential surfaces as a failed plan the King can see and
+        // retry, rather than an error attached to nothing.
+        Err(e) => return settle(plan_id, Err(e)),
+    };
+
+    // A model that cannot call tools still drafts perfectly good prose, so it
+    // gets a prose-only turn rather than an error. Sending tools to a gateway
+    // that does not accept them fails the whole request opaquely.
+    let tools = if model.can_act() {
+        ToolSpec::all()
+    } else {
+        Vec::new()
+    };
+    let shop = Workshop::new(workspace);
+
+    for round in 0..MOST_ROUNDS {
+        // The conversation is rebuilt from the plan each pass rather than
+        // accumulated in a local. The deeds recorded below are already in it,
+        // and reading them back is what makes this loop's state the plan's
+        // state -- so a reader of the transcript sees exactly what the model
+        // saw.
+        let turns = {
+            let kingdom = lock()?;
+            let Some(plan) = kingdom.plan(&plan_id) else {
+                return Err(ServerFnError::new("That plan vanished mid-decree."));
+            };
+            plan.turns().collect::<Vec<_>>()
+        };
+
+        let brief = Brief {
+            city: city.clone(),
+            turns,
+            tools: tools.clone(),
+        };
+
+        match model.take_turn(&brief).await {
+            Ok(Reply::Spoke(draft)) => return settle(plan_id, Ok(draft)),
+            Err(e) => return settle(plan_id, Err(e)),
+
+            Ok(Reply::Acts(acts)) => {
+                for act in acts {
+                    // Recorded *before* it runs, and proclaimed by `update`, so
+                    // the chamber shows the command while it is still going.
+                    // This is the answer to "what is this agent doing right
+                    // now", and it only works because the deed is written down
+                    // first.
+                    {
+                        let mut kingdom = lock()?;
+                        update(&mut kingdom, &plan_id, |p| {
+                            p.working_on = Some(describe(&act.tool, &act.input));
+                            p.begin_deed(Deed::begun(
+                                act.id.clone(),
+                                act.tool.clone(),
+                                act.input.clone(),
+                            ));
+                        });
+                    }
+
+                    // The lock is deliberately not held across this. A tool can
+                    // take minutes, and a held lock would freeze every other
+                    // plan and every chamber in the kingdom behind it.
+                    let outcome = crate::tools::invoke(&act.tool, act.input, &shop).await;
+
+                    let mut kingdom = lock()?;
+                    update(&mut kingdom, &plan_id, |p| {
+                        if !p.settle_deed(&act.id, outcome.clone()) {
+                            // Cannot happen -- the deed was recorded a moment
+                            // ago under the same id -- but a silently dropped
+                            // result would leave the model waiting forever for
+                            // a call the transcript says it never made.
+                            p.note(
+                                NoteKind::Failed,
+                                format!(
+                                    "A result arrived for a call ({}) that is not in this \
+                                     plan's log. This is a bug in Kingdom.",
+                                    act.id
+                                ),
+                            );
+                        }
+                    });
+                }
+
+                // Back round to ask again, now with the results in the log.
+                let _ = round;
+            }
+        }
+    }
+
+    // Out of rope. Recorded as a note rather than a reply: nothing was said,
+    // and dressing a truncation as counsel would hand the King an answer that
+    // is really an unfinished job.
+    let mut kingdom = lock()?;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        p.working_on = None;
+        p.status = kingdom_core::PlanStatus::Failed;
+        p.summary = format!("Stopped after {MOST_ROUNDS} rounds without an answer.");
+        p.note(
+            NoteKind::Failed,
+            format!(
+                "The court acted {MOST_ROUNDS} times in {city_name} without reaching an \
+                 answer, and was stopped. Its work so far is still in the workspace; \
+                 say something to send it round again."
+            ),
+        );
+    });
+
+    updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
+}
+
+/// Plain-language "what is happening right now", for the rail and the map.
+///
+/// The tool's name alone is close to useless to the King -- "bash" tells him
+/// nothing that "an agent is working" did not. The argument is the information,
+/// so it is what gets shown.
+#[cfg(feature = "ssr")]
+fn describe(tool: &str, input: &serde_json::Value) -> String {
+    let subject = ["cmd", "path", "pattern", "url", "selector", "query"]
+        .iter()
+        .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or_default()
+        .trim();
+
+    if subject.is_empty() {
+        return format!("Running {tool}");
+    }
+
+    let short: String = subject.chars().take(60).collect();
+    format!("{tool}: {short}")
+}
+
 
 /// Records a drafting outcome on the plan and marks it no longer busy.
 ///

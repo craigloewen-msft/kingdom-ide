@@ -10,7 +10,7 @@ pub mod copilot;
 pub mod credential;
 pub mod mock;
 
-use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Utterance, Workspace};
+use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Turn, Workspace};
 
 /// Everything a model is told about the work.
 ///
@@ -19,16 +19,53 @@ use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Utterance, W
 #[derive(Debug, Clone)]
 pub struct Brief {
     pub city: CityBrief,
-    /// What has actually been *said*, oldest first, excluding `prompt`.
+    /// The whole exchange so far, oldest first: what was said and what was
+    /// done, interleaved exactly as it happened.
     ///
-    /// [`Utterance`] rather than `kingdom_core::Entry` on purpose: Kingdom's own
-    /// notices -- a failed call or a workspace event -- are not words anybody spoke,
-    /// and replaying them as the model's own prior turns would teach it to
-    /// answer in the voice of the plumbing. The type is what prevents that;
-    /// see `Plan::said`.
-    pub transcript: Vec<Utterance>,
-    /// The message being answered now.
-    pub prompt: String,
+    /// [`Turn`] rather than `kingdom_core::Entry` on purpose: Kingdom's own
+    /// notices -- a failed call or a workspace event -- are not part of the
+    /// exchange, and replaying them as the model's own prior turns would teach
+    /// it to answer in the voice of the plumbing. The type is what prevents
+    /// that; see `Plan::turns`.
+    ///
+    /// Unlike the old shape this *includes* the message being answered. Once a
+    /// turn can end in a tool call rather than words, "the last thing the King
+    /// said" is no longer where the conversation is -- the model may be
+    /// answering its own tool result, with the King's last words several turns
+    /// back.
+    pub turns: Vec<Turn>,
+    /// What the court may do with its own hands this turn.
+    ///
+    /// Empty means a prose-only turn, which is what a model that cannot call
+    /// tools gets. A provider must not invent tools when this is empty.
+    pub tools: Vec<ToolSpec>,
+}
+
+/// One tool, as a model is told about it.
+///
+/// A flattened copy of what [`crate::tools::Tool`] declares, rather than the
+/// trait object itself, so that the `llm` layer never holds something runnable.
+/// Describing a tool and running one are different jobs and this is the seam
+/// between them: a provider builds a request, and cannot execute anything.
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub schema: serde_json::Value,
+}
+
+impl ToolSpec {
+    /// Describes every tool the court has.
+    pub fn all() -> Vec<Self> {
+        crate::tools::all()
+            .iter()
+            .map(|t| Self {
+                name: t.name().to_string(),
+                description: t.description(),
+                schema: t.input_schema(),
+            })
+            .collect()
+    }
 }
 
 /// The facts about a project worth spending tokens on.
@@ -99,6 +136,34 @@ pub struct Draft {
     pub body: String,
 }
 
+/// What a model does when asked.
+///
+/// Two endings, because a turn can now finish in two ways: the court has
+/// something to say, or it wants to do something first. Making this an enum
+/// rather than a `Draft` with an optional list of calls is deliberate -- the
+/// two are mutually exclusive in the loop that consumes them, and a shape that
+/// can hold both invites a caller to settle a plan *and* run its tools.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    /// Words. The turn is over.
+    Spoke(Draft),
+    /// Tool calls to make before the model will answer. Never empty.
+    Acts(Vec<Act>),
+}
+
+/// One tool call a model has asked for.
+#[derive(Debug, Clone)]
+pub struct Act {
+    /// The provider's correlation id, quoted back with the result. See
+    /// [`kingdom_core::Deed::id`].
+    pub id: String,
+    pub tool: String,
+    /// The arguments as the model sent them. Already parsed where it sent valid
+    /// JSON; the raw text as a JSON string where it did not, so that a
+    /// malformed call is still recorded as the thing that was attempted.
+    pub input: serde_json::Value,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("no credential: {0}")]
@@ -111,12 +176,30 @@ pub enum ModelError {
 
 #[async_trait::async_trait]
 pub trait Model: Send + Sync {
-    async fn draft(&self, brief: &Brief) -> Result<Draft, ModelError>;
+    /// Takes one turn: either speaks, or asks to act.
+    ///
+    /// One call, not a loop. Driving the conversation is [`crate::api`]'s job,
+    /// because that is where the plan lives and where a deed can be recorded
+    /// before it runs -- a provider that ran its own tools would do so with
+    /// nothing watching, and the chamber would show a long silence followed by
+    /// an answer.
+    async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError>;
 
     /// The namespaced id, recorded on the plan so the King can see exactly what
     /// drew it. Namespaced rather than bare because that is what routes the
     /// *next* turn back to the same backend.
     fn id(&self) -> &str;
+
+    /// Whether this model can be given tools.
+    ///
+    /// A model that cannot call them is still perfectly able to draft a plan,
+    /// so it is offered a prose-only turn rather than withheld from the picker:
+    /// the King choosing a weaker model should get a weaker answer, not an
+    /// error. The loop asks this and sends no tools when it is false, which is
+    /// what stops a gateway rejecting the request outright.
+    fn can_act(&self) -> bool {
+        true
+    }
 }
 
 /// A backend that serves models.

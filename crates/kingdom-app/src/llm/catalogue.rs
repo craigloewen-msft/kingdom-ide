@@ -92,6 +92,7 @@ mod tests {
             context_window: 0,
             recommended,
             efforts: Vec::new(),
+            can_act: true,
         }
     }
 
