@@ -170,7 +170,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     .get()
                     .plans
                     .iter()
-                    .any(|p| p.city == id && is_active(p.status))
+                    .any(|p| p.city == id && p.is_live())
         })
     };
 
