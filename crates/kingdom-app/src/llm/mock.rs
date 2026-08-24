@@ -212,7 +212,6 @@ impl Model for MockModel {
                     }),
                 }]),
                 Some(chosen) => Reply::Spoke(Draft {
-                    title: format!("Counsel on {}", city.name),
                     summary: format!("Asked the King, and he chose: {}", chosen.trim()),
                     body: format!(
                         "You chose \"{}\", so that is how I would proceed on {}.\n\n\
@@ -240,7 +239,6 @@ impl Model for MockModel {
                     }),
                 }]),
                 Some(result) => Reply::Spoke(Draft {
-                    title: format!("Works upon {}", city.name),
                     summary: format!("Used a tool, then reported on {}.", city.name),
                     body: format!(
                         "On the decree \"{}\":\n\n\
@@ -282,7 +280,6 @@ impl Model for MockModel {
                     }),
                 }]),
                 Some(reports) => Reply::Spoke(Draft {
-                    title: format!("Errands upon {}", city.name),
                     summary: format!("Sent two errands into {} and read them back.", city.name),
                     body: format!(
                         "On the decree \"{}\":\n\n\
@@ -311,7 +308,6 @@ impl Model for MockModel {
                         .collect::<String>()
                 };
                 Ok(Reply::Spoke(Draft {
-                    title: format!("Works upon {}", city.name),
                     summary: format!(
                         "Proposes changes to {} file(s) in {}.",
                         named.len(),
@@ -381,7 +377,6 @@ impl Model for MockModel {
                     }),
                 }]),
                 Some(result) => Reply::Spoke(Draft {
-                    title: format!("Works upon {}", city.name),
                     summary: format!("Carried out the approved plan for {}.", city.name),
                     body: format!(
                         "The plan is done.\n\n\
@@ -393,7 +388,6 @@ impl Model for MockModel {
             }),
 
             Scenario::Survey => Ok(Reply::Spoke(Draft {
-                title: format!("Survey of {}", city.name),
                 summary: format!("A reading of {} as it stands.", city.name),
                 body: format!(
                     "On the decree \"{}\":\n\n\
@@ -578,7 +572,6 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(first.body, second.body);
-        assert_eq!(first.title, second.title);
 
         let refused = model.take_turn(&brief("anything [[scenario:refuse]]")).await;
         assert!(matches!(refused, Err(ModelError::Refused(_))));

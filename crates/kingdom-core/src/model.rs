@@ -532,9 +532,10 @@ pub struct Plan {
 pub struct Proposal {
     /// The model's own headline for the work.
     ///
-    /// Not applied to [`Plan::title`] today. Retitling a plan means renaming
-    /// its `kingdom/<slug>` branch, which is its own piece of work; until then
-    /// this is the better name sitting ready for it.
+    /// Applied to [`Plan::title`] by [`Plan::propose`]: it is the name the user
+    /// read on the card, so it is the name the rail should show. The plan's
+    /// `slug` deliberately does not follow it -- that is the git branch, and it
+    /// is already cut on disk.
     pub title: String,
     /// The proposal itself, as markdown.
     pub body: String,
@@ -742,8 +743,20 @@ impl Plan {
     /// revises, and the superseded version is not lost -- the tool call that
     /// made it is still in the transcript, which is where the history of a plan
     /// lives.
+    ///
+    /// The proposal also **names the plan**. Until it proposes, a plan is
+    /// labelled with the opening decree's first clause, which is a placeholder;
+    /// the headline the model put to the user is the first name the work
+    /// actually has. Renaming here rather than at the call site means a plan's
+    /// name and its standing proposal cannot drift apart, and a revised
+    /// proposal retitles for free.
+    ///
+    /// [`Plan::slug`] is left alone: the branch is already cut on disk under it,
+    /// and renaming a branch mid-flight is its own decision.
     pub fn propose(&mut self, title: impl Into<String>, body: impl Into<String>) {
-        self.proposal = Some(Proposal::put(title, body));
+        let proposal = Proposal::put(title, body);
+        self.title = proposal.title.clone();
+        self.proposal = Some(proposal);
     }
 
     /// The user accepts the standing proposal, and the model gains its tools.
@@ -1771,6 +1784,30 @@ mod proposal_tests {
             "approving nothing must be reported, not silently granted"
         );
         assert_eq!(fresh.permissions, Permissions::Propose);
+    }
+
+    /// A proposal names the plan.
+    ///
+    /// The regression this pins is the rail: before, a plan kept whatever the
+    /// opening decree was truncated to, while the name the user actually read
+    /// on the proposal card was never used. The branch is deliberately not
+    /// renamed with it -- it is already cut on disk.
+    #[test]
+    fn a_proposal_retitles_the_plan_but_not_its_branch() {
+        let mut plan = proposing();
+        assert_eq!(plan.title, "Fix the off-by-one");
+        assert_eq!(plan.slug, crate::naming::slugify("Fix the parser"));
+
+        plan.propose("Rewrite the lexer instead", "Bigger than it looked.");
+        assert_eq!(
+            plan.title, "Rewrite the lexer instead",
+            "a revised proposal renames the plan too"
+        );
+        assert_eq!(
+            plan.slug,
+            crate::naming::slugify("Fix the parser"),
+            "the branch is already cut and must not drift"
+        );
     }
 
     /// A plan recorded before proposals existed keeps the tools it was drafted
