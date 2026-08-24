@@ -72,10 +72,16 @@ pub fn Conversation() -> impl IntoView {
 
     // A plan that is Drafting, busy with nothing and has heard nothing back is
     // one nobody has started yet: exactly the state `begin_plan` leaves behind.
+    //
+    // Never an errand: an errand is driven by the call that sent it, which is
+    // already looping over it. A King who opens one in the window before its
+    // first turn must not start a second loop over the same plan. The server
+    // refuses this too -- this is the half that avoids the pointless request.
     Effect::new(move |_| {
         let Some(p) = plan.get() else { return };
         let unstarted = p.status == PlanStatus::Drafting
             && !p.is_busy()
+            && !p.is_errand()
             && !p.said().any(|u| u.speaker == Speaker::Court);
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());
@@ -191,6 +197,32 @@ fn ChamberBody(
     let status = Memo::new(move |_| live.get().map(|p| p.status).unwrap_or(PlanStatus::Drafting));
     let settled = Memo::new(move |_| status.get().is_settled());
     let title = Memo::new(move |_| live.get().map(|p| p.title).unwrap_or_default());
+
+    // An errand is settled once and never changes, so it is read off the
+    // snapshot rather than the live signal.
+    let errand = StoredValue::new(plan.errand_for.clone());
+    let is_errand = errand.get_value().is_some();
+    // The plan that sent it, for the banner's link. Read live because the
+    // parent's *title* is still being drafted while its errands run -- a
+    // snapshot here would leave the banner naming a title that has moved on.
+    let parent = Memo::new(move |_| {
+        let sent_by = errand.get_value()?;
+        let kingdom = state.kingdom.get();
+        let parent = kingdom.plan(&sent_by.parent)?;
+        Some((parent.id.clone(), parent.title.clone()))
+    });
+    let task = StoredValue::new(plan.prompt.clone());
+
+    // Where the arrow goes. For an errand that is the plan that sent it; for
+    // anything else, the realm. A parent this browser has not loaded falls back
+    // to the realm rather than to a link that would lead nowhere.
+    let back = Memo::new(move |_| match parent.get() {
+        Some((id, _)) => (
+            format!("/plan/{id}"),
+            "Back to the plan that sent this errand".to_string(),
+        ),
+        None => ("/".to_string(), "Back to the realm".to_string()),
+    });
     let outcome = Memo::new(move |_| {
         live.get()
             .and_then(|p| p.outcome)
@@ -233,10 +265,45 @@ fn ChamberBody(
     let (watching, set_watching) = signal(false);
 
     view! {
-        <header class="chamber-header">
-            <a class="back-link" href="/" title="Back to the realm">"\u{2190}"</a>
+        <header class="chamber-header" class:errand=is_errand>
+            // For an errand, "back" is the plan that sent it rather than the
+            // realm: that is where the King came from, and where he has to go
+            // to steer the work. Retargeting the arrow he already knows beats
+            // adding a second one beside it.
+            <a
+                class="back-link"
+                href=move || back.get().0
+                title=move || back.get().1
+            >"\u{2190}"</a>
             <div class="chamber-id">
-                <h1 class="chamber-title">{move || title.get()}</h1>
+                // Where he is, above what he is reading -- the ordinary
+                // breadcrumb shape. Present only for an errand, because for a
+                // plan the King decreed there is no "above" to name.
+                <Show when=move || is_errand>
+                    <div class="chamber-crumb">
+                        <span class="crumb-mark">"\u{26b1}"</span>
+                        "Errand of "
+                        {move || match parent.get() {
+                            Some((id, title)) => view! {
+                                <a class="crumb-parent" href=format!("/plan/{id}")>{title}</a>
+                            }
+                            .into_any(),
+                            // The parent is not in the kingdom this browser has
+                            // loaded -- a deep link, most likely. Still say what
+                            // this is; the alternative reads as an ordinary plan.
+                            None => view! {
+                                <span class="crumb-parent">"another plan"</span>
+                            }
+                            .into_any(),
+                        }}
+                    </div>
+                </Show>
+                // An errand's title is cut from its task, so the full wording
+                // goes on hover rather than onto a line of its own.
+                <h1
+                    class="chamber-title"
+                    title=move || if is_errand { task.get_value() } else { String::new() }
+                >{move || title.get()}</h1>
                 <div class="chamber-meta">
                     <span class="chamber-city">
                         {move || city.get().unwrap_or_else(|| "unknown city".into())}
@@ -255,7 +322,15 @@ fn ChamberBody(
                 </div>
             </div>
             <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
-                {move || status.get().label()}
+                {move || {
+                    // An errand is never reviewed and never merged: it reports
+                    // to the court that sent it. Same states, honest words.
+                    match (is_errand, status.get()) {
+                        (true, PlanStatus::AwaitingReview) => "Reported",
+                        (true, PlanStatus::Drafting) => "Working",
+                        (_, s) => s.label(),
+                    }
+                }}
             </span>
             // The court's browser is headless, so without this the King's only
             // evidence of a browser flow is a list of tool names. Offered on
@@ -304,13 +379,29 @@ fn ChamberBody(
         // A settled plan is a record, not a place to type. The composer goes
         // and the outcome takes its place, so the chamber says what became of
         // the work rather than inviting more of it.
+        //
+        // An errand is a record for a different reason: it answers to the court
+        // that sent it, and a second person steering it would leave the parent
+        // reading a report on a conversation that changed under it.
         <Show
-            when={move || !settled.get()}
+            when={move || !settled.get() && !is_errand}
             fallback={move || view! {
-                <div class="chamber-outcome">
-                    <span class="outcome-mark">"\u{2713}"</span>
-                    <span class="outcome-text">{move || outcome.get()}</span>
-                </div>
+                <Show
+                    when=move || !is_errand
+                    fallback=move || view! {
+                        <div class="chamber-outcome errand-outcome">
+                            <span class="outcome-text">
+                                "This errand reports to the plan that sent it. \
+                                 To steer the work, speak there."
+                            </span>
+                        </div>
+                    }
+                >
+                    <div class="chamber-outcome">
+                        <span class="outcome-mark">"\u{2713}"</span>
+                        <span class="outcome-text">{move || outcome.get()}</span>
+                    </div>
+                </Show>
             }}
         >
             <div class="chamber-composer">
@@ -457,6 +548,12 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Did(d) if is_open_question(&d) => {
                         view! { <Question deed=d plan=plan_id/> }.into_any()
                     }
+                    // Errands are not a line of output either: the call's own
+                    // text result is a summary, and the thing the King wants is
+                    // the list of agents it sent and a way into each one.
+                    Entry::Did(d) if d.tool == "spawn_agents" => {
+                        view! { <Errands deed=d plan=plan_id/> }.into_any()
+                    }
                     Entry::Did(d) => view! { <DeedLine deed=d/> }.into_any(),
                 }
             }
@@ -464,7 +561,141 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     }
 }
 
-/// A question the court has stopped to ask, rendered where it was asked.
+/// The errands one call sent, each a way into its own conversation.
+///
+/// Rendered from the *plans*, not from the deed's text output. The output is a
+/// summary written for the model; the King wants to know who is out there, what
+/// each was asked, and how each is getting on -- and to be able to go and read
+/// one. None of that survives being flattened into a paragraph.
+///
+/// The rows are live for free: `herald::proclaim` announces an errand on its
+/// parent's channel as well as its own, and `Kingdom::absorb` files a plan the
+/// chamber has not seen before. So these come from the same signal everything
+/// else reads, with no separate subscription.
+#[component]
+fn Errands(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let deed_id = StoredValue::new(deed.id.clone());
+    let running = deed.in_flight();
+
+    let errands = Memo::new(move |_| {
+        let Some(parent) = plan.get() else {
+            return Vec::new();
+        };
+        state
+            .kingdom
+            .get()
+            .errands_of(&parent, &deed_id.get_value())
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+
+    // The tasks as the model asked for them. Shown only until the errands
+    // themselves exist: between the call being recorded and the plans being
+    // created there is a moment with nothing to list, and an empty box there
+    // would read as a call that sent nobody.
+    let asked = StoredValue::new(
+        deed.input
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| t.get("task").and_then(|t| t.as_str()))
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>(),
+    );
+
+    view! {
+        <div class="chat-errands" class:running=running>
+            <div class="errands-head">
+                <span class="errands-mark">"\u{26b1}"</span>
+                <span class="errands-who">
+                    {move || {
+                        let sent = errands.get().len().max(asked.get_value().len());
+                        match sent {
+                            1 => "The court sent an errand".to_string(),
+                            n => format!("The court sent {n} errands"),
+                        }
+                    }}
+                </span>
+            </div>
+
+            <ul class="errand-list">
+                {move || {
+                    let sent = errands.get();
+                    if sent.is_empty() {
+                        // Not yet created, or a record from before this chamber
+                        // knew them: show what was asked, without a link that
+                        // would lead nowhere.
+                        return asked
+                            .get_value()
+                            .into_iter()
+                            .map(|task| view! {
+                                <li class="errand-row pending">
+                                    <span class="errand-dot"></span>
+                                    <span class="errand-task">{task}</span>
+                                    <span class="errand-state">"sending\u{2026}"</span>
+                                </li>
+                            })
+                            .collect_view()
+                            .into_any();
+                    }
+
+                    sent.into_iter()
+                        .map(|errand| {
+                            let href = format!("/plan/{}", errand.id);
+                            let status = errand.status;
+                            let working = errand.working_on.clone();
+                            view! {
+                                <li class="errand-row">
+                                    <a class="errand-link" href=href>
+                                        <span
+                                            class=format!(
+                                                "errand-dot status-{}",
+                                                status.css_suffix(),
+                                            )
+                                            style:background=status.color()
+                                        ></span>
+                                        <span class="errand-task">{errand.prompt.clone()}</span>
+                                        <span class="errand-state">
+                                            {match (status, working) {
+                                                // What it is doing beats what it
+                                                // is: "Drafting" is true of every
+                                                // working errand and tells the
+                                                // King nothing.
+                                                (_, Some(doing)) => doing,
+                                                (s, None) => errand_status(s).to_string(),
+                                            }}
+                                        </span>
+                                    </a>
+                                </li>
+                            }
+                        })
+                        .collect_view()
+                        .into_any()
+                }}
+            </ul>
+        </div>
+    }
+}
+
+/// How an errand's state reads, which is not how a plan's does.
+///
+/// An errand is never reviewed and never merged -- it reports to the court that
+/// sent it. Relabelled here rather than given its own `PlanStatus` variant: a
+/// sixth state would ripple through the map legend, `ALL` and every match on
+/// plan state to buy one word.
+fn errand_status(status: PlanStatus) -> &'static str {
+    match status {
+        PlanStatus::Drafting => "working\u{2026}",
+        PlanStatus::AwaitingReview => "reported",
+        PlanStatus::Failed => "could not finish",
+        PlanStatus::Merged | PlanStatus::Archived => status.label(),
+    }
+}
+
+/// A question the court has stopped to ask, rendered where it was asked./// A question the court has stopped to ask, rendered where it was asked.
 ///
 /// Inline in the transcript rather than as a modal. A modal would be the
 /// obvious choice and is the wrong one: it puts the question in front of the

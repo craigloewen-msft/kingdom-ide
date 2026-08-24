@@ -48,8 +48,36 @@ impl Kingdom {
     }
 
     /// Plans drawn up in a given city.
+    ///
+    /// Errands are excluded, and this is the reader that decides it for the map.
+    /// An errand holds no worktree of its own -- it works in its parent's -- so
+    /// a second pip on the same city would draw one piece of work twice.
     pub fn plans_in<'a>(&'a self, id: &'a CityId) -> impl Iterator<Item = &'a Plan> + 'a {
-        self.plans.iter().filter(move |p| &p.city == id)
+        self.plans
+            .iter()
+            .filter(move |p| &p.city == id && !p.is_errand())
+    }
+
+    /// The errands one call sent, in the order they were sent.
+    ///
+    /// Keyed by the deed as well as the parent, so a plan that sends errands
+    /// twice does not show the first round's under the second round's call.
+    ///
+    /// This is the *only* way the parent's chamber finds its errands, and the
+    /// direction is deliberate: the link is a field on the errand rather than a
+    /// list on the [`Deed`], so there is one place it can be wrong. A list on
+    /// the deed would have to be kept in step with the plans themselves, and the
+    /// failure -- a named errand that does not exist, or an errand no call
+    /// admits to -- would be silent.
+    pub fn errands_of<'a>(
+        &'a self,
+        parent: &'a PlanId,
+        deed: &'a str,
+    ) -> impl Iterator<Item = &'a Plan> + 'a {
+        self.plans.iter().filter(move |p| match &p.errand_for {
+            Some(errand) => &errand.parent == parent && errand.deed == deed,
+            None => false,
+        })
     }
 
     /// Files a plan into the kingdom, replacing whatever was there under its id.
@@ -72,10 +100,13 @@ impl Kingdom {
     }
 
     /// Plans still awaiting the King's judgement.
+    ///
+    /// Never an errand: an errand reports to the court that sent it, and nothing
+    /// about it is ever waiting on the King.
     pub fn pending_plans(&self) -> impl Iterator<Item = &Plan> {
         self.plans
             .iter()
-            .filter(|p| p.status == PlanStatus::AwaitingReview)
+            .filter(|p| p.status == PlanStatus::AwaitingReview && !p.is_errand())
     }
 }
 
@@ -449,6 +480,30 @@ pub struct Plan {
     /// plan is prevented from working.
     #[serde(default)]
     pub working_on: Option<String>,
+    /// The call this plan was sent to answer, when it is an errand.
+    ///
+    /// `None` for a plan the King decreed, which is every plan he sees in the
+    /// rail or on the map. An errand is a plan the *court* sent, to answer a
+    /// question it had while working on its own.
+    ///
+    /// Being a plan rather than a type of its own is what gives an errand a
+    /// chamber, a watch socket and a record on disk for free -- see the module
+    /// docs on [`Plan::sent`] for what that buys and what it costs.
+    #[serde(default)]
+    pub errand_for: Option<Errand>,
+}
+
+/// Which call an errand was sent to answer.
+///
+/// The deed is carried as well as the plan because a plan may send errands more
+/// than once: without it, a second round's chamber would show the first round's
+/// errands under its call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Errand {
+    /// The plan that sent this one.
+    pub parent: PlanId,
+    /// The [`Deed::id`] of the call that sent it.
+    pub deed: String,
 }
 
 impl Plan {
@@ -479,7 +534,64 @@ impl Plan {
             outcome: None,
             workspace,
             working_on: None,
+            errand_for: None,
         }
+    }
+
+    /// A plan sent by another plan to answer one question.
+    ///
+    /// # What an errand shares with its parent, and why
+    ///
+    /// Its **workspace, verbatim**. An errand is another agent working in the
+    /// same place on the same files, which is the whole point -- it is sent to
+    /// look at the work in progress, not at a pristine copy of the project. It
+    /// therefore owns nothing on disk and must never be finished: merging it
+    /// would land its parent's half-done work and then delete the worktree from
+    /// under a plan still running in it. `api::finish_plan` refuses on
+    /// [`Plan::is_errand`], and that guard is load-bearing.
+    ///
+    /// Its **model and effort**, so a fan-out is drafted by the thing the King
+    /// chose rather than by whatever the default happens to be that day.
+    ///
+    /// # Why the task is recorded as the King speaking
+    ///
+    /// It was the parent's court that said it, not the King, so this is a small
+    /// lie -- and it is the right one. [`Speaker`] maps directly onto the wire's
+    /// `user`/`assistant` roles, and a third variant would need a decision at
+    /// every match over a transcript -- the provider, the mock, the store's
+    /// repair pass, the chamber -- to buy nothing but a label. The label is
+    /// fixed where labels belong: the chamber renders an errand's King turns as
+    /// "Commission".
+    pub fn sent(id: PlanId, parent: &Plan, deed: &str, task: impl Into<String>) -> Self {
+        let task = task.into();
+        Self {
+            id,
+            city: parent.city.clone(),
+            slug: crate::naming::slugify(&title_from_prompt(&task)),
+            title: title_from_prompt(&task),
+            summary: String::new(),
+            transcript: vec![Entry::Said(Utterance::new(Speaker::King, task.clone()))],
+            prompt: task,
+            model: parent.model.clone(),
+            effort: parent.effort,
+            status: PlanStatus::Drafting,
+            outcome: None,
+            workspace: parent.workspace.clone(),
+            working_on: None,
+            errand_for: Some(Errand {
+                parent: parent.id.clone(),
+                deed: deed.to_string(),
+            }),
+        }
+    }
+
+    /// True when this plan was sent by another plan rather than decreed.
+    ///
+    /// Read by every guard and every filter that has to tell the King's work
+    /// from the court's own: the rail, the map, `say`, `draft_plan` and -- most
+    /// importantly -- `finish_plan`.
+    pub fn is_errand(&self) -> bool {
+        self.errand_for.is_some()
     }
 
     /// True while a turn is in flight, so a second one is not started over it.
@@ -1543,6 +1655,100 @@ mod transcript_tests {
             plan.turns().count(),
             1,
             "the note is still excluded, and nothing invented a deed that never happened"
+        );
+    }
+
+    /// An errand is a plan the King never asked for, so the readers that build
+    /// *his* views must not show it -- while the reader the parent's chamber
+    /// uses must find exactly the errands of the call that sent them.
+    ///
+    /// Worth one test because this is a filter applied in several places from
+    /// one predicate: the map reads `plans_in`, the rail reads `plans` with the
+    /// same condition, and the deed line reads `errands_of`. The failure is
+    /// silent in both directions -- an errand in the rail is clutter, an errand
+    /// missing from `errands_of` is a chamber that shows a call sending nothing.
+    #[test]
+    fn errands_are_hidden_from_the_kings_views_and_found_by_their_call() {
+        let city = CityId::new("c1");
+        let parent = Plan::opened(
+            PlanId::new("plan-1"),
+            city.clone(),
+            "Work out what is slow",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+
+        let mut first = Plan::sent(PlanId::new("plan-2"), &parent, "call-1", "Read the parser");
+        first.status = PlanStatus::AwaitingReview;
+        let second = Plan::sent(PlanId::new("plan-3"), &parent, "call-1", "Read the loader");
+        // A second round of errands, under a different call.
+        let later = Plan::sent(PlanId::new("plan-4"), &parent, "call-2", "Read the cache");
+
+        let kingdom = Kingdom {
+            name: "Testburg".into(),
+            root: "/dev".into(),
+            cities: Vec::new(),
+            plans: vec![parent.clone(), first, second, later],
+            sandbox: false,
+        };
+
+        assert_eq!(
+            kingdom.plans_in(&city).map(|p| p.id.clone()).collect::<Vec<_>>(),
+            vec![PlanId::new("plan-1")],
+            "the map must draw the decreed plan only: errands share its worktree, \
+             so drawing them too would count one piece of work four times"
+        );
+
+        assert_eq!(
+            kingdom.pending_plans().count(),
+            0,
+            "an errand reports to the court that sent it, never to the King"
+        );
+
+        assert_eq!(
+            kingdom
+                .errands_of(&parent.id, "call-1")
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>(),
+            vec![PlanId::new("plan-2"), PlanId::new("plan-3")],
+            "a call finds its own errands, in the order they were sent, and not \
+             the ones a later call sent"
+        );
+    }
+
+    /// Plans are the one thing disk cannot tell us again, and `errand_for` is a
+    /// new field on a type that is already recorded. Additive-serde is a claim,
+    /// not a fact, and the cost of being wrong is a kingdom that will not open.
+    #[test]
+    fn a_plan_recorded_before_errands_existed_still_loads() {
+        let before_errands = r#"{
+            "id": "plan-old",
+            "city": "c1",
+            "title": "An older plan",
+            "summary": "Drawn up before the court could send anyone",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [
+                { "Said": { "speaker": "King", "body": "Do the thing", "at": 1 } }
+            ],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan =
+            serde_json::from_str(before_errands).expect("an older plan record must still load");
+
+        assert!(
+            !plan.is_errand(),
+            "a plan recorded before errands existed is the King's own work, and \
+             must not be mistaken for something the court sent"
         );
     }
 }

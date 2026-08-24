@@ -94,14 +94,17 @@ crates/
                     provider + its /models catalogue), catalogue.rs (assembles
                     one catalogue from every provider), credential.rs
     tools/          What the court can do with its own hands (ssr only)
-                    mod.rs (Tool trait, Workshop = the workspace boundary),
+                    mod.rs (Tool trait, Workshop = the workspace boundary,
+                    Remit = how much of the world a plan may touch),
                     think, read_file, read_image, search, bash, tmux, patch,
-                    browser, profile (browser_profile), ask_user_question
+                    browser, profile (browser_profile),
+                    spawn_agents (errands), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
                     bundle. The Tool impls over it live in kingdom-app.
-    session.rs      Per-plan Chrome, and the operations the tools call
+    session.rs      Per-plan Chrome, finding one on the machine, and the
+                    operations the tools call
     screencast.rs   CDP screencast, relayed to the spyglass's viewers
     profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
     perf.rs         The in-page helper injected before any page script
@@ -159,6 +162,12 @@ flowchart TB
   issued any decree. Plans he opens himself are entirely real.
 
 **Not built at all:**
+- **Errands with hands, and errands that send errands.** An errand is read-only
+  (`tools::Remit::Survey`), which is what makes running several of them in one
+  worktree safe without arbitrating anything. Both extensions need the same
+  missing piece: the moment an errand can write, two of them can collide, and
+  that is the resource question above. `Remit::Full` is the seam either would
+  arrive at.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
@@ -178,10 +187,6 @@ flowchart TB
   it changes the title, and the branch follows for free.
 
 **Tools the court does not have, and why each is its own decision:**
-- `spawn_agents`. Kingdom has no notion of a sub-plan. A spawned agent is
-  either a real `Plan` — and then: does it appear on the map, does it own a
-  worktree, who merges it? — or it is something invisible, which breaks the
-  product's first question. That is a design decision, not a port.
 - `keyword_search`. Wants a model call of its own. Genuinely useful, but
   `search` plus `read_file` cover most of the ground, so it earns its place
   only once someone finds the gap.
@@ -240,6 +245,12 @@ cargo leptos serve      # build + serve at http://127.0.0.1:3000
 cargo leptos watch      # same, with rebuild on change
 cargo test -p kingdom-core
 cargo test -p kingdom-app --features ssr --no-default-features
+
+# No test launches a browser, so the suite needs nothing installed and stays
+# fast. Kingdom finds Chrome itself at runtime: whatever is on `PATH` or in the
+# usual install locations, and failing that a Chromium that Playwright or
+# Puppeteer already downloaded. Set KINGDOM_CHROME_EXECUTABLE only to override
+# that on a machine where the guess is wrong.
 
 # Raise a proving ground: a synthetic dev folder, safe to work against.
 cargo run -p kingdom-app --bin kingdom-seed -- --list

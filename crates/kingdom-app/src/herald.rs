@@ -36,6 +36,19 @@
 //! forgotten, and the symptom -- a chamber frozen mid-turn -- would be blamed
 //! on the socket rather than on the caller that stayed silent.
 
+//! # Why an errand reaches two channels
+//!
+//! An errand is proclaimed on its own channel *and* on the channel of the plan
+//! that sent it. That is the whole of the live-errand-status feature, and it is
+//! four lines, because the decision above pays off a second time: the wire
+//! carries whole plans, and [`kingdom_core::Kingdom::absorb`] files a plan it
+//! has not seen before rather than dropping it. So a chamber watching a parent
+//! accumulates that parent's errands as they work, with no new message type, no
+//! second socket, and nothing to keep in step.
+//!
+//! An event stream would have needed a new event, a client that knew how to
+//! apply it, and a decision about ordering between the two channels.
+
 use kingdom_core::{Plan, PlanId};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -58,7 +71,7 @@ const BACKLOG: usize = 16;
 /// with thirty.
 static CHANNELS: OnceLock<Mutex<HashMap<PlanId, broadcast::Sender<Plan>>>> = OnceLock::new();
 
-fn channels() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
+fn registry() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
     CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -69,12 +82,25 @@ fn channels() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
 /// failure to proclaim must never fail the King's decree, because the work
 /// itself succeeded and the records on disk are already correct. The worst case
 /// is a chamber that is briefly stale, and the next proclamation repairs it.
+///
+/// An errand is announced twice: once to its own chamber, and once to the
+/// chamber of the plan that sent it, which is where the King watches it work.
+/// See the module docs for why that costs nothing.
 pub fn proclaim(plan: &Plan) {
-    let Ok(channels) = channels().lock() else {
+    let Ok(channels) = registry().lock() else {
         return;
     };
+
     if let Some(tx) = channels.get(&plan.id) {
         let _ = tx.send(plan.clone());
+    }
+
+    // The second channel is the *sender's*, not a broadcast: only the plan that
+    // sent this errand hears about it.
+    if let Some(errand) = &plan.errand_for {
+        if let Some(tx) = channels.get(&errand.parent) {
+            let _ = tx.send(plan.clone());
+        }
     }
 }
 
@@ -83,7 +109,7 @@ pub fn proclaim(plan: &Plan) {
 /// The channel is created on first listen rather than when a plan is opened, so
 /// plans nobody is watching hold no machinery at all.
 pub fn listen(id: &PlanId) -> broadcast::Receiver<Plan> {
-    let mut channels = match channels().lock() {
+    let mut channels = match registry().lock() {
         Ok(c) => c,
         // A poisoned registry means a previous holder panicked mid-update. The
         // King's chamber should not go dark over it: hand back a lone receiver
@@ -109,7 +135,7 @@ pub fn listen(id: &PlanId) -> broadcast::Receiver<Plan> {
 /// racy by nature, so it only removes a channel that currently has no
 /// receivers, and a listener arriving in that instant simply makes a new one.
 pub fn forget_if_unwatched(id: &PlanId) {
-    let Ok(mut channels) = channels().lock() else {
+    let Ok(mut channels) = registry().lock() else {
         return;
     };
     if let Some(tx) = channels.get(id) {
@@ -161,8 +187,47 @@ mod tests {
         forget_if_unwatched(&id);
 
         assert!(
-            !channels().lock().unwrap().contains_key(&id),
+            !registry().lock().unwrap().contains_key(&id),
             "the last watcher leaving must take the channel with it"
+        );
+    }
+
+    /// The whole of live errand status in the parent's chamber: a chamber
+    /// watching a plan is told about the errands that plan sent, without
+    /// subscribing to each one.
+    ///
+    /// Worth pinning because the *receiving* side has no idea this is
+    /// happening -- it just absorbs a plan -- so a regression here would show
+    /// up as errand rows that never leave "working", with nothing in the
+    /// chamber's own code to blame.
+    #[tokio::test]
+    async fn a_parent_hears_its_errands_and_no_others() {
+        let parent = a_plan("parent");
+        let mut watching_parent = listen(&parent.id);
+
+        // Somebody else's errand first: if the second channel were a broadcast
+        // rather than the sender's own parent, this is what would leak.
+        proclaim(&Plan::sent(
+            PlanId::new("stranger"),
+            &a_plan("elsewhere"),
+            "call-1",
+            "Not ours",
+        ));
+        proclaim(&Plan::sent(
+            PlanId::new("errand"),
+            &parent,
+            "call-1",
+            "Go and look",
+        ));
+
+        let heard = watching_parent
+            .recv()
+            .await
+            .expect("the parent's chamber should hear about its own errand");
+        assert_eq!(
+            heard.id,
+            PlanId::new("errand"),
+            "a chamber must hear the errands its own plan sent, and only those"
         );
     }
 }

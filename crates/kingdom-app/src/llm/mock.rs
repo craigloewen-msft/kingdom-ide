@@ -92,6 +92,14 @@ pub enum Scenario {
     /// transcript. Without this the loop could only be exercised against a real
     /// gateway, which is exactly the dependency the mock exists to remove.
     Work,
+    /// Sends two errands, then answers from what they report.
+    ///
+    /// The offline rehearsal for the fan-out: two sub-agents running at once,
+    /// each a real plan with its own chamber. It exercises the part that has no
+    /// other test -- errands being created, drafted concurrently and collected
+    /// -- and it is the only way to see the parent's errand rows go live
+    /// without a credential.
+    Errand,
 }
 
 impl Scenario {
@@ -122,6 +130,7 @@ impl Scenario {
             "slow" => Some(Scenario::Slow),
             "error" => Some(Scenario::Error),
             "work" | "tools" => Some(Scenario::Work),
+            "errand" | "errands" => Some(Scenario::Errand),
             "ask" => Some(Scenario::Ask),
             _ => None,
         }
@@ -220,6 +229,50 @@ impl Model for MockModel {
                          (Drafted by the mock model \u{2014} no real work was done.)",
                         prompt.trim(),
                         result.trim()
+                    ),
+                }),
+            }),
+
+            // Send on the first pass, speak on the second -- the same shape as
+            // `Work`, and read from the transcript for the same reason.
+            //
+            // The errands themselves are drafted by this same mock: their task
+            // text hashes to an ordinary speaking scenario, which is exactly
+            // the behaviour being rehearsed.
+            Scenario::Errand => Ok(match done_already(brief) {
+                None => Reply::Acts(vec![Act {
+                    id: "mock-errand-1".to_string(),
+                    tool: "spawn_agents".to_string(),
+                    input: serde_json::json!({
+                        "tasks": [
+                            {
+                                "task": format!(
+                                    "Survey the shape of {}: what kind of project is \
+                                     it, and what are its largest parts?",
+                                    city.name
+                                )
+                            },
+                            {
+                                "task": format!(
+                                    "Look for anything in {} that looks unfinished \
+                                     or inconsistent, and say where it is.",
+                                    city.name
+                                )
+                            }
+                        ]
+                    }),
+                }]),
+                Some(reports) => Reply::Spoke(Draft {
+                    title: format!("Errands upon {}", city.name),
+                    summary: format!("Sent two errands into {} and read them back.", city.name),
+                    body: format!(
+                        "On the decree \"{}\":\n\n\
+                         I sent two errands to look at {} in parallel. They \
+                         reported:\n\n{}\n\n\
+                         (Drafted by the mock model \u{2014} no real work was done.)",
+                        prompt.trim(),
+                        city.name,
+                        reports.trim()
                     ),
                 }),
             }),

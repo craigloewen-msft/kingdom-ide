@@ -55,9 +55,15 @@ pub struct ToolSpec {
 }
 
 impl ToolSpec {
-    /// Describes every tool the court has.
-    pub fn all() -> Vec<Self> {
-        crate::tools::all()
+    /// Describes every tool available under a remit.
+    ///
+    /// Goes through [`crate::tools::all`] rather than filtering here, so the
+    /// list a model is *shown* and the list it may *run* are the same list.
+    /// Two filters would eventually disagree, and the direction that fails
+    /// quietly is the dangerous one: a tool offered but refused is confusing,
+    /// while a tool refused but runnable is a hole in the boundary.
+    pub fn all(remit: crate::tools::Remit) -> Vec<Self> {
+        crate::tools::all(remit)
             .iter()
             .map(|t| Self {
                 name: t.name().to_string(),
@@ -67,21 +73,23 @@ impl ToolSpec {
             .collect()
     }
 
-    /// Describes the tools this model can actually make use of.
+    /// Describes the tools this model can actually make use of, under a remit.
     ///
-    /// The one seam where a model's capabilities narrow the tool list, so that
-    /// the reasoning lives in a single place rather than in each caller. Today
-    /// that means withholding `read_image` from a model with no vision: it
-    /// would call the tool, be handed a result it cannot look at, and have
-    /// spent one of the King's turns discovering that.
-    pub fn for_model(model: &dyn Model) -> Vec<Self> {
+    /// Two narrowings, and they compose rather than compete. The remit is about
+    /// what a *plan* may do to the world -- an errand surveys and cannot write.
+    /// The capabilities are about what a *model* can make sense of -- one with
+    /// no vision would call `read_image`, be handed something it cannot look
+    /// at, and have spent one of the King's turns discovering that.
+    ///
+    /// Both live here so neither is a check a caller has to remember.
+    pub fn for_model(model: &dyn Model, remit: crate::tools::Remit) -> Vec<Self> {
         if !model.can_act() {
             // Not merely "no tools worth offering" -- sending a `tools` array to
             // a gateway that does not accept one fails the request outright.
             return Vec::new();
         }
         let sighted = model.can_see();
-        Self::all()
+        Self::all(remit)
             .into_iter()
             .filter(|t| sighted || t.name != "read_image")
             .collect()

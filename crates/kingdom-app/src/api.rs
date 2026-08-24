@@ -435,6 +435,19 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
                 existing.status.label().to_lowercase()
             )));
         }
+
+        // An errand answers to the court that sent it, not to the King. Its
+        // chamber renders no composer, so this is only reachable from a stale
+        // tab or a hand-made request -- but the damage is real: the parent is
+        // blocked on a tool call whose conversation would now have two hands on
+        // it, and would be handed a report on a conversation that changed
+        // underneath it.
+        if existing.is_errand() {
+            return Err(ServerFnError::new(
+                "This is an errand the court sent, not a plan you decreed. \
+                 Say what you want in the plan that sent it.",
+            ));
+        }
     }
 
     update(&mut kingdom, &plan_id, |p| {
@@ -491,6 +504,14 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             return Ok(existing);
         }
 
+        // An errand is driven by the call that sent it, which is already
+        // running one of these loops over it. The chamber mounts identically
+        // for an errand, so without this, a King who opens one while it works
+        // would start a second loop over the same plan.
+        if existing.is_errand() {
+            return Ok(existing);
+        }
+
         let Some(city) = kingdom.city(&existing.city).cloned() else {
             return Err(ServerFnError::new("That plan's city is gone."));
         };
@@ -523,7 +544,16 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // the result, never the clearing; and since every step is pushed to the
     // chamber, that view was never the only way to see it.
     let handle = tokio::spawn(async move {
-        converse(plan_id, city_brief, workspace, city_name, choice).await
+        converse(
+            plan_id,
+            city_brief,
+            workspace,
+            city_name,
+            choice,
+            crate::tools::Remit::Full,
+            MOST_ROUNDS,
+        )
+        .await
     });
 
     handle
@@ -538,13 +568,22 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 /// so with nothing recording them: the chamber would show a long silence and
 /// then an answer, and a crash mid-way would leave no trace of what had already
 /// been done to the workspace.
+///
+/// Two callers: [`draft_plan`], for a plan the King decreed, and
+/// [`send_errands`], for each errand the court sends. They differ only in the
+/// `remit` and `cap` handed in -- an errand reads and reports, and gets fewer
+/// rounds to do it in. Sharing the loop is the point: an errand that drafted
+/// through a second, simpler path would be a second place for the busy mark,
+/// the deed recording and the push to drift.
 #[cfg(feature = "ssr")]
-async fn converse(
+pub(crate) async fn converse(
     plan_id: PlanId,
     city: crate::llm::CityBrief,
     workspace: kingdom_core::Workspace,
     city_name: String,
     choice: kingdom_core::ModelChoice,
+    remit: crate::tools::Remit,
+    cap: usize,
 ) -> Result<Plan, ServerFnError> {
     use crate::llm::{Brief, Reply, ToolSpec};
     use crate::tools::Workshop;
@@ -558,13 +597,17 @@ async fn converse(
     };
 
     // A model that cannot call tools still drafts perfectly good prose, so it
-    // gets a prose-only turn rather than an error, and one that cannot see is
-    // simply not offered the tool that hands back a picture. Both narrowings
-    // live in `ToolSpec::for_model`, so the reasoning is in one place.
-    let tools = ToolSpec::for_model(model.as_ref());
-    let shop = Workshop::new(workspace).for_plan(plan_id.clone());
+    // gets a prose-only turn rather than an error; one that cannot see is not
+    // offered the tool that hands back a picture; and a plan under a survey
+    // remit is not offered the tools that would let it write. All three
+    // narrowings live in `ToolSpec::for_model`, so the reasoning is in one
+    // place and no caller has to remember any of them.
+    let tools = ToolSpec::for_model(model.as_ref(), remit);
+    let shop = Workshop::new(workspace)
+        .for_plan(plan_id.clone())
+        .under(remit);
 
-    for round in 0..MOST_ROUNDS {
+    for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than
         // accumulated in a local. The deeds recorded below are already in it,
         // and reading them back is what makes this loop's state the plan's
@@ -650,11 +693,11 @@ async fn converse(
     let updated = update(&mut kingdom, &plan_id, |p| {
         p.working_on = None;
         p.status = kingdom_core::PlanStatus::Failed;
-        p.summary = format!("Stopped after {MOST_ROUNDS} rounds without an answer.");
+        p.summary = format!("Stopped after {cap} rounds without an answer.");
         p.note(
             NoteKind::Failed,
             format!(
-                "The court acted {MOST_ROUNDS} times in {city_name} without reaching an \
+                "The court acted {cap} times in {city_name} without reaching an \
                  answer, and was stopped. Its work so far is still in the workspace; \
                  say something to send it round again."
             ),
@@ -664,7 +707,158 @@ async fn converse(
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
-/// Plain-language "what is happening right now", for the rail and the map.
+/// Sends a set of errands and waits for them all to report.
+///
+/// Called by the `spawn_agents` tool, which is itself running inside its
+/// parent's [`converse`] loop -- so this is the turn loop calling itself, one
+/// level down, with a narrower remit. That shape is why `converse` is
+/// `pub(crate)` rather than private.
+///
+/// Each errand is a real plan: recorded, watched and pushed like any other,
+/// which is what lets the King open one and read it while it works. They run
+/// concurrently, which is only safe because [`crate::tools::spawn_agents::ERRAND_REMIT`]
+/// forbids them from writing -- see that module.
+///
+/// Returns the reports as one block of text for the model, or `Err` with a
+/// reason to report to it when no errand could be sent at all.
+#[cfg(feature = "ssr")]
+pub(crate) async fn send_errands(
+    parent_id: &PlanId,
+    deed: &str,
+    tasks: Vec<String>,
+    patience: std::time::Duration,
+) -> Result<String, String> {
+    use crate::tools::spawn_agents::{ERRAND_REMIT, MOST_ERRAND_ROUNDS};
+
+    // Everything the errands need is read once, under one lock: the parent they
+    // are cut from, and the city they work in. Holding it across the model
+    // calls below would freeze every other plan in the kingdom.
+    let (errands, city_brief, city_name) = {
+        let mut kingdom = lock().map_err(|e| e.to_string())?;
+
+        let Some(parent) = kingdom.plan(parent_id).cloned() else {
+            return Err("The plan that sent these errands is no longer in the records.".to_string());
+        };
+        let Some(city) = kingdom.city(&parent.city).cloned() else {
+            return Err("That plan's city is gone.".to_string());
+        };
+
+        // An errand is briefed on the *workspace*, exactly as its parent is:
+        // it is sent to look at the work in progress, not at a pristine copy.
+        let city_brief = crate::llm::CityBrief::from_city(&city, &parent.workspace);
+
+        let mut errands = Vec::new();
+        for task in tasks {
+            let id = PlanId::new(format!("plan-{}", next_plan_number()));
+            let mut errand = Plan::sent(id.clone(), &parent, deed, task.clone());
+            let root = std::path::PathBuf::from(&kingdom.root);
+            remember(&root, &mut errand);
+            // Pushed as well as recorded, so the parent's chamber can draw the
+            // errand the instant it exists rather than when it first speaks.
+            crate::herald::proclaim(&errand);
+            kingdom.plans.push(errand);
+            errands.push((id, task));
+        }
+
+        (errands, city_brief, city.name)
+    };
+
+    // All at once. The remit is what makes this safe: they share one worktree
+    // and none of them can write to it.
+    let running: Vec<_> = errands
+        .iter()
+        .map(|(id, _)| {
+            let id = id.clone();
+            let city_brief = city_brief.clone();
+            let city_name = city_name.clone();
+            // Read back rather than carried down, so an errand is drafted by
+            // what its own record says -- the same rule `draft_plan` follows.
+            let found = snapshot(&id).map(|p| (p.workspace.clone(), p.choice()));
+            tokio::spawn(async move {
+                let Some((workspace, choice)) = found else {
+                    return Err(ServerFnError::new("That errand vanished before it began."));
+                };
+                converse(
+                    id,
+                    city_brief,
+                    workspace,
+                    city_name,
+                    choice,
+                    ERRAND_REMIT,
+                    MOST_ERRAND_ROUNDS,
+                )
+                .await
+            })
+        })
+        .collect();
+
+    // One deadline across the whole call rather than one per errand: they run
+    // concurrently, so the bound that matters is how long the *parent* waits.
+    //
+    // Collected one at a time against that shared deadline, which is what keeps
+    // a partial answer possible -- an errand that has already reported is
+    // collected even if a later one has to be given up on. Timing the whole
+    // batch out as a unit would throw away work that was finished and paid for.
+    let deadline = tokio::time::Instant::now() + patience;
+    let mut outcomes: Vec<Option<Plan>> = Vec::with_capacity(running.len());
+    for handle in running {
+        let settled = tokio::time::timeout_at(deadline, handle)
+            .await
+            .ok()
+            .and_then(|joined| joined.ok())
+            .and_then(|result| result.ok());
+        outcomes.push(settled);
+    }
+
+    Ok(report(&errands, &outcomes))
+}
+
+/// Renders what the errands found, for the model that sent them.
+///
+/// Each block names the errand's plan id, which is what lets the parent refer
+/// to one in its own reply -- and what lets the King find the same conversation
+/// the parent read.
+#[cfg(feature = "ssr")]
+fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
+    use kingdom_core::Speaker;
+
+    let mut out = String::new();
+    for (i, (id, task)) in errands.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("--- errand {} ({id}) ---\nTask: {task}\n\n", i + 1));
+
+        // Read from the record rather than from the returned plan: an errand
+        // that timed out here may still have said something, and its record is
+        // where that would be.
+        let plan = outcomes
+            .get(i)
+            .and_then(|p| p.clone())
+            .or_else(|| snapshot(id));
+
+        // The last thing the *court* said is the errand's answer. Read with a
+        // fold rather than `next_back` because `said()` yields a plain forward
+        // iterator; taking the last match is the whole intent.
+        let said = plan.as_ref().and_then(|p| {
+            p.said()
+                .filter(|u| u.speaker == Speaker::Court)
+                .last()
+                .map(|u| u.body.clone())
+        });
+        match said {
+            Some(body) => out.push_str(&body),
+            None => out.push_str(
+                "This errand did not report back. It may have run out of rope or \
+                 taken too long; carry on without it, or ask something narrower.",
+            ),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Plain-language "what is happening right now", for the rail and the map./// Plain-language "what is happening right now", for the rail and the map.
 ///
 /// The tool's name alone is close to useless to the King -- "bash" tells him
 /// nothing that "an agent is working" did not. The argument is the information,
@@ -795,6 +989,22 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         // and repeating the disposal would only produce confusing git errors.
         if existing.status.is_settled() {
             return Ok(existing.clone());
+        }
+
+        // An errand's workspace is a *clone of its parent's* -- same path, same
+        // branch, same id -- because an errand works alongside the plan that
+        // sent it rather than in a checkout of its own.
+        //
+        // So finishing one would merge the parent's half-finished work and then
+        // delete the worktree out from under a plan still running in it. The
+        // chamber never offers the button, but the blast radius here is the
+        // King's actual work, so the guard is here rather than in the UI.
+        if existing.is_errand() {
+            return Err(ServerFnError::new(
+                "This is an errand, and it works in the worktree of the plan that \
+                 sent it -- it has nothing of its own to merge or archive. \
+                 Finish the plan that sent it instead.",
+            ));
         }
 
         let Some(city) = kingdom.city(&existing.city) else {
@@ -959,6 +1169,53 @@ mod tests {
             open_court(recorded.clone(), &[], court),
             recorded,
             "a kingdom with records keeps them, and gets no second court"
+        );
+    }
+
+    /// The guard with the largest blast radius in the codebase.
+    ///
+    /// An errand's workspace is a clone of its parent's, so finishing one would
+    /// merge the parent's half-finished work and then delete the worktree from
+    /// under a plan still running in it. The chamber never offers the button --
+    /// but "the UI does not offer it" is not a guarantee, and the thing being
+    /// protected is the King's real work.
+    ///
+    /// Tested through the guard's own predicate rather than through
+    /// `finish_plan`, which needs a git repository, a scanned kingdom and a
+    /// process-global lock to reach: this pins the decision, and the git work
+    /// below it is `worktree.rs`'s business and already has its own tests.
+    #[test]
+    fn an_errand_is_never_finished_on_its_own() {
+        use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
+
+        let parent = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Make the tests pass",
+            &ModelChoice::new("mock", None),
+            Workspace {
+                mode: kingdom_core::WorkspaceMode::Fresh,
+                path: "/dev/testburg/.kingdom/abc".into(),
+                branch: Some("kingdom/make-the-tests-pass".into()),
+                id: Some("abc".into()),
+                base: Some("main".into()),
+            },
+        );
+        let errand = Plan::sent(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
+
+        assert_eq!(
+            errand.workspace, parent.workspace,
+            "an errand works in its parent's checkout -- which is precisely why \
+             finishing it would destroy work that is not its own"
+        );
+        assert!(
+            errand.is_errand(),
+            "the predicate `finish_plan` refuses on must hold for a sent plan"
+        );
+        assert!(
+            !parent.is_errand(),
+            "and must not hold for the plan that sent it, or the King could \
+             never finish anything"
         );
     }
 }
