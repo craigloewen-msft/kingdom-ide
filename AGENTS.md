@@ -67,8 +67,9 @@ crates/
   kingdom-core/     Domain model. No I/O, no framework deps. Compiles to
                     BOTH native and wasm32 — keep it that way.
     ids.rs          Newtyped IDs (CityId, PlanId)
-    model.rs        Kingdom, City, Plan,
+    model.rs        Kingdom, City, Plan, Proposal (a plan put to the King),
                     District/Building/Ward (a project's shape on disk)
+    remit.rs        Remit = how much of the world a plan may touch
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
     sample.rs       Placeholder court data
@@ -90,14 +91,17 @@ crates/
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model + Provider traits, Brief, Reply, the provider
-                    list), mock.rs (offline provider), copilot.rs (Copilot
-                    provider + its /models catalogue), catalogue.rs (assembles
-                    one catalogue from every provider), credential.rs
+                    list), charter.rs (everything the court is told: the city,
+                    where it stands, its remit, and the project's AGENTS.md),
+                    mock.rs (offline provider), copilot.rs (Copilot provider +
+                    its /models catalogue), catalogue.rs (assembles one
+                    catalogue from every provider), credential.rs
     tools/          What the court can do with its own hands (ssr only)
                     mod.rs (Tool trait, Workshop = the workspace boundary,
-                    Remit = how much of the world a plan may touch),
+                    and the one place a Remit becomes a list of tools),
                     think, read_file, read_image, search, bash, tmux, patch,
                     browser, profile (browser_profile),
+                    propose_plan (counsel's gateway to work),
                     spawn_agents (errands), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
@@ -161,13 +165,42 @@ flowchart TB
 - The *opening* court: the plans a kingdom starts with, before the King has
   issued any decree. Plans he opens himself are entirely real.
 
+**How a plan actually runs.** A decree opens under `Remit::Counsel`: the court
+may read, search, and run commands, but has no `patch` and cannot change the
+project. When it knows what to do it calls `propose_plan`, which ends the turn
+and parks the plan in `AwaitingReview` with a `Proposal` standing on it. The
+King either sends notes back — ordinary `say` + `draft_plan`, the composer's own
+path — or presses **Start with this**, which is `approve_plan`: the remit widens
+to `Full` and the same conversation carries on with hands it did not have.
+
+Nothing is parked while he reads. The turn genuinely ends, so a server restart
+mid-review loses nothing — the proposal is on the plan and the plan is on disk.
+That is the whole reason `propose_plan` does not work like `ask_user_question`,
+which holds a request open on a oneshot; the module docs there spell it out.
+
+**The counsel boundary is a statement of the job, not a sandbox.** Counsel keeps
+`bash`, which `Workshop::root` is explicit about not containing — a command that
+names an absolute path writes wherever it likes. Withholding it would buy a
+guarantee Kingdom cannot keep while costing the court `git log`, `cargo tree`
+and running the failing test it is proposing to fix. What counsel loses is
+`patch`: offering the editing tool says *you may edit*, and withholding it says
+*you may not*. `charter.rs` says the rest in words, and says plainly that the
+shell is a boundary the court is trusted to keep rather than one that is
+enforced. Closing that properly means an OS-level sandbox, which is a deliberate
+later decision.
+
 **Not built at all:**
 - **Errands with hands, and errands that send errands.** An errand is read-only
-  (`tools::Remit::Survey`), which is what makes running several of them in one
-  worktree safe without arbitrating anything. Both extensions need the same
-  missing piece: the moment an errand can write, two of them can collide, and
-  that is the resource question above. `Remit::Full` is the seam either would
-  arrive at.
+  (`Remit::Survey`), which is what makes running several of them in one worktree
+  safe without arbitrating anything. Both extensions need the same missing
+  piece: the moment an errand can write, two of them can collide, and that is
+  the resource question above. `Remit::Full` is the seam either would arrive at.
+- **Errands while drawing up a plan.** `spawn_agents` is `Remit::Full` only, so
+  a counselling plan cannot fan out — which is a shame, because exploring a
+  codebase to write a proposal is the most fan-out-shaped work there is. It was
+  left out rather than guessed at; the case for adding it is that `Plan::sent`
+  already pins an errand to `Survey` unconditionally, so an errand of a
+  counselling plan would be the same read-only thing an errand always is.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
@@ -208,10 +241,12 @@ beside the existing `can_act` narrowing). The vision flag is read from three
 places in Copilot's `/models` payload because the catalogue is not ours; if it
 ever reads as blind for everything, that is where to look.
 
-The placeholder court deliberately includes a **failed plan** and a plan **mid
-draft**, because those are states the UI exists to show. Do not "clean up" the
-sample data into a court of tidy settled plans — it would make the most
-important visual states unreachable during development. A test pins this.
+The placeholder court deliberately includes a **failed plan**, a plan **mid
+draft**, and one with a **proposal standing in front of the King**, because
+those are states the UI exists to show — and the last is the one the product's
+whole stance rests on. Do not "clean up" the sample data into a court of tidy
+settled plans — it would make the most important visual states unreachable
+during development. A test pins this.
 
 ### Where state lives
 

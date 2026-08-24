@@ -561,7 +561,7 @@ impl Model for CopilotModel {
         }
 
         Ok(Reply::Spoke(Draft {
-            title: headline(&text, &brief.city.name),
+            title: headline(&text, &brief.charter.city.name),
             summary: first_sentence(&text),
             body: text,
         }))
@@ -609,39 +609,20 @@ fn parse_acts(tool_calls: &Value) -> Vec<Act> {
         .collect()
 }
 
-/// The system prompt.
+/// The system prompt: whatever the charter says.
 ///
-/// Deliberately plain. Kingdom's metaphor -- kings, courts, decrees -- exists to
-/// give the *user* a stance toward his agents; it is not information about the
-/// work, and sending it only nudges the model into answering in costume instead
-/// of answering the question.
+/// Deliberately thin. This used to *build* the prompt, which quietly made it
+/// Copilot's prompt rather than Kingdom's -- a second provider would have had
+/// to reinvent it, and the two would have drifted the first time either was
+/// touched. What a model is told is content, and content belongs in
+/// [`crate::llm::charter`]; a provider's job is transport.
+///
+/// The metaphor is still deliberately absent from it. Kings, courts and decrees
+/// exist to give the *user* a stance toward his agents; they are not
+/// information about the work, and sending them only nudges the model into
+/// answering in costume instead of answering the question.
 fn system_prompt(brief: &Brief) -> String {
-    let mut out = format!(
-        "You are a senior software engineer helping with one project.\n\n{}\n",
-        brief.city.render()
-    );
-
-    if brief.tools.is_empty() {
-        out.push_str(
-            "Answer concisely and concretely, referring to real files above where relevant. \
-             You cannot run commands or edit files: you are writing a proposal for review. \
-             Do not invent files that are not listed.",
-        );
-    } else {
-        // The file list is a starting point once tools exist, not the whole
-        // world -- telling a model with a filesystem in its hands not to name
-        // unlisted files would forbid it from reading anything it discovered.
-        out.push_str(
-            "You have tools and are working in the directory above. Use them: read \
-             before you change, and check your work by running it rather than by \
-             assuming. The file list is a starting point, not the whole project. \
-             When you have finished, reply with what you did and what it means \
-             for the reader -- concisely, and without repeating the output of \
-             commands they can already see.",
-        );
-    }
-
-    out
+    brief.charter.render()
 }
 
 /// Pulls `{"error":{"message":…}}` out of an error body, falling back to the
@@ -704,14 +685,17 @@ mod tests {
         deed.outcome = Some(kingdom_core::DeedOutcome::seen("Looked at shot.png.", images));
 
         Brief {
-            city: crate::llm::CityBrief {
-                name: "Testburg".into(),
-                path: "/dev/testburg".into(),
-                stack: "Rust".into(),
-                file_count: 1,
-                has_git: false,
-                dirty_files: 0,
-                notable_paths: Vec::new(),
+            charter: crate::llm::Charter {
+                city: crate::llm::CityBrief {
+                    name: "Testburg".into(),
+                    path: "/dev/testburg".into(),
+                    stack: "Rust".into(),
+                    file_count: 1,
+                    has_git: false,
+                    dirty_files: 0,
+                    notable_paths: Vec::new(),
+                },
+                ..Default::default()
             },
             turns: vec![Turn::Did(deed)],
             tools: Vec::new(),
@@ -924,12 +908,7 @@ mod tests {
             "no chosen effort must send no field, not a fabricated default"
         );
 
-        let chosen = request_body(
-            "claude-opus-5",
-            Some(ModelEffort::Xhigh),
-            Vec::new(),
-            &[],
-        );
+        let chosen = request_body("claude-opus-5", Some(ModelEffort::Xhigh), Vec::new(), &[]);
         assert_eq!(chosen["reasoning_effort"], "xhigh");
 
         let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new(), &[]);

@@ -24,9 +24,11 @@ pub mod layout;
 pub mod mockdata;
 pub mod model;
 pub mod naming;
+pub mod remit;
 pub mod sample;
 pub mod skyline;
 pub mod terrain;
 
 pub use ids::*;
 pub use model::*;
+pub use remit::*;

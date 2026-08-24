@@ -6,10 +6,12 @@
 //! for the plumbing would only obscure where the HTTP call lives.
 
 pub mod catalogue;
+pub mod charter;
 pub mod copilot;
 pub mod credential;
 pub mod mock;
 
+pub use charter::Charter;
 use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Turn, Workspace};
 
 /// Everything a model is told about the work.
@@ -18,7 +20,15 @@ use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Turn, Worksp
 /// with it the King is talking to something that knows which project he means.
 #[derive(Debug, Clone)]
 pub struct Brief {
-    pub city: CityBrief,
+    /// What the court is told before it is asked anything: the project, where
+    /// it is standing, what it may touch, and the project's own guidance.
+    ///
+    /// Replaces the bare [`CityBrief`] this used to carry. The city is still in
+    /// there -- see [`Charter::city`] -- but a provider now renders one
+    /// assembled document rather than deciding for itself what a model should
+    /// be told, which is a decision that belongs to Kingdom rather than to a
+    /// gateway.
+    pub charter: Charter,
     /// The whole exchange so far, oldest first: what was said and what was
     /// done, interleaved exactly as it happened.
     ///
@@ -97,7 +107,7 @@ impl ToolSpec {
 }
 
 /// The facts about a project worth spending tokens on.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CityBrief {
     pub name: String,
     /// Absolute path on the host machine.

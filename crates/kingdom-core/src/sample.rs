@@ -5,10 +5,10 @@
 //! this module fabricates is a *starting* court, so a freshly opened kingdom
 //! has something to show before the King has issued a single decree.
 //!
-//! It deliberately seeds a **failed plan** alongside ones awaiting review. A
-//! court that opens all-quiet makes the states worth noticing unreachable
-//! during development, which is exactly when a refactor would quietly lose
-//! them. A test pins this.
+//! It deliberately seeds a **failed plan** alongside ones awaiting review, and
+//! a plan with a **proposal standing in front of the King**. A court that opens
+//! all-quiet makes the states worth noticing unreachable during development,
+//! which is exactly when a refactor would quietly lose them. A test pins this.
 
 use crate::ids::*;
 use crate::model::*;
@@ -109,6 +109,39 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
     });
     plans.push(archived);
 
+    // A plan waiting on the King's word, which is the state the whole product
+    // turns on: the court has drawn something up and stopped, and nothing moves
+    // until he decides. Without one here the proposal card is unreachable on a
+    // fresh kingdom, and an unreachable state is one a refactor breaks quietly.
+    let mut proposing = Plan::opened(
+        PlanId::new("plan-counsel"),
+        first.id.clone(),
+        "Speed up the start-up path",
+        &mock,
+        Workspace::in_place(&first.path),
+    );
+    proposing.title = format!("The Swift Gates of {}", first.name);
+    proposing.summary = "A plan for the start-up path, awaiting your word.".into();
+    proposing.status = PlanStatus::AwaitingReview;
+    proposing.propose(
+        "Cache the scan between runs",
+        format!(
+            "## What I would do\n\n\
+             {} rescans every file on each start, which is most of the wait. I would \
+             keep the previous scan and re-walk only what changed.\n\n\
+             ## The changes\n\n\
+             1. Record the scan under `.kingdom/`, keyed by mtime.\n\
+             2. Compare on open, and walk only the folders that moved.\n\
+             3. Fall back to a full scan when the record is missing or unreadable.\n\n\
+             ## What I am assuming\n\n\
+             That mtime is trustworthy here. I have not checked what happens on a \
+             network mount.\n\n\
+             (Placeholder court \u{2014} no real work was done.)",
+            first.name
+        ),
+    );
+    plans.push(proposing);
+
     plans
 }
 
@@ -146,6 +179,10 @@ mod tests {
     /// contended resource; with lease arbitration gone, a *failed* plan is the
     /// honest equivalent, because it is a state the running product can
     /// genuinely produce.
+    ///
+    /// A standing proposal joined them for the same reason and matters most of
+    /// the four: it is the state the product's whole stance rests on, and the
+    /// only one whose UI is a decision rather than a display.
     #[test]
     fn the_opening_court_always_shows_trouble_and_history() {
         let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
@@ -162,6 +199,11 @@ mod tests {
         assert!(
             plans.iter().any(|p| !p.is_live()),
             "settled history must exist, or the rail's All filter looks broken"
+        );
+        assert!(
+            plans.iter().any(|p| p.standing_proposal().is_some()),
+            "a plan awaiting the King's word must be visible, or the proposal card \
+             — the state this whole product turns on — is unreachable on a fresh kingdom"
         );
     }
 }

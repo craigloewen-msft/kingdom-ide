@@ -481,7 +481,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 
     let plan_id = PlanId::new(plan);
 
-    let (city_brief, workspace, city_name, choice) = {
+    let (city_brief, workspace, city_name, choice, root) = {
         let mut kingdom = lock()?;
 
         let Some(existing) = kingdom.plan(&plan_id).cloned() else {
@@ -533,6 +533,9 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             existing.workspace.clone(),
             city.name,
             existing.choice(),
+            // Bounds the walk for project guidance: everything from the
+            // workspace up to here, and nothing above it.
+            std::path::PathBuf::from(&kingdom.root),
         )
     };
 
@@ -550,7 +553,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             workspace,
             city_name,
             choice,
-            crate::tools::Remit::Full,
+            root,
             MOST_ROUNDS,
         )
         .await
@@ -561,7 +564,8 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("drafting task failed: {e}")))?
 }
 
-/// Takes turns with the model until it speaks, runs out of rope, or fails.
+/// Takes turns with the model until it speaks, proposes, runs out of rope, or
+/// fails.
 ///
 /// The loop lives here rather than behind the [`crate::llm::Model`] trait
 /// because this is where the plan is. A provider running its own tools would do
@@ -571,10 +575,11 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 ///
 /// Two callers: [`draft_plan`], for a plan the King decreed, and
 /// [`send_errands`], for each errand the court sends. They differ only in the
-/// `remit` and `cap` handed in -- an errand reads and reports, and gets fewer
-/// rounds to do it in. Sharing the loop is the point: an errand that drafted
-/// through a second, simpler path would be a second place for the busy mark,
-/// the deed recording and the push to drift.
+/// `cap` handed in -- an errand gets fewer rounds. The *remit* is no longer a
+/// parameter: it is read back off the plan each pass, because it can change
+/// mid-conversation when the King accepts a proposal. Sharing the loop is the
+/// point: an errand that drafted through a second, simpler path would be a
+/// second place for the busy mark, the deed recording and the push to drift.
 #[cfg(feature = "ssr")]
 pub(crate) async fn converse(
     plan_id: PlanId,
@@ -582,12 +587,12 @@ pub(crate) async fn converse(
     workspace: kingdom_core::Workspace,
     city_name: String,
     choice: kingdom_core::ModelChoice,
-    remit: crate::tools::Remit,
+    root: std::path::PathBuf,
     cap: usize,
 ) -> Result<Plan, ServerFnError> {
-    use crate::llm::{Brief, Reply, ToolSpec};
+    use crate::llm::{Brief, Charter, Reply, ToolSpec};
     use crate::tools::Workshop;
-    use kingdom_core::{Deed, NoteKind};
+    use kingdom_core::{Deed, DeedOutcome, NoteKind};
 
     let model = match crate::llm::open(&choice).await {
         Ok(model) => model,
@@ -596,33 +601,44 @@ pub(crate) async fn converse(
         Err(e) => return settle(plan_id, Err(e)),
     };
 
-    // A model that cannot call tools still drafts perfectly good prose, so it
-    // gets a prose-only turn rather than an error; one that cannot see is not
-    // offered the tool that hands back a picture; and a plan under a survey
-    // remit is not offered the tools that would let it write. All three
-    // narrowings live in `ToolSpec::for_model`, so the reasoning is in one
-    // place and no caller has to remember any of them.
-    let tools = ToolSpec::for_model(model.as_ref(), remit);
-    let shop = Workshop::new(workspace)
-        .for_plan(plan_id.clone())
-        .under(remit);
-
     for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than
         // accumulated in a local. The deeds recorded below are already in it,
         // and reading them back is what makes this loop's state the plan's
         // state -- so a reader of the transcript sees exactly what the model
         // saw.
-        let turns = {
+        //
+        // The *remit* is read back for the same reason, and it is the reason
+        // this read now yields more than turns. A plan can gain its hands
+        // mid-conversation: the King accepts a proposal, `approve_plan` widens
+        // the remit, and the very next pass must offer the tools that grant
+        // implies. Resolving the tools once before the loop -- as this used to
+        // -- would have left an approved plan holding a counsellor's toolbox.
+        let (turns, remit, approved) = {
             let kingdom = lock()?;
             let Some(plan) = kingdom.plan(&plan_id) else {
                 return Err(ServerFnError::new("That plan vanished mid-decree."));
             };
-            plan.turns().collect::<Vec<_>>()
+            (
+                plan.turns().collect::<Vec<_>>(),
+                plan.remit,
+                plan.approved_proposal().is_some(),
+            )
         };
 
+        // A model that cannot call tools still drafts perfectly good prose, so
+        // it gets a prose-only turn rather than an error; one that cannot see is
+        // not offered the tool that hands back a picture; and a plan under a
+        // narrower remit is not offered the tools it may not run. All three
+        // narrowings live in `ToolSpec::for_model`, so the reasoning is in one
+        // place and no caller has to remember any of them.
+        let tools = ToolSpec::for_model(model.as_ref(), remit);
+        let shop = Workshop::new(workspace.clone())
+            .for_plan(plan_id.clone())
+            .under(remit);
+
         let brief = Brief {
-            city: city.clone(),
+            charter: Charter::assemble(&city, &workspace, remit, approved, &root),
             turns,
             tools: tools.clone(),
         };
@@ -650,6 +666,14 @@ pub(crate) async fn converse(
                         });
                     }
 
+                    // Read off the arguments *before* they are handed to the
+                    // tool, and from the same value the deed was recorded with
+                    // a moment ago -- so what the transcript shows and what the
+                    // chamber offers cannot disagree.
+                    let put = (act.tool == "propose_plan")
+                        .then(|| crate::tools::propose_plan::proposed(&act.input))
+                        .flatten();
+
                     // The lock is deliberately not held across this. A tool can
                     // take minutes -- and `ask_user_question` waits on a person
                     // -- so a held lock would freeze every other plan and every
@@ -662,6 +686,7 @@ pub(crate) async fn converse(
                         crate::tools::invoke(&act.tool, act.input, &shop.for_deed(&act.id)).await;
 
                     let mut kingdom = lock()?;
+                    let mut proposed = None;
                     update(&mut kingdom, &plan_id, |p| {
                         if !p.settle_deed(&act.id, outcome.clone()) {
                             // Cannot happen -- the deed was recorded a moment
@@ -677,7 +702,32 @@ pub(crate) async fn converse(
                                 ),
                             );
                         }
+
+                        // A plan put to the King ends the turn.
+                        //
+                        // The outcome is checked as well as the arguments: a
+                        // refused call -- bad arguments, or the wrong remit --
+                        // is one the model should be told about and allowed to
+                        // correct on the next round, not one that parks the
+                        // plan in front of the King with nothing to read.
+                        let accepted = matches!(&outcome, DeedOutcome::Done { output, .. }
+                            if output == crate::tools::propose_plan::PROPOSED);
+                        if let (Some((title, body)), true) = (put.clone(), accepted) {
+                            p.propose(title, body);
+                            p.working_on = None;
+                            p.status = kingdom_core::PlanStatus::AwaitingReview;
+                            proposed = Some(p.clone());
+                        }
                     });
+
+                    // Nothing is parked and no request stays open: the plan is
+                    // on disk with its proposal, and the chamber has been told.
+                    // A server restart mid-review therefore loses nothing --
+                    // see the module docs on `tools::propose_plan` for why that
+                    // is worth more than resuming in place would have been.
+                    if let Some(plan) = proposed {
+                        return Ok(plan);
+                    }
                 }
 
                 // Back round to ask again, now with the results in the log.
@@ -716,8 +766,9 @@ pub(crate) async fn converse(
 ///
 /// Each errand is a real plan: recorded, watched and pushed like any other,
 /// which is what lets the King open one and read it while it works. They run
-/// concurrently, which is only safe because [`crate::tools::spawn_agents::ERRAND_REMIT`]
-/// forbids them from writing -- see that module.
+/// concurrently, which is only safe because an errand is born under
+/// [`kingdom_core::Remit::Survey`] and so cannot write -- see [`Plan::sent`],
+/// which is where that is now settled, and `tools::spawn_agents`.
 ///
 /// Returns the reports as one block of text for the model, or `Err` with a
 /// reason to report to it when no errand could be sent at all.
@@ -728,16 +779,18 @@ pub(crate) async fn send_errands(
     tasks: Vec<String>,
     patience: std::time::Duration,
 ) -> Result<String, String> {
-    use crate::tools::spawn_agents::{ERRAND_REMIT, MOST_ERRAND_ROUNDS};
+    use crate::tools::spawn_agents::MOST_ERRAND_ROUNDS;
 
     // Everything the errands need is read once, under one lock: the parent they
     // are cut from, and the city they work in. Holding it across the model
     // calls below would freeze every other plan in the kingdom.
-    let (errands, city_brief, city_name) = {
+    let (errands, city_brief, city_name, root) = {
         let mut kingdom = lock().map_err(|e| e.to_string())?;
 
         let Some(parent) = kingdom.plan(parent_id).cloned() else {
-            return Err("The plan that sent these errands is no longer in the records.".to_string());
+            return Err(
+                "The plan that sent these errands is no longer in the records.".to_string(),
+            );
         };
         let Some(city) = kingdom.city(&parent.city).cloned() else {
             return Err("That plan's city is gone.".to_string());
@@ -760,17 +813,25 @@ pub(crate) async fn send_errands(
             errands.push((id, task));
         }
 
-        (errands, city_brief, city.name)
+        (
+            errands,
+            city_brief,
+            city.name,
+            std::path::PathBuf::from(&kingdom.root),
+        )
     };
 
     // All at once. The remit is what makes this safe: they share one worktree
-    // and none of them can write to it.
+    // and none of them can write to it. It is settled on the errand itself, by
+    // `Plan::sent`, and read back by the loop -- so the invariant travels with
+    // the plan rather than with this call site.
     let running: Vec<_> = errands
         .iter()
         .map(|(id, _)| {
             let id = id.clone();
             let city_brief = city_brief.clone();
             let city_name = city_name.clone();
+            let root = root.clone();
             // Read back rather than carried down, so an errand is drafted by
             // what its own record says -- the same rule `draft_plan` follows.
             let found = snapshot(&id).map(|p| (p.workspace.clone(), p.choice()));
@@ -784,7 +845,7 @@ pub(crate) async fn send_errands(
                     workspace,
                     city_name,
                     choice,
-                    ERRAND_REMIT,
+                    root,
                     MOST_ERRAND_ROUNDS,
                 )
                 .await
@@ -827,7 +888,10 @@ fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("--- errand {} ({id}) ---\nTask: {task}\n\n", i + 1));
+        out.push_str(&format!(
+            "--- errand {} ({id}) ---\nTask: {task}\n\n",
+            i + 1
+        ));
 
         // Read from the record rather than from the returned plan: an errand
         // that timed out here may still have said something, and its record is
@@ -873,6 +937,13 @@ fn describe(tool: &str, input: &serde_json::Value) -> String {
         return "Waiting on the King".to_string();
     }
 
+    // Likewise a plan put to him. Not a command running and not a question
+    // either: the turn is over and the next move is his, which is a different
+    // sort of "busy" again and worth its own words.
+    if tool == "propose_plan" {
+        return "Awaiting the King's word".to_string();
+    }
+
     let subject = ["cmd", "path", "pattern", "url", "selector", "query"]
         .iter()
         .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
@@ -886,7 +957,6 @@ fn describe(tool: &str, input: &serde_json::Value) -> String {
     let short: String = subject.chars().take(60).collect();
     format!("{tool}: {short}")
 }
-
 
 /// Records a drafting outcome on the plan and marks it no longer busy.
 ///
@@ -909,6 +979,13 @@ fn settle(
                 plan.summary = draft.summary.clone();
                 plan.status = PlanStatus::AwaitingReview;
                 plan.say(Speaker::Court, draft.body.clone());
+                // The court has spoken, so any proposal the King had not
+                // accepted is no longer the question on the table. Without
+                // this, a plan that proposed, was asked something, and answered
+                // in prose would still be offering to start work the
+                // conversation has moved past. An accepted proposal is left
+                // alone -- it is not a question, it is the job in hand.
+                plan.set_aside_proposal();
             }
             Err(e) => {
                 // A failure is Kingdom reporting, not the model speaking -- so
@@ -953,6 +1030,78 @@ pub async fn answer_question(
     }
 
     snapshot(&plan_id).ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+}
+
+/// The King accepts the standing proposal, and the court gains its hands.
+///
+/// The one place a plan's authority widens, and the only thing in Kingdom the
+/// King changes on a plan directly. Everything else about a plan is written by
+/// the court or by Kingdom itself.
+///
+/// Makes **no model call**, exactly as [`begin_plan`] makes none: it grants and
+/// returns, and the chamber then dispatches [`draft_plan`] the same way it does
+/// after [`say`]. Splitting them is what lets the King see the grant land
+/// immediately rather than watching a spinner for the first round of work.
+#[server(ApprovePlan, "/api")]
+pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
+    use kingdom_core::{NoteKind, PlanStatus, Speaker};
+
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    // Checked before the grant rather than inside it, so the refusal can say
+    // *why*. A stale tab is the ordinary case here: the King left a proposal
+    // open, revised it in another tab, and came back to press a button that no
+    // longer refers to anything.
+    match kingdom.plan(&plan_id) {
+        None => return Err(ServerFnError::new("That plan is no longer in the records.")),
+        Some(existing) if existing.standing_proposal().is_none() => {
+            return Err(ServerFnError::new(
+                "There is no plan awaiting your word here. It may have been accepted in \
+                 another tab, or the court may have revised it since.",
+            ))
+        }
+        Some(_) => {}
+    }
+
+    update(&mut kingdom, &plan_id, |p| {
+        if !p.approve() {
+            return;
+        }
+
+        // Authority changing is something that *happened*, not something anyone
+        // said, so it is a note. The King must be able to see the moment his
+        // agent gained the ability to change his files -- and see it in the log
+        // rather than only in a header that reflects the present.
+        p.note(
+            NoteKind::Workspace,
+            "Approved. The court may now change the project.",
+        );
+
+        // The grant reaches the model as an ordinary King turn. It could have
+        // been a new kind of message with its own handling on the wire; making
+        // it something the King said needs no provider to know anything, and is
+        // also simply true.
+        p.say(Speaker::King, kingdom_core::APPROVAL);
+        p.status = PlanStatus::Drafting;
+    })
+    .ok_or_else(|| ServerFnError::new("That plan vanished as it was being approved."))
+}
+
+/// The King sets aside a proposal without accepting it.
+///
+/// Deliberately **not** a terminal state. The plan stays where it was, with its
+/// composer live, so he can say what he actually wants instead. Archiving is
+/// how a plan ends, and it is reached the way it always is -- conflating "not
+/// this plan" with "not this work" would make the dismissive click the
+/// destructive one.
+#[server(SetAsidePlan, "/api")]
+pub async fn set_aside_plan(plan: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    update(&mut kingdom, &plan_id, |p| p.set_aside_proposal())
+        .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
 /// Closes a plan: lands its work, or sets it aside.

@@ -1,6 +1,7 @@
 //! The Kingdom domain model.
 
 use crate::ids::*;
+use crate::remit::Remit;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -491,7 +492,83 @@ pub struct Plan {
     /// docs on [`Plan::sent`] for what that buys and what it costs.
     #[serde(default)]
     pub errand_for: Option<Errand>,
+    /// How much of the world this plan may touch, right now.
+    ///
+    /// The one field on a plan the King changes directly, and he changes it
+    /// exactly once: from [`Remit::Counsel`] to [`Remit::Full`], by accepting a
+    /// proposal. Everything else here is written by the court or by Kingdom.
+    ///
+    /// Defaults to `Full` when absent so a plan recorded before counsel existed
+    /// keeps the hands it was drafted with. The opposite default would strand
+    /// every old plan: reloaded without a proposal it could never make one,
+    /// because the composer would only ever hand it back to a court with no
+    /// `patch`.
+    #[serde(default = "Remit::full")]
+    pub remit: Remit,
+    /// The plan the court has put to the King, if there is one standing.
+    ///
+    /// A *standing* proposal is one that is still the live question in the
+    /// chamber -- see [`Plan::propose`], [`Plan::approve`] and
+    /// [`Plan::set_aside_proposal`] for the three transitions, which together
+    /// are the whole of this state machine.
+    #[serde(default)]
+    pub proposal: Option<Proposal>,
 }
+
+/// A plan the court has drawn up and put to the King.
+///
+/// Held on the plan rather than only in the transcript, even though the deed
+/// that made it is already there. The transcript is the *record*; this is the
+/// *question currently on the table*, and the chamber needs to answer "is there
+/// one, and has it been accepted?" without re-parsing tool arguments to find
+/// out. It also means the body survives independently of how the deed was
+/// recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proposal {
+    /// The court's own headline for the work.
+    ///
+    /// Not applied to [`Plan::title`] today. Retitling a plan means renaming
+    /// its `kingdom/<slug>` branch, which is its own piece of work; until then
+    /// this is the better name sitting ready for it.
+    pub title: String,
+    /// The proposal itself, as markdown.
+    pub body: String,
+    /// When it was put to the King. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+    /// True once the King has said to start with it.
+    ///
+    /// An approved proposal is no longer a question -- it is the plan being
+    /// carried out, which is why it survives the court speaking again where an
+    /// unapproved one does not.
+    #[serde(default)]
+    pub approved: bool,
+}
+
+impl Proposal {
+    /// A proposal as the court has just made it: put, not yet accepted.
+    pub fn put(title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            body: body.into(),
+            at: Timestamp::now(),
+            approved: false,
+        }
+    }
+}
+
+/// What the King is recorded as saying when he accepts a proposal.
+///
+/// The grant reaches the model as an ordinary [`Speaker::King`] turn rather
+/// than as a new kind of message, so no provider has to learn anything -- and
+/// it is also simply true, since he did say to start.
+///
+/// A constant because it is not only *written*. Anything that reasons about
+/// what the King actually asked for has to be able to tell his decree from
+/// Kingdom's phrasing of his click, and comparing against a literal in two
+/// places is how those two drift apart.
+pub const APPROVAL: &str = "Approved. Carry out the plan as proposed. If you find it was \
+                            wrong, say so rather than quietly doing something else.";
 
 /// Which call an errand was sent to answer.
 ///
@@ -535,6 +612,12 @@ impl Plan {
             workspace,
             working_on: None,
             errand_for: None,
+            // A decree opens under counsel: the court draws up a plan and puts
+            // it to the King before it touches anything. This one line is what
+            // inverts the product's stance -- the King reviews a proposal
+            // rather than a fait accompli.
+            remit: Remit::Counsel,
+            proposal: None,
         }
     }
 
@@ -582,6 +665,14 @@ impl Plan {
                 parent: parent.id.clone(),
                 deed: deed.to_string(),
             }),
+            // An errand reads and reports and never writes, which is the whole
+            // reason several may share one worktree safely. Carried on the
+            // errand rather than passed to the turn loop, so the invariant
+            // lives on the thing it constrains.
+            remit: Remit::Survey,
+            // An errand answers to the court that sent it. Nothing about it is
+            // ever put to the King.
+            proposal: None,
         }
     }
 
@@ -636,6 +727,70 @@ impl Plan {
     /// Records something Kingdom itself reports. Never leaves the machine.
     pub fn note(&mut self, kind: NoteKind, body: impl Into<String>) {
         self.transcript.push(Entry::Note(Note::new(kind, body)));
+    }
+
+    /// Puts a plan to the King, replacing whatever was standing before it.
+    ///
+    /// Replacing rather than accumulating is the point: there is one question
+    /// on the table at a time. A revised proposal supersedes the one it
+    /// revises, and the superseded version is not lost -- the deed that made it
+    /// is still in the transcript, which is where the history of a plan lives.
+    pub fn propose(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        self.proposal = Some(Proposal::put(title, body));
+    }
+
+    /// The King accepts the standing proposal, and the court gains its hands.
+    ///
+    /// The single door from counsel to work, so a plan cannot end up with
+    /// `Remit::Full` and no accepted proposal to answer for it. Returns false
+    /// when nothing was standing, which the caller must report rather than
+    /// swallow: granting authority on a question that is no longer being asked
+    /// is exactly the mistake worth being loud about.
+    pub fn approve(&mut self) -> bool {
+        match &mut self.proposal {
+            Some(proposal) => {
+                proposal.approved = true;
+                self.remit = Remit::Full;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Clears a proposal the King has not accepted.
+    ///
+    /// Called when he sets one aside, and again whenever the court speaks --
+    /// see [`Plan::standing_proposal`] for why the second case matters. An
+    /// *approved* proposal is deliberately untouched: it is no longer a
+    /// question, it is the work in progress.
+    pub fn set_aside_proposal(&mut self) {
+        if self.proposal.as_ref().is_some_and(|p| !p.approved) {
+            self.proposal = None;
+        }
+    }
+
+    /// The proposal awaiting the King's word, if there is one.
+    ///
+    /// The single reader behind the chamber's card, so "is there a decision to
+    /// make here?" is answered the same way everywhere. Three conditions, and
+    /// each rules out a card that would be wrong rather than merely redundant:
+    /// a proposal already accepted is the work in progress and not a question;
+    /// a plan that already has full hands has nothing left to grant; and a plan
+    /// still drafting may be in the middle of revising the very proposal being
+    /// looked at.
+    pub fn standing_proposal(&self) -> Option<&Proposal> {
+        if self.remit.is_full() || self.status != PlanStatus::AwaitingReview {
+            return None;
+        }
+        self.proposal.as_ref().filter(|p| !p.approved)
+    }
+
+    /// The proposal the court is carrying out, if the King accepted one.
+    ///
+    /// What the chamber's header names while the work is under way, and what
+    /// tells the charter to remind the model whose plan it is following.
+    pub fn approved_proposal(&self) -> Option<&Proposal> {
+        self.proposal.as_ref().filter(|p| p.approved)
     }
 
     /// Just the utterances, in order.
@@ -1530,6 +1685,118 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod proposal_tests {
+    use super::*;
+
+    fn counselling() -> Plan {
+        let mut plan = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+        plan.propose("Fix the off-by-one", "Change `lex.rs` line 42.");
+        plan.status = PlanStatus::AwaitingReview;
+        plan
+    }
+
+    /// The whole of the standing-proposal state machine, in the order a plan
+    /// actually moves through it.
+    ///
+    /// Every branch here is one the chamber renders, and getting any of them
+    /// wrong shows the King a button that lies. The last one is the subtle one:
+    /// a proposal the King has *not* accepted is cleared when the court speaks
+    /// again, because otherwise a plan that proposed, was asked a question, and
+    /// answered it in prose would still be offering to start work the
+    /// conversation had already moved past. An accepted proposal survives that,
+    /// because it is no longer a question -- it is the work in progress, and
+    /// the header names it for the rest of the plan's life.
+    #[test]
+    fn a_proposal_stands_until_it_is_accepted_or_superseded() {
+        let mut plan = counselling();
+        assert!(
+            plan.standing_proposal().is_some(),
+            "a fresh proposal awaiting review is the question on the table"
+        );
+
+        // Still drafting means the court may be mid-revision: nothing to decide
+        // on yet.
+        plan.status = PlanStatus::Drafting;
+        assert!(plan.standing_proposal().is_none());
+        plan.status = PlanStatus::AwaitingReview;
+
+        // The King accepts. The question is settled and the hands are granted.
+        assert!(plan.approve(), "there was a proposal to accept");
+        assert_eq!(plan.remit, Remit::Full);
+        assert!(
+            plan.standing_proposal().is_none(),
+            "an accepted proposal is the work, not a decision to make"
+        );
+        assert!(plan.approved_proposal().is_some());
+
+        // Speaking does not revoke work already approved.
+        plan.set_aside_proposal();
+        assert!(
+            plan.approved_proposal().is_some(),
+            "the plan being carried out must survive the court speaking"
+        );
+
+        // An unapproved one does not survive it.
+        let mut fresh = counselling();
+        fresh.set_aside_proposal();
+        assert!(
+            fresh.proposal.is_none(),
+            "an unaccepted proposal is superseded when the court speaks again"
+        );
+        assert_eq!(
+            fresh.remit,
+            Remit::Counsel,
+            "setting a proposal aside must not hand over the hands"
+        );
+        assert!(
+            !fresh.approve(),
+            "approving nothing must be reported, not silently granted"
+        );
+        assert_eq!(fresh.remit, Remit::Counsel);
+    }
+
+    /// A plan recorded before counsel existed keeps the hands it was drafted
+    /// with. The opposite default would strand every plan already on disk: no
+    /// proposal to accept, and no `patch` to make one with.
+    #[test]
+    fn a_plan_recorded_before_counsel_still_has_its_hands() {
+        let before_counsel = r#"{
+            "id": "plan-1",
+            "city": "c1",
+            "title": "Old work",
+            "summary": "",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan =
+            serde_json::from_str(before_counsel).expect("an older plan record must still load");
+
+        assert_eq!(plan.remit, Remit::Full);
+        assert!(plan.proposal.is_none());
+        assert!(
+            plan.standing_proposal().is_none(),
+            "an old plan must not sprout a proposal card it can never satisfy"
+        );
+    }
+}
 #[cfg(test)]
 mod transcript_tests {
     use super::*;

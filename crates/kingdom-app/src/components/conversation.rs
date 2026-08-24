@@ -5,10 +5,12 @@
 //! signals, which is what lets a reload -- or a link shared between tabs --
 //! rebuild the conversation exactly.
 
-use crate::api::{draft_plan, finish_plan, get_kingdom, say};
+use crate::api::{approve_plan, draft_plan, finish_plan, get_kingdom, say, set_aside_plan};
 use crate::app::KingdomState;
 use crate::components::Spyglass;
-use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker, Timestamp};
+use kingdom_core::{
+    Disposition, Entry, Plan, PlanId, PlanStatus, Proposal, Remit, Speaker, Timestamp,
+};
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
@@ -70,8 +72,21 @@ pub fn Conversation() -> impl IntoView {
         }
     });
 
-    // A plan that is Drafting, busy with nothing and has heard nothing back is
-    // one nobody has started yet: exactly the state `begin_plan` leaves behind.
+    // A plan that is Drafting, busy with nothing and whose court has done
+    // nothing is one nobody has started: exactly the state `begin_plan` leaves
+    // behind.
+    //
+    // "Done nothing" means the court has neither spoken *nor acted*, and the
+    // second half is load-bearing. This used to ask only whether the court had
+    // spoken, which was a safe proxy while every turn ended in speech -- but a
+    // counselling plan ends its turn on a `propose_plan` call, having said
+    // nothing at all. Under the old test such a plan read as unstarted on every
+    // mount, so approving one dispatched a second turn loop racing the first,
+    // and the court's reply landed in the transcript twice.
+    //
+    // Kingdom's own notes are deliberately not evidence either way: a plan is
+    // born with a workspace note already in its log, so counting notes here
+    // would mean no plan ever started at all.
     //
     // Never an errand: an errand is driven by the call that sent it, which is
     // already looping over it. A King who opens one in the window before its
@@ -79,10 +94,13 @@ pub fn Conversation() -> impl IntoView {
     // refuses this too -- this is the half that avoids the pointless request.
     Effect::new(move |_| {
         let Some(p) = plan.get() else { return };
-        let unstarted = p.status == PlanStatus::Drafting
-            && !p.is_busy()
-            && !p.is_errand()
-            && !p.said().any(|u| u.speaker == Speaker::Court);
+        let court_has_moved = p.transcript.iter().any(|e| match e {
+            Entry::Said(u) => u.speaker == Speaker::Court,
+            Entry::Did(_) => true,
+            Entry::Note(_) => false,
+        });
+        let unstarted =
+            p.status == PlanStatus::Drafting && !p.is_busy() && !p.is_errand() && !court_has_moved;
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());
         }
@@ -112,6 +130,13 @@ pub fn Conversation() -> impl IntoView {
         });
     });
 
+    // Sending the court round again, for the chamber's other reason to: the
+    // King accepting a plan. Wrapping the action rather than handing it down
+    // keeps `draft`'s pending state -- which the composer reads -- owned here.
+    let redraft = Callback::new(move |id: PlanId| {
+        draft.dispatch(id);
+    });
+
     // Finishing touches the workspace on disk and may settle the plan, so the
     // whole kingdom is refetched rather than patched: the rail and the map both
     // render what just changed.
@@ -139,6 +164,7 @@ pub fn Conversation() -> impl IntoView {
                         city=city_name
                         drafting=drafting
                         on_say=speak
+                        on_draft=redraft
                         finish=finish
                     />
                 }
@@ -174,6 +200,9 @@ fn ChamberBody(
     city: Memo<Option<String>>,
     drafting: Memo<bool>,
     on_say: Callback<(PlanId, String)>,
+    /// Sends the court round again. Used after the King accepts a plan, which
+    /// grants authority but deliberately makes no model call of its own.
+    on_draft: Callback<PlanId>,
     finish: Action<(PlanId, Disposition), ()>,
 ) -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -197,6 +226,14 @@ fn ChamberBody(
     let status = Memo::new(move |_| live.get().map(|p| p.status).unwrap_or(PlanStatus::Drafting));
     let settled = Memo::new(move |_| status.get().is_settled());
     let title = Memo::new(move |_| live.get().map(|p| p.title).unwrap_or_default());
+
+    // The plan the court has put to the King, if it is his move. Read live,
+    // because it arrives mid-conversation over the watch socket -- and read
+    // through `standing_proposal` rather than by testing the fields here, so
+    // the browser and the server agree on what "awaiting his word" means.
+    let proposal = Memo::new(move |_| live.get().and_then(|p| p.standing_proposal().cloned()));
+    // What the court may touch right now. Widens exactly once, when he accepts.
+    let remit = Memo::new(move |_| live.get().map(|p| p.remit).unwrap_or(Remit::Full));
 
     // An errand is settled once and never changes, so it is read off the
     // snapshot rather than the live signal.
@@ -258,6 +295,44 @@ fn ChamberBody(
         set_showing_done.set(false);
         finish.dispatch((id.get_value(), how));
     };
+
+    // Accepting a plan makes no model call of its own -- it grants, and then
+    // the court is asked again through exactly the path `say` uses. Splitting
+    // them is what lets the grant land in the chamber immediately rather than
+    // behind the first round of real work.
+    let accept = Callback::new(move |_: ()| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match approve_plan(plan_id.to_string()).await {
+                Ok(_) => {
+                    state.error.set(None);
+                    if let Ok(k) = get_kingdom().await {
+                        state.kingdom.set(k);
+                    }
+                    // Straight on to the work. The court has hands now.
+                    on_draft.run(plan_id);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // Setting a proposal aside is deliberately *not* an ending: the plan stays
+    // exactly where it was, with its composer live, so the King can say what he
+    // actually wants instead. Archiving is how a plan ends, and it is still
+    // reached the way it always was.
+    let set_aside = Callback::new(move |_: ()| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match set_aside_plan(plan_id.to_string()).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.absorb(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
 
     // Closed by default. Opening it is what attaches a viewer and starts the
     // screencast, and closing it is what stops one -- so this signal is the
@@ -325,9 +400,18 @@ fn ChamberBody(
                 {move || {
                     // An errand is never reviewed and never merged: it reports
                     // to the court that sent it. Same states, honest words.
+                    //
+                    // A plan with something in front of the King is the other
+                    // case where "Awaiting review" is too vague to be useful --
+                    // it does not say that the wait is on *him*, or that there
+                    // is a button. A label, deliberately, and not a sixth
+                    // `PlanStatus`: nothing about the state machine changed.
                     match (is_errand, status.get()) {
                         (true, PlanStatus::AwaitingReview) => "Reported",
                         (true, PlanStatus::Drafting) => "Working",
+                        (false, PlanStatus::AwaitingReview) if proposal.get().is_some() => {
+                            "Proposal"
+                        }
                         (_, s) => s.label(),
                     }
                 }}
@@ -376,6 +460,21 @@ fn ChamberBody(
             </div>
         </Show>
 
+        // The King's move, when the court has put something to him. Above the
+        // composer rather than inside the log for the same reason the error
+        // strip is: the log is what was said and done, and this is a decision
+        // still to make. It sits where his attention already is.
+        <Show when=move || proposal.get().is_some()>
+            {move || proposal.get().map(|put| view! {
+                <ProposalCard
+                    proposal=put
+                    busy=drafting
+                    on_accept=accept
+                    on_set_aside=set_aside
+                />
+            })}
+        </Show>
+
         // A settled plan is a record, not a place to type. The composer goes
         // and the outcome takes its place, so the chamber says what became of
         // the work rather than inviting more of it.
@@ -408,7 +507,21 @@ fn ChamberBody(
                 <input
                     class="decree-input"
                     r#type="text"
-                    placeholder="Say more, or ask for a change\u{2026}"
+                    placeholder=move || {
+                        // The composer says which conversation this is. While
+                        // the court is drawing something up, "ask for a change"
+                        // would be inviting him to steer work that has not
+                        // started -- and once a plan is in front of him, the
+                        // useful thing to type is what he would change *about
+                        // the plan*.
+                        if remit.get().is_full() {
+                            "Say more, or ask for a change\u{2026}"
+                        } else if proposal.get().is_some() {
+                            "Say what you would change about this plan\u{2026}"
+                        } else {
+                            "Say more about what you want\u{2026}"
+                        }
+                    }
                     prop:value=move || reply.get()
                     disabled={move || drafting.get()}
                     on:input=move |ev| set_reply.set(event_target_value(&ev))
@@ -695,13 +808,94 @@ fn errand_status(status: PlanStatus) -> &'static str {
     }
 }
 
-/// A question the court has stopped to ask, rendered where it was asked./// A question the court has stopped to ask, rendered where it was asked.
+/// A plan the court has put to the King, and the two things he can do with it.
+///
+/// Follows the `.chat-question` idiom deliberately: that card already means
+/// "this is not something to watch, it is something to do", and a proposal is
+/// the same kind of thing at a larger scale. What differs is the stakes, so the
+/// accepting button is the loud one and the setting-aside is quiet.
+///
+/// The body is rendered as **plain text**, in a `<pre>`. Kingdom has no
+/// markdown renderer -- the chamber prints every utterance verbatim -- and
+/// adding one is a real dependency in the wasm bundle rather than a detail.
+/// Proposals read perfectly well as prose in the meantime, and nothing else in
+/// the flow depends on it, so it is left as its own decision.
+#[component]
+fn ProposalCard(
+    proposal: Proposal,
+    /// True while a turn is in flight. The buttons go dead rather than
+    /// disappearing, so the card does not jump under the King's cursor.
+    busy: Memo<bool>,
+    on_accept: Callback<()>,
+    on_set_aside: Callback<()>,
+) -> impl IntoView {
+    // Locked the instant he decides, so a double-click cannot grant twice or
+    // race a set-aside against an acceptance. The same guard `Question` uses,
+    // and for the same reason -- except that here the thing being handed over
+    // is the ability to change his files.
+    let (decided, set_decided) = signal(false);
+    let deciding = move || decided.get() || busy.get();
+
+    let accept = move |_| {
+        if deciding() {
+            return;
+        }
+        set_decided.set(true);
+        on_accept.run(());
+    };
+    let set_aside = move |_| {
+        if deciding() {
+            return;
+        }
+        set_decided.set(true);
+        on_set_aside.run(());
+    };
+
+    view! {
+        <div class="chat-proposal" class:decided=move || decided.get()>
+            <div class="proposal-head">
+                <span class="proposal-mark">"\u{1F4DC}"</span>
+                <span class="proposal-who">"The court proposes"</span>
+                <span class="proposal-at">{clock(proposal.at)}</span>
+            </div>
+
+            <p class="proposal-title">{proposal.title}</p>
+            <pre class="proposal-body">{proposal.body}</pre>
+
+            <div class="proposal-actions">
+                <button
+                    class="proposal-accept"
+                    title="Let the court carry out this plan"
+                    disabled=deciding
+                    on:click=accept
+                >
+                    {move || if decided.get() { "Starting\u{2026}" } else { "Start with this" }}
+                </button>
+                <button
+                    class="proposal-aside"
+                    title="Put this plan aside and say what you want instead"
+                    disabled=deciding
+                    on:click=set_aside
+                >
+                    "Set aside"
+                </button>
+                <span class="proposal-hint">
+                    "Or say what you would change below."
+                </span>
+            </div>
+        </div>
+    }
+}
+
+/// The court's question to the King, rendered where it was asked.
 ///
 /// Inline in the transcript rather than as a modal. A modal would be the
 /// obvious choice and is the wrong one: it puts the question in front of the
 /// King with the work that prompted it hidden behind it, so he answers without
 /// the context he needs. Here the reasoning and the commands that led to the
 /// question are right above it, and he can scroll.
+///
+/// See [`is_open_question`] for why only an unanswered one gets this treatment.
 #[component]
 fn Question(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();

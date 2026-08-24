@@ -24,6 +24,7 @@ pub mod bash;
 pub mod browser;
 pub mod patch;
 pub mod profile;
+pub mod propose_plan;
 pub mod read_file;
 pub mod read_image;
 pub mod search;
@@ -35,29 +36,10 @@ use kingdom_core::{DeedOutcome, Workspace};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-/// How much of the world a plan is allowed to touch.
-///
-/// The second boundary in this module, and it sits beside the path check for
-/// the same reason: it is a rule about what a tool call may do, so it belongs
-/// at the seam every tool call passes through rather than inside the tools.
-///
-/// It exists because errands share their parent's worktree. Several agents
-/// writing to one checkout at once is precisely the collision this product
-/// exists to prevent, and nothing here arbitrates -- so instead of detecting it
-/// after the fact, [`Remit::Survey`] makes it unrepresentable. That is what lets
-/// errands run in parallel without any lease machinery behind them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Remit {
-    /// Reads and reports, and cannot touch the world.
-    ///
-    /// No writing, no commands, no browser -- and no sending errands of its
-    /// own, which is what keeps the fan-out one level deep. A tree of agents
-    /// needs an answer to "who is blocked behind whom" that Kingdom does not
-    /// have yet.
-    Survey,
-    /// Everything the court has.
-    Full,
-}
+// `Remit` moved down into the domain -- it crosses the wire now, because the
+// chamber renders differently under counsel. Re-exported at its historical path
+// so every existing `tools::Remit` keeps resolving (move-down, re-export-up).
+pub use kingdom_core::Remit;
 
 /// Every tool available under a given remit.
 ///
@@ -70,25 +52,38 @@ pub enum Remit {
 /// is shown ([`crate::llm::ToolSpec::all`]) and the list it may actually run
 /// ([`invoke`]) come through here, which is what stops the two disagreeing -- a
 /// model that invents `bash` under a survey remit must not be handed `bash`.
+///
+/// # Why counsel keeps `bash` but loses `patch`
+///
+/// These look inconsistent and are not. This list is **not a sandbox** -- see
+/// [`Workshop::root`], which says plainly that the path boundary does not
+/// contain a shell. Withholding `bash` from a counselling plan would therefore
+/// buy a guarantee Kingdom cannot keep, while costing the court `git log`,
+/// `cargo tree`, and running the failing test it is proposing to fix.
+///
+/// What the list *is* is a statement of the job. Offering `patch` says "you may
+/// edit"; withholding it says "you may not", and the charter says the rest in
+/// words. A model that means to follow its instructions is told clearly what
+/// they are; one that does not was never going to be stopped by a missing tool
+/// while it holds a shell.
 pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
-    let full = matches!(remit, Remit::Full);
+    // Reads: everything, at every rung. Looking at a picture is a read, so it
+    // sits with the other reads rather than with the browser tools it was built
+    // to pair with -- an errand surveying a project may legitimately want to
+    // look at a screenshot somebody already took; it still cannot take one.
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(think::Think),
         Box::new(read_file::ReadFile),
         Box::new(search::Search),
-        // Looking at a picture is a read, so it sits with the other reads
-        // rather than with the browser tools it was built to pair with. An
-        // errand surveying a project may legitimately want to look at a
-        // screenshot somebody already took; it still cannot take one.
         Box::new(read_image::ReadImage),
     ];
 
-    if full {
+    // Acting on the world without changing the project: counsel and above.
+    if matches!(remit, Remit::Counsel | Remit::Full) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
             Box::new(bash::Bash),
             Box::new(tmux::TmuxRun),
             Box::new(tmux::Tmux),
-            Box::new(patch::Patch),
             Box::new(browser::BrowserNavigate),
             Box::new(browser::BrowserClick),
             Box::new(browser::BrowserType),
@@ -99,11 +94,30 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
             Box::new(browser::BrowserResize),
             Box::new(browser::BrowserRecentConsoleLogs),
             Box::new(browser::BrowserClearConsoleLogs),
-            // Driving a browser at all is a Full remit, and profiling drives
-            // one -- it navigates, clicks and throttles a real page.
+            // Driving a browser at all is more than a survey, and profiling
+            // drives one -- it navigates, clicks and throttles a real page.
             Box::new(profile::BrowserProfile),
-            Box::new(spawn_agents::SpawnAgents),
             Box::new(ask_user_question::AskUserQuestion),
+        ]);
+    }
+
+    // Putting a plan to the King: only from counsel. A plan with full hands is
+    // already carrying out a proposal he accepted and cannot propose its way to
+    // more authority; an errand answers to the court that sent it, and nothing
+    // about it is ever waiting on the King.
+    if matches!(remit, Remit::Counsel) {
+        tools.push(Box::new(propose_plan::ProposePlan));
+    }
+
+    // Changing the project: only once the King has said so.
+    if matches!(remit, Remit::Full) {
+        tools.extend::<Vec<Box<dyn Tool>>>(vec![
+            Box::new(patch::Patch),
+            // Withheld under counsel for a duller reason than `patch`: an
+            // errand of a counselling plan is a case nobody has needed yet. It
+            // would inherit `Survey`, which is probably right -- but guessing
+            // at an unasked-for shape is how the lease machinery happened.
+            Box::new(spawn_agents::SpawnAgents),
         ]);
     }
 
@@ -117,13 +131,36 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
 /// error: models hallucinate tool names, and being told "there is no such tool"
 /// is something a model can recover from in one turn.
 ///
-/// A tool outside the remit gets that same answer, deliberately. It *is* the
-/// truth from where the model is standing -- it was never shown the tool -- and
-/// it is a refusal that reads as recoverable rather than as a wall.
+/// A tool that exists but is outside the remit gets a *different* answer, and
+/// the difference earns its keep. "There is no such tool" is true from where a
+/// model stands -- it was never shown the tool -- but it is a dead end: the
+/// obvious recovery is to give up on the whole approach. Saying that the tool
+/// exists and is not available *yet* points at the actual next move, which for
+/// a counselling plan is to put a plan to the King.
 pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> DeedOutcome {
-    match all(shop.remit()).into_iter().find(|t| t.name() == tool) {
-        Some(t) => t.run(input, shop).await,
-        None => Refusal::NoSuchTool(tool.to_string()).into(),
+    if let Some(t) = all(shop.remit()).into_iter().find(|t| t.name() == tool) {
+        return t.run(input, shop).await;
+    }
+
+    // Known to Kingdom, but not at this rung. Worth distinguishing, because the
+    // model is not wrong about the tool existing -- only about what it may do
+    // right now.
+    let exists_elsewhere = [Remit::Survey, Remit::Counsel, Remit::Full]
+        .into_iter()
+        .any(|r| all(r).iter().any(|t| t.name() == tool));
+
+    match (exists_elsewhere, shop.remit()) {
+        (true, Remit::Counsel) => Refusal::Refused(format!(
+            "`{tool}` is not available while you are drawing up a plan. Put the plan to \
+             the King with `propose_plan`; if he starts you on it, you will have it."
+        ))
+        .into(),
+        (true, Remit::Survey) => Refusal::Refused(format!(
+            "`{tool}` is not available to an errand. You were sent to read and report, \
+             so report what you found to the court that sent you."
+        ))
+        .into(),
+        _ => Refusal::NoSuchTool(tool.to_string()).into(),
     }
 }
 
@@ -159,8 +196,10 @@ pub struct Workshop {
 /// of exactly the same call.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("{path} is outside this plan's workspace. Everything this plan may \
-             touch is under {root}; use a path inside it.")]
+    #[error(
+        "{path} is outside this plan's workspace. Everything this plan may \
+             touch is under {root}; use a path inside it."
+    )]
     OutsideWorkspace { path: String, root: String },
 
     #[error("{tool} was called with arguments it cannot read: {detail}")]
@@ -366,10 +405,7 @@ mod tests {
             "src/./../../..",
         ] {
             assert!(
-                matches!(
-                    shop.resolve(escape),
-                    Err(Refusal::OutsideWorkspace { .. })
-                ),
+                matches!(shop.resolve(escape), Err(Refusal::OutsideWorkspace { .. })),
                 "{escape:?} leaves the workspace and must be refused"
             );
         }
@@ -410,7 +446,7 @@ mod tests {
         ));
     }
 
-    /// The invariant errands rest on.
+    /// The invariant errands rest on, and the rung that was added beside it.
     ///
     /// Errands run in parallel inside their parent's worktree, which is only
     /// safe because they cannot write. That is enforced here, at the seam, and
@@ -424,7 +460,13 @@ mod tests {
     async fn a_survey_cannot_reach_the_tools_that_touch_the_world() {
         let surveying = workshop().under(Remit::Survey);
 
-        for forbidden in ["bash", "patch", "tmux_run", "browser_navigate", "spawn_agents"] {
+        for forbidden in [
+            "bash",
+            "patch",
+            "tmux_run",
+            "browser_navigate",
+            "spawn_agents",
+        ] {
             assert!(
                 !all(Remit::Survey).iter().any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered to a survey"
@@ -444,6 +486,63 @@ mod tests {
             assert!(
                 all(Remit::Survey).iter().any(|t| t.name() == allowed),
                 "{allowed} is how a survey does its job"
+            );
+        }
+    }
+
+    /// The counsel rung: what a plan drawing up a proposal may and may not do.
+    ///
+    /// The withheld half is the load-bearing one, and it is narrower than it
+    /// looks. Counsel keeps `bash` deliberately -- see the note on [`all`] --
+    /// so `patch` is the single tool standing between a counselling court and
+    /// editing the project. If it ever leaks into this rung, every decree
+    /// silently goes back to changing files before the King has seen a plan,
+    /// and nothing else in the system would notice.
+    ///
+    /// The refusal is tested as well as the absence for the same reason as
+    /// above: the list a model is *shown* and the list it may *run* must not
+    /// disagree, and a model that invents `patch` must not be handed it.
+    #[tokio::test]
+    async fn counsel_may_look_and_run_but_not_change_the_project() {
+        let counselling = workshop().under(Remit::Counsel);
+
+        for forbidden in ["patch", "spawn_agents"] {
+            assert!(
+                !all(Remit::Counsel).iter().any(|t| t.name() == forbidden),
+                "{forbidden} must not be offered while drawing up a plan"
+            );
+            assert!(
+                matches!(
+                    invoke(forbidden, serde_json::json!({}), &counselling).await,
+                    DeedOutcome::Refused { .. }
+                ),
+                "{forbidden} must be refused even when counsel asks for it by name"
+            );
+        }
+
+        // Counsel is meant to be a *strong* explorer: it can run the failing
+        // test it is proposing to fix, and look at the app it is changing.
+        for allowed in [
+            "think",
+            "read_file",
+            "search",
+            "bash",
+            "browser_navigate",
+            "propose_plan",
+        ] {
+            assert!(
+                all(Remit::Counsel).iter().any(|t| t.name() == allowed),
+                "{allowed} is how counsel does its job"
+            );
+        }
+
+        // `propose_plan` is the one tool that belongs to counsel *alone*: a
+        // plan already working has nothing left to be granted, and an errand
+        // reports to the court that sent it rather than to the King.
+        for other in [Remit::Survey, Remit::Full] {
+            assert!(
+                !all(other).iter().any(|t| t.name() == "propose_plan"),
+                "only a counselling plan puts work to the King"
             );
         }
     }

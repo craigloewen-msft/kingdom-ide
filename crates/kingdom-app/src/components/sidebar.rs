@@ -201,6 +201,12 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     // `For` reuses a row whose key is unchanged, so keying on
                     // the id alone would leave a plan reading "Drafting" in the
                     // rail long after its chamber showed the finished draft.
+                    //
+                    // The proposal is in the key for the same reason and is
+                    // easier to miss: a plan can go from speaking to proposing
+                    // without its status moving at all -- both are
+                    // `AwaitingReview` -- so without it the badge would never
+                    // change to "Proposal".
                     <For
                         each={move || plans.get()}
                         key=|p: &Plan| {
@@ -209,6 +215,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                 p.status,
                                 p.title.clone(),
                                 p.choice().label(),
+                                p.standing_proposal().is_some(),
                             )
                         }
                         let:plan
@@ -225,6 +232,19 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                             let summary = plan.summary.clone();
                             let model = plan.choice().label();
                             let status = plan.status;
+                            // "Awaiting review" is true both of a plan the court
+                            // has merely finished speaking on and of one that
+                            // has put work to the King -- but only the second is
+                            // something he has to *act* on. The rail is where he
+                            // scans for that, so it says which is which.
+                            //
+                            // A label, not a sixth `PlanStatus`: nothing about
+                            // the state machine changed, and the badge keeps its
+                            // colour.
+                            let badge = match plan.standing_proposal() {
+                                Some(_) => "Proposal",
+                                None => status.label(),
+                            };
                             view! {
                                 <li>
                                     <A href=href attr:class="plan-row" attr:title=summary>
@@ -235,7 +255,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                                 "plan-badge plan-{}",
                                                 status.css_suffix(),
                                             )>
-                                                {status.label()}
+                                                {badge}
                                             </span>
                                         </span>
                                     </A>

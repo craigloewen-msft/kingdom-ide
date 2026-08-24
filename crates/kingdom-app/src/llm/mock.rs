@@ -100,6 +100,15 @@ pub enum Scenario {
     /// -- and it is the only way to see the parent's errand rows go live
     /// without a credential.
     Errand,
+    /// Proposes a plan, then carries it out once the King accepts.
+    ///
+    /// The offline rehearsal for the whole point of the product: a court that
+    /// draws something up and stops, a King who reads it and says start, and
+    /// the same conversation continuing with hands it did not have before.
+    /// Without this the approval path could only be exercised against a real
+    /// gateway, which is exactly the dependency the mock exists to remove --
+    /// and this is now the most important path there is to rehearse.
+    Propose,
 }
 
 impl Scenario {
@@ -132,6 +141,7 @@ impl Scenario {
             "work" | "tools" => Some(Scenario::Work),
             "errand" | "errands" => Some(Scenario::Errand),
             "ask" => Some(Scenario::Ask),
+            "propose" | "proposal" => Some(Scenario::Propose),
             _ => None,
         }
     }
@@ -145,7 +155,16 @@ impl Model for MockModel {
 
     async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError> {
         let prompt = latest_decree(brief);
-        let scenario = Scenario::for_prompt(&prompt);
+        // A conversation that has put a plan to the King and not been approved
+        // is still *in* the proposing conversation, whatever his latest words
+        // hash to. Without this the mock falls out of the scenario the moment
+        // he asks for a change -- and the revision loop, which is half of what
+        // this scenario exists to rehearse, could never be exercised offline.
+        let scenario = if proposed_already(brief) && !approved(brief) {
+            Scenario::Propose
+        } else {
+            Scenario::for_prompt(&prompt)
+        };
 
         if scenario == Scenario::Slow {
             // Long enough for the drafting state to be visible on the map, short
@@ -153,7 +172,7 @@ impl Model for MockModel {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
 
-        let city = &brief.city;
+        let city = &brief.charter.city;
 
         match scenario {
             Scenario::Error => Err(ModelError::Transport(
@@ -311,6 +330,68 @@ impl Model for MockModel {
                 }))
             }
 
+            // Propose on the first pass; once the King has accepted, act and
+            // then speak. Which stage this is comes entirely from the
+            // transcript, for the same reason as `Work` -- and here it matters
+            // more, because the real thing genuinely spans two separate turns
+            // with a human decision between them.
+            Scenario::Propose if !approved(brief) => {
+                // A revision quotes what he asked for, so the King can see his
+                // feedback was actually read rather than a fresh plan appearing
+                // that happens to look the same.
+                let revising = revision_note(brief);
+                Ok(Reply::Acts(vec![Act {
+                    id: format!("mock-proposal-{}", proposals_so_far(brief) + 1),
+                    tool: "propose_plan".to_string(),
+                    input: serde_json::json!({
+                        "title": format!("Tidy the edges of {}", city.name),
+                        "body": format!(
+                            "{revising}On the decree \"{}\":\n\n\
+                             ## What I would do\n\n\
+                             {} is a {} project of {} files. I would work through it in \
+                             three steps, checking after each.\n\n\
+                             ## The changes\n\n\
+                             1. Read the entry point and map what calls what.\n\
+                             2. Make the change itself, in one place.\n\
+                             3. Run the tests and report what moved.\n\n\
+                             ## What I am assuming\n\n\
+                             That the tests currently pass. I have not run them.\n\n\
+                             (Drafted by the mock model \u{2014} no real work was done.)",
+                            prompt.trim(),
+                            city.name,
+                            city.stack,
+                            city.file_count
+                        )
+                    }),
+                }]))
+            }
+
+            Scenario::Propose => Ok(match done_since_approval(brief) {
+                // Approved, and nothing done since: the court now has hands it
+                // did not have a moment ago, so it uses one.
+                None => Reply::Acts(vec![Act {
+                    id: "mock-approved-1".to_string(),
+                    tool: "think".to_string(),
+                    input: serde_json::json!({
+                        "thoughts": format!(
+                            "The King approved the plan for {}. Step one was to read the \
+                             entry point, so that is where I start.",
+                            city.name
+                        )
+                    }),
+                }]),
+                Some(result) => Reply::Spoke(Draft {
+                    title: format!("Works upon {}", city.name),
+                    summary: format!("Carried out the approved plan for {}.", city.name),
+                    body: format!(
+                        "The plan is done.\n\n\
+                         I began as proposed, and concluded:\n\n  {}\n\n\
+                         (Drafted by the mock model \u{2014} no real work was done.)",
+                        result.trim()
+                    ),
+                }),
+            }),
+
             Scenario::Survey => Ok(Reply::Spoke(Draft {
                 title: format!("Survey of {}", city.name),
                 summary: format!("A reading of {} as it stands.", city.name),
@@ -338,22 +419,98 @@ impl Model for MockModel {
     }
 }
 
-/// The last thing the King said, which is what a scenario is chosen from.
+/// The last thing the King *asked for*, which is what a scenario is chosen from.
 ///
 /// Read out of the transcript rather than handed over separately, because after
 /// a tool call the most recent turn is a deed, not a decree -- and the scenario
 /// must stay the one the King asked for across every pass of the loop, or the
 /// mock would change its mind halfway through its own rehearsal.
+///
+/// Accepting a proposal is skipped for exactly that reason. It is recorded as
+/// the King speaking (see [`kingdom_core::APPROVAL`]) because that is the
+/// honest shape and it needs no provider to learn a new message type -- but it
+/// is Kingdom's phrasing of a click rather than a decree, and treating it as
+/// one would have every approved plan re-roll its scenario from a sentence the
+/// King never typed.
 fn latest_decree(brief: &Brief) -> String {
     brief
         .turns
         .iter()
         .rev()
         .find_map(|t| match t {
-            Turn::Said(u) if u.speaker == Speaker::King => Some(u.body.clone()),
+            Turn::Said(u) if u.speaker == Speaker::King && u.body != kingdom_core::APPROVAL => {
+                Some(u.body.clone())
+            }
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// True once the court has put a plan to the King in this conversation.
+fn proposed_already(brief: &Brief) -> bool {
+    proposals_so_far(brief) > 0
+}
+
+/// How many plans the court has put to the King so far.
+///
+/// Also what gives each `propose_plan` call a distinct id. Reusing one id
+/// across a revision would leave the second call unable to settle -- the loop
+/// looks for a deed *still in flight* under that id, and the first one is long
+/// since answered.
+fn proposals_so_far(brief: &Brief) -> usize {
+    brief
+        .turns
+        .iter()
+        .filter(|t| matches!(t, Turn::Did(d) if d.tool == "propose_plan"))
+        .count()
+}
+
+/// A line acknowledging the King's notes, for a revised proposal.
+///
+/// Empty on a first proposal. The mock cannot actually revise anything, but it
+/// can show the shape a real revision takes -- and the King seeing his own
+/// words quoted back is the difference between a rehearsal of the feedback loop
+/// and a plan that merely reappeared.
+fn revision_note(brief: &Brief) -> String {
+    if !proposed_already(brief) {
+        return String::new();
+    }
+    match latest_decree(brief) {
+        notes if notes.is_empty() => String::new(),
+        notes => format!("Revised, having read: \"{}\".\n\n", notes.trim()),
+    }
+}
+
+/// True once the King has accepted a proposal in this conversation.
+///
+/// The mock's stand-in for the real signal the loop uses (`Plan::remit`), which
+/// a model is deliberately never handed: what a court may do is Kingdom's
+/// business, not something a provider gets to read. The transcript is what a
+/// model actually sees, so this is what a model could actually know.
+fn approved(brief: &Brief) -> bool {
+    approval_at(brief).is_some()
+}
+
+/// Where the King's acceptance sits in the exchange, if he has given one.
+fn approval_at(brief: &Brief) -> Option<usize> {
+    brief.turns.iter().position(|t| {
+        matches!(t, Turn::Said(u) if u.speaker == Speaker::King && u.body == kingdom_core::APPROVAL)
+    })
+}
+
+/// The result of a tool call made *after* the King accepted the plan.
+///
+/// Deliberately not [`done_already`], and the difference is the whole reason
+/// this exists. The `propose_plan` call is itself a settled deed sitting in the
+/// transcript, so "has a tool been used?" is always true once a proposal has
+/// been made -- and the mock would skip straight from approval to a closing
+/// speech, rehearsing none of the work it had just been given permission to do.
+fn done_since_approval(brief: &Brief) -> Option<String> {
+    let at = approval_at(brief)?;
+    brief.turns.iter().skip(at).rev().find_map(|t| match t {
+        Turn::Did(d) if !d.in_flight() => Some(d.report().to_string()),
+        _ => None,
+    })
 }
 
 /// The result of a tool call already made, if there is one.
@@ -371,14 +528,17 @@ mod tests {
 
     fn brief(prompt: &str) -> Brief {
         Brief {
-            city: CityBrief {
-                name: "Testburg".into(),
-                path: "/dev/testburg".into(),
-                stack: "Rust".into(),
-                file_count: 12,
-                has_git: true,
-                dirty_files: 2,
-                notable_paths: vec!["src/lib.rs".into(), "src/main.rs".into()],
+            charter: crate::llm::Charter {
+                city: CityBrief {
+                    name: "Testburg".into(),
+                    path: "/dev/testburg".into(),
+                    stack: "Rust".into(),
+                    file_count: 12,
+                    has_git: true,
+                    dirty_files: 2,
+                    notable_paths: vec!["src/lib.rs".into(), "src/main.rs".into()],
+                },
+                ..Default::default()
             },
             turns: vec![Turn::Said(kingdom_core::Utterance::new(
                 Speaker::King,
