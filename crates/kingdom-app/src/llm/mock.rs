@@ -2,7 +2,10 @@
 //!
 //! This exists so the whole drafting path -- busy mark, draft, transcript, status
 //! transitions -- can be exercised without a credential, a network, or a bill.
-//! It is the default provider precisely so a fresh clone works immediately.
+//! It is an ordinary entry in the picker: a provider serving one model, chosen
+//! the same way any other model is chosen. Being the only one that can never
+//! fail to be available is what makes it the fallback, and that falls out of
+//! the list rather than being written into it.
 //!
 //! Determinism is the entire point, so there is no randomness and no clock
 //! here. The scenario is chosen from a byte sum of the prompt, and can be
@@ -10,12 +13,48 @@
 //! end-to-end flows authorable: a test can demand the blocked case rather than
 //! hoping for it.
 
-use super::{Brief, Draft, Model, ModelError};
+use super::{Brief, Draft, Model, ModelError, Provider, ProviderCatalogue};
+use kingdom_core::{CredentialState, ModelChoice, ModelOption};
 
-pub const MODEL_NAME: &str = "mock";
+/// The namespaced id, which for a single-model provider is just its namespace.
+pub const MODEL_ID: &str = "mock";
+
+#[derive(Debug, Default)]
+pub struct MockProvider;
 
 #[derive(Debug, Default)]
 pub struct MockModel;
+
+#[async_trait::async_trait]
+impl Provider for MockProvider {
+    fn namespace(&self) -> &'static str {
+        MODEL_ID
+    }
+
+    /// One model, always available, needing nothing.
+    ///
+    /// Not `recommended`, so it sinks below real models once any are on offer --
+    /// but when a credential is missing it is the only entry, and therefore
+    /// still what the King lands on.
+    async fn catalogue(&self) -> ProviderCatalogue {
+        ProviderCatalogue {
+            options: vec![ModelOption {
+                id: MODEL_ID.to_string(),
+                label: "Mock (offline)".to_string(),
+                vendor: "Offline".to_string(),
+                context_window: 0,
+                recommended: false,
+                efforts: Vec::new(),
+            }],
+            credential: CredentialState::Ready,
+            detail: "The offline mock needs no credential.".to_string(),
+        }
+    }
+
+    async fn open(&self, _choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
+        Ok(Box::new(MockModel))
+    }
+}
 
 /// The shapes of reply the UI needs to be able to render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +181,8 @@ impl Model for MockModel {
         }
     }
 
-    fn name(&self) -> &str {
-        MODEL_NAME
+    fn id(&self) -> &str {
+        MODEL_ID
     }
 }
 

@@ -637,25 +637,6 @@ impl PlanStatus {
 // Model access -- what the King can see about how plans get drafted
 // ---------------------------------------------------------------------------
 
-/// Which backend drafts plans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelProvider {
-    /// Deterministic, offline, no credential. The default, so a fresh clone
-    /// works with no setup.
-    Mock,
-    /// GitHub Copilot's chat completions API.
-    Copilot,
-}
-
-impl ModelProvider {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ModelProvider::Mock => "mock",
-            ModelProvider::Copilot => "copilot",
-        }
-    }
-}
-
 /// Whether a credential could be obtained.
 ///
 /// This is a *description* of the credential's state, never the credential
@@ -669,24 +650,6 @@ pub enum CredentialState {
     Missing,
     /// Something was configured, and it failed.
     Failed,
-}
-
-/// What the dock's provider badge renders, and what its panel explains.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelStatus {
-    pub provider: ModelProvider,
-    /// The model plans will be drafted with, e.g. `"claude-sonnet-4.6"`.
-    pub model: String,
-    pub credential: CredentialState,
-    /// Plain-language detail: where the credential came from, or what to set to
-    /// fix it. Safe to display.
-    pub detail: String,
-}
-
-impl ModelStatus {
-    pub fn is_ready(&self) -> bool {
-        self.credential == CredentialState::Ready
-    }
 }
 
 /// How hard a model is asked to think.
@@ -761,12 +724,17 @@ impl ModelChoice {
         }
     }
 
-    /// Which backend this choice routes to. Derived from the id rather than
-    /// held separately, so provider and model cannot disagree.
-    pub fn provider(&self) -> ModelProvider {
+    /// Which backend serves this model. Derived from the id rather than held
+    /// separately, so the backend and the model can never disagree -- a plan
+    /// drawn by Copilot cannot be re-drafted by the mock because some other
+    /// setting drifted.
+    ///
+    /// The segment before the `/`, or the whole id when there is none:
+    /// `copilot/claude-opus-5` is served by `copilot`, `mock` by `mock`.
+    pub fn namespace(&self) -> &str {
         match self.model.split_once('/') {
-            Some(("copilot", _)) => ModelProvider::Copilot,
-            _ => ModelProvider::Mock,
+            Some((namespace, _)) => namespace,
+            None => &self.model,
         }
     }
 
@@ -878,10 +846,10 @@ mod tests {
             options: vec![
                 ModelOption {
                     id: "mock".into(),
-                    label: "Mock".into(),
+                    label: "Mock (offline)".into(),
                     vendor: "Offline".into(),
-                    context_window: 8_000,
-                    recommended: true,
+                    context_window: 0,
+                    recommended: false,
                     efforts: Vec::new(),
                 },
                 ModelOption {
@@ -893,7 +861,7 @@ mod tests {
                     efforts: vec![ModelEffort::Low, ModelEffort::High],
                 },
             ],
-            default_id: "mock".into(),
+            default_id: "copilot/claude-opus-5".into(),
             credential: CredentialState::Ready,
             detail: String::new(),
         }
@@ -903,6 +871,11 @@ mod tests {
     /// lives. A withdrawn model or an effort a model no longer declares must
     /// degrade quietly -- if either could error, last week's localStorage would
     /// wedge today's dock, and sending an undeclared effort earns an opaque 400.
+    ///
+    /// The invariant is precisely: *the resolved choice never carries an effort
+    /// the resolved model does not declare.* Not "a fallback drops the effort" --
+    /// that was only ever true by accident, back when the fallback was the mock
+    /// and the mock declares no efforts at all.
     #[test]
     fn a_stale_remembered_choice_degrades_rather_than_erroring() {
         let catalogue = catalogue();
@@ -910,8 +883,9 @@ mod tests {
         let withdrawn = ModelChoice::new("copilot/gone-last-year", Some(ModelEffort::High));
         assert_eq!(
             catalogue.resolve(Some(&withdrawn)),
-            ModelChoice::new("mock", None),
-            "an unknown model falls back to the default, and takes no effort with it"
+            ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::High)),
+            "an unknown model falls back to the default, keeping an effort that \
+             default also declares"
         );
 
         let undeclared = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Max));
@@ -921,22 +895,37 @@ mod tests {
             "an effort the model does not declare falls back to the model's own default"
         );
 
+        // The two degradations compounding: an unknown model *and* an effort the
+        // fallback does not declare. This is the case that would reach the wire
+        // as a 400 if `resolve` checked the effort against the remembered model
+        // rather than the resolved one.
+        let doubly_stale = ModelChoice::new("copilot/gone-last-year", Some(ModelEffort::Max));
+        assert_eq!(
+            catalogue.resolve(Some(&doubly_stale)),
+            ModelChoice::new("copilot/claude-opus-5", None)
+        );
+
         let good = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Low));
         assert_eq!(catalogue.resolve(Some(&good)), good);
-        assert_eq!(catalogue.resolve(None), ModelChoice::new("mock", None));
+        assert_eq!(
+            catalogue.resolve(None),
+            ModelChoice::new("copilot/claude-opus-5", None)
+        );
     }
 
-    /// The provider is read off the id so the two cannot disagree; a plan drawn
+    /// The backend is read off the id so the two cannot disagree; a plan drawn
     /// by Copilot must never be re-drafted by the mock because a separate
-    /// provider setting drifted.
+    /// setting drifted.
     #[test]
     fn a_choice_routes_by_its_own_id() {
         let copilot = ModelChoice::new("copilot/claude-opus-5", None);
-        assert_eq!(copilot.provider(), ModelProvider::Copilot);
+        assert_eq!(copilot.namespace(), "copilot");
         assert_eq!(copilot.api_name(), "claude-opus-5");
 
+        // The mock is not special-cased: a bare id is its own namespace, which
+        // is what lets it be listed and chosen like any other model.
         let mock = ModelChoice::new("mock", None);
-        assert_eq!(mock.provider(), ModelProvider::Mock);
+        assert_eq!(mock.namespace(), "mock");
         assert_eq!(mock.api_name(), "mock");
     }
 }

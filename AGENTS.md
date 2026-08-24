@@ -85,8 +85,10 @@ crates/
     mock.rs         Seeding a realm onto disk (ssr only)
     worktree.rs     Preparing a plan's workspace via git (ssr only)
     llm/            Drafting plans with a model (ssr only)
-                    mod.rs (Model trait, Brief), mock.rs, copilot.rs,
-                    catalogue.rs (live /models list), credential.rs
+                    mod.rs (Model + Provider traits, Brief, the provider list),
+                    mock.rs (offline provider), copilot.rs (Copilot provider
+                    + its /models catalogue), catalogue.rs (assembles one
+                    catalogue from every provider), credential.rs
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, decree.rs, conversation.rs,
                     map/ (mod.rs + city.rs)

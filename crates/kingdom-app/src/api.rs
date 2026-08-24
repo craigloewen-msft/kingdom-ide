@@ -8,7 +8,7 @@
 
 #[cfg(feature = "ssr")]
 use kingdom_core::PlanId;
-use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan, WorkspaceMode};
+use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, Plan, WorkspaceMode};
 use leptos::prelude::*;
 
 /// In-memory kingdom state.
@@ -403,7 +403,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // it is cleared, leaving a plan permanently Drafting that no later decree
     // could restart. A detached task loses only the reply, never the clearing.
     let handle = tokio::spawn(async move {
-        let outcome = match crate::llm::configured(&choice).await {
+        let outcome = match crate::llm::open(&choice).await {
             Ok(model) => {
                 model
                     .draft(&Brief {
@@ -463,19 +463,12 @@ fn settle(
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
-/// How plans will be drafted: provider, model, and whether a credential works.
-///
-/// Resolves the credential rather than merely checking it is configured, since
-/// "set" and "works" are different questions and only the second one matters.
-#[server(GetModelStatus, "/api")]
-pub async fn model_status() -> Result<ModelStatus, ServerFnError> {
-    Ok(crate::llm::status().await)
-}
-
 /// Every model the King can choose between, and what each will accept.
 ///
-/// Read live from the provider rather than hard-coded, so the picker cannot
-/// offer a model that has been withdrawn or hide one that has just landed.
+/// Read live from each provider rather than hard-coded, so the picker cannot
+/// offer a model that has been withdrawn or hide one that has just landed. It
+/// also carries the credential state, which is why there is no separate status
+/// call: "what can draft this?" and "will it work?" are one question.
 #[server(ListModels, "/api")]
 pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
     Ok(crate::llm::catalogue::catalogue().await)

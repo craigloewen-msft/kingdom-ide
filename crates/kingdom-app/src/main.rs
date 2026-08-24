@@ -38,12 +38,12 @@ async fn main() {
 
     println!("\n  \u{265a}  Kingdom IDE \u{2014} the throne room awaits at http://{addr}");
 
-    let status = kingdom_app::llm::status().await;
+    let catalogue = kingdom_app::llm::catalogue::catalogue().await;
     println!(
-        "     Plans drafted by: {} ({}) \u{2014} {}\n",
-        status.provider.label(),
-        status.model,
-        status.detail
+        "     {} model(s) available, opening on {} \u{2014} {}\n",
+        catalogue.options.len(),
+        catalogue.default_id,
+        catalogue.detail
     );
 
     let listener = tokio::net::TcpListener::bind(&addr)

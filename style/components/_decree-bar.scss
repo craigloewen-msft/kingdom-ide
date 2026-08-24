@@ -56,24 +56,6 @@
   font-size: 12px;
 }
 
-// Quiet when the court can answer, loud only when it cannot — a healthy
-// provider should not compete with the map for attention.
-.model-badge {
-  flex: 0 0 auto;
-  padding: 9px 14px;
-  background: transparent;
-  border: none;
-  border-left: 1px solid t.$edge;
-  color: t.$ink-faint;
-  font-size: 11px;
-  font-family: t.$font-mono;
-  white-space: nowrap;
-  cursor: pointer;
-
-  &:hover { background: t.$panel-2; color: t.$ink-dim; }
-  &.broken { color: t.$blocked; }
-}
-
 // The chip: what the next plan will be drawn with, and the way in to changing
 // it. Reads as information first, control second — the King should be able to
 // see the model without being invited to fiddle with it.
@@ -282,15 +264,8 @@
   font-size: 11px;
 }
 
-// Shown only when the badge is clicked: which variable to set, so a missing
-// credential is fixable without going to read the source.
-.model-setup {
-  padding: 12px 16px;
-  border-top: 1px solid t.$edge;
-  background: t.$panel-2;
-}
-
-.setup-line { margin: 0 0 4px; font-size: 12px; color: t.$ink; }
+// The picker's own explanation of itself: where the catalogue came from, and
+// — when a credential is missing — exactly what to set to lengthen the list.
 .setup-detail { margin: 0; font-size: 12px; color: t.$ink-dim; line-height: 1.5; }
 
 .setup-code {

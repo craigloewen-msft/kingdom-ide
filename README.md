@@ -58,11 +58,15 @@ Early. Project scanning, the map, and the client/server round trip are real.
 So is drafting: a decree opens a plan and calls a model with that project's real
 scan data.
 
-Out of the box an offline **mock** model drafts every plan, so a fresh clone
-works with no credential and no network. To use a real model, copy
-`.kingdom.env.example` to `.kingdom.env` and set `KINGDOM_MODEL_PROVIDER=copilot`
-plus either a token (`KINGDOM_API_KEY`) or a command that prints one
-(`KINGDOM_API_KEY_HELPER`, defaulting to `agency auth github`).
+Every model is chosen the same way, from one list in the decree bar. With a
+working credential the picker opens on a real model; with none it offers the
+offline **mock**, so a fresh clone drafts with no credential and no network —
+not because the mock is a special mode, but because it is the only model left in
+the list. To reach real models, copy `.kingdom.env.example` to `.kingdom.env`
+and set either a token (`KINGDOM_API_KEY`) or a command that prints one
+(`KINGDOM_API_KEY_HELPER`, defaulting to `agency auth github`). Note that this
+means a configured clone spends tokens on its first decree; pick `mock` in the
+picker to work offline.
 
 Plans still cannot *do* anything beyond replying — no tool use, no edits — and
 the court a kingdom opens with is placeholder data.
