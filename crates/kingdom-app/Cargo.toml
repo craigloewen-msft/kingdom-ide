@@ -44,6 +44,9 @@ uuid = { version = "1", features = ["v4"], optional = true }
 # Client-only.
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+# Formats a log entry's UTC timestamp as the King's own local time. The browser
+# is the only place that knows his timezone, so this is the only place that can.
+js-sys = { version = "0.3", optional = true }
 
 # Needed on both targets: the map reads element geometry to fit the view, and
 # the sidebar persists its dragged width in localStorage.
@@ -70,6 +73,7 @@ hydrate = [
     "leptos/hydrate",
     "dep:console_error_panic_hook",
     "dep:wasm-bindgen",
+    "dep:js-sys",
 ]
 ssr = [
     "dep:axum",

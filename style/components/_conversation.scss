@@ -84,6 +84,10 @@
 }
 
 // --- Log -------------------------------------------------------------------
+//
+// The log is the conversation and nothing but the conversation, oldest at the
+// top. Plan state belongs to the header and the rail: rendering it here put
+// blocks derived from the newest reply above the decree that opened the plan.
 
 .chamber-log {
   flex: 1;
@@ -93,43 +97,6 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-
-.chamber-summary {
-  margin: 0;
-  padding: 12px 14px;
-  background: t.$panel;
-  border-left: 2px solid t.$gold-dim;
-  border-radius: 0 t.$radius t.$radius 0;
-  color: t.$ink-dim;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-// What the plan proposes to touch. The same paths the map gilds, listed here
-// where they can actually be read.
-.chamber-touches {
-  padding: 12px 14px;
-  background: t.$panel;
-  border: 1px solid t.$edge;
-  border-radius: t.$radius;
-
-  ul { list-style: none; margin: 8px 0 0; padding: 0; }
-}
-
-.touches-label {
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: t.$ink-faint;
-}
-
-.touch-path {
-  font-family: t.$font-mono;
-  font-size: 12px;
-  color: t.$ink-dim;
-  line-height: 1.7;
-  word-break: break-all;
 }
 
 // --- Transcript ------------------------------------------------------------
@@ -153,6 +120,19 @@
   // problem to fix.
   &.drafting .msg-body { color: t.$ink-faint; font-style: italic; }
   &.failed .msg-body { color: t.$blocked; }
+}
+
+// When the line landed. Deliberately the quietest thing in the row: it exists
+// to confirm the order the King is already reading, not to be read itself.
+// Tabular figures so the column cannot jitter between rows.
+.msg-at {
+  flex-shrink: 0;
+  width: 34px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: t.$ink-faint;
+  opacity: 0.7;
+  padding-top: 2px;
 }
 
 .msg-who {
@@ -183,12 +163,36 @@
   &.note-workspace { font-family: t.$font-mono; }
 }
 
+// A note is centred with no speaker column, so its time rides inline.
+.note-at {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  margin-right: 8px;
+
+  &:empty { margin-right: 0; }
+}
+
 .msg-body {
   min-width: 0;
   color: t.$ink-dim;
   // A model's reply arrives as prose with real line breaks; collapsing them
   // would run every paragraph and list item together.
   white-space: pre-wrap;
+}
+
+// --- Something went wrong just now -----------------------------------------
+//
+// Outside the log on purpose. An error is not something anybody said, and a
+// drafting failure is already recorded as a note in its proper place in time;
+// this strip is for the request that failed a moment ago.
+.chamber-error {
+  flex: 0 0 auto;
+  padding: 8px 20px;
+  background: rgba(t.$failed, 0.08);
+  border-top: 1px solid rgba(t.$failed, 0.35);
+  color: t.$failed;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 // --- Composer --------------------------------------------------------------

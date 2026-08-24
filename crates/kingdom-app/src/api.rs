@@ -445,7 +445,6 @@ fn settle(
             Ok(draft) => {
                 plan.title = draft.title.clone();
                 plan.summary = draft.summary.clone();
-                plan.touches = draft.touches.clone();
                 plan.status = PlanStatus::AwaitingReview;
                 plan.say(Speaker::Court, draft.body.clone());
             }
