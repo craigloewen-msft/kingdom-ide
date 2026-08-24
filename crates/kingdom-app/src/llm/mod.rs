@@ -225,6 +225,34 @@ impl Acts {
     }
 }
 
+/// One completed turn: what the model did, and what it cost.
+///
+/// A wrapper around [`Reply`] rather than a field on each of its variants. The
+/// cost is true of the *turn*, not of one of its two endings -- a turn that
+/// ends in tool calls filled the window exactly as much as one that ends in
+/// words -- and duplicating it across the variants would make every `match` in
+/// the turn loop responsible for carrying it past.
+#[derive(Debug, Clone)]
+pub struct Answer {
+    pub reply: Reply,
+    /// Tokens this turn cost, as the provider reported them.
+    ///
+    /// `None` means the provider said nothing about it, which is a different
+    /// thing from zero and must stay tellable apart: zero would be drawn as an
+    /// empty window, which is a claim rather than an absence.
+    pub tokens: Option<usize>,
+}
+
+impl Answer {
+    /// A turn whose cost the provider did not report.
+    pub fn untallied(reply: Reply) -> Self {
+        Self {
+            reply,
+            tokens: None,
+        }
+    }
+}
+
 /// One tool call a model has asked for.
 #[derive(Debug, Clone)]
 pub struct Act {
@@ -257,7 +285,7 @@ pub trait Model: Send + Sync {
     /// recorded before it runs -- a provider that ran its own tools would do so
     /// with nothing watching, and the conversation would show a long silence
     /// followed by an answer.
-    async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError>;
+    async fn take_turn(&self, brief: &Brief) -> Result<Answer, ModelError>;
 
     /// The namespaced id, recorded on the plan so the user can see exactly what
     /// drew it. Namespaced rather than bare because that is what routes the
@@ -283,6 +311,17 @@ pub trait Model: Send + Sync {
     /// parse rejects the whole request. A backend that can see says so.
     fn can_see(&self) -> bool {
         false
+    }
+
+    /// How many tokens this model will hold, or `0` when it does not say.
+    ///
+    /// Asked of the model rather than looked up beside it, because the window
+    /// is a fact about the model and can change under a conversation that has
+    /// been running for a week. Zero means "unknown", which is what the offline
+    /// mock honestly is -- and a window of zero yields no reading at all rather
+    /// than an invented one. See [`kingdom_core::ContextUsage::percent`].
+    fn context_window(&self) -> usize {
+        0
     }
 }
 

@@ -11,6 +11,7 @@
 //! the result would be a dead end.
 
 use crate::app::{KingdomState, DEFAULT_SIDEBAR_WIDTH};
+use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use kingdom_core::{City, CityId, Plan};
 use leptos::ev;
 use leptos::prelude::*;
@@ -20,10 +21,12 @@ use std::collections::HashSet;
 
 /// How far the rail may be dragged. Narrower than the minimum and city names
 /// are unreadable; wider than the maximum and the map stops being the hero.
-const MIN_WIDTH: f64 = 200.0;
-const MAX_WIDTH: f64 = 560.0;
+const BOUNDS: Bounds = Bounds {
+    min: 200.0,
+    max: 560.0,
+    default: DEFAULT_SIDEBAR_WIDTH,
+};
 
-#[cfg(feature = "hydrate")]
 const WIDTH_KEY: &str = "kingdom.sidebar_width";
 
 #[component]
@@ -37,7 +40,7 @@ pub fn Sidebar() -> impl IntoView {
     let cities = move || state.kingdom.get().cities;
     let city_count = move || state.kingdom.get().cities.len();
 
-    restore_width(state.sidebar_width);
+    restore_width(state.sidebar_width, WIDTH_KEY, BOUNDS);
 
     view! {
         <aside class="sidebar">
@@ -92,7 +95,13 @@ pub fn Sidebar() -> impl IntoView {
                 </ul>
             </div>
 
-            <Resizer width=state.sidebar_width/>
+            <Resizer
+                width=state.sidebar_width
+                grows=Grows::Rightwards
+                bounds=BOUNDS
+                storage_key=WIDTH_KEY
+                class="sidebar-resizer"
+            />
         </aside>
     }
 }
@@ -270,113 +279,4 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
             </Show>
         </li>
     }
-}
-
-/// The drag handle on the rail's right edge.
-#[component]
-fn Resizer(width: RwSignal<f64>) -> impl IntoView {
-    // Drag origin: pointer x and rail width at mousedown.
-    let drag = RwSignal::new(Option::<(f64, f64)>::None);
-
-    let on_mouse_down = move |ev: ev::MouseEvent| {
-        ev.prevent_default();
-        drag.set(Some((ev.client_x() as f64, width.get_untracked())));
-        set_resizing_class(true);
-    };
-
-    // Window-level rather than element-level: once the pointer leaves the thin
-    // handle it is over the SVG map, whose own mousemove pans the viewport and
-    // would otherwise steal the drag.
-    let move_handle = window_event_listener(ev::mousemove, move |ev: ev::MouseEvent| {
-        if let Some((start_x, start_w)) = drag.get_untracked() {
-            let next = start_w + (ev.client_x() as f64 - start_x);
-            width.set(next.clamp(MIN_WIDTH, MAX_WIDTH));
-        }
-    });
-
-    let up_handle = window_event_listener(ev::mouseup, move |_| {
-        if drag.get_untracked().is_some() {
-            drag.set(None);
-            set_resizing_class(false);
-            // Persist once, on release: writing every mousemove would hammer
-            // localStorage for no benefit.
-            store_width(width.get_untracked());
-        }
-    });
-
-    on_cleanup(move || {
-        move_handle.remove();
-        up_handle.remove();
-    });
-
-    view! {
-        <div
-            class="sidebar-resizer"
-            class:dragging=move || drag.get().is_some()
-            title="Drag to resize · double-click to reset"
-            on:mousedown=on_mouse_down
-            on:dblclick=move |_| {
-                width.set(DEFAULT_SIDEBAR_WIDTH);
-                store_width(DEFAULT_SIDEBAR_WIDTH);
-            }
-        ></div>
-    }
-}
-
-// --- Width persistence -----------------------------------------------------
-//
-// Browser-only, and every call is failure-tolerant: storage can be disabled
-// entirely, in which case the rail simply opens at its default width.
-
-#[cfg(feature = "hydrate")]
-fn local_storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
-/// Restores the stored width inside an effect, so it runs only on the client.
-/// Reading it during rendering would make the server emit different markup
-/// than hydration expects.
-fn restore_width(width: RwSignal<f64>) {
-    #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        if let Some(stored) = local_storage()
-            .and_then(|s| s.get_item(WIDTH_KEY).ok().flatten())
-            .and_then(|raw| raw.parse::<f64>().ok())
-        {
-            width.set(stored.clamp(MIN_WIDTH, MAX_WIDTH));
-        }
-    });
-
-    #[cfg(not(feature = "hydrate"))]
-    let _ = width;
-}
-
-fn store_width(width: f64) {
-    #[cfg(feature = "hydrate")]
-    if let Some(storage) = local_storage() {
-        let _ = storage.set_item(WIDTH_KEY, &width.to_string());
-    }
-
-    #[cfg(not(feature = "hydrate"))]
-    let _ = width;
-}
-
-/// Suppresses text selection for the duration of a drag, so the pointer
-/// crossing the map does not smear a highlight across it.
-fn set_resizing_class(on: bool) {
-    #[cfg(feature = "hydrate")]
-    if let Some(body) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.body())
-    {
-        let list = body.class_list();
-        let _ = if on {
-            list.add_1("resizing")
-        } else {
-            list.remove_1("resizing")
-        };
-    }
-
-    #[cfg(not(feature = "hydrate"))]
-    let _ = on;
 }

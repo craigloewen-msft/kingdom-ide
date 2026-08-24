@@ -518,6 +518,18 @@ pub struct Plan {
     /// are the whole of this state machine.
     #[serde(default)]
     pub proposal: Option<Proposal>,
+    /// How full the model's context window stood at the end of the last turn.
+    ///
+    /// `None` until the court has answered once -- and for a provider that
+    /// reports no usage or declares no window, `None` forever. That is the
+    /// honest reading: this is measured, not estimated, and there is nothing to
+    /// show until something has actually been sent and counted.
+    ///
+    /// Overwritten each turn rather than accumulated. A conversation's cost is
+    /// not a running total: every turn resends the whole exchange, so the last
+    /// count *is* how full the window is.
+    #[serde(default)]
+    pub context: Option<ContextUsage>,
 }
 
 /// A plan the model has drawn up and put to the user.
@@ -560,6 +572,60 @@ impl Proposal {
             at: Timestamp::now(),
             approved: false,
         }
+    }
+}
+
+/// How much of a model's context window a conversation is filling.
+///
+/// Both numbers are carried together, written at the same moment, because
+/// separately they lie. A token count is meaningless without the window it was
+/// measured against, and a window read from today's catalogue against a count
+/// taken last week is a percentage of the wrong thing. Held as one value, they
+/// cannot drift apart.
+///
+/// The count is the *provider's*, never ours -- see [`ContextUsage::percent`]
+/// for why an estimate would be worse than nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    /// Tokens the last turn actually cost, as the provider reported them.
+    pub tokens: usize,
+    /// The window those tokens were measured against.
+    pub window: usize,
+}
+
+impl ContextUsage {
+    /// How full the window is, rounded, or `None` when there is nothing
+    /// truthful to say.
+    ///
+    /// A window of zero is a real, reachable state rather than a defensive
+    /// check: the offline mock declares no window at all, and it is the model
+    /// the user lands on whenever no credential works. `None` rather than a
+    /// fabricated figure, because a percentage is precisely the sort of number
+    /// a reader acts on -- deciding whether to keep going or start again.
+    pub fn percent(&self) -> Option<u8> {
+        if self.window == 0 {
+            return None;
+        }
+        // Saturating rather than capped after the fact: a provider counting the
+        // reply as well as the prompt can report slightly over its own limit,
+        // and "104%" reads as a bug in Kingdom rather than as a full window.
+        Some(((self.tokens * 100 / self.window).min(100)) as u8)
+    }
+}
+
+/// A context window as it is written for a reader: `1000K`.
+///
+/// One spelling, shared by the model picker and the chamber header. Two copies
+/// of `w / 1000` is exactly how the number the user chose a model by and the
+/// number he later measures a conversation against come to disagree.
+///
+/// An undeclared window is the empty string rather than `0K`, so a caller that
+/// prints it unconditionally says nothing instead of claiming a limit of
+/// nothing.
+pub fn window_label(tokens: usize) -> String {
+    match tokens {
+        0 => String::new(),
+        w => format!("{}K", w / 1000),
     }
 }
 
@@ -624,6 +690,8 @@ impl Plan {
             // rather than a fait accompli.
             permissions: Permissions::Propose,
             proposal: None,
+            // Nothing has been sent yet, so there is nothing counted.
+            context: None,
         }
     }
 
@@ -679,6 +747,9 @@ impl Plan {
             // A subagent answers to the plan that sent it. Nothing about it is
             // ever put to the user.
             proposal: None,
+            // Its own window, not its parent's: it is a separate conversation
+            // with a separate exchange, sharing only the model.
+            context: None,
         }
     }
 
@@ -1809,6 +1880,46 @@ mod tests {
         assert_eq!(
             catalogue.resolve(None),
             ModelChoice::new("copilot/claude-opus-5", None)
+        );
+    }
+
+    /// The mock declares a context window of zero, and it is the model the user
+    /// lands on whenever no credential works -- so "a window of nothing" is a
+    /// state the header genuinely renders, not a defensive hypothetical.
+    ///
+    /// `None` is the whole point: it is what makes the bar *absent* rather than
+    /// drawn at some fabricated fraction of a limit nobody declared. The other
+    /// half pinned here is the cap, because a provider that counts its own
+    /// reply can report past its limit, and "104% of 200K" reads as a bug in
+    /// Kingdom rather than as a full window.
+    #[test]
+    fn a_window_nobody_declared_yields_no_reading() {
+        assert_eq!(
+            ContextUsage {
+                tokens: 4_000,
+                window: 0
+            }
+            .percent(),
+            None
+        );
+
+        assert_eq!(
+            ContextUsage {
+                tokens: 50_000,
+                window: 200_000
+            }
+            .percent(),
+            Some(25)
+        );
+
+        assert_eq!(
+            ContextUsage {
+                tokens: 208_000,
+                window: 200_000
+            }
+            .percent(),
+            Some(100),
+            "a full window reads as full, never as more than full"
         );
     }
 

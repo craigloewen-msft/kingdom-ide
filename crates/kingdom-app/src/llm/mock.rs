@@ -13,7 +13,9 @@
 //! end-to-end flows authorable: a test can demand the blocked case rather than
 //! hoping for it.
 
-use super::{Act, Acts, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply};
+use super::{
+    Act, Acts, Answer, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply,
+};
 use kingdom_core::{CredentialState, ModelChoice, ModelOption, Speaker, Turn};
 
 /// The namespaced id, which for a single-model provider is just its namespace.
@@ -157,7 +159,25 @@ impl Model for MockModel {
         true
     }
 
-    async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError> {
+    /// Always untallied: the mock has no gateway to count anything, and
+    /// inventing a number would put a bar on screen measuring nothing. It
+    /// declares no context window either, so there would be nothing to measure
+    /// it against.
+    async fn take_turn(&self, brief: &Brief) -> Result<Answer, ModelError> {
+        self.reply_to(brief).await.map(Answer::untallied)
+    }
+
+    fn id(&self) -> &str {
+        MODEL_ID
+    }
+}
+
+impl MockModel {
+    /// The scenario's reply, before it is wrapped with what it cost.
+    ///
+    /// Split out only so the cost is added in one place rather than at every
+    /// `Ok` in the match below.
+    async fn reply_to(&self, brief: &Brief) -> Result<Reply, ModelError> {
         let prompt = latest_prompt(brief);
         // A conversation that has put a plan to the user and not been approved
         // is still *in* the proposing conversation, whatever their latest words
@@ -411,10 +431,6 @@ impl Model for MockModel {
             })),
         }
     }
-
-    fn id(&self) -> &str {
-        MODEL_ID
-    }
 }
 
 /// The last thing the user *asked for*, which is what a scenario is chosen from.
@@ -549,8 +565,8 @@ mod tests {
         }
     }
 
-    fn spoken(reply: Reply) -> Draft {
-        match reply {
+    fn spoken(answer: Answer) -> Draft {
+        match answer.reply {
             Reply::Spoke(d) => d,
             Reply::Acts(a) => panic!("expected words, got {} tool call(s)", a.len()),
         }
@@ -598,7 +614,7 @@ mod tests {
         let model = MockModel;
         let mut brief = brief("Do some work [[scenario:work]]");
 
-        let Reply::Acts(acts) = model.take_turn(&brief).await.unwrap() else {
+        let Reply::Acts(acts) = model.take_turn(&brief).await.unwrap().reply else {
             panic!("the first pass must ask to act, not speak");
         };
         assert_eq!(acts.len(), 1);

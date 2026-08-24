@@ -135,7 +135,8 @@ crates/
     mock.rs         Seeding a fixture onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
-                    mod.rs (Model + Provider traits, Brief, Reply, the provider
+                    mod.rs (Model + Provider traits, Brief, Reply/Answer, the
+                    provider
                     list), system_prompt.rs (everything the model is told: the
                     city, where it stands, its permissions, and the project's
                     AGENTS.md),
@@ -162,7 +163,8 @@ crates/
 
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, prompt_bar.rs, conversation.rs,
-                    browser_view.rs,
+                    browser_view.rs, resizer.rs (the drag handle the rail
+                    and the spyglass share),
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling

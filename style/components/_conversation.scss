@@ -3,6 +3,9 @@
 // Header, then a scrolling log, then the composer. The log is the only part
 // that scrolls, so the plan's identity and the King's input are always in
 // reach however long the conversation runs.
+//
+// That column is now one of two: the spyglass sits beside it when open. The
+// column below is unchanged by that — it simply no longer owns the full width.
 
 @use "../abstracts/tokens" as t;
 @use "../abstracts/mixins" as m;
@@ -13,6 +16,25 @@
   height: 100%;
   min-height: 0;
   background: t.$deep;
+}
+
+// The two columns: everything the chamber always had, and the panel beside it.
+.chamber-frame {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+// The conversation proper. Takes what the spyglass does not, and `min-width: 0`
+// so a long unbroken line in the transcript pushes the panel off screen rather
+// than being allowed to.
+.chamber-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 
 // --- Header ----------------------------------------------------------------
@@ -81,6 +103,43 @@
   color: t.$ink-faint;
 
   &.isolated { color: t.$gold-dim; }
+}
+
+// How full the model's context window this conversation is. Deliberately as
+// quiet as its neighbours: it is provenance, not an alarm. A header that
+// changed colour on its own would pull the King's eye away from the log, which
+// is where the work actually is — so the fill stays one tone the whole way
+// across and the number is left to say how close the limit is.
+.chamber-context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  // The row aligns on the baseline, and this item has no text of its own to
+  // sit on — the track is a bare box, so the baseline is taken from its
+  // bottom edge and the whole chip hangs a few pixels low beside the model
+  // and the workspace. Centring this one item is what puts it back in line.
+  align-self: center;
+}
+
+.context-track {
+  width: 46px;
+  height: 3px;
+  border-radius: 2px;
+  background: t.$edge-bright;
+  overflow: hidden;
+}
+
+.context-fill {
+  display: block;
+  height: 100%;
+  background: t.$gold-dim;
+}
+
+.context-label {
+  font-family: t.$font-mono;
+  font-size: 11px;
+  color: t.$ink-faint;
 }
 
 // --- Log -------------------------------------------------------------------
