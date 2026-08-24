@@ -4,11 +4,18 @@
 //! resource is attention, so the rail answers exactly one question — what is
 //! being proposed, and where — and leaves agent status and resource contention
 //! to the map, which shows them spatially.
+//!
+//! It is also the app's primary navigator: every row goes somewhere. A city
+//! goes to the realm with that city selected; a plan goes to its conversation.
+//! A row that silently changed state on a screen that cannot show the result
+//! would be a dead end.
 
 use crate::app::{KingdomState, DEFAULT_SIDEBAR_WIDTH};
 use kingdom_core::{City, CityId, Plan, PlanStatus};
 use leptos::ev;
 use leptos::prelude::*;
+use leptos_router::components::A;
+use leptos_router::hooks::{use_location, use_navigate};
 use std::collections::HashSet;
 
 /// How far the rail may be dragged. Narrower than the minimum and city names
@@ -124,7 +131,14 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
 
     let select = {
         let id = id.clone();
-        move |_| state.selected.set(Some(id.clone()))
+        let navigate = use_navigate();
+        move |_| {
+            state.selected.set(Some(id.clone()));
+            // A city is a place on the map, so selecting one goes to the map.
+            // Otherwise clicking a city from inside a conversation would change
+            // a selection the King cannot see the effect of.
+            navigate("/", Default::default());
+        }
     };
 
     let has_plans = Memo::new(move |_| !plans.get().is_empty());
@@ -148,14 +162,41 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
 
             <Show when={move || is_open.get() && has_plans.get()}>
                 <ul class="plan-list">
-                    <For each={move || plans.get()} key=|p: &Plan| p.id.clone() let:plan>
-                        <li class="plan-row" title=plan.summary.clone()>
-                            <span class="plan-title">{plan.title.clone()}</span>
-                            <span class="plan-model">{plan.model.clone()}</span>
-                            <span class=format!("plan-badge plan-{}", plan.status.css_suffix())>
-                                {plan.status.label()}
-                            </span>
-                        </li>
+                    // Keyed on what the row actually draws, not just the id: a
+                    // `For` reuses a row whose key is unchanged, so keying on
+                    // the id alone would leave a plan reading "Drafting" in the
+                    // rail long after its chamber showed the finished draft.
+                    <For
+                        each={move || plans.get()}
+                        key=|p: &Plan| {
+                            (p.id.clone(), p.status, p.title.clone(), p.model.clone())
+                        }
+                        let:plan
+                    >
+                        {
+                            let href = format!("/plan/{}", plan.id);
+                            let current = {
+                                let href = href.clone();
+                                let location = use_location();
+                                Memo::new(move |_| location.pathname.get() == href)
+                            };
+                            view! {
+                                <li>
+                                    <A href=href attr:class="plan-row" attr:title=plan.summary.clone()>
+                                        <span class="plan-row-inner" class:current=current>
+                                            <span class="plan-title">{plan.title.clone()}</span>
+                                            <span class="plan-model">{plan.model.clone()}</span>
+                                            <span class=format!(
+                                                "plan-badge plan-{}",
+                                                plan.status.css_suffix(),
+                                            )>
+                                                {plan.status.label()}
+                                            </span>
+                                        </span>
+                                    </A>
+                                </li>
+                            }
+                        }
                     </For>
                 </ul>
             </Show>

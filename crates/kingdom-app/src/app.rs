@@ -1,10 +1,12 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{ChatDock, KingdomMap, Sidebar};
+use crate::components::{Conversation, DecreeBar, KingdomMap, Sidebar};
 use kingdom_core::{CityId, Kingdom};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
+use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
+use leptos_router::path;
 
 /// The HTML document shell wrapped around the app during SSR.
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -88,19 +90,63 @@ pub fn App() -> impl IntoView {
             when=move || state.kingdom.get().is_open()
             fallback=move || view! { <ChooseKingdom/> }
         >
-            <div
-                class="throne-room"
-                style:grid-template-columns=move || {
-                    format!("{}px 1fr", state.sidebar_width.get())
-                }
-            >
-                <Sidebar/>
-                <main class="map-region">
-                    <KingdomMap/>
-                </main>
-                <ChatDock/>
-            </div>
+            // The rail lives on the parent route so it never unmounts: moving
+            // between the realm and a plan's chamber is then instant, and the
+            // rail keeps its scroll position and collapse state across the move.
+            <Router>
+                <Routes fallback=|| view! { <NoSuchPlace/> }>
+                    <ParentRoute path=path!("") view=ThroneRoom>
+                        <Route path=path!("") view=Realm/>
+                        <Route path=path!("plan/:id") view=Conversation/>
+                    </ParentRoute>
+                </Routes>
+            </Router>
         </Show>
+    }
+}
+
+/// The frame both screens hang in: the rail, and whichever view is routed.
+#[component]
+fn ThroneRoom() -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+
+    view! {
+        <div
+            class="throne-room"
+            style:grid-template-columns=move || {
+                format!("{}px 1fr", state.sidebar_width.get())
+            }
+        >
+            <Sidebar/>
+            <main class="main-region">
+                <Outlet/>
+            </main>
+        </div>
+    }
+}
+
+/// `/` -- the whole realm, with the decree bar beneath it.
+#[component]
+fn Realm() -> impl IntoView {
+    view! {
+        <div class="realm-view">
+            <div class="map-region">
+                <KingdomMap/>
+            </div>
+            <DecreeBar/>
+        </div>
+    }
+}
+
+/// A URL that matches nothing. Rare, but a blank screen would leave the King
+/// with no way back.
+#[component]
+fn NoSuchPlace() -> impl IntoView {
+    view! {
+        <div class="empty-chamber">
+            <p>"No such place in this kingdom."</p>
+            <a class="back-link" href="/">"\u{2190} Back to the realm"</a>
+        </div>
     }
 }
 

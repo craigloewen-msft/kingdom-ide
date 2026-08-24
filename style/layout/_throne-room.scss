@@ -1,18 +1,33 @@
 // Throne room layout.
 //
-// Sidebar down the left, map filling the rest, chat docked across the bottom
-// of the map region.
+// Sidebar down the left, and whichever view is routed filling the rest. The
+// rail is on the parent route, so this grid survives navigation and only the
+// main region's contents change.
 
 .throne-room {
   display: grid;
   // The first column is set inline from the sidebar width signal, so the
   // resizer can drive it live. This is only the pre-hydration fallback.
   grid-template-columns: 290px 1fr;
-  grid-template-rows: 1fr auto;
-  grid-template-areas:
-    "sidebar map"
-    "sidebar chat";
+  grid-template-areas: "sidebar main";
   height: 100vh;
+}
+
+.main-region {
+  grid-area: main;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+// The realm: map above, decree bar pinned beneath it. A flex column rather
+// than its own grid area, so both routes share one outer grid.
+.realm-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 // While the rail is being dragged the pointer sweeps across the map; without

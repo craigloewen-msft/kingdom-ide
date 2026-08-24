@@ -132,8 +132,9 @@ crates/
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
                     credential.rs, broker.rs (leases)
-    app.rs          Shell, routing, shared UI state
-    components/     sidebar.rs, chat.rs, map/ (mod.rs + city.rs)
+    app.rs          Shell, routes, shared UI state
+    components/     sidebar.rs, decree.rs, conversation.rs,
+                    map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
 ```
@@ -157,9 +158,9 @@ No `tokio`, no `std::fs`, no native-only crates. Server-only code goes in
 ```mermaid
 flowchart TB
   subgraph Browser["Browser — wasm32, feature: hydrate"]
-    Map["Kingdom map (SVG, pan/zoom)"]
-    Side["Left rail: Cities / Plans / Resources"]
-    Chat["Bottom dock: Start a new task"]
+    Map["/ — kingdom map (SVG, pan/zoom) + decree bar"]
+    Side["Left rail: Cities / Plans — navigates to both routes"]
+    Chat["/plan/:id — the plan's chamber (conversation)"]
   end
   subgraph Server["Axum — native, feature: ssr"]
     SF["server functions"]
@@ -191,11 +192,17 @@ build on top of a placeholder believing it is real.
 - Pan, zoom, city selection, level-of-detail switching
 - The client/server round trip for every `#[server]` function
 - Lease compatibility logic (tested)
-- **Drafting a plan with a real model.** A decree opens a plan, takes a `Shared`
-  lease on the city's path, calls the model with that project's real scan data,
-  and settles the plan at `AwaitingReview` (or `Blocked`/`Failed`), releasing the
-  lease on every path. Two providers: an offline deterministic `mock` (the
-  default) and GitHub Copilot.
+- **Two routes, and a plan you can navigate to.** `/` is the realm (map plus the
+  decree bar); `/plan/:id` is that plan's chamber — its transcript, status,
+  summary and touched files. The rail links to both, and every plan has a URL
+  that survives a reload.
+- **Drafting a plan with a real model.** A decree *opens* a plan instantly
+  (`begin_plan`: no lease, no model call) and the chamber then asks for the
+  draft (`draft_plan`), which takes a `Shared` lease on the city's path, calls
+  the model with that project's real scan data, and settles the plan at
+  `AwaitingReview` (or `Blocked`/`Failed`), releasing the lease on every path —
+  including when the browser walks away mid-draft. Two providers: an offline
+  deterministic `mock` (the default) and GitHub Copilot.
 - **Credential resolution** from `KINGDOM_API_KEY` or a helper command
   (`agency auth github` by default), with the contract tested.
 
@@ -205,7 +212,7 @@ build on top of a placeholder believing it is real.
 
 **Not built at all:**
 - Agents that *do* anything beyond replying: no tool use, no commands, no edits
-- Live updates (no WebSocket yet — state refreshes only on action)
+- Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
 - Persistence (state is in memory; a restart empties the kingdom)
 - Plan approval/rejection actually doing anything
 - A lease *queue* — refusal is surfaced, never resolved
@@ -219,8 +226,8 @@ important visual states unreachable during development. A test pins this.
 
 Copy `.kingdom.env.example` to `.kingdom.env` (gitignored). With nothing set,
 the offline mock drafts every plan, so a fresh clone works with no credential
-and no network. The dock's provider badge reports whether a credential actually
-resolves, not merely whether one is configured.
+and no network. The decree bar's provider badge reports whether a credential
+actually resolves, not merely whether one is configured.
 
 ---
 
@@ -293,9 +300,11 @@ later decision, not an oversight.
 Roughly in order of value:
 
 1. **WebSocket live updates.** "Know what your agents are doing" is inherently a
-   push problem, and this is now the binding constraint: drafting happens inside
-   the request, so the King watches a spinner instead of watching work. Everything
-   else on this list is easier once it lands.
+   push problem, and this is still the binding constraint. Opening a plan is now
+   instant, but the *draft* still happens inside a request, and the conversation
+   view falls back to polling once a second to notice one that landed elsewhere.
+   That poll (`components/conversation.rs`) is a deliberate stopgap: delete it
+   when push lands rather than growing it into a general polling layer.
 2. **A lease queue.** `acquire`/`release` are real; what is missing is what
    happens *after* a refusal. Today a blocked plan sits visible but inert.
 3. **Give a plan hands.** Tool use: run a command, read a file, propose a diff —

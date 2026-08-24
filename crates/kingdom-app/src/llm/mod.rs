@@ -123,6 +123,19 @@ pub fn provider() -> ModelProvider {
     }
 }
 
+/// The model a draft *would* use, without resolving a credential.
+///
+/// Exists so a plan can record what is drawing it up the instant it is opened,
+/// before anything has been claimed or called. Resolving the credential here
+/// instead would mean running the helper command just to label a row in the
+/// rail.
+pub fn intended_model_name() -> String {
+    match provider() {
+        ModelProvider::Mock => mock::MODEL_NAME.to_string(),
+        ModelProvider::Copilot => copilot::model_name(),
+    }
+}
+
 /// Builds the configured model.
 pub async fn configured() -> Result<Box<dyn Model>, ModelError> {
     match provider() {

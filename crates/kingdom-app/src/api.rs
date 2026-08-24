@@ -100,16 +100,19 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
     Ok(kingdom)
 }
 
-/// Issues a decree: the King opens a new plan in a city, and a model drafts it.
+/// Opens a plan and returns immediately, before any drafting happens.
 ///
-/// The whole turn happens here rather than in a background task, because there
-/// is no push channel yet -- the browser has nowhere to receive progress. When
-/// the WebSocket layer lands this becomes spawn-and-notify; until then, awaiting
-/// the reply is honest about what the King is actually waiting for.
-#[server(OpenPlan, "/api")]
-pub async fn open_plan(prompt: String, city: Option<String>) -> Result<Plan, ServerFnError> {
-    use crate::llm::{broker, Brief, CityBrief};
-    use kingdom_core::{CityId, PlanStatus, Speaker};
+/// The split between opening and drafting is what lets the King land in the
+/// plan's conversation the moment he presses Start: the plan has an id, a
+/// title and his own words in its transcript before the model has been called
+/// at all. [`draft_plan`] then does the slow, resource-claiming half.
+///
+/// Deliberately takes **no lease** and makes **no model call**. Nothing shared
+/// has been touched yet, so there is nothing to claim; a lease taken here would
+/// make the city look busy while the King is still reading.
+#[server(BeginPlan, "/api")]
+pub async fn begin_plan(prompt: String, city: Option<String>) -> Result<Plan, ServerFnError> {
+    use kingdom_core::CityId;
 
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -120,84 +123,105 @@ pub async fn open_plan(prompt: String, city: Option<String>) -> Result<Plan, Ser
         city.ok_or_else(|| ServerFnError::new("Choose a city before issuing a decree."))?,
     );
 
-    // Build the model first: with no credential there is nothing to draft with,
-    // and taking a lease we cannot use would leave the city looking busy.
-    let model = crate::llm::configured()
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
     let plan_id = PlanId::new(format!("plan-{}", next_plan_number()));
-    let mut plan = Plan::opened(plan_id.clone(), city_id.clone(), &prompt, model.name());
+    let plan = Plan::opened(
+        plan_id,
+        city_id.clone(),
+        &prompt,
+        crate::llm::intended_model_name(),
+    );
 
-    // Register the plan and claim the city's files in one critical section, so
-    // two decrees racing for the same city cannot both see it free.
-    let brief = {
-        let mut kingdom = lock()?;
+    let mut kingdom = lock()?;
+    if kingdom.city(&city_id).is_none() {
+        return Err(ServerFnError::new("No such city in this kingdom."));
+    }
+    kingdom.plans.push(plan.clone());
 
-        let Some(city) = kingdom.city(&city_id).cloned() else {
-            return Err(ServerFnError::new("No such city in this kingdom."));
-        };
-        let brief = CityBrief::from_city(&city, &kingdom.root);
-
-        match broker::acquire_city_read(&mut kingdom, &plan_id, &city_id) {
-            Ok(lease) => plan.leases.push(lease),
-            Err(refusal) => {
-                // Refused work is not silently dropped: it is parked where the
-                // King can see it, on the map and in the rail.
-                plan.status = PlanStatus::Blocked;
-                plan.summary = refusal.reason.clone();
-                plan.say(Speaker::Court, refusal.reason);
-                kingdom.plans.push(plan.clone());
-                return Ok(plan);
-            }
-        }
-
-        kingdom.plans.push(plan.clone());
-        brief
-    };
-
-    let outcome = model
-        .draft(&Brief {
-            city: brief,
-            transcript: Vec::new(),
-            prompt,
-        })
-        .await;
-
-    settle(plan_id, outcome)
+    Ok(plan)
 }
 
-/// Another turn on an existing plan, so the dock is a conversation rather than
-/// a series of unrelated one-shots.
-#[server(ContinuePlan, "/api")]
-pub async fn continue_plan(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
-    use crate::llm::{broker, Brief, CityBrief};
+/// Records another decree on an existing plan, without drafting a reply.
+///
+/// Paired with [`draft_plan`] for the same reason as [`begin_plan`]: the King's
+/// own words appear in the conversation the instant he sends them, rather than
+/// only once the court has finished thinking.
+#[server(Say, "/api")]
+pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
     use kingdom_core::{PlanStatus, Speaker};
 
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(ServerFnError::new("A decree cannot be empty."));
     }
+
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    update(&mut kingdom, &plan_id, |p| {
+        p.status = PlanStatus::Drafting;
+        p.say(Speaker::King, prompt);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+}
+
+/// Draws up the plan: claims the city's files, calls the model, settles.
+///
+/// This is the half that costs something, so it is the half that takes a lease.
+/// The whole turn still happens inside the request because there is no push
+/// channel yet -- the browser has nowhere to receive progress. When the
+/// WebSocket layer lands this becomes spawn-and-notify.
+#[server(DraftPlan, "/api")]
+pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
+    use crate::llm::{broker, Brief, CityBrief};
+    use kingdom_core::{PlanStatus, Speaker};
+
     let plan_id = PlanId::new(plan);
 
-    let model = crate::llm::configured()
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let (brief, transcript) = {
+    let (brief, transcript, prompt) = {
         let mut kingdom = lock()?;
 
         let Some(existing) = kingdom.plan(&plan_id).cloned() else {
             return Err(ServerFnError::new("That plan is no longer in the records."));
         };
+
+        // A lease already held by this plan means a draft is in flight: the
+        // conversation view kicks drafting off on mount, so a reload or a second
+        // tab would otherwise start a second one. The lease is already the
+        // answer to "is someone working on this right now?", so it is used here
+        // rather than inventing a flag that could disagree with it.
+        if !existing.leases.is_empty() {
+            return Ok(existing);
+        }
+
         let Some(city) = kingdom.city(&existing.city).cloned() else {
             return Err(ServerFnError::new("That plan's city is gone."));
         };
         let brief = CityBrief::from_city(&city, &kingdom.root);
 
-        let lease = match broker::acquire_city_read(&mut kingdom, &plan_id, &existing.city) {
-            Ok(lease) => lease,
+        // The decree being answered is the King's last word; everything before
+        // it is the context leading up to it.
+        let (transcript, prompt) = match existing
+            .transcript
+            .iter()
+            .rposition(|u| u.speaker == Speaker::King)
+        {
+            Some(i) => (
+                existing.transcript[..i].to_vec(),
+                existing.transcript[i].body.clone(),
+            ),
+            None => (Vec::new(), existing.prompt.clone()),
+        };
+
+        match broker::acquire_city_read(&mut kingdom, &plan_id, &existing.city) {
+            Ok(lease) => {
+                update(&mut kingdom, &plan_id, |p| {
+                    p.status = PlanStatus::Drafting;
+                    p.leases = vec![lease];
+                });
+            }
             Err(refusal) => {
+                // Refused work is not silently dropped: it is parked where the
+                // King can see it, on the map and in the rail.
                 let plan = update(&mut kingdom, &plan_id, |p| {
                     p.status = PlanStatus::Blocked;
                     p.summary = refusal.reason.clone();
@@ -205,27 +229,46 @@ pub async fn continue_plan(plan: String, prompt: String) -> Result<Plan, ServerF
                 });
                 return plan.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."));
             }
-        };
+        }
 
-        update(&mut kingdom, &plan_id, |p| {
-            p.status = PlanStatus::Drafting;
-            p.model = model.name().to_string();
-            p.leases = vec![lease.clone()];
-            p.say(Speaker::King, prompt.clone());
-        });
-
-        (brief, existing.transcript)
+        (brief, transcript, prompt)
     };
 
-    let outcome = model
-        .draft(&Brief {
-            city: brief,
-            transcript,
-            prompt,
-        })
-        .await;
+    // Spawned rather than awaited inline, because the lease is already held.
+    // If the browser navigates away mid-draft, Axum drops this request's
+    // future -- which would cancel the model call *after* the claim and
+    // *before* the release, leaving the city held by a plan that is
+    // permanently Drafting and blocking every later decree with no way to
+    // clear it. A detached task loses only the reply, never the release.
+    let handle = tokio::spawn(async move {
+        let outcome = match crate::llm::configured().await {
+            Ok(model) => {
+                // Recorded now rather than at open: this is the model that
+                // actually did the work, credential and all.
+                if let Ok(mut kingdom) = lock() {
+                    update(&mut kingdom, &plan_id, |p| {
+                        p.model = model.name().to_string()
+                    });
+                }
+                model
+                    .draft(&Brief {
+                        city: brief,
+                        transcript,
+                        prompt,
+                    })
+                    .await
+            }
+            // A missing credential surfaces as a failed plan the King can see
+            // and retry, rather than an error attached to nothing.
+            Err(e) => Err(e),
+        };
 
-    settle(plan_id, outcome)
+        settle(plan_id, outcome)
+    });
+
+    handle
+        .await
+        .map_err(|e| ServerFnError::new(format!("drafting task failed: {e}")))?
 }
 
 /// Records a drafting outcome on the plan and hands back every lease it held.

@@ -409,7 +409,7 @@ pub enum Speaker {
 /// This absorbs what a separate architect status used to carry: `Drafting` is
 /// an agent working, `Blocked` is an agent that could not get a lease. They were
 /// always two views of one state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlanStatus {
     /// A model is drafting it right now.
     Drafting,

@@ -21,7 +21,8 @@
 @use "components/sidebar";
 @use "components/map";
 @use "components/skyline";
-@use "components/chat-dock";
+@use "components/decree-bar";
+@use "components/conversation";
 
 @use "status";
 @use "base/scrollbars";

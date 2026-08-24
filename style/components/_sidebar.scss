@@ -159,19 +159,44 @@
 }
 
 // --- Plans under a city ----------------------------------------------------
+//
+// Every plan row is a link to its chamber, so the whole row is a target and
+// the anchor carries no default link styling of its own.
 
 .plan-list {
   list-style: none;
   margin: 0 0 4px;
   padding: 0 0 0 22px;
+
+  li { list-style: none; }
 }
 
 .plan-row {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.plan-row-inner {
   display: flex;
   align-items: baseline;
   gap: 8px;
   padding: 5px 8px;
   border-left: 1px solid t.$edge;
+  border-radius: 0 4px 4px 0;
+
+  .plan-row:hover & {
+    background: t.$panel-2;
+    .plan-title { color: t.$ink; }
+  }
+
+  // The conversation currently open. Gold on the left edge matches how a
+  // selected city is marked, so "you are here" reads the same down the rail.
+  &.current {
+    background: t.$panel-2;
+    border-left-color: t.$gold;
+    .plan-title { color: t.$ink; }
+  }
 }
 
 .plan-title {

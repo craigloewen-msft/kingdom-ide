@@ -10,7 +10,8 @@
 @use "../abstracts/mixins" as m;
 
 .map-region {
-  grid-area: map;
+  // Fills whatever the realm's flex column leaves after the decree bar.
+  flex: 1;
   position: relative;
   min-height: 0;
   // Deep ocean beyond the drawn sea, so the world has no visible edge however
