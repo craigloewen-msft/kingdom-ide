@@ -23,6 +23,7 @@ pub mod ask_user_question;
 pub mod bash;
 pub mod browser;
 pub mod patch;
+pub mod profile;
 pub mod read_file;
 pub mod read_image;
 pub mod search;
@@ -59,6 +60,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(browser::BrowserResize),
         Box::new(browser::BrowserRecentConsoleLogs),
         Box::new(browser::BrowserClearConsoleLogs),
+        Box::new(profile::BrowserProfile),
         Box::new(ask_user_question::AskUserQuestion),
     ]
 }

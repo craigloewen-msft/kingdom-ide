@@ -20,6 +20,11 @@
 use leptos::prelude::*;
 
 /// What the socket has last told us.
+///
+/// `NoSession` and `Ended` are only ever set by the socket handler, which is
+/// `hydrate`-only -- so on the server build they are legitimately unreachable
+/// rather than forgotten.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sight {
     Opening,

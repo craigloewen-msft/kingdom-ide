@@ -5,6 +5,8 @@
 //! in one call and vanish in the next, breaking login and any other flow whose
 //! meaning spans multiple browser actions.
 
+
+use crate::profile::{PerfReading, ProfilingState};
 use crate::screencast::{ScreencastBroker, ScreencastEvent};
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
@@ -81,6 +83,12 @@ struct BrowserSession {
     /// strong reference here would keep every screencast alive for the life of
     /// the session, which is the exact cost the lazy start exists to avoid.
     screencast: tokio::sync::Mutex<std::sync::Weak<ScreencastBroker>>,
+    /// Which profiling machines this session has running.
+    ///
+    /// On the session because that is their scope: a CPU profile belongs to a
+    /// browser, not to the call that started it, and the call that stops it is
+    /// a different one entirely.
+    profiling: Arc<Mutex<ProfilingState>>,
 }
 
 impl BrowserSession {
@@ -165,6 +173,19 @@ impl BrowserSession {
             }
         };
 
+        // Install the in-page helper into every future document, before the
+        // page's own scripts. React registers its fiber roots into whatever
+        // hook exists at startup, and the longtask observer has to be running
+        // before there is any work to observe -- so installing it when
+        // profiling begins would be too late for both. Harmless on a page that
+        // uses neither.
+        //
+        // Best effort and bounded: the browser is perfectly usable without it,
+        // and a wedged socket here must not hang the launch.
+        let helper = chromiumoxide::cdp::browser_protocol::page::
+            AddScriptToEvaluateOnNewDocumentParams::new(crate::perf::HELPER_SCRIPT.to_string());
+        let _ = tokio::time::timeout(INIT_TIMEOUT, page.execute(helper)).await;
+
         let console = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_CONSOLE_LOGS)));
         let mut events = page.event_listener::<EventConsoleApiCalled>().await?;
         let captured = Arc::clone(&console);
@@ -205,6 +226,7 @@ impl BrowserSession {
             page,
             console,
             screencast: tokio::sync::Mutex::new(std::sync::Weak::new()),
+            profiling: Arc::new(Mutex::new(ProfilingState::default())),
         })
     }
 }
@@ -274,6 +296,47 @@ impl BrowserSessionManager {
         };
         let guard = session.read().await;
         guard.watch().await.map(Some)
+    }
+
+    /// Runs one profiling operation against a plan's browser.
+    ///
+    /// The whole profiling surface goes through one method taking a closure,
+    /// rather than a dozen forwarding methods, because every one of them wants
+    /// the same two things -- the page, and the session's profiling state -- and
+    /// writing that pairing out a dozen times is a dozen chances to take the
+    /// locks in a different order.
+    pub async fn profiling<T, F>(&self, plan: &str, work: F) -> Result<T, BrowserError>
+    where
+        F: for<'a> FnOnce(
+            &'a Page,
+            Arc<Mutex<ProfilingState>>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, BrowserError>> + Send + 'a>,
+        >,
+    {
+        let session = self.session(plan).await?;
+        let guard = session.read().await;
+        let state = Arc::clone(&guard.profiling);
+        work(&guard.page, state).await
+    }
+
+    /// Opens a measurement window, runs `steps`, and reads what happened.
+    ///
+    /// The bracket is here rather than in the caller so that the window cannot
+    /// be left open: whatever `steps` does, the read happens.
+    pub async fn measure<F>(&self, plan: &str, steps: F) -> Result<PerfReading, BrowserError>
+    where
+        F: for<'a> FnOnce(
+            &'a Page,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), BrowserError>> + Send + 'a>,
+        >,
+    {
+        let session = self.session(plan).await?;
+        let guard = session.read().await;
+        crate::profile::perf_reset(&guard.page).await?;
+        steps(&guard.page).await?;
+        Ok(crate::profile::perf_read(&guard.page).await)
     }
 
     pub async fn navigate(
