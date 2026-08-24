@@ -298,7 +298,7 @@ fn ChamberBody(
                     disabled={move || drafting.get()}
                     on:click=move |_| submit()
                 >
-                    {move || if drafting.get() { "Drafting\u{2026}" } else { "Decree" }}
+                    {move || if drafting.get() { "Drafting\u{2026}" } else { "Send" }}
                 </button>
 
                 // Closing the plan sits beside sending to it, because they are
