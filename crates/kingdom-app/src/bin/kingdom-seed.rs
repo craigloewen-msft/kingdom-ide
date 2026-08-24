@@ -14,7 +14,7 @@ fn main() -> std::process::ExitCode {
     use kingdom_app::mock;
     use kingdom_core::mockdata;
 
-    let mut realm_name: Option<String> = None;
+    let mut fixture_name: Option<String> = None;
     let mut into: Option<std::path::PathBuf> = None;
     let mut force = false;
 
@@ -42,18 +42,18 @@ fn main() -> std::process::ExitCode {
                 usage();
                 return std::process::ExitCode::FAILURE;
             }
-            other => realm_name = Some(other.to_string()),
+            other => fixture_name = Some(other.to_string()),
         }
     }
 
-    let name = realm_name.unwrap_or_else(|| mockdata::DEFAULT_REALM.to_string());
-    let Some(spec) = mockdata::realm(&name) else {
+    let name = fixture_name.unwrap_or_else(|| mockdata::DEFAULT_FIXTURE.to_string());
+    let Some(spec) = mockdata::fixture(&name) else {
         eprintln!("No such realm: {name}\n");
         list();
         return std::process::ExitCode::FAILURE;
     };
 
-    let root = into.unwrap_or_else(|| mock::realm_path(&name));
+    let root = into.unwrap_or_else(|| mock::fixture_path(&name));
 
     // Without --force, an existing proving ground is left alone. Re-seeding is
     // destructive even when it is safe, so it should be asked for.
@@ -84,16 +84,16 @@ fn main() -> std::process::ExitCode {
 #[cfg(feature = "ssr")]
 fn list() {
     println!("Realms:\n");
-    for realm in kingdom_core::mockdata::realms() {
-        let marker = if realm.name == kingdom_core::mockdata::DEFAULT_REALM {
+    for fixture in kingdom_core::mockdata::fixtures() {
+        let marker = if fixture.name == kingdom_core::mockdata::DEFAULT_FIXTURE {
             " (default)"
         } else {
             ""
         };
-        println!("  {:<16}{}{marker}", realm.name, realm.blurb);
+        println!("  {:<16}{}{marker}", fixture.name, fixture.blurb);
     }
     println!(
-        "\nDefined in crates/kingdom-core/src/mockdata/realms.rs -- edit that to change them."
+        "\nDefined in crates/kingdom-core/src/mockdata/fixtures.rs -- edit that to change them."
     );
 }
 

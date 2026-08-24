@@ -330,13 +330,13 @@ fn ChooseKingdom() -> impl IntoView {
     // Raising a proving ground is the safe path, so it gets its own action
     // rather than being something the King must first read about and then type
     // a path to reach.
-    let realms = Resource::new(|| (), |_| crate::api::list_realms());
-    let enter = Action::new(move |realm: &Option<String>| {
-        let realm = realm.clone();
+    let fixtures = Resource::new(|| (), |_| crate::api::list_fixtures());
+    let enter = Action::new(move |fixture: &Option<String>| {
+        let fixture = fixture.clone();
         async move {
             state.loading.set(true);
             state.error.set(None);
-            match crate::api::enter_proving_grounds(realm).await {
+            match crate::api::enter_proving_grounds(fixture).await {
                 Ok(k) => state.kingdom.set(k),
                 Err(e) => state.error.set(Some(e.to_string())),
             }
@@ -403,7 +403,7 @@ fn ChooseKingdom() -> impl IntoView {
                     <div class="pg-realms">
                         <Suspense>
                             {move || {
-                                realms
+                                fixtures
                                     .get()
                                     .and_then(|r| r.ok())
                                     .map(|list| {

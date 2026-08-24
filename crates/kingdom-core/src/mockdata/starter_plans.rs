@@ -1,7 +1,7 @@
 //! Opening courts a realm can choose between.
 //!
 //! A court is the plans a kingdom starts with, before the King has issued a
-//! decree. [`crate::sample::populate_court`] already builds one over whatever
+//! decree. [`crate::sample::starter_plans`] already builds one over whatever
 //! cities were scanned; the only limitation was that there was exactly one of
 //! it. So these are simply more functions of the same signature, and a realm
 //! names the one it wants.
@@ -15,19 +15,19 @@
 use crate::ids::PlanId;
 use crate::model::{City, ModelChoice, Plan, PlanStatus, Speaker, Workspace};
 
-/// The standard opening court: whatever [`crate::sample::populate_court`] makes.
+/// The standard opening court: whatever [`crate::sample::starter_plans`] makes.
 ///
 /// Most realms want this. It is the same court the real-folder path gets, so a
 /// proving ground rehearses what the King actually sees.
-pub fn default_court(cities: &[City]) -> Vec<Plan> {
-    crate::sample::populate_court(cities)
+pub fn default_plans(cities: &[City]) -> Vec<Plan> {
+    crate::sample::starter_plans(cities)
 }
 
 /// A single settled plan, and nothing else.
 ///
 /// For looking at a realm whose map is almost empty -- useful when the thing
 /// being examined is the terrain or the skyline rather than the court.
-pub fn quiet_court(cities: &[City]) -> Vec<Plan> {
+pub fn quiet_plans(cities: &[City]) -> Vec<Plan> {
     let Some(city) = cities.first() else {
         return Vec::new();
     };

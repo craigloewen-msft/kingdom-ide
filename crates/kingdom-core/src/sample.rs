@@ -15,7 +15,7 @@ use crate::model::*;
 
 /// Fabricates a court of plans for the given cities, so the map has something
 /// to show on first run.
-pub fn populate_court(cities: &[City]) -> Vec<Plan> {
+pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
     if cities.is_empty() {
         return Vec::new();
     }
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn the_opening_court_always_shows_trouble_and_history() {
         let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
-        let plans = populate_court(&cities);
+        let plans = starter_plans(&cities);
 
         assert!(
             plans.iter().any(|p| p.status == PlanStatus::Failed),

@@ -1,7 +1,7 @@
 //! **The fake data. Edit this file to change it.**
 //!
-//! Each realm is a function returning a [`RealmSpec`]. To add one, write the
-//! function and list it in [`realms()`] -- that is the whole procedure. The
+//! Each realm is a function returning a [`FixtureSpec`]. To add one, write the
+//! function and list it in [`fixtures()`] -- that is the whole procedure. The
 //! helpers in [`super::build`] (`rust_city`, `file`, `fill`, `text`, ...) are
 //! what keep a realm readable; see [`super`] for the full walkthrough.
 //!
@@ -14,11 +14,11 @@
 //!   the others do not. They are fixtures, not a gallery.
 
 use super::build::*;
-use super::{CitySpec, RealmSpec};
+use super::{CitySpec, FixtureSpec};
 use crate::model::Language;
 
 /// The realm the "Enter the Proving Grounds" button opens.
-pub const DEFAULT_REALM: &str = "kingdom-mirror";
+pub const DEFAULT_FIXTURE: &str = "kingdom-mirror";
 
 // Per-realm seeds. Arbitrary values -- what matters is that they are *fixed*.
 // Changing one reshuffles every generated file size in that realm, which moves
@@ -28,18 +28,18 @@ const CROWDED_SEED: u64 = 0x_C0FF_0002;
 const MONOREPO_SEED: u64 = 0x_BEEF_0003;
 
 /// Every realm the seeder can build. **Add yours here.**
-pub fn realms() -> Vec<RealmSpec> {
+pub fn fixtures() -> Vec<FixtureSpec> {
     vec![kingdom_mirror(), crowded(), monorepo()]
 }
 
 /// Looks up a realm by name.
-pub fn realm(name: &str) -> Option<RealmSpec> {
-    realms().into_iter().find(|r| r.name == name)
+pub fn fixture(name: &str) -> Option<FixtureSpec> {
+    fixtures().into_iter().find(|r| r.name == name)
 }
 
 /// Every realm name, for the CLI's listing and its unknown-name error.
-pub fn realm_names() -> Vec<&'static str> {
-    realms().into_iter().map(|r| r.name).collect()
+pub fn fixture_names() -> Vec<&'static str> {
+    fixtures().into_iter().map(|r| r.name).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -50,8 +50,8 @@ pub fn realm_names() -> Vec<&'static str> {
 /// *modest* in size so it seeds in well under a second -- the realms that
 /// stress-test the scanner are separate, because a slow default would push
 /// people back towards opening their real folder.
-fn kingdom_mirror() -> RealmSpec {
-    RealmSpec::new(
+fn kingdom_mirror() -> FixtureSpec {
+    FixtureSpec::new(
         "kingdom-mirror",
         "Five projects, mixed stacks -- the everyday proving ground.",
         MIRROR_SEED,
@@ -114,7 +114,7 @@ fn kingdom_mirror() -> RealmSpec {
 /// Exists so map layout, label collision and level-of-detail switching fail
 /// *here* rather than on the King's machine. Each city is tiny; the point is the
 /// count, not the bulk.
-fn crowded() -> RealmSpec {
+fn crowded() -> FixtureSpec {
     const NAMES: [&str; 40] = [
         "alder", "birch", "cedar", "dogwood", "elm", "fir", "gorse", "hazel", "ivy", "juniper",
         "kapok", "larch", "maple", "nutmeg", "oak", "pine", "quince", "rowan", "spruce", "teak",
@@ -143,7 +143,7 @@ fn crowded() -> RealmSpec {
         }
     });
 
-    RealmSpec::new(
+    FixtureSpec::new(
         "crowded",
         "Forty cities. For map layout, labels and level-of-detail.",
         CROWDED_SEED,
@@ -157,7 +157,7 @@ fn crowded() -> RealmSpec {
 /// budget, `FILES_PER_DISTRICT` pruning into `extra_files`/`extra_bytes`, and the
 /// assets-versus-code weighting. Those caps are invisible until something
 /// crosses them, and a real monorepo is a bad place to discover they misbehave.
-fn monorepo() -> RealmSpec {
+fn monorepo() -> FixtureSpec {
     let deep = dir(
         "packages",
         (0..8).map(|p| {
@@ -188,7 +188,7 @@ fn monorepo() -> RealmSpec {
         }),
     );
 
-    RealmSpec::new(
+    FixtureSpec::new(
         "monorepo",
         "One vast project: depth caps, file caps, and a huge asset.",
         MONOREPO_SEED,

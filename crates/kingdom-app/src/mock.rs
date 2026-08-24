@@ -1,7 +1,7 @@
 //! Materialising a proving ground on disk.
 //!
 //! The mirror image of [`crate::scan`]: that turns a folder into a `Kingdom`,
-//! this turns a [`RealmSpec`] into a folder. Server-only, and deliberately the
+//! this turns a [`FixtureSpec`] into a folder. Server-only, and deliberately the
 //! *only* place in the codebase that creates or deletes files.
 //!
 //! # Why write real files at all
@@ -19,7 +19,7 @@
 //! **nothing is cleared or written into unless it is empty or carries the
 //! [`MARKER`] file.** No flag overrides it. See [`ensure_seedable`].
 
-use kingdom_core::mockdata::{FileContent, GitSpec, PlannedFile, RealmSpec};
+use kingdom_core::mockdata::{FileContent, GitSpec, PlannedFile, FixtureSpec};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -40,7 +40,7 @@ pub fn sandbox_root() -> PathBuf {
 }
 
 /// Where a named realm is seeded by default.
-pub fn realm_path(name: &str) -> PathBuf {
+pub fn fixture_path(name: &str) -> PathBuf {
     sandbox_root().join(name)
 }
 
@@ -91,7 +91,7 @@ impl From<std::io::Error> for SeedError {
 /// What a seed produced, for the CLI to print.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedReport {
-    pub realm: String,
+    pub fixture: String,
     pub root: PathBuf,
     pub cities: usize,
     pub files: usize,
@@ -106,7 +106,7 @@ impl std::fmt::Display for SeedReport {
         write!(
             f,
             "Seeded '{}' at {}\n  {} cities, {} files, {} declared ({} git repos)",
-            self.realm,
+            self.fixture,
             self.root.display(),
             self.cities,
             self.files,
@@ -150,7 +150,7 @@ fn ensure_seedable(path: &Path) -> Result<(), SeedError> {
 }
 
 /// Materialises a realm at `into`, clearing any previous seeding of it.
-pub fn seed(spec: &RealmSpec, into: &Path) -> Result<SeedReport, SeedError> {
+pub fn seed(spec: &FixtureSpec, into: &Path) -> Result<SeedReport, SeedError> {
     // Validate before touching anything: a realm that fails halfway through
     // leaves a folder that looks plausible and is not, which is worse than no
     // folder at all.
@@ -181,7 +181,7 @@ pub fn seed(spec: &RealmSpec, into: &Path) -> Result<SeedReport, SeedError> {
     }
 
     Ok(SeedReport {
-        realm: spec.name.to_string(),
+        fixture: spec.name.to_string(),
         root: into.to_path_buf(),
         cities: spec.cities.len(),
         files: planned.len(),
@@ -190,7 +190,7 @@ pub fn seed(spec: &RealmSpec, into: &Path) -> Result<SeedReport, SeedError> {
     })
 }
 
-fn write_marker(spec: &RealmSpec, root: &Path) -> Result<(), SeedError> {
+fn write_marker(spec: &FixtureSpec, root: &Path) -> Result<(), SeedError> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -202,7 +202,7 @@ fn write_marker(spec: &RealmSpec, root: &Path) -> Result<(), SeedError> {
             "# Kingdom IDE proving ground -- generated, safe to delete.\n\
              realm = {}\nseed = {:#x}\ngenerated_at = {stamp}\n\n\
              Every file under this directory is fake. Edit\n\
-             crates/kingdom-core/src/mockdata/realms.rs and re-seed to change it.\n",
+             crates/kingdom-core/src/mockdata/fixtures.rs and re-seed to change it.\n",
             spec.name, spec.seed
         ),
     )?;
@@ -396,9 +396,9 @@ mod tests {
         std::fs::write(&precious, "a user's real work").unwrap();
 
         // Any bundled realm will do; which one is not what is under test here.
-        let realm = kingdom_core::mockdata::realm("kingdom-mirror").expect("bundled realm");
+        let fixture = kingdom_core::mockdata::fixture("kingdom-mirror").expect("bundled realm");
 
-        let refused = seed(&realm, &temp.0);
+        let refused = seed(&fixture, &temp.0);
         assert!(
             matches!(refused, Err(SeedError::NotAProvingGround(_))),
             "an unmarked directory must be refused, got {refused:?}"
@@ -412,7 +412,7 @@ mod tests {
         // Marked, the same directory is fair game -- which is what makes
         // re-seeding safe rather than special-cased.
         std::fs::write(temp.0.join(MARKER), "realm = contended\n").unwrap();
-        seed(&realm, &temp.0).expect("a marked directory may be re-seeded");
+        seed(&fixture, &temp.0).expect("a marked directory may be re-seeded");
         assert!(!precious.exists(), "re-seeding a proving ground clears it");
     }
 
@@ -423,21 +423,21 @@ mod tests {
     /// actually written. Same for file counts: this is what catches the seeder
     /// silently dropping files, or `Fill` expanding to fewer than it claims.
     #[test]
-    fn a_seeded_realm_scans_back_as_it_was_declared() {
+    fn a_seeded_fixture_scans_back_as_it_was_declared() {
         let temp = Temp::new("roundtrip");
         let root = temp.0.join("kingdom-mirror");
-        let realm = kingdom_core::mockdata::realm("kingdom-mirror").expect("bundled realm");
+        let fixture = kingdom_core::mockdata::fixture("kingdom-mirror").expect("bundled realm");
 
-        let report = seed(&realm, &root).expect("seeding a fresh directory");
+        let report = seed(&fixture, &root).expect("seeding a fresh directory");
         let scanned = crate::scan::scan_kingdom(&root).expect("scanning the seeded realm");
 
         assert_eq!(
             scanned.len(),
-            realm.cities.len(),
+            fixture.cities.len(),
             "every declared city must scan back as a city"
         );
 
-        for declared in &realm.cities {
+        for declared in &fixture.cities {
             let found = scanned
                 .iter()
                 .find(|c| c.name == declared.name)
@@ -449,7 +449,7 @@ mod tests {
                 declared.name, declared.stack, found.kind
             );
 
-            let expected = realm
+            let expected = fixture
                 .expand()
                 .iter()
                 .filter(|f| f.city == declared.name)

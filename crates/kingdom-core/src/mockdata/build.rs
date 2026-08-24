@@ -1,6 +1,6 @@
 //! Terse constructors for writing realms.
 //!
-//! The user-facing promise of the proving grounds is "open `realms.rs`, change
+//! The user-facing promise of the proving grounds is "open `fixtures.rs`, change
 //! the fake data". A wall of struct literals would break that promise on
 //! contact, so realms are written with these instead.
 //!

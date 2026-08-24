@@ -131,18 +131,18 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 /// absolute path to real work before showing anything at all, which makes
 /// pointing the tool at real files the default first act.
 #[server(EnterProvingGrounds, "/api")]
-pub async fn enter_proving_grounds(realm: Option<String>) -> Result<Kingdom, ServerFnError> {
+pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
     use kingdom_core::mockdata;
 
-    let name = realm.unwrap_or_else(|| mockdata::DEFAULT_REALM.to_string());
-    let spec = mockdata::realm(&name).ok_or_else(|| {
+    let name = fixture.unwrap_or_else(|| mockdata::DEFAULT_FIXTURE.to_string());
+    let spec = mockdata::fixture(&name).ok_or_else(|| {
         ServerFnError::new(format!(
             "No such realm: {name}. Known realms: {}.",
-            mockdata::realm_names().join(", ")
+            mockdata::fixture_names().join(", ")
         ))
     })?;
 
-    let root = crate::mock::realm_path(&name);
+    let root = crate::mock::fixture_path(&name);
 
     // Only seed when it is not already there, so entering twice is instant and
     // does not silently discard a realm the King has been poking at.
@@ -155,13 +155,13 @@ pub async fn enter_proving_grounds(realm: Option<String>) -> Result<Kingdom, Ser
         .canonicalize()
         .map_err(|e| ServerFnError::new(format!("Could not resolve {}: {e}", root.display())))?;
 
-    assemble(&root, Some(spec.court))
+    assemble(&root, Some(spec.starter_plans))
 }
 
 /// Every realm the King can enter, for the opening screen.
 #[server(ListRealms, "/api")]
-pub async fn list_realms() -> Result<Vec<(String, String)>, ServerFnError> {
-    Ok(kingdom_core::mockdata::realms()
+pub async fn list_fixtures() -> Result<Vec<(String, String)>, ServerFnError> {
+    Ok(kingdom_core::mockdata::fixtures()
         .into_iter()
         .map(|r| (r.name.to_string(), r.blurb.to_string()))
         .collect())
@@ -175,7 +175,7 @@ pub async fn list_realms() -> Result<Vec<(String, String)>, ServerFnError> {
 #[cfg(feature = "ssr")]
 fn assemble(
     root: &std::path::Path,
-    court: Option<kingdom_core::mockdata::CourtFn>,
+    starter_plans: Option<kingdom_core::mockdata::StarterPlansFn>,
 ) -> Result<Kingdom, ServerFnError> {
     use crate::scan::scan_kingdom;
 
@@ -185,14 +185,14 @@ fn assemble(
     // Cities are rescanned every time -- disk is their source of truth. Plans
     // are not: they are the one thing here that disk cannot tell us again.
     let recorded = crate::store::load(root);
-    let seating_court = recorded.is_empty();
-    let court = court.unwrap_or(kingdom_core::sample::populate_court);
-    let plans = open_court(recorded, &cities, court);
+    let seeding_starter_plans = recorded.is_empty();
+    let starter_plans = starter_plans.unwrap_or(kingdom_core::sample::starter_plans);
+    let plans = seed_starter_plans(recorded, &cities, starter_plans);
 
     // A fabricated court is fabricated exactly once per kingdom. Written
     // immediately so the next open reads it back as ordinary history rather
     // than seating a second one over the top of the first.
-    if seating_court && !plans.is_empty() {
+    if seeding_starter_plans && !plans.is_empty() {
         if let Err(e) = crate::store::save_all(root, &plans) {
             leptos::logging::warn!("could not record the opening court: {e}");
         }
@@ -230,13 +230,13 @@ fn assemble(
 /// plan. Split out from [`assemble`] so the rule is testable without the
 /// process-global kingdom.
 #[cfg(feature = "ssr")]
-fn open_court(
+fn seed_starter_plans(
     recorded: Vec<Plan>,
     cities: &[kingdom_core::City],
-    court: kingdom_core::mockdata::CourtFn,
+    starter_plans: kingdom_core::mockdata::StarterPlansFn,
 ) -> Vec<Plan> {
     if recorded.is_empty() {
-        court(cities)
+        starter_plans(cities)
     } else {
         recorded
     }
@@ -1105,13 +1105,13 @@ mod tests {
             .as_nanos();
         let base = std::env::temp_dir().join(format!("kingdom-sandbox-{unique}"));
         let sandbox = base.join("realms");
-        let realm = sandbox.join("kingdom-mirror");
+        let fixture = sandbox.join("kingdom-mirror");
         let outside = base.join("real-work");
-        std::fs::create_dir_all(&realm).unwrap();
+        std::fs::create_dir_all(&fixture).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
 
         assert!(
-            within_sandbox(&sandbox, &realm).is_ok(),
+            within_sandbox(&sandbox, &fixture).is_ok(),
             "a realm inside the sandbox must be openable"
         );
 
@@ -1141,7 +1141,7 @@ mod tests {
     fn a_court_is_seated_only_over_an_empty_store() {
         use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
 
-        fn court(_: &[kingdom_core::City]) -> Vec<Plan> {
+        fn starter_plans(_: &[kingdom_core::City]) -> Vec<Plan> {
             vec![Plan::opened(
                 PlanId::new("plan-fabricated"),
                 CityId::new("c1"),
@@ -1151,7 +1151,7 @@ mod tests {
             )]
         }
 
-        let seated = open_court(Vec::new(), &[], court);
+        let seated = seed_starter_plans(Vec::new(), &[], starter_plans);
         assert_eq!(
             seated.len(),
             1,
@@ -1166,7 +1166,7 @@ mod tests {
             Workspace::in_place("/dev/testburg"),
         )];
         assert_eq!(
-            open_court(recorded.clone(), &[], court),
+            seed_starter_plans(recorded.clone(), &[], starter_plans),
             recorded,
             "a kingdom with records keeps them, and gets no second court"
         );
