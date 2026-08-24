@@ -17,6 +17,8 @@ pub mod mock;
 #[cfg(feature = "ssr")]
 pub mod scan;
 #[cfg(feature = "ssr")]
+pub mod spyglass;
+#[cfg(feature = "ssr")]
 pub mod store;
 #[cfg(feature = "ssr")]
 pub mod tools;

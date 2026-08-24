@@ -10,9 +10,10 @@
 //! let one court member inherit another's login. This is the same per-plan
 //! isolation boundary as the tmux tool.
 //!
-//! Phoenix's `browser_profile` and screencast broker are deliberately absent:
-//! they serve Phoenix UI consumers Kingdom does not have, so exposing either
-//! would create capture state the King cannot see or steer.
+//! The same per-plan session is what the King's spyglass attaches to; see
+//! `crate::spyglass`. An earlier note here called the screencast deliberately
+//! absent because it served a Phoenix UI feature Kingdom lacked -- that has
+//! since been built, and the reasoning no longer holds.
 
 use super::{Refusal, Tool, Workshop};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
@@ -25,7 +26,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const LARGE_OUTPUT: usize = 4 * 1024;
 
 static BROWSERS: OnceLock<BrowserSessionManager> = OnceLock::new();
-fn browsers() -> &'static BrowserSessionManager {
+/// The one browser session manager, shared by the tools and by the spyglass.
+///
+/// Public so `crate::spyglass` can attach a viewer to a session the tools
+/// created. It deliberately does *not* create one -- see
+/// [`BrowserSessionManager::watch`].
+pub(crate) fn browsers() -> &'static BrowserSessionManager {
     BROWSERS.get_or_init(BrowserSessionManager::new)
 }
 fn plan(shop: &Workshop) -> String {

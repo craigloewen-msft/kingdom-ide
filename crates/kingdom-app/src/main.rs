@@ -36,6 +36,12 @@ async fn main() {
             kingdom_app::watch::ROUTE,
             axum::routing::get(kingdom_app::watch::upgrade),
         )
+        // The spyglass, for the same reason and on the same terms: pixels
+        // rather than plans, but equally not a Leptos route.
+        .route(
+            kingdom_app::spyglass::ROUTE,
+            axum::routing::get(kingdom_app::spyglass::upgrade),
+        )
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();
             move || shell(opts.clone())

@@ -7,14 +7,20 @@
 //! servers.
 //!
 //! This crate intentionally has no `Tool` dependency; the thin Kingdom-facing
-//! adapters live in `kingdom-app`. Phoenix's profiling engine and screencast
-//! broker are not ported: both feed Phoenix UI features Kingdom has no consumer
-//! for, and carrying them here would add long-lived capture state with nobody
-//! able to inspect it.
+//! adapters live in `kingdom-app`.
+//!
+//! The screencast broker *is* here, unlike when this crate was first written.
+//! The note that stood in its place argued it served a Phoenix UI feature
+//! Kingdom had no consumer for, which was true at the time and is no longer:
+//! the King now has a spyglass onto his court's browser, and [`screencast`] is
+//! what feeds it. Phoenix's profiling engine remains unported for its own
+//! reasons, recorded in `kingdom-app`'s browser tools.
 //!
 //! Native-only by design. Adding this crate to a client feature would drag a
 //! Chrome subprocess driver toward wasm, where process spawning cannot work.
 
+mod screencast;
 mod session;
 
+pub use screencast::{ScreencastBroker, ScreencastEvent};
 pub use session::{BrowserError, BrowserSessionManager, ConsoleEntry, KeyMethod, Screenshot};

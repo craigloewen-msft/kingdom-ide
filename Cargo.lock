@@ -1174,6 +1174,7 @@ dependencies = [
 name = "kingdom-browser"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chromiumoxide",
  "futures",
  "serde_json",

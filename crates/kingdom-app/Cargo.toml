@@ -76,14 +76,21 @@ js-sys = { version = "0.3", optional = true }
 # Needed on both targets: the map reads element geometry to fit the view, and
 # the sidebar persists its dragged width in localStorage.
 web-sys = { version = "0.3", features = [
+    "BinaryType",
+    "Blob",
+    "BlobPropertyBag",
+    "CanvasRenderingContext2d",
     "DomRect",
     "DomTokenList",
     "Element",
+    "HtmlCanvasElement",
     "HtmlElement",
+    "HtmlImageElement",
     "Location",
     "MessageEvent",
     "MouseEvent",
     "Storage",
+    "Url",
     "WebSocket",
     "WheelEvent",
     "Window",

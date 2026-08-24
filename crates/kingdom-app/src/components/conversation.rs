@@ -7,6 +7,7 @@
 
 use crate::api::{draft_plan, finish_plan, get_kingdom, say};
 use crate::app::KingdomState;
+use crate::components::Spyglass;
 use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker, Timestamp};
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
@@ -226,6 +227,11 @@ fn ChamberBody(
         finish.dispatch((id.get_value(), how));
     };
 
+    // Closed by default. Opening it is what attaches a viewer and starts the
+    // screencast, and closing it is what stops one -- so this signal is the
+    // King's direct control over whether Chrome is painting for an audience.
+    let (watching, set_watching) = signal(false);
+
     view! {
         <header class="chamber-header">
             <a class="back-link" href="/" title="Back to the realm">"\u{2190}"</a>
@@ -251,7 +257,24 @@ fn ChamberBody(
             <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
                 {move || status.get().label()}
             </span>
+            // The court's browser is headless, so without this the King's only
+            // evidence of a browser flow is a list of tool names. Offered on
+            // every plan rather than only those known to hold a session:
+            // Kingdom has no field saying which do, and the panel's own
+            // "no browser" state answers the question honestly for the rest.
+            <button
+                class="spyglass-toggle"
+                class:open=move || watching.get()
+                title="Watch this plan's browser"
+                on:click=move |_| set_watching.update(|w| *w = !*w)
+            >
+                "\u{1F50D}"
+            </button>
         </header>
+
+        <Show when=move || watching.get()>
+            <Spyglass plan=id.get_value()/>
+        </Show>
 
         // Everything the King and the court have exchanged, oldest first, and
         // nothing else. Plan *state* -- the summary, the status -- lives in the

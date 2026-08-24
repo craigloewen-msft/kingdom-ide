@@ -1,0 +1,101 @@
+// The King's spyglass: a live view of a plan's headless browser.
+//
+// Sits between the chamber header and the log, so the King reads the
+// transcript with the page it describes directly above it.
+//
+// The canvas takes no pointer events, and that is load-bearing rather than
+// cosmetic -- the panel is view-only by design (see `spyglass.rs`), and a
+// surface that swallowed clicks silently would leave the King unsure whether
+// they had reached the page.
+
+@use "../abstracts/tokens" as t;
+
+.spyglass {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  // Tall enough to read a page, capped so it never crowds out the transcript:
+  // the conversation is still the thing being reviewed.
+  max-height: 45%;
+  background: t.$void;
+  border-bottom: 1px solid t.$edge;
+}
+
+.spyglass-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  background: t.$panel-2;
+  border-bottom: 1px solid t.$edge;
+  font-size: 12px;
+}
+
+.spyglass-url {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: t.$ink-dim;
+  font-family: t.$font-mono;
+}
+
+.spyglass-note {
+  flex: 0 0 auto;
+  color: t.$ink-faint;
+  font-style: italic;
+}
+
+.spyglass-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.spyglass-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: t.$radius;
+  // The whole non-goal, in one declaration. Two input sources driving one page
+  // with nothing arbitrating between them is the collision this product exists
+  // to surface; shipping one here would be self-refuting.
+  pointer-events: none;
+}
+
+.spyglass-empty {
+  position: absolute;
+  margin: 0;
+  padding: 24px;
+  color: t.$ink-faint;
+  font-size: 13px;
+  text-align: center;
+}
+
+// --- The toggle, in the chamber header ---------------------------------------
+
+.spyglass-toggle {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  font-size: 14px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+
+  &.open {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+  }
+}

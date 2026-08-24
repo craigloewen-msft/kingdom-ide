@@ -5,6 +5,7 @@
 //! in one call and vanish in the next, breaking login and any other flow whose
 //! meaning spans multiple browser actions.
 
+use crate::screencast::{ScreencastBroker, ScreencastEvent};
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
     cdp::{
@@ -73,6 +74,38 @@ struct BrowserSession {
     _console: JoinHandle<()>,
     page: Page,
     console: Arc<Mutex<VecDeque<ConsoleEntry>>>,
+    /// The live screencast, if anyone is watching.
+    ///
+    /// `Weak` deliberately: the viewers own the broker, so it dies when the last
+    /// of them goes and Chrome stops painting frames nobody is looking at. A
+    /// strong reference here would keep every screencast alive for the life of
+    /// the session, which is the exact cost the lazy start exists to avoid.
+    screencast: tokio::sync::Mutex<std::sync::Weak<ScreencastBroker>>,
+}
+
+impl BrowserSession {
+    /// Attaches a viewer, starting the screencast if this is the first.
+    async fn watch(
+        &self,
+    ) -> Result<
+        (
+            Arc<ScreencastBroker>,
+            tokio::sync::broadcast::Receiver<ScreencastEvent>,
+            Option<String>,
+        ),
+        BrowserError,
+    > {
+        let mut slot = self.screencast.lock().await;
+        if let Some(broker) = slot.upgrade() {
+            let (frames, url) = broker.subscribe().await;
+            return Ok((broker, frames, url));
+        }
+        // First viewer pays for starting the capture; the rest share it.
+        let broker = ScreencastBroker::start(self.page.clone()).await?;
+        *slot = Arc::downgrade(&broker);
+        let (frames, url) = broker.subscribe().await;
+        Ok((broker, frames, url))
+    }
 }
 
 impl BrowserSession {
@@ -171,6 +204,7 @@ impl BrowserSession {
             _console: console_task,
             page,
             console,
+            screencast: tokio::sync::Mutex::new(std::sync::Weak::new()),
         })
     }
 }
@@ -211,6 +245,35 @@ impl BrowserSessionManager {
         let session = Arc::new(RwLock::new(BrowserSession::launch(plan).await?));
         sessions.insert(plan.to_string(), Arc::clone(&session));
         Ok(session)
+    }
+
+    /// Attaches a viewer to a plan's browser, if it already has one.
+    ///
+    /// **Never launches Chrome.** `Ok(None)` means this plan has no browser and
+    /// the caller should say so. That restraint is the point: looking must not
+    /// be an act that spawns a process. A spyglass that started a browser by
+    /// being opened would manufacture exactly the invisible resource this
+    /// product exists to make visible -- and the King would be watching a blank
+    /// page his court never asked for.
+    ///
+    /// The returned `Arc` is what keeps the screencast alive; dropping it
+    /// detaches this viewer, and dropping the last one stops the capture.
+    pub async fn watch(
+        &self,
+        plan: &str,
+    ) -> Result<
+        Option<(
+            Arc<ScreencastBroker>,
+            tokio::sync::broadcast::Receiver<ScreencastEvent>,
+            Option<String>,
+        )>,
+        BrowserError,
+    > {
+        let Some(session) = self.sessions.read().await.get(plan).cloned() else {
+            return Ok(None);
+        };
+        let guard = session.read().await;
+        guard.watch().await.map(Some)
     }
 
     pub async fn navigate(
@@ -525,4 +588,123 @@ async fn dispatch_key(page: &Page, key: &str, modifiers: &[String]) -> Result<()
         page.execute(params).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A viewer must never be what launches a browser.
+    ///
+    /// The panel is opened by curiosity -- the King wondering what a plan is
+    /// doing -- and if looking spawned a Chrome, then the act of looking would
+    /// itself manufacture the kind of invisible resource this product exists to
+    /// surface. `Ok(None)` is the honest answer for a plan that has never
+    /// browsed, and the socket turns it into "no browser here".
+    #[tokio::test]
+    async fn watching_a_plan_that_never_browsed_launches_nothing() {
+        let manager = BrowserSessionManager::new();
+
+        let attached = manager.watch("never-browsed").await;
+
+        assert!(
+            matches!(attached, Ok(None)),
+            "attaching a viewer must not create a session"
+        );
+    }
+
+    /// The screencast's whole lifetime, against a real Chrome.
+    ///
+    /// Three claims that are only meaningful together: frames actually arrive
+    /// (the pipeline decodes and delivers), a second viewer shares the first
+    /// one's capture rather than starting a second, and the capture is released
+    /// when the last viewer leaves.
+    ///
+    /// The last is what the `Arc`/`Weak` machinery exists for.
+    /// `Page.startScreencast` makes Chrome paint and encode continuously, so a
+    /// broker outliving its viewers is a permanent cost for a panel the King
+    /// glanced at once -- and nothing in the UI would ever reveal it.
+    ///
+    /// Skipped without Chrome rather than failed: not every machine can run
+    /// this, and a red suite on a laptop teaches nothing.
+    #[tokio::test]
+    async fn a_screencast_is_shared_while_watched_and_released_when_it_is_not() {
+        let available = std::env::var("KINGDOM_CHROME_EXECUTABLE")
+            .map(|p| Path::new(&p).is_file())
+            .unwrap_or(false);
+        if !available {
+            eprintln!("skipped: set KINGDOM_CHROME_EXECUTABLE to run this");
+            return;
+        }
+
+        let manager = BrowserSessionManager::new();
+        let plan = "spyglass-test";
+
+        // A page with something to paint: a blank one can legitimately produce
+        // no frames, which would make a failure here ambiguous.
+        manager
+            .navigate(
+                plan,
+                "data:text/html,<h1 style='color:red'>watched</h1>",
+                Duration::from_secs(15),
+            )
+            .await
+            .expect("the browser should launch and navigate");
+
+        let (broker, mut frames, _) = manager
+            .watch(plan)
+            .await
+            .expect("watching should succeed")
+            .expect("the plan now has a browser");
+
+        let (second, _, _) = manager
+            .watch(plan)
+            .await
+            .expect("watching should succeed")
+            .expect("the plan still has a browser");
+        assert!(
+            Arc::ptr_eq(&broker, &second),
+            "a second viewer must share the running capture, not start another"
+        );
+
+        let seen = tokio::time::timeout(Duration::from_secs(20), frames.recv())
+            .await
+            .expect("a painting page should produce something")
+            .expect("the broker should still be live");
+        if let ScreencastEvent::Frame { jpeg } = seen {
+            assert!(
+                jpeg.starts_with(&[0xFF, 0xD8]),
+                "frames must be decoded JPEG bytes, not the base64 CDP sent"
+            );
+        }
+
+        // Everyone leaves. The session holds only a `Weak`, so nothing is left
+        // to keep the broker alive. The address is noted first, because after
+        // the drop there is deliberately nothing left to compare against --
+        // holding a clone to compare with would itself keep the capture alive
+        // and make the test vacuous.
+        let was_at = Arc::as_ptr(&broker);
+        drop(frames);
+        drop(second);
+        let abandoned = Arc::downgrade(&broker);
+        drop(broker);
+        assert_eq!(
+            abandoned.strong_count(),
+            0,
+            "the last viewer leaving must drop the broker, or Chrome paints \
+             forever for an audience of nobody"
+        );
+
+        // The session itself survived; only the capture stopped. Otherwise the
+        // spyglass could be opened exactly once per plan.
+        let (again, _, _) = manager
+            .watch(plan)
+            .await
+            .expect("watching again should succeed")
+            .expect("the session outlives its screencasts");
+        assert!(
+            !std::ptr::eq(Arc::as_ptr(&again), was_at),
+            "reopening starts a fresh capture"
+        );
+    }
 }
