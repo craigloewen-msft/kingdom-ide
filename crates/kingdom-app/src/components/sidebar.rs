@@ -11,7 +11,7 @@
 //! would be a dead end.
 
 use crate::app::{KingdomState, DEFAULT_SIDEBAR_WIDTH};
-use kingdom_core::{City, CityId, Plan, PlanStatus};
+use kingdom_core::{City, CityId, Plan};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -78,7 +78,7 @@ pub fn Sidebar() -> impl IntoView {
                     <button
                         class="filter-btn"
                         class:active=move || state.show_all_plans.get()
-                        title="Include approved and rejected plans"
+                        title="Include merged and archived plans"
                         on:click=move |_| state.show_all_plans.set(true)
                     >"All"</button>
                 </div>
@@ -119,7 +119,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                 .get()
                 .plans
                 .into_iter()
-                .filter(|p| p.city == id && (show_all || is_active(p.status)))
+                .filter(|p| p.city == id && (show_all || p.is_live()))
                 .collect::<Vec<_>>()
         })
     };
@@ -243,12 +243,6 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
             </Show>
         </li>
     }
-}
-
-/// A plan is active while it is still in play. Approved and rejected plans are
-/// history, hidden unless the King asks.
-fn is_active(status: PlanStatus) -> bool {
-    !matches!(status, PlanStatus::Approved | PlanStatus::Rejected)
 }
 
 /// The drag handle on the rail's right edge.

@@ -350,6 +350,15 @@ pub struct Workspace {
     pub branch: Option<String>,
     /// The GUID naming the worktree folder, for `Fresh` and `Branch`.
     pub id: Option<String>,
+    /// The branch this workspace was cut from, recorded at the moment it was
+    /// true.
+    ///
+    /// This is what makes "merge this work back" honest. Reading the city's
+    /// current HEAD at merge time would land a plan wherever the King happens to
+    /// have wandered since it was opened -- which is the collision this product
+    /// exists to prevent, committed by the product itself.
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 impl Workspace {
@@ -360,6 +369,7 @@ impl Workspace {
             path: path.into(),
             branch: None,
             id: None,
+            base: None,
         }
     }
 
@@ -399,6 +409,10 @@ pub struct Plan {
     /// The chat log so far: what was said, and what happened, in order.
     pub transcript: Vec<Entry>,
     pub status: PlanStatus,
+    /// How it ended, and what it left behind. `None` while the plan is still in
+    /// play; always present once the status is settled.
+    #[serde(default)]
+    pub outcome: Option<Outcome>,
     /// Where on disk this plan works. Settled when the plan opens and never
     /// changed afterwards.
     pub workspace: Workspace,
@@ -434,6 +448,7 @@ impl Plan {
             model: choice.model.clone(),
             effort: choice.effort,
             status: PlanStatus::Drafting,
+            outcome: None,
             workspace,
             working_on: None,
         }
@@ -454,13 +469,28 @@ impl Plan {
 
     /// True while the plan is still in play, as opposed to settled history.
     pub fn is_live(&self) -> bool {
-        !matches!(self.status, PlanStatus::Approved | PlanStatus::Rejected)
+        !self.status.is_settled()
+    }
+
+    /// Closes the plan: records how it ended and moves it into history.
+    ///
+    /// The one door from live to settled, so a status and an outcome cannot
+    /// disagree -- a `Merged` plan with no commit recorded would be a plan the
+    /// chamber claims to have landed and cannot say where.
+    pub fn settle(&mut self, outcome: Outcome) {
+        self.status = match &outcome {
+            Outcome::Merged { .. } => PlanStatus::Merged,
+            Outcome::Archived { .. } => PlanStatus::Archived,
+        };
+        self.working_on = None;
+        self.outcome = Some(outcome);
     }
 
     /// Records words a participant produced. These, and only these, are ever
     /// sent to a model.
     pub fn say(&mut self, speaker: Speaker, body: impl Into<String>) {
-        self.transcript.push(Entry::Said(Utterance::new(speaker, body)));
+        self.transcript
+            .push(Entry::Said(Utterance::new(speaker, body)));
     }
 
     /// Records something Kingdom itself reports. Never leaves the machine.
@@ -598,6 +628,9 @@ pub enum NoteKind {
     Failed,
     /// Where this plan is working, and how it was prepared.
     Workspace,
+    /// What happened when the King moved to finish the plan: work landing, a
+    /// conflict git refused, a worktree disposed of.
+    Merge,
 }
 
 impl NoteKind {
@@ -606,6 +639,7 @@ impl NoteKind {
         match self {
             NoteKind::Failed => "failed",
             NoteKind::Workspace => "workspace",
+            NoteKind::Merge => "merge",
         }
     }
 }
@@ -628,6 +662,12 @@ pub enum Speaker {
 /// went when lease arbitration did -- nothing could produce it any more, and an
 /// unreachable state is a trap for whoever matches on it next. It comes back if
 /// and when plans can genuinely block each other.
+///
+/// `Approved` and `Rejected` went the same way, and were replaced rather than
+/// joined by the two states below. They named a judgement nobody could pass:
+/// only `sample.rs` ever produced them, because there was no code path by which
+/// the King could approve anything. `Merged` and `Archived` name what actually
+/// happens to a branch, and both are reachable from the chamber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlanStatus {
     /// A model is drafting it right now.
@@ -636,8 +676,10 @@ pub enum PlanStatus {
     AwaitingReview,
     /// The model could not be reached, or refused.
     Failed,
-    Approved,
-    Rejected,
+    /// Its work landed on the branch it was cut from. The worktree is gone.
+    Merged,
+    /// Set aside, with its work preserved. The worktree is gone.
+    Archived,
 }
 
 impl PlanStatus {
@@ -647,17 +689,26 @@ impl PlanStatus {
         PlanStatus::Drafting,
         PlanStatus::AwaitingReview,
         PlanStatus::Failed,
-        PlanStatus::Approved,
-        PlanStatus::Rejected,
+        PlanStatus::Merged,
+        PlanStatus::Archived,
     ];
+
+    /// True once the plan is history rather than still in play.
+    ///
+    /// The single definition of "settled". The rail's filter, the map's plan
+    /// list and the guards on `say`/`draft` all read it, so a sixth state cannot
+    /// be added and quietly treated as live by one of them.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, PlanStatus::Merged | PlanStatus::Archived)
+    }
 
     pub fn label(&self) -> &'static str {
         match self {
             PlanStatus::Drafting => "Drafting",
             PlanStatus::AwaitingReview => "Awaiting review",
             PlanStatus::Failed => "Failed",
-            PlanStatus::Approved => "Approved",
-            PlanStatus::Rejected => "Rejected",
+            PlanStatus::Merged => "Merged",
+            PlanStatus::Archived => "Archived",
         }
     }
 
@@ -666,8 +717,8 @@ impl PlanStatus {
             PlanStatus::Drafting => "#22c55e",
             PlanStatus::AwaitingReview => "#eab308",
             PlanStatus::Failed => "#f97316",
-            PlanStatus::Approved => "#38bdf8",
-            PlanStatus::Rejected => "#64748b",
+            PlanStatus::Merged => "#38bdf8",
+            PlanStatus::Archived => "#64748b",
         }
     }
 
@@ -677,9 +728,67 @@ impl PlanStatus {
             PlanStatus::Drafting => "drafting",
             PlanStatus::AwaitingReview => "review",
             PlanStatus::Failed => "failed",
-            PlanStatus::Approved => "approved",
-            PlanStatus::Rejected => "rejected",
+            PlanStatus::Merged => "merged",
+            PlanStatus::Archived => "archived",
         }
+    }
+}
+
+/// What the King chose to do with a plan when he closed it.
+///
+/// Crosses the wire, so it lives here rather than in the server. Two options
+/// because there are two honest endings: the work belongs in the project, or it
+/// does not and should be kept somewhere it can be found again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Disposition {
+    /// Land the work on the branch the workspace was cut from.
+    Merge,
+    /// Set the work aside, preserved, and reclaim the checkout.
+    Archive,
+}
+
+/// How a plan ended, and what it left behind.
+///
+/// Held separately from [`PlanStatus`] because the two answer different
+/// questions. A status is a `Copy` label the rail and the map paint; this is the
+/// *evidence* -- the sha to `git show`, the branch to restore from. Folding the
+/// detail into the status enum would make every match on state carry a payload
+/// it does not want, and would cost `PlanStatus` its `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    /// The work landed. `commit` is the merge commit, `into` the branch it
+    /// landed on.
+    Merged { commit: String, into: String },
+    /// The work was set aside but kept. Everything needed to bring it back is
+    /// here: the branch still exists at `tip`, and a patch of `base..tip` is on
+    /// disk at `patch` for the day the branch is pruned or the repo re-cloned.
+    Archived {
+        branch: String,
+        tip: String,
+        base: String,
+        patch: Option<String>,
+    },
+}
+
+impl Outcome {
+    /// How the chamber's footer states what became of the plan.
+    pub fn summary(&self) -> String {
+        match self {
+            Outcome::Merged { commit, into } => {
+                format!("Merged into {into} as {}.", short_sha(commit))
+            }
+            Outcome::Archived { branch, tip, .. } => {
+                format!("Archived on {branch}, at {}.", short_sha(tip))
+            }
+        }
+    }
+}
+
+/// Abbreviates a sha the way git does, leaving anything shorter untouched.
+fn short_sha(sha: &str) -> &str {
+    match sha.char_indices().nth(7) {
+        Some((i, _)) => &sha[..i],
+        None => sha,
     }
 }
 

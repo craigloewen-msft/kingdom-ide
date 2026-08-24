@@ -5,9 +5,9 @@
 //! signals, which is what lets a reload -- or a link shared between tabs --
 //! rebuild the conversation exactly.
 
-use crate::api::{draft_plan, get_kingdom, say};
+use crate::api::{draft_plan, finish_plan, get_kingdom, say};
 use crate::app::KingdomState;
-use kingdom_core::{Entry, Plan, PlanId, PlanStatus, Speaker, Timestamp};
+use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker, Timestamp};
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
@@ -115,11 +115,34 @@ pub fn Conversation() -> impl IntoView {
         });
     });
 
+    // Finishing touches the workspace on disk and may settle the plan, so the
+    // whole kingdom is refetched rather than patched: the rail and the map both
+    // render what just changed.
+    let finish = Action::new(move |(id, how): &(PlanId, Disposition)| {
+        let id = id.to_string();
+        let how = *how;
+        async move {
+            match finish_plan(id, how).await {
+                Ok(_) => state.error.set(None),
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+            if let Ok(k) = get_kingdom().await {
+                state.kingdom.set(k);
+            }
+        }
+    });
+
     view! {
         <div class="chamber">
             {move || match plan.get() {
                 Some(p) => view! {
-                    <ChamberBody plan=p city=city_name drafting=drafting on_say=speak/>
+                    <ChamberBody
+                        plan=p
+                        city=city_name
+                        drafting=drafting
+                        on_say=speak
+                        finish=finish
+                    />
                 }
                 .into_any(),
                 None => view! {
@@ -140,21 +163,37 @@ fn ChamberBody(
     city: Memo<Option<String>>,
     drafting: Memo<bool>,
     on_say: Callback<(PlanId, String)>,
+    finish: Action<(PlanId, Disposition), ()>,
 ) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let (reply, set_reply) = signal(String::new());
+    let (showing_done, set_showing_done) = signal(false);
 
     let id = StoredValue::new(plan.id.clone());
     let status = plan.status;
     let workspace_label = plan.workspace.mode.label();
     let workspace_path = plan.workspace.path.clone();
     let workspace_isolated = plan.workspace.is_isolated();
+    // Named so the menu offers the branch this plan will really land on, rather
+    // than a hopeful "main" it might not have been cut from. `StoredValue`
+    // because the label sits inside a reactive closure, which must be `Fn`.
+    let base = StoredValue::new(
+        plan.workspace
+            .base
+            .clone()
+            .unwrap_or_else(|| "the project".to_string()),
+    );
+    let settled = status.is_settled();
+    let outcome = plan.outcome.clone();
 
     // Keeps the newest line in view. A conversation longer than the viewport
     // otherwise leaves the reply the King is waiting for below the fold.
     let log_ref = NodeRef::<leptos::html::Div>::new();
     let entry_count = plan.transcript.len();
-    stick_to_bottom(log_ref, Signal::derive(move || (entry_count, drafting.get())));
+    stick_to_bottom(
+        log_ref,
+        Signal::derive(move || (entry_count, drafting.get())),
+    );
 
     // `StoredValue` rather than a captured `PlanId`: a closure holding an owned
     // non-Copy value is `FnOnce` and cannot be used by both handlers below.
@@ -165,6 +204,11 @@ fn ChamberBody(
         }
         set_reply.set(String::new());
         on_say.run((id.get_value(), text));
+    };
+
+    let close_with = move |how: Disposition| {
+        set_showing_done.set(false);
+        finish.dispatch((id.get_value(), how));
     };
 
     view! {
@@ -219,26 +263,102 @@ fn ChamberBody(
             </div>
         </Show>
 
-        <div class="chamber-composer">
-            <input
-                class="decree-input"
-                r#type="text"
-                placeholder="Say more, or ask for a change\u{2026}"
-                prop:value=move || reply.get()
-                disabled={move || drafting.get()}
-                on:input=move |ev| set_reply.set(event_target_value(&ev))
-                on:keydown=move |ev| {
-                    if ev.key() == "Enter" { submit(); }
+        // A settled plan is a record, not a place to type. The composer goes
+        // and the outcome takes its place, so the chamber says what became of
+        // the work rather than inviting more of it.
+        <Show
+            when={move || !settled}
+            fallback={
+                let stated = outcome
+                    .as_ref()
+                    .map(|o| o.summary())
+                    .unwrap_or_else(|| "This plan is closed.".to_string());
+                move || view! {
+                    <div class="chamber-outcome">
+                        <span class="outcome-mark">"\u{2713}"</span>
+                        <span class="outcome-text">{stated.clone()}</span>
+                    </div>
                 }
-            />
-            <button
-                class="start-btn"
-                disabled={move || drafting.get()}
-                on:click=move |_| submit()
-            >
-                {move || if drafting.get() { "Drafting\u{2026}" } else { "Decree" }}
-            </button>
-        </div>
+            }
+        >
+            <div class="chamber-composer">
+                <input
+                    class="decree-input"
+                    r#type="text"
+                    placeholder="Say more, or ask for a change\u{2026}"
+                    prop:value=move || reply.get()
+                    disabled={move || drafting.get()}
+                    on:input=move |ev| set_reply.set(event_target_value(&ev))
+                    on:keydown=move |ev| {
+                        if ev.key() == "Enter" { submit(); }
+                    }
+                />
+                <button
+                    class="start-btn"
+                    disabled={move || drafting.get()}
+                    on:click=move |_| submit()
+                >
+                    {move || if drafting.get() { "Drafting\u{2026}" } else { "Decree" }}
+                </button>
+
+                // Closing the plan sits beside sending to it, because they are
+                // the two things the King does from here.
+                <button
+                    class="done-btn"
+                    title="Finish with this plan"
+                    disabled={move || drafting.get() || finish.pending().get()}
+                    on:click=move |_| set_showing_done.update(|s| *s = !*s)
+                >
+                    {move || if finish.pending().get() { "Closing\u{2026}" } else { "Done" }}
+                    <span class="chip-chevron">"\u{2304}"</span>
+                </button>
+            </div>
+
+            // Two rows and no confirmation dialog: both endings are recoverable
+            // -- one makes a revertable merge commit, the other keeps the branch
+            // and a patch -- and a modal would spend the King's attention to
+            // prevent nothing.
+            <Show when={move || showing_done.get()}>
+                <div class="done-picker">
+                    <div class="picker-head">
+                        <span class="picker-title">"Finish with this plan"</span>
+                        <button
+                            class="picker-close"
+                            on:click=move |_| set_showing_done.set(false)
+                        >"\u{2715}"</button>
+                    </div>
+
+                    <ul class="done-list">
+                        <li>
+                            <button
+                                class="done-row"
+                                on:click=move |_| close_with(Disposition::Merge)
+                            >
+                                <span class="done-name">
+                                    {move || format!("Merge into {}", base.get_value())}
+                                </span>
+                                <span class="done-detail">
+                                    "Lands this work in the project and clears the \
+                                     worktree. Stops and explains if git refuses."
+                                </span>
+                            </button>
+                        </li>
+                        <li>
+                            <button
+                                class="done-row"
+                                on:click=move |_| close_with(Disposition::Archive)
+                            >
+                                <span class="done-name">"Archive"</span>
+                                <span class="done-detail">
+                                    "Sets this aside. The branch and a patch are \
+                                     kept, so it can come back."
+                                </span>
+                            </button>
+                        </li>
+                    </ul>
+                </div>
+            </Show>
+        </Show>
     }
 }
 

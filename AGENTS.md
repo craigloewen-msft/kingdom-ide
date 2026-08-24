@@ -82,8 +82,9 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
+    store.rs        The kingdom's records on disk (ssr only)
     mock.rs         Seeding a realm onto disk (ssr only)
-    worktree.rs     Preparing a plan's workspace via git (ssr only)
+    worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model + Provider traits, Brief, the provider list),
                     mock.rs (offline provider), copilot.rs (Copilot provider
@@ -144,18 +145,41 @@ flowchart TB
 **Not built at all:**
 - Agents that *do* anything beyond replying: no tool use, no commands, no edits
   (a plan now has a workspace to do them *in*, but still only talks)
-- Removing worktrees. They persist under `.kingdom/` so the King can inspect or
-  merge them; deciding when one is disposable is its own question, and guessing
-  would throw away real work.
+- Restoring an archived plan. Its outcome records the branch, the tip and a
+  patch, so everything a restore would need is kept — but nothing has asked for
+  the button yet, and guessing at that UI is how the lease machinery happened.
 - Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
-- Persistence (state is in memory; a restart empties the kingdom)
-- Plan approval/rejection actually doing anything
 - **Any resource arbitration at all** — see §3
 
 The placeholder court deliberately includes a **failed plan** and a plan **mid
 draft**, because those are states the UI exists to show. Do not "clean up" the
-sample data into a court of tidy approved plans — it would make the most
+sample data into a court of tidy settled plans — it would make the most
 important visual states unreachable during development. A test pins this.
+
+### Where state lives
+
+Plans are kept as one JSON document each under the kingdom root:
+
+```
+<kingdom_root>/.kingdom/
+  kingdom.json              format version
+  plans/<plan-id>.json      one document per plan
+  archive/<plan-id>.patch   the work an archived plan set aside
+```
+
+Cities are **not** stored — they are rescanned every open, because disk is their
+source of truth. Plans are the one thing disk cannot tell us again, which is
+exactly why they are worth writing down: a plan owns a worktree, and forgetting
+it orphans real work with nothing left that knows what it was for.
+
+`store.rs` is the seam. The in-memory `Mutex<Kingdom>` is still the read path and
+the store is a write-through behind `api.rs::update`. Swapping in SQLite when
+there are genuinely concurrent writers touches only that module — the reasoning
+for files over a database is written up at the top of it.
+
+Note the collision of names: `<kingdom_root>/.kingdom/` holds Kingdom's records,
+while `<city>/.kingdom/` holds worktrees. A worktree is *derived* and disposable;
+a plan record is not.
 
 ## 5. Running it
 
