@@ -22,7 +22,7 @@
 //! them, for the same reason: a caller must be told its measurement is shaky
 //! without having the data quietly adjusted underneath it.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_browser::{profile, BrowserError, PerfReading};
 use kingdom_core::ToolOutcome;
 use serde::Deserialize;
@@ -264,7 +264,7 @@ impl Tool for BrowserProfile {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: ProfileInput = match serde_json::from_value(input) {
             Ok(input) => input,
             Err(error) => return bad(error.to_string()),
@@ -440,7 +440,7 @@ async fn gated_start(plan: &str, machine: Machine) -> ToolOutcome {
     }
 }
 
-async fn cpu_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
+async fn cpu_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, |page, state| {
             Box::pin(async move {
@@ -479,7 +479,7 @@ async fn cpu_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
     }
 }
 
-async fn coverage_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
+async fn coverage_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, |page, state| {
             Box::pin(async move {
@@ -543,7 +543,7 @@ async fn trace_start(plan: &str, categories: Option<&str>) -> ToolOutcome {
     }
 }
 
-async fn trace_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
+async fn trace_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, |page, state| {
             Box::pin(async move {
@@ -585,7 +585,7 @@ async fn trace_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
     }
 }
 
-fn artifact(shop: &Workshop, stem: &str, extension: &str) -> std::path::PathBuf {
+fn artifact(shop: &Sandbox, stem: &str, extension: &str) -> std::path::PathBuf {
     let serial = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -601,7 +601,7 @@ fn artifact(shop: &Workshop, stem: &str, extension: &str) -> std::path::PathBuf 
 async fn scenario(
     input: &ProfileInput,
     plan: &str,
-    shop: &Workshop,
+    shop: &Sandbox,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let steps = input.steps.clone().unwrap_or_default();
     if steps.is_empty() {
@@ -877,8 +877,8 @@ mod tests {
     use super::*;
     use kingdom_core::Workspace;
 
-    fn workshop() -> Workshop {
-        Workshop::new(Workspace::in_place("/tmp"))
+    fn sandbox() -> Sandbox {
+        Sandbox::new(Workspace::in_place("/tmp"))
             .for_plan(kingdom_core::PlanId::new("profile-test"))
     }
 
@@ -899,7 +899,7 @@ mod tests {
                 "runs",
             ),
         ] {
-            let outcome = BrowserProfile.run(args, &workshop()).await;
+            let outcome = BrowserProfile.run(args, &sandbox()).await;
             let ToolOutcome::Refused { reason } = outcome else {
                 panic!("a malformed scenario must be refused: {outcome:?}");
             };
@@ -925,7 +925,7 @@ mod tests {
                     "runs": 1,
                     "steps": [{ "kind": "navigate", "url": "http://localhost:3000" }]
                 }),
-                &workshop(),
+                &sandbox(),
             )
             .await;
 
@@ -942,7 +942,7 @@ mod tests {
     #[tokio::test]
     async fn help_needs_no_browser_and_names_every_action() {
         let outcome = BrowserProfile
-            .run(json!({ "action": "help" }), &workshop())
+            .run(json!({ "action": "help" }), &sandbox())
             .await;
 
         let ToolOutcome::Done { output, .. } = outcome else {

@@ -27,14 +27,14 @@
 //!
 //! # Why the boundary is thin here, like `bash`
 //!
-//! A window starts in [`Workshop::root`] and that is the whole of the
+//! A window starts in [`Sandbox::root`] and that is the whole of the
 //! containment. The pane holds an interactive shell: it can `cd /`, name an
 //! absolute path, or `ssh` away entirely, and nothing here stops it. Stated
 //! plainly rather than implied away -- a guarantee people believe in and that
 //! does not hold is worse than a limit they can see. Closing it means an
 //! OS-level sandbox, a deliberate later decision.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -137,7 +137,7 @@ impl Tool for TmuxRun {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         if let Err(refusal) = tmux_is_installed() {
             return refusal.into();
         }
@@ -262,7 +262,7 @@ impl Tool for Tmux {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         if let Err(refusal) = tmux_is_installed() {
             return refusal.into();
         }
@@ -418,7 +418,7 @@ fn tmux_is_installed() -> Result<(), Refusal> {
 pub async fn dismiss(plan: &kingdom_core::PlanId) {
     // The workspace is irrelevant here -- only the plan decides which socket to
     // knock on -- so a placeholder is honest rather than lazy.
-    let shop = Workshop::new(kingdom_core::Workspace::in_place(String::new()))
+    let shop = Sandbox::new(kingdom_core::Workspace::in_place(String::new()))
         .for_plan(plan.clone());
     let socket = socket_for(&shop);
 
@@ -446,7 +446,7 @@ pub async fn dismiss(plan: &kingdom_core::PlanId) {
 /// get separate servers. A collision here would be exactly the leak the whole
 /// module is built to prevent, so it is closed by construction rather than by
 /// assuming ids are tame.
-fn socket_for(shop: &Workshop) -> PathBuf {
+fn socket_for(shop: &Sandbox) -> PathBuf {
     let plan = shop.plan().as_str();
     let readable: String = plan
         .chars()
@@ -730,8 +730,8 @@ mod tests {
         tmux_is_installed().is_ok()
     }
 
-    fn shop_for(plan: &str, root: &Path) -> Workshop {
-        Workshop::new(Workspace::in_place(root.to_str().unwrap()))
+    fn shop_for(plan: &str, root: &Path) -> Sandbox {
+        Sandbox::new(Workspace::in_place(root.to_str().unwrap()))
             .for_plan(PlanId::new(plan.to_string()))
     }
 

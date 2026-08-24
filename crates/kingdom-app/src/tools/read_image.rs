@@ -10,7 +10,7 @@
 //! rather than inside it, and `llm/copilot.rs` for how they reach a model that
 //! can actually see.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use kingdom_core::{ToolImage, ToolOutcome};
 use serde::Deserialize;
@@ -78,7 +78,7 @@ impl Tool for ReadImage {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: ReadImageInput = match serde_json::from_value(input) {
             Ok(input) => input,
             Err(error) => {
@@ -169,7 +169,7 @@ mod tests {
     async fn a_picture_travels_beside_the_words_not_inside_them() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shot.png"), A_REAL_PNG).unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_string_lossy()));
 
         let outcome = ReadImage.run(json!({ "path": "shot.png" }), &shop).await;
 
@@ -195,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn a_picture_outside_the_workspace_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_string_lossy()));
 
         let outcome = ReadImage
             .run(json!({ "path": "../elsewhere.png" }), &shop)
@@ -214,7 +214,7 @@ mod tests {
     async fn something_that_is_not_an_image_is_refused_with_the_list() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"not a picture").unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_string_lossy()));
 
         let outcome = ReadImage.run(json!({ "path": "notes.txt" }), &shop).await;
 

@@ -10,7 +10,7 @@
 //! filesystem, so a failure here is a failure in the machinery rather than in
 //! anything it drives.
 
-use super::{Tool, Workshop};
+use super::{Tool, Sandbox};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 
@@ -48,7 +48,7 @@ impl Tool for Think {
     /// Not a no-op return: the model's own reasoning has to reappear in the
     /// next request or the turn after this one is built from a conversation in
     /// which it never thought anything. The echo *is* the mechanism.
-    async fn run(&self, input: Value, _shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, _shop: &Sandbox) -> ToolOutcome {
         let thoughts = input
             .get("thoughts")
             .and_then(Value::as_str)

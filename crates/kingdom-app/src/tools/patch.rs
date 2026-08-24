@@ -23,7 +23,7 @@
 //! half-written is worse than one left untouched: the plan's next build fails
 //! for a reason unrelated to anything the court believes it did.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_core::ToolOutcome;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -233,7 +233,7 @@ Everything is literal: no newline is added or trimmed for you."#
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
             Err(e) => {
@@ -887,7 +887,7 @@ mod tests {
         let victim = outside.path().join("victim.txt");
         std::fs::write(&victim, "untouched\n").unwrap();
 
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
         let outcome = Patch
             .run(
                 json!({
@@ -910,7 +910,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.rs"), "fn main() {}\n").unwrap();
 
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
         let outcome = Patch
             .run(
                 json!({

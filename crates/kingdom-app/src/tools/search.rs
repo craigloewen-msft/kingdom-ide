@@ -6,12 +6,12 @@
 //! returns `target/` and `node_modules/` first and fills the model's context
 //! with build output, so the useful matches never arrive.
 //!
-//! The walk is rooted at [`Workshop::resolve`]'s answer, never at a raw path
+//! The walk is rooted at [`Sandbox::resolve`]'s answer, never at a raw path
 //! from the model. A search is a read of every file it touches, so an
 //! unresolved `path` here leaks a neighbouring city one line at a time -- the
 //! quietest possible version of crossing the boundary.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use kingdom_core::ToolOutcome;
@@ -119,7 +119,7 @@ impl Tool for Search {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
             return Refusal::BadArguments {
                 tool: "search".to_string(),
@@ -387,7 +387,7 @@ mod tests {
     use kingdom_core::Workspace;
 
     async fn search(root: &Path, input: Value) -> String {
-        let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(root.to_str().unwrap()));
         match Search.run(input, &shop).await {
             ToolOutcome::Done { output, .. } => output,
             ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
@@ -447,7 +447,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "needle\n").unwrap();
 
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
         let outcome = Search
             .run(
                 json!({"pattern": "needle", "path": outside.path().to_str().unwrap()}),

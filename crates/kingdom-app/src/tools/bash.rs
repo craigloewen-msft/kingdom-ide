@@ -20,7 +20,7 @@
 //!
 //! # Why the boundary is thinner here than anywhere else
 //!
-//! The command's working directory is [`Workshop::root`], and that is the whole
+//! The command's working directory is [`Sandbox::root`], and that is the whole
 //! of the containment. A shell can `cd /`, name an absolute path, or `ssh`
 //! somewhere else entirely, and nothing here stops it. That hole is stated
 //! plainly rather than papered over, because a guarantee people believe in and
@@ -35,7 +35,7 @@
 //! would be worse than the crash: the model would reason from output it thinks
 //! is complete.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -69,7 +69,7 @@ const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 /// Every command this process has started and not yet forgotten.
 ///
-/// Process-global rather than per-[`Workshop`] because a handle must survive
+/// Process-global rather than per-[`Sandbox`] because a handle must survive
 /// the call that minted it: the whole contract is that the court comes back for
 /// it in a *later* deed, with a fresh workshop. Follows the registry pattern in
 /// `herald.rs`.
@@ -137,7 +137,7 @@ impl Tool for Bash {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         match op(&input) {
             Err(refusal) => refusal.into(),
             Ok(Op::Run) => start(&input, shop).await,
@@ -202,7 +202,7 @@ fn job(input: &Value) -> Result<Arc<Job>, Refusal> {
     })
 }
 
-async fn start(input: &Value, shop: &Workshop) -> ToolOutcome {
+async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
     let Some(cmd) = input.get("cmd").and_then(Value::as_str) else {
         return Refusal::BadArguments {
             tool: "bash".to_string(),
@@ -620,7 +620,7 @@ mod tests {
     use kingdom_core::Workspace;
 
     async fn bash(root: &std::path::Path, input: Value) -> String {
-        let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(root.to_str().unwrap()));
         match Bash.run(input, &shop).await {
             ToolOutcome::Done { output, .. } => output,
             ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
@@ -642,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn a_command_that_fails_still_ran() {
         let dir = tempfile::tempdir().unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
 
         let outcome = Bash
             .run(json!({"op": "run", "cmd": "echo nope >&2; exit 3"}), &shop)
@@ -722,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_handle_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
 
         let outcome = Bash
             .run(json!({"op": "peek", "handle": "b-nosuch"}), &shop)

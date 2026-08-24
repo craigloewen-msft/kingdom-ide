@@ -62,8 +62,8 @@ impl ToolSpec {
     /// Two filters would eventually disagree, and the direction that fails
     /// quietly is the dangerous one: a tool offered but refused is confusing,
     /// while a tool refused but runnable is a hole in the boundary.
-    pub fn all(remit: crate::tools::Remit) -> Vec<Self> {
-        crate::tools::all(remit)
+    pub fn all(permissions: crate::tools::Permissions) -> Vec<Self> {
+        crate::tools::all(permissions)
             .iter()
             .map(|t| Self {
                 name: t.name().to_string(),
@@ -82,14 +82,14 @@ impl ToolSpec {
     /// at, and have spent one of the King's turns discovering that.
     ///
     /// Both live here so neither is a check a caller has to remember.
-    pub fn for_model(model: &dyn Model, remit: crate::tools::Remit) -> Vec<Self> {
+    pub fn for_model(model: &dyn Model, permissions: crate::tools::Permissions) -> Vec<Self> {
         if !model.can_act() {
             // Not merely "no tools worth offering" -- sending a `tools` array to
             // a gateway that does not accept one fails the request outright.
             return Vec::new();
         }
         let sighted = model.can_see();
-        Self::all(remit)
+        Self::all(permissions)
             .into_iter()
             .filter(|t| sighted || t.name != "read_image")
             .collect()

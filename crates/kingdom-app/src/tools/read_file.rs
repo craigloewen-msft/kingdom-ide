@@ -7,13 +7,13 @@
 //! no coordinates, and the next request re-reads the whole file to find one
 //! function.
 //!
-//! Every path arrives through [`Workshop::resolve`]. Phoenix, where this is
+//! Every path arrives through [`Sandbox::resolve`]. Phoenix, where this is
 //! ported from, deliberately dropped that check so its agent could read stdlib
 //! sources and toolchain caches -- reasonable there, wrong here: a plan owns a
 //! worktree precisely so that what it touches is knowable, and a reader that
 //! wanders into another city's checkout makes the boundary a fiction.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -68,7 +68,7 @@ impl Tool for ReadFile {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let Some(path) = input.get("path").and_then(Value::as_str) else {
             return Refusal::BadArguments {
                 tool: "read_file".to_string(),
@@ -173,8 +173,8 @@ mod tests {
     use kingdom_core::Workspace;
     use std::path::Path;
 
-    fn shop(root: &Path) -> Workshop {
-        Workshop::new(Workspace::in_place(root.to_str().unwrap()))
+    fn shop(root: &Path) -> Sandbox {
+        Sandbox::new(Workspace::in_place(root.to_str().unwrap()))
     }
 
     async fn read(root: &Path, input: Value) -> String {
@@ -217,7 +217,7 @@ mod tests {
     }
 
     /// The boundary, exercised through the tool rather than through
-    /// [`Workshop::resolve`] alone -- the check is only worth anything if the
+    /// [`Sandbox::resolve`] alone -- the check is only worth anything if the
     /// tool actually routes its path through it, and that is what regresses.
     #[tokio::test]
     async fn a_path_outside_the_workspace_is_refused() {

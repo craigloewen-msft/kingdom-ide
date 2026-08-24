@@ -7,7 +7,7 @@
 //!
 //! # The boundary
 //!
-//! Every tool is rooted at the plan's workspace, and [`Workshop`] is the only
+//! Every tool is rooted at the plan's workspace, and [`Sandbox`] is the only
 //! thing that knows where that is. A tool receives paths already resolved and
 //! checked; it cannot reach outside because it is never told how to.
 //!
@@ -15,8 +15,8 @@
 //! tool has to remember is a check the next tool will forget, and the tool that
 //! forgets is the one that quietly edits a file in somebody else's checkout.
 //!
-//! Read [`Workshop::resolve`] before adding a tool that touches the filesystem,
-//! and [`Workshop::root`] before adding one that spawns a process -- the
+//! Read [`Sandbox::resolve`] before adding a tool that touches the filesystem,
+//! and [`Sandbox::root`] before adding one that spawns a process -- the
 //! guarantee is real for the first and deliberately weaker for the second.
 
 pub mod ask_user_question;
@@ -44,17 +44,17 @@ use std::path::{Component, Path, PathBuf};
 /// It exists because errands share their parent's worktree. Several agents
 /// writing to one checkout at once is precisely the collision this product
 /// exists to prevent, and nothing here arbitrates -- so instead of detecting it
-/// after the fact, [`Remit::Survey`] makes it unrepresentable. That is what lets
+/// after the fact, [`Permissions::ReadOnly`] makes it unrepresentable. That is what lets
 /// errands run in parallel without any lease machinery behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Remit {
+pub enum Permissions {
     /// Reads and reports, and cannot touch the world.
     ///
     /// No writing, no commands, no browser -- and no sending errands of its
     /// own, which is what keeps the fan-out one level deep. A tree of agents
     /// needs an answer to "who is blocked behind whom" that Kingdom does not
     /// have yet.
-    Survey,
+    ReadOnly,
     /// Everything the court has.
     Full,
 }
@@ -70,8 +70,8 @@ pub enum Remit {
 /// is shown ([`crate::llm::ToolSpec::all`]) and the list it may actually run
 /// ([`invoke`]) come through here, which is what stops the two disagreeing -- a
 /// model that invents `bash` under a survey remit must not be handed `bash`.
-pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
-    let full = matches!(remit, Remit::Full);
+pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
+    let full = matches!(permissions, Permissions::Full);
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(think::Think),
         Box::new(read_file::ReadFile),
@@ -120,8 +120,8 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
 /// A tool outside the remit gets that same answer, deliberately. It *is* the
 /// truth from where the model is standing -- it was never shown the tool -- and
 /// it is a refusal that reads as recoverable rather than as a wall.
-pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> ToolOutcome {
-    match all(shop.remit()).into_iter().find(|t| t.name() == tool) {
+pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
+    match all(shop.permissions()).into_iter().find(|t| t.name() == tool) {
         Some(t) => t.run(input, shop).await,
         None => Refusal::NoSuchTool(tool.to_string()).into(),
     }
@@ -141,14 +141,14 @@ pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> ToolOutcome {
 /// being rendered as is exactly that. Minting a second identifier would mean
 /// keeping two in step for no gain.
 #[derive(Debug, Clone)]
-pub struct Workshop {
+pub struct Sandbox {
     workspace: Workspace,
     plan: kingdom_core::PlanId,
     /// The deed this call is recorded as, once it is running. `None` outside a
     /// turn, which is the case tests construct.
     tool_call: Option<String>,
-    /// How much of the world this plan may touch. See [`Remit`].
-    remit: Remit,
+    /// How much of the world this plan may touch. See [`Permissions`].
+    permissions: Permissions,
 }
 
 /// A refusal: the tool would not run, and why.
@@ -181,7 +181,7 @@ impl From<Refusal> for ToolOutcome {
     }
 }
 
-impl Workshop {
+impl Sandbox {
     /// A workshop with the court's full hands, which is what a plan the King
     /// decreed gets.
     pub fn new(workspace: Workspace) -> Self {
@@ -189,19 +189,19 @@ impl Workshop {
             workspace,
             plan: kingdom_core::PlanId::new(String::new()),
             tool_call: None,
-            remit: Remit::Full,
+            permissions: Permissions::Full,
         }
     }
 
-    /// Narrows what this workshop may do. See [`Remit`].
-    pub fn under(mut self, remit: Remit) -> Self {
-        self.remit = remit;
+    /// Narrows what this workshop may do. See [`Permissions`].
+    pub fn under(mut self, permissions: Permissions) -> Self {
+        self.permissions = permissions;
         self
     }
 
     /// How much of the world this plan may touch.
-    pub fn remit(&self) -> Remit {
-        self.remit
+    pub fn permissions(&self) -> Permissions {
+        self.permissions
     }
 
     /// Names the plan these tools work for.
@@ -317,7 +317,7 @@ fn normalise(path: &Path) -> PathBuf {
 /// One thing the court can do.
 ///
 /// Stateless: every tool is a singleton and all per-call context arrives in the
-/// [`Workshop`]. That is what lets one instance serve every plan at once
+/// [`Sandbox`]. That is what lets one instance serve every plan at once
 /// without a tool ever holding a plan's path in a field, which is the mistake
 /// that would make the boundary above a suggestion.
 #[async_trait::async_trait]
@@ -337,15 +337,15 @@ pub trait Tool: Send + Sync {
     /// results the model must be *told*: a refusal it never hears about is a
     /// call it makes again immediately. Errors that are not the model's business
     /// -- a poisoned lock, a vanished plan -- belong to the caller, not here.
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome;
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn workshop() -> Workshop {
-        Workshop::new(Workspace::in_place("/dev/city"))
+    fn sandbox() -> Sandbox {
+        Sandbox::new(Workspace::in_place("/dev/city"))
     }
 
     /// The invariant the whole tool surface rests on. It is tested here, at the
@@ -357,7 +357,7 @@ mod tests {
     /// lexically here is what stops the filesystem resolving it later.
     #[test]
     fn a_path_that_leaves_the_workspace_is_refused() {
-        let shop = workshop();
+        let shop = sandbox();
 
         for escape in [
             "../secrets",
@@ -381,7 +381,7 @@ mod tests {
     /// way to name a sibling.
     #[test]
     fn ordinary_paths_resolve_inside_the_workspace() {
-        let shop = workshop();
+        let shop = sandbox();
 
         assert_eq!(
             shop.resolve("src/main.rs").unwrap(),
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn a_sibling_with_a_shared_prefix_is_not_inside() {
         assert!(matches!(
-            workshop().resolve("/dev/city-old/secrets"),
+            sandbox().resolve("/dev/city-old/secrets"),
             Err(Refusal::OutsideWorkspace { .. })
         ));
     }
@@ -422,11 +422,11 @@ mod tests {
     /// invents this one must not be handed it.
     #[tokio::test]
     async fn a_survey_cannot_reach_the_tools_that_touch_the_world() {
-        let surveying = workshop().under(Remit::Survey);
+        let surveying = sandbox().under(Permissions::ReadOnly);
 
         for forbidden in ["bash", "patch", "tmux_run", "browser_navigate", "spawn_agents"] {
             assert!(
-                !all(Remit::Survey).iter().any(|t| t.name() == forbidden),
+                !all(Permissions::ReadOnly).iter().any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered to a survey"
             );
             assert!(
@@ -442,7 +442,7 @@ mod tests {
         // report, and it must still be able to.
         for allowed in ["think", "read_file", "search"] {
             assert!(
-                all(Remit::Survey).iter().any(|t| t.name() == allowed),
+                all(Permissions::ReadOnly).iter().any(|t| t.name() == allowed),
                 "{allowed} is how a survey does its job"
             );
         }

@@ -550,7 +550,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             workspace,
             city_name,
             choice,
-            crate::tools::Remit::Full,
+            crate::tools::Permissions::Full,
             MOST_ROUNDS,
         )
         .await
@@ -571,7 +571,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 ///
 /// Two callers: [`draft_plan`], for a plan the King decreed, and
 /// [`spawn_subagents`], for each errand the court sends. They differ only in the
-/// `remit` and `cap` handed in -- an errand reads and reports, and gets fewer
+/// `permissions` and `cap` handed in -- an errand reads and reports, and gets fewer
 /// rounds to do it in. Sharing the loop is the point: an errand that drafted
 /// through a second, simpler path would be a second place for the busy mark,
 /// the deed recording and the push to drift.
@@ -582,11 +582,11 @@ pub(crate) async fn converse(
     workspace: kingdom_core::Workspace,
     city_name: String,
     choice: kingdom_core::ModelChoice,
-    remit: crate::tools::Remit,
+    permissions: crate::tools::Permissions,
     cap: usize,
 ) -> Result<Plan, ServerFnError> {
     use crate::llm::{Brief, Reply, ToolSpec};
-    use crate::tools::Workshop;
+    use crate::tools::Sandbox;
     use kingdom_core::{ToolCall, NoteKind};
 
     let model = match crate::llm::open(&choice).await {
@@ -602,10 +602,10 @@ pub(crate) async fn converse(
     // remit is not offered the tools that would let it write. All three
     // narrowings live in `ToolSpec::for_model`, so the reasoning is in one
     // place and no caller has to remember any of them.
-    let tools = ToolSpec::for_model(model.as_ref(), remit);
-    let shop = Workshop::new(workspace)
+    let tools = ToolSpec::for_model(model.as_ref(), permissions);
+    let shop = Sandbox::new(workspace)
         .for_plan(plan_id.clone())
-        .under(remit);
+        .under(permissions);
 
     for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than

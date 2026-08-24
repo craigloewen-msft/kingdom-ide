@@ -29,7 +29,7 @@
 //!    question is parked, the timeout dies with it. A plan is repaired on load
 //!    instead, which is the only place that can know.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_core::{ToolOutcome, PlanId};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -142,7 +142,7 @@ impl Tool for AskUserQuestion {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let questions = input.get("questions").and_then(Value::as_array);
         if questions.is_none_or(|q| q.is_empty()) {
             return Refusal::BadArguments {
@@ -206,8 +206,8 @@ mod tests {
     use super::*;
     use kingdom_core::Workspace;
 
-    fn shop() -> Workshop {
-        Workshop::new(Workspace::in_place("/dev/city"))
+    fn shop() -> Sandbox {
+        Sandbox::new(Workspace::in_place("/dev/city"))
             .for_plan(PlanId::new("plan-1"))
             .for_tool_call("call-1")
     }

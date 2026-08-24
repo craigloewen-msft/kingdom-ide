@@ -15,14 +15,14 @@
 //!
 //! # Why this is safe to run in parallel
 //!
-//! Because errands cannot write. They are run under [`Remit::Survey`], so the
+//! Because errands cannot write. They are run under [`Permissions::ReadOnly`], so the
 //! only tools they have are `think`, `read_file` and `search`. Several agents
 //! writing to one worktree at once is exactly the collision this product exists
 //! to prevent, and nothing in Kingdom arbitrates yet -- so rather than detect
 //! it, the remit makes it impossible. Give errands hands and this file needs a
 //! lease before it needs anything else.
 
-use super::{Refusal, Remit, Tool, Workshop};
+use super::{Refusal, Permissions, Tool, Sandbox};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 
@@ -92,7 +92,7 @@ impl Tool for SpawnAgents {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let tasks: Vec<String> = input
             .get("tasks")
             .and_then(Value::as_array)
@@ -133,7 +133,7 @@ impl Tool for SpawnAgents {
 
 /// The remit an errand works under. Named here rather than at the call site so
 /// the reason travels with the tool that depends on it.
-pub const ERRAND_REMIT: Remit = Remit::Survey;
+pub const ERRAND_REMIT: Permissions = Permissions::ReadOnly;
 
 /// How many rounds an errand may take before it is stopped.
 ///

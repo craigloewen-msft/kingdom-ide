@@ -5,7 +5,7 @@
 //! native subprocess driver to Leptos, which would make an accidental wasm
 //! dependency possible.
 //!
-//! Sessions are selected with [`Workshop::plan`], not the workspace path. Two
+//! Sessions are selected with [`Sandbox::plan`], not the workspace path. Two
 //! plans may deliberately share a city path, but sharing browser cookies would
 //! let one court member inherit another's login. This is the same per-plan
 //! isolation boundary as the tmux tool.
@@ -15,7 +15,7 @@
 //! absent because it served a Phoenix UI feature Kingdom lacked -- that has
 //! since been built, and the reasoning no longer holds.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
 use kingdom_core::ToolOutcome;
 use serde::Deserialize;
@@ -34,7 +34,7 @@ static BROWSERS: OnceLock<BrowserSessionManager> = OnceLock::new();
 pub(crate) fn browsers() -> &'static BrowserSessionManager {
     BROWSERS.get_or_init(BrowserSessionManager::new)
 }
-fn plan(shop: &Workshop) -> String {
+fn plan(shop: &Sandbox) -> String {
     shop.plan().to_string()
 }
 
@@ -77,7 +77,7 @@ fn outcome(result: Result<String, BrowserError>) -> ToolOutcome {
 fn parse<T: for<'de> Deserialize<'de>>(tool: &str, input: Value) -> Result<T, ToolOutcome> {
     serde_json::from_value(input).map_err(|error| bad(tool, error.to_string()))
 }
-fn artifact(shop: &Workshop, stem: &str, extension: &str) -> PathBuf {
+fn artifact(shop: &Sandbox, stem: &str, extension: &str) -> PathBuf {
     let serial = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -108,7 +108,7 @@ impl Tool for BrowserNavigate {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["url"],"properties":{"url":{"type":"string"},"timeout":{"type":"string","description":"Default 15s; examples: 500ms, 15s, 1m."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: NavigateInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -148,7 +148,7 @@ impl Tool for BrowserEval {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["expression"],"properties":{"expression":{"type":"string"},"timeout":{"type":"string"},"await":{"type":"boolean","description":"Await promises; default true."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: EvalInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -193,7 +193,7 @@ impl Tool for BrowserTakeScreenshot {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"selector":{"type":"string"},"timeout":{"type":"string"}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: ScreenshotInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -237,7 +237,7 @@ impl Tool for BrowserResize {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["width","height"],"properties":{"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1},"timeout":{"type":"string"}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: ResizeInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -277,7 +277,7 @@ impl Tool for BrowserWaitForSelector {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["selector"],"properties":{"selector":{"type":"string"},"timeout":{"type":"string","description":"Default 30s."},"visible":{"type":"boolean"}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: WaitInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -320,7 +320,7 @@ impl Tool for BrowserClick {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["selector"],"properties":{"selector":{"type":"string"},"wait":{"type":"boolean"},"timeout":{"type":"string","description":"Default 30s."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: ClickInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -358,7 +358,7 @@ impl Tool for BrowserType {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["selector","text"],"properties":{"selector":{"type":"string"},"text":{"type":"string"},"clear":{"type":"boolean"},"timeout":{"type":"string","description":"Default 30s."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: TypeInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -402,7 +402,7 @@ impl Tool for BrowserKeyPress {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["key"],"properties":{"key":{"type":"string"},"modifiers":{"type":"array","items":{"type":"string","enum":["ctrl","shift","alt","meta"]}},"method":{"type":"string","enum":["cdp","js"]}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: KeyInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -442,7 +442,7 @@ impl Tool for BrowserRecentConsoleLogs {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"description":"Default 100."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: LogsInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -486,7 +486,7 @@ impl Tool for BrowserClearConsoleLogs {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
     }
-    async fn run(&self, _: Value, shop: &Workshop) -> ToolOutcome {
+    async fn run(&self, _: Value, shop: &Sandbox) -> ToolOutcome {
         outcome(
             browsers()
                 .clear_console_logs(&plan(shop))
