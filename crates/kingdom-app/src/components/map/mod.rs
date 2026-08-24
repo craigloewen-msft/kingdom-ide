@@ -21,7 +21,7 @@ use city::{CityGlyph, Detail};
 use kingdom_core::layout::{realm_bounds, settle_kingdom, Realm};
 use kingdom_core::skyline::iso;
 use kingdom_core::terrain::{contours, Band, BANDS};
-use kingdom_core::{City, CityId, PlanStatus, Ward};
+use kingdom_core::{City, CityId, PlanStatus, Language};
 use leptos::ev;
 use leptos::prelude::*;
 
@@ -386,7 +386,7 @@ pub fn KingdomMap() -> impl IntoView {
                 // Ward colours: what the code *is*, as opposed to what is being
                 // proposed for it.
                 <div class="legend-row wards">
-                    {Ward::ALL.iter().map(|w| view! {
+                    {Language::ALL.iter().map(|w| view! {
                         <span>
                             <i class="dot" style:background=w.tint()></i>
                             {w.label()}

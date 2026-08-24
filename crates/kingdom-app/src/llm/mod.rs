@@ -323,15 +323,15 @@ pub async fn open(choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
 /// Real paths from a city, preferring source files, so a model can ground its
 /// answer in files that exist.
 fn notable_paths(city: &City, want: usize) -> Vec<String> {
-    use kingdom_core::{District, Ward};
+    use kingdom_core::{Folder, Language};
 
-    fn walk(d: &District, out: &mut Vec<(bool, u64, String)>) {
-        for b in &d.buildings {
+    fn walk(d: &Folder, out: &mut Vec<(bool, u64, String)>) {
+        for b in &d.source_files {
             let is_source = matches!(
-                b.ward,
-                Ward::Rust | Ward::Web | Ward::Python | Ward::Go | Ward::Systems
+                b.language,
+                Language::Rust | Language::Web | Language::Python | Language::Go | Language::Systems
             );
-            out.push((is_source, b.bulk, b.path.clone()));
+            out.push((is_source, b.bytes, b.path.clone()));
         }
         for child in &d.children {
             walk(child, out);

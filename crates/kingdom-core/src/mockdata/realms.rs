@@ -15,7 +15,7 @@
 
 use super::build::*;
 use super::{CitySpec, RealmSpec};
-use crate::model::Ward;
+use crate::model::Language;
 
 /// The realm the "Enter the Proving Grounds" button opens.
 pub const DEFAULT_REALM: &str = "kingdom-mirror";
@@ -63,10 +63,10 @@ fn kingdom_mirror() -> RealmSpec {
                 [
                     file("main.rs", 4_200),
                     file("lib.rs", 9_800),
-                    fill("module_{i}.rs", 24, 1_500..12_000, Ward::Rust),
+                    fill("module_{i}.rs", 24, 1_500..12_000, Language::Rust),
                 ],
             )
-            .dir("tests", [fill("case_{i}.rs", 6, 800..3_000, Ward::Rust)])
+            .dir("tests", [fill("case_{i}.rs", 6, 800..3_000, Language::Rust)])
             .dir("docs", [file("design.md", 6_400), file("api.md", 3_100)])
             .dirty(3),
         node_city("lantern")
@@ -74,8 +74,8 @@ fn kingdom_mirror() -> RealmSpec {
                 "src",
                 [
                     file("index.ts", 2_400),
-                    fill("component_{i}.tsx", 32, 900..8_000, Ward::Web),
-                    dir("styles", [fill("_{i}.scss", 8, 400..2_500, Ward::Style)]),
+                    fill("component_{i}.tsx", 32, 900..8_000, Language::Web),
+                    dir("styles", [fill("_{i}.scss", 8, 400..2_500, Language::Style)]),
                 ],
             )
             .dir(
@@ -88,12 +88,12 @@ fn kingdom_mirror() -> RealmSpec {
                 "almanac",
                 [
                     file("__init__.py", 320),
-                    fill("task_{i}.py", 18, 1_200..7_000, Ward::Python),
+                    fill("task_{i}.py", 18, 1_200..7_000, Language::Python),
                 ],
             )
-            .dir("tests", [fill("test_{i}.py", 9, 600..2_800, Ward::Python)]),
+            .dir("tests", [fill("test_{i}.py", 9, 600..2_800, Language::Python)]),
         docs_city("chronicle")
-            .dir("notes", [fill("{i}-entry.md", 40, 800..9_000, Ward::Docs)])
+            .dir("notes", [fill("{i}-entry.md", 40, 800..9_000, Language::Docs)])
             .dir("assets", [file("diagram.excalidraw", 88_000)]),
         // No git, so `has_git: false` is reachable -- it changes what the map
         // draws, and would otherwise never be seen in development.
@@ -102,7 +102,7 @@ fn kingdom_mirror() -> RealmSpec {
                 "src",
                 [
                     file("main.rs", 1_800),
-                    fill("pass_{i}.rs", 7, 700..4_000, Ward::Rust),
+                    fill("pass_{i}.rs", 7, 700..4_000, Language::Rust),
                 ],
             )
             .no_git(),
@@ -128,13 +128,13 @@ fn crowded() -> RealmSpec {
         // the map's size scaling and label thresholds meaningfully exercised.
         let count = 2 + (i * 3) % 60;
         let city: CitySpec = match i % 4 {
-            0 => rust_city(name).dir("src", [fill("mod_{i}.rs", count, 400..20_000, Ward::Rust)]),
-            1 => node_city(name).dir("src", [fill("part_{i}.ts", count, 300..15_000, Ward::Web)]),
+            0 => rust_city(name).dir("src", [fill("mod_{i}.rs", count, 400..20_000, Language::Rust)]),
+            1 => node_city(name).dir("src", [fill("part_{i}.ts", count, 300..15_000, Language::Web)]),
             2 => python_city(name).dir(
                 "pkg",
-                [fill("unit_{i}.py", count, 300..12_000, Ward::Python)],
+                [fill("unit_{i}.py", count, 300..12_000, Language::Python)],
             ),
-            _ => go_city(name).dir("cmd", [fill("step_{i}.go", count, 400..10_000, Ward::Go)]),
+            _ => go_city(name).dir("cmd", [fill("step_{i}.go", count, 400..10_000, Language::Go)]),
         };
         if i % 5 == 0 {
             city.dirty(i % 7)
@@ -154,7 +154,7 @@ fn crowded() -> RealmSpec {
 /// One enormous project, nested well past the scanner's depth cap.
 ///
 /// Drives every limit in `scan.rs` at once: `SCAN_DEPTH`, the `COUNT_CAP`
-/// budget, `FILES_PER_DISTRICT` pruning into `extra_files`/`extra_bulk`, and the
+/// budget, `FILES_PER_DISTRICT` pruning into `extra_files`/`extra_bytes`, and the
 /// assets-versus-code weighting. Those caps are invisible until something
 /// crosses them, and a real monorepo is a bad place to discover they misbehave.
 fn monorepo() -> RealmSpec {
@@ -168,7 +168,7 @@ fn monorepo() -> RealmSpec {
                     dir(
                         "src",
                         [
-                            fill("unit_{i}.ts", 90, 500..14_000, Ward::Web),
+                            fill("unit_{i}.ts", 90, 500..14_000, Language::Web),
                             // Past SCAN_DEPTH from the city root: the scanner
                             // must stop here and still report honestly.
                             dir(
@@ -177,7 +177,7 @@ fn monorepo() -> RealmSpec {
                                     "deep",
                                     [dir(
                                         "deeper",
-                                        [fill("buried_{i}.ts", 20, 400..3_000, Ward::Web)],
+                                        [fill("buried_{i}.ts", 20, 400..3_000, Language::Web)],
                                     )],
                                 )],
                             ),
@@ -196,7 +196,7 @@ fn monorepo() -> RealmSpec {
     .city(
         node_city("leviathan")
             .files([deep])
-            .dir("src", [fill("core_{i}.ts", 240, 800..40_000, Ward::Web)])
+            .dir("src", [fill("core_{i}.ts", 240, 800..40_000, Language::Web)])
             .dir(
                 "assets",
                 [

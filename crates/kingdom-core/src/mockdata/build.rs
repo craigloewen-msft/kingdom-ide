@@ -11,7 +11,7 @@
 //! rather than something it is told.
 
 use super::{CitySpec, FileContent, TreeSpec};
-use crate::model::{CityKind, Ward};
+use crate::model::{CityKind, Language};
 use std::ops::Range;
 
 /// A file of a given size, filled with generated filler.
@@ -31,12 +31,12 @@ pub fn text(path: impl Into<String>, content: impl Into<String>) -> TreeSpec {
 }
 
 /// `count` generated files from a pattern containing `{i}`.
-pub fn fill(pattern: impl Into<String>, count: usize, bytes: Range<u64>, ward: Ward) -> TreeSpec {
+pub fn fill(pattern: impl Into<String>, count: usize, bytes: Range<u64>, language: Language) -> TreeSpec {
     TreeSpec::Fill {
         pattern: pattern.into(),
         count,
         bytes,
-        ward,
+        language,
     }
 }
 

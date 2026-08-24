@@ -202,7 +202,7 @@ fn Districts(skyline: StoredValue<Skyline>, show_labels: bool) -> impl IntoView 
         <g class="districts">
             {plates.into_iter().map(|plate| {
                 let points = plate_points(&plate);
-                let tint = plate.ward.tint();
+                let tint = plate.language.tint();
                 // Deeper plates sit brighter so nesting reads as depth. The
                 // folder-as-district metaphor is the core semantic content of
                 // the map, so plates have to be legible, not merely present.
@@ -269,7 +269,7 @@ fn Buildings(skyline: StoredValue<Skyline>) -> impl IntoView {
         <g class="buildings">
             {lots.into_iter().enumerate().map(|(i, lot)| {
                 let is_cathedral = cathedral == Some(i);
-                view! { <BuildingGlyph lot=lot cathedral=is_cathedral/> }
+                view! { <SourceFileGlyph lot=lot cathedral=is_cathedral/> }
             }).collect_view()}
         </g>
     }
@@ -277,7 +277,7 @@ fn Buildings(skyline: StoredValue<Skyline>) -> impl IntoView {
 
 /// One building: three faces of an extruded isometric box.
 #[component]
-fn BuildingGlyph(lot: Lot, cathedral: bool) -> impl IntoView {
+fn SourceFileGlyph(lot: Lot, cathedral: bool) -> impl IntoView {
     let hw = lot.width / 2.0;
     let hd = lot.depth / 2.0;
     let h = lot.height;
@@ -305,10 +305,10 @@ fn BuildingGlyph(lot: Lot, cathedral: bool) -> impl IntoView {
         iso(x1, y0, 0.0),
     ];
 
-    let tint = lot.ward.tint();
+    let tint = lot.language.tint();
 
     let title = match lot.kind {
-        LotKind::Tower => format!("{} \u{2014} {}", lot.path, lot.ward.label()),
+        LotKind::Tower => format!("{} \u{2014} {}", lot.path, lot.language.label()),
         LotKind::Commons => format!("{} \u{2014} aggregated", lot.name),
     };
 
@@ -418,7 +418,7 @@ fn Landmark(skyline: StoredValue<Skyline>) -> impl IntoView {
 
         view! {
             <g class="landmark">
-                <polygon class="landmark-top" points=points(&top) fill=lot.ward.tint()/>
+                <polygon class="landmark-top" points=points(&top) fill=lot.language.tint()/>
                 <line class="landmark-spire" x1=bx y1=by x2=sx y2=sy/>
                 <circle class="landmark-star" cx=sx cy=sy r="2.4"/>
                 <title>{format!("{} \u{2014} largest file", lot.path)}</title>

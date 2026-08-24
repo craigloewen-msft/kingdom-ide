@@ -14,12 +14,12 @@
 //! realm or add a function returning a [`RealmSpec`], and list it in
 //! [`realms()`]. There is no config file and no parser: the types *are* the
 //! schema, so a mistyped realm fails to compile rather than failing at seed
-//! time, and `CityKind`/`Ward` are the real enums rather than strings that have
+//! time, and `CityKind`/`Language` are the real enums rather than strings that have
 //! to be matched back to them.
 //!
 //! ```no_run
 //! # use kingdom_core::mockdata::{RealmSpec, build::*, court};
-//! # use kingdom_core::Ward;
+//! # use kingdom_core::Language;
 //! fn my_realm() -> RealmSpec {
 //!     RealmSpec::new("my-realm", "What it is for.", 0x5EED)
 //!         .court(court::default_court)
@@ -27,7 +27,7 @@
 //!             rust_city("orchard")
 //!                 .dir("src", [
 //!                     file("main.rs", 4_200),
-//!                     fill("module_{i}.rs", 24, 1_500..12_000, Ward::Rust),
+//!                     fill("module_{i}.rs", 24, 1_500..12_000, Language::Rust),
 //!                 ])
 //!                 .dirty(3),
 //!         )
@@ -47,7 +47,7 @@ pub mod build;
 pub mod court;
 pub mod realms;
 
-use crate::model::{City, CityKind, Plan, Ward};
+use crate::model::{City, CityKind, Plan, Language};
 use std::ops::Range;
 
 pub use build::{docs_city, file, fill, node_city, python_city, rust_city, text};
@@ -294,7 +294,7 @@ pub enum TreeSpec {
         pattern: String,
         count: usize,
         bytes: Range<u64>,
-        ward: Ward,
+        language: Language,
     },
 }
 
@@ -324,7 +324,7 @@ impl TreeSpec {
                 pattern,
                 count,
                 bytes,
-                ward: _,
+                language: _,
             } => {
                 for i in 0..*count {
                     let path = join(prefix, &pattern.replace("{i}", &i.to_string()));
@@ -508,7 +508,7 @@ mod tests {
                 pattern: "module_{i}.rs".into(),
                 count: 12,
                 bytes: 1_000..9_000,
-                ward: Ward::Rust,
+                language: Language::Rust,
             }],
         );
         if let Some(entry) = extra {
@@ -523,7 +523,7 @@ mod tests {
                     pattern: "view_{i}.ts".into(),
                     count: 9,
                     bytes: 500..4_000,
-                    ward: Ward::Web,
+                    language: Language::Web,
                 }],
             ),
         ])
