@@ -163,7 +163,8 @@ crates/
 
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, prompt_bar.rs, conversation.rs,
-                    browser_view.rs,
+                    browser_view.rs, resizer.rs (the drag handle the rail
+                    and the spyglass share),
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
@@ -346,6 +347,27 @@ cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror [--force]
 To change the fake data, edit `crates/kingdom-core/src/mockdata/fixtures.rs` and
 re-seed with `--force`. It is plain Rust with terse builders — no config format,
 no parser, and a mistyped fixture fails to compile rather than at seed time.
+
+### Rehearsing a change
+
+Work against a proving ground, not your dev folder:
+
+```bash
+KINGDOM_REALM=kingdom-mirror KINGDOM_SANDBOX=1 cargo leptos watch
+```
+
+`KINGDOM_REALM` opens that realm at boot, so the server comes up on a populated
+map instead of the folder picker — which matters under `watch`, where every save
+restarts the server and would otherwise send you back to it. It seeds the realm
+on first use and is instant thereafter.
+
+`KINGDOM_SANDBOX=1` makes "I meant to open the fake one" a rule the server
+enforces rather than one you remember: any folder outside the sandbox root is
+refused.
+
+Both belong in `.kingdom.env` (gitignored; copy `.kingdom.env.example`) so the
+setting survives a restart. If you are changing what a fixture *contains*,
+re-seed with `--force` — an already-standing realm is deliberately left alone.
 
 The browser cannot hand a server a real filesystem path, so the opening screen
 asks the King to type one; the server reads it directly from disk. A native

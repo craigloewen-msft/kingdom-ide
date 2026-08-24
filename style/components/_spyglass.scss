@@ -1,10 +1,13 @@
 // The King's spyglass: a live view of a plan's headless browser.
 //
-// Sits between the chamber header and the log, so the King reads the
-// transcript with the page it describes directly above it.
+// A full-height column down the right of the chamber, with the transcript
+// beside it. Stacked above the log it had to be capped at a fraction of the
+// height, which showed the top third of a 1024x768 page *and* shortened the
+// transcript — the two things the King wants to read at once were competing for
+// the one axis. Side by side, neither costs the other anything.
 //
 // The canvas takes no pointer events, and that is load-bearing rather than
-// cosmetic -- the panel is view-only by design (see `spyglass.rs`), and a
+// cosmetic -- the panel is view-only by design (see `browser_view.rs`), and a
 // surface that swallowed clicks silently would leave the King unsure whether
 // they had reached the page.
 
@@ -13,12 +16,13 @@
 .spyglass {
   display: flex;
   flex-direction: column;
+  // Width comes from the resizer's signal, set inline. `flex: 0 0 auto` so the
+  // transcript yields the room rather than the panel being squeezed out of the
+  // width the King dragged it to.
   flex: 0 0 auto;
-  // Tall enough to read a page, capped so it never crowds out the transcript:
-  // the conversation is still the thing being reviewed.
-  max-height: 45%;
+  min-width: 0;
   background: t.$void;
-  border-bottom: 1px solid t.$edge;
+  border-left: 1px solid t.$edge;
 }
 
 .spyglass-bar {
@@ -52,6 +56,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  // Takes whatever height is left once the bar and the caption have theirs.
+  flex: 1 1 auto;
   min-height: 0;
   padding: 8px;
   overflow: hidden;
@@ -60,6 +66,10 @@
 .spyglass-canvas {
   max-width: 100%;
   max-height: 100%;
+  // Contain, so the whole frame is always on screen. A 4:3 page in a tall panel
+  // letterboxes, and the dead space is the honest trade: scaling to width would
+  // hide the bottom of the page by default, which is the opposite of what a
+  // panel for *watching* is for.
   object-fit: contain;
   border-radius: t.$radius;
   // The whole non-goal, in one declaration. Two input sources driving one page
@@ -75,6 +85,42 @@
   color: t.$ink-faint;
   font-size: 13px;
   text-align: center;
+}
+
+// --- The caption: what is being done to the page -----------------------------
+//
+// Borrows the transcript's deed vocabulary rather than inventing a second one,
+// so the same call looks the same in both places and the King does not have to
+// reconcile them by eye.
+
+.spyglass-deed {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  background: t.$panel;
+  border-top: 1px solid t.$edge;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  color: t.$ink-faint;
+
+  // A settled deed is the *last* thing done, not the current one, so it reads
+  // quieter than the one still running.
+  &.running { color: t.$ink-dim; }
+}
+
+// --- The divider -------------------------------------------------------------
+
+.spyglass-resizer {
+  flex: 0 0 auto;
+  width: 7px;
+  margin-right: -4px;  // straddle the panel's border, as the rail's does
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
+
+  &:hover, &.dragging { background: rgba(212, 175, 55, 0.35); }
 }
 
 // --- The toggle, in the chamber header ---------------------------------------
@@ -98,4 +144,26 @@
     border-color: t.$gold-dim;
     color: t.$gold;
   }
+}
+
+// --- Too narrow to sit beside anything ---------------------------------------
+//
+// Below this there is no width that leaves both a readable page and a readable
+// transcript, so the panel goes back over the top of the column — the layout
+// this replaced, kept as the small-screen branch rather than deleted.
+
+@media (max-width: 1100px) {
+  .chamber-frame { flex-direction: column; }
+
+  .spyglass {
+    // The dragged width is meaningless once the panel is full-bleed.
+    width: auto !important;
+    max-height: 45%;
+    border-left: none;
+    border-bottom: 1px solid t.$edge;
+    order: -1;  // above the column, where it used to be
+  }
+
+  // A vertical divider between two stacked panels would drag the wrong axis.
+  .spyglass-resizer { display: none; }
 }

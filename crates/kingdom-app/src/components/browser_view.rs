@@ -3,9 +3,21 @@
 //! The client half of `crate::screencast`. Reads the binary frames that module
 //! documents and paints them onto a canvas.
 //!
+//! Sits beside the transcript rather than above it, so the King reads what the
+//! court said and watches the page it is describing without either one being
+//! shortened to make room for the other.
+//!
 //! **View-only.** The canvas is `pointer-events: none`, so a user who clicks it
 //! gets nothing rather than an ambiguous non-response. The reasoning is in the
 //! server module and it is a permanent decision, not a missing feature.
+//!
+//! # What it is given, and why
+//!
+//! Everything reactive arrives as a prop -- the deed to caption, the width to
+//! occupy -- rather than being read from context. The panel is then a thing that
+//! renders a browser and a caption for whatever it is handed, which is what
+//! would let it move out of the conversation and onto the throne room later
+//! without being rewritten.
 //!
 //! # Non-goal, recorded rather than guessed at
 //!
@@ -48,7 +60,13 @@ impl ConnectionState {
 
 /// A live view of one plan's browser.
 #[component]
-pub fn BrowserView(plan: kingdom_core::PlanId) -> impl IntoView {
+pub fn BrowserView(
+    plan: kingdom_core::PlanId,
+    /// The browser deed to caption the picture with, if the court has made one.
+    deed: Memo<Option<kingdom_core::ToolCall>>,
+    /// The panel's width in pixels, driven by the resizer beside it.
+    width: RwSignal<f64>,
+) -> impl IntoView {
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let (sight, set_sight) = signal(ConnectionState::Opening);
     let (url, set_url) = signal(String::new());
@@ -56,7 +74,7 @@ pub fn BrowserView(plan: kingdom_core::PlanId) -> impl IntoView {
     watch_browser(plan, canvas, set_sight, set_url);
 
     view! {
-        <div class="spyglass">
+        <div class="spyglass" style:width=move || format!("{}px", width.get())>
             <div class="spyglass-bar">
                 <span class="spyglass-url">{move || url.get()}</span>
                 // Said plainly rather than shown as a badge: the user is being
@@ -70,6 +88,28 @@ pub fn BrowserView(plan: kingdom_core::PlanId) -> impl IntoView {
                     <p class="spyglass-empty">{move || sight.get().tell()}</p>
                 </Show>
             </div>
+            // Beneath the stage rather than in the bar above it: the bar says
+            // *where* the page is, and this says what is being done to it. Two
+            // questions, and the URL keeps the position the King already knows.
+            <Show when=move || deed.get().is_some()>
+                {move || deed.get().map(|call| {
+                    let running = call.in_flight();
+                    view! {
+                        // Dressed as a deed, because that is what it is: the
+                        // same call the transcript is showing, named the same
+                        // way, so the two do not have to be reconciled by eye.
+                        <div class="spyglass-deed" class:running=running>
+                            <span class="deed-tool">{call.tool.clone()}</span>
+                            <span class="deed-gist">
+                                {crate::components::conversation::telling_argument(&call.input)}
+                            </span>
+                            <Show when=move || running>
+                                <span class="deed-running">"working\u{2026}"</span>
+                            </Show>
+                        </div>
+                    }
+                })}
+            </Show>
         </div>
     }
 }
