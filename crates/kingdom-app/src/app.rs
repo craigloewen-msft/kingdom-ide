@@ -2,7 +2,7 @@
 
 use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, DecreeBar, KingdomMap, Sidebar};
-use kingdom_core::{CityId, Kingdom};
+use kingdom_core::{CityId, Kingdom, ModelChoice};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
@@ -31,6 +31,12 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 /// returns it to.
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 
+/// Where the last-used model and effort are remembered between visits.
+#[cfg(feature = "hydrate")]
+const MODEL_KEY: &str = "kingdom.model";
+#[cfg(feature = "hydrate")]
+const EFFORT_KEY: &str = "kingdom.effort";
+
 /// Shared UI state, provided via context so the three regions stay in sync
 /// without threading props through every layer.
 #[derive(Clone, Copy)]
@@ -48,6 +54,10 @@ pub struct KingdomState {
     pub loading: RwSignal<bool>,
     /// Most recent error, shown in the chat dock.
     pub error: RwSignal<Option<String>>,
+    /// What the next new plan will be drafted with. `None` until the King has
+    /// chosen or a remembered choice has been restored, at which point the
+    /// server's catalogue default applies.
+    pub choice: RwSignal<Option<ModelChoice>>,
 }
 
 impl KingdomState {
@@ -59,8 +69,71 @@ impl KingdomState {
             show_all_plans: RwSignal::new(false),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            choice: RwSignal::new(None),
         }
     }
+
+    /// Records the King's choice and remembers it for next time.
+    pub fn choose_model(&self, choice: ModelChoice) {
+        store_choice(&choice);
+        self.choice.set(Some(choice));
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// Restores the remembered choice inside an effect, so it runs only on the
+/// client -- reading storage during rendering would make the server emit
+/// different markup than hydration expects. Whatever comes back is still passed
+/// through the server's catalogue before it is used, so a model withdrawn since
+/// it was stored degrades rather than failing a decree.
+fn restore_choice(choice: RwSignal<Option<ModelChoice>>) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(storage) = local_storage() else {
+            return;
+        };
+        let Some(model) = storage
+            .get_item(MODEL_KEY)
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty())
+        else {
+            return;
+        };
+        let effort = storage
+            .get_item(EFFORT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|e| kingdom_core::ModelEffort::from_wire(&e));
+        choice.set(Some(ModelChoice::new(model, effort)));
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = choice;
+}
+
+fn store_choice(choice: &ModelChoice) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(MODEL_KEY, &choice.model);
+        match choice.effort {
+            Some(effort) => {
+                let _ = storage.set_item(EFFORT_KEY, effort.wire_name());
+            }
+            // "The model's own default" must be remembered as an absence, not
+            // as the `none` level, which is a different request.
+            None => {
+                let _ = storage.remove_item(EFFORT_KEY);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = choice;
 }
 
 /// Root component: the throne room.
@@ -70,6 +143,7 @@ pub fn App() -> impl IntoView {
 
     let state = KingdomState::new();
     provide_context(state);
+    restore_choice(state.choice);
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the King back to the folder picker.

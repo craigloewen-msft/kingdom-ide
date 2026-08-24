@@ -4,39 +4,55 @@
 //! WebSocket layer exists -- without push, a streamed reply has nowhere to go.
 
 use super::{Brief, Draft, Model, ModelError};
-use kingdom_core::Speaker;
+use kingdom_core::{ModelEffort, Speaker};
 use serde_json::{json, Value};
 
 const ENDPOINT: &str = "https://api.githubcopilot.com/chat/completions";
-const DEFAULT_MODEL: &str = "claude-sonnet-4.6";
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4.6";
 
 /// Copilot's gateway rejects requests that do not identify a known integration,
 /// so these two headers are required, not decorative.
-const INTEGRATION_ID: &str = "copilot-cli";
-const EDITOR_VERSION: &str = "CopilotCLI/1.0.78";
-
-pub fn model_name() -> String {
-    std::env::var("KINGDOM_MODEL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
-}
+pub const INTEGRATION_ID: &str = "copilot-cli";
+pub const EDITOR_VERSION: &str = "CopilotCLI/1.0.78";
 
 pub struct CopilotModel {
     token: String,
+    /// The name Copilot knows this model by, with no `copilot/` namespace.
     model: String,
+    /// `None` means the model's own default, which is a *different request*
+    /// from any explicit level -- see [`request_body`].
+    effort: Option<ModelEffort>,
     http: reqwest::Client,
 }
 
 impl CopilotModel {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: String, model: impl Into<String>, effort: Option<ModelEffort>) -> Self {
         Self {
             token,
-            model: model_name(),
+            model: model.into(),
+            effort,
             http: reqwest::Client::new(),
         }
     }
+}
+
+/// Builds the chat completions payload.
+///
+/// `reasoning_effort` is present only when the King explicitly chose a level.
+/// Omitting it asks for the model's native default; sending `"none"` asks for a
+/// specific level that only some models accept. Conflating the two either
+/// silently changes how hard the model thinks or earns an opaque 400, so the
+/// distinction is carried all the way down to the wire.
+fn request_body(model: &str, effort: Option<ModelEffort>, messages: Vec<Value>) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": 2048,
+    });
+    if let Some(effort) = effort {
+        body["reasoning_effort"] = json!(effort.wire_name());
+    }
+    body
 }
 
 #[async_trait::async_trait]
@@ -64,11 +80,7 @@ impl Model for CopilotModel {
             .bearer_auth(&self.token)
             .header("Copilot-Integration-Id", INTEGRATION_ID)
             .header("Editor-Version", EDITOR_VERSION)
-            .json(&json!({
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": 2048,
-            }))
+            .json(&request_body(&self.model, self.effort, messages))
             .send()
             .await
             .map_err(|e| ModelError::Transport(e.to_string()))?;
@@ -186,4 +198,31 @@ fn truncate(text: &str, max: usize) -> String {
         return trimmed.to_string();
     }
     format!("{}…", trimmed.chars().take(max).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "The model's own default" and "explicitly the lowest level" are two
+    /// different requests, and the difference is invisible until a gateway
+    /// either thinks harder than asked or refuses with an opaque 400. The wire
+    /// body is where that distinction has to survive.
+    #[test]
+    fn effort_reaches_the_wire_only_when_the_king_chose_one() {
+        let native = request_body("claude-opus-5", None, Vec::new());
+        assert!(
+            native.get("reasoning_effort").is_none(),
+            "no chosen effort must send no field, not a fabricated default"
+        );
+
+        let chosen = request_body("claude-opus-5", Some(ModelEffort::Xhigh), Vec::new());
+        assert_eq!(chosen["reasoning_effort"], "xhigh");
+
+        let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new());
+        assert_eq!(
+            explicit_none["reasoning_effort"], "none",
+            "an explicit `none` is a level in its own right, not the absent case"
+        );
+    }
 }

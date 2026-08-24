@@ -74,6 +74,127 @@
   &.broken { color: t.$blocked; }
 }
 
+// The chip: what the next plan will be drawn with, and the way in to changing
+// it. Reads as information first, control second — the King should be able to
+// see the model without being invited to fiddle with it.
+.model-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  background: transparent;
+  border: none;
+  border-left: 1px solid t.$edge;
+  color: t.$ink-dim;
+  font-size: 11px;
+  font-family: t.$font-mono;
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover { background: t.$panel-2; color: t.$ink; }
+}
+
+.chip-chevron { color: t.$ink-faint; }
+
+.model-picker {
+  padding: 12px 16px;
+  border-top: 1px solid t.$edge;
+  background: t.$panel-2;
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.picker-title { font-size: 12px; font-weight: 600; color: t.$ink; }
+
+.picker-close {
+  background: none;
+  border: none;
+  color: t.$ink-faint;
+  cursor: pointer;
+
+  &:hover { color: t.$ink; }
+}
+
+.model-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  // The full catalogue runs to dozens; cap the height rather than pushing the
+  // input off the bottom of the bar.
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.model-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { background: t.$deep; color: t.$ink; }
+  &.chosen { border-color: t.$gold-dim; color: t.$ink; }
+}
+
+.model-name { font-size: 12px; }
+.model-api-name {
+  flex: 1;
+  font-size: 11px;
+  font-family: t.$font-mono;
+  color: t.$ink-faint;
+}
+.model-vendor { font-size: 11px; color: t.$ink-faint; }
+.model-window { font-size: 11px; font-family: t.$font-mono; color: t.$ink-faint; }
+
+.picker-more {
+  margin-top: 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: t.$gold-dim;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover { color: t.$gold; }
+}
+
+.effort-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid t.$edge;
+}
+
+.effort-label { font-size: 11px; color: t.$ink-faint; margin-right: 4px; }
+
+.effort-btn {
+  padding: 3px 9px;
+  background: transparent;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  font-size: 11px;
+  font-family: t.$font-mono;
+  cursor: pointer;
+
+  &:hover { background: t.$deep; color: t.$ink; }
+  &.chosen { border-color: t.$gold-dim; color: t.$gold; }
+}
+
 // Shown only when the badge is clicked: which variable to set, so a missing
 // credential is fixable without going to read the source.
 .model-setup {

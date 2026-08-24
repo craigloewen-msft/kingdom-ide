@@ -521,7 +521,7 @@ fn PlanPips(plans: Memo<Vec<kingdom_core::Plan>>, radius: f64) -> impl IntoView 
                                     "{} \u{2014} {} ({})",
                                     plan.title,
                                     plan.status.label(),
-                                    plan.model,
+                                    plan.choice().label(),
                                 )}
                             </title>
                         </circle>

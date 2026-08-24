@@ -162,7 +162,7 @@ fn ChamberBody(
                     <span class="chamber-city">
                         {move || city.get().unwrap_or_else(|| "unknown city".into())}
                     </span>
-                    <span class="chamber-model">{plan.model.clone()}</span>
+                    <span class="chamber-model">{plan.choice().label()}</span>
                 </div>
             </div>
             <span class=format!("plan-badge plan-{}", status.css_suffix())>

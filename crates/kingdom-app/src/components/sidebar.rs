@@ -169,7 +169,12 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     <For
                         each={move || plans.get()}
                         key=|p: &Plan| {
-                            (p.id.clone(), p.status, p.title.clone(), p.model.clone())
+                            (
+                                p.id.clone(),
+                                p.status,
+                                p.title.clone(),
+                                p.choice().label(),
+                            )
                         }
                         let:plan
                     >
@@ -180,17 +185,22 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                 let location = use_location();
                                 Memo::new(move |_| location.pathname.get() == href)
                             };
+                            // Read off the plan before the view, which moves it.
+                            let title = plan.title.clone();
+                            let summary = plan.summary.clone();
+                            let model = plan.choice().label();
+                            let status = plan.status;
                             view! {
                                 <li>
-                                    <A href=href attr:class="plan-row" attr:title=plan.summary.clone()>
+                                    <A href=href attr:class="plan-row" attr:title=summary>
                                         <span class="plan-row-inner" class:current=current>
-                                            <span class="plan-title">{plan.title.clone()}</span>
-                                            <span class="plan-model">{plan.model.clone()}</span>
+                                            <span class="plan-title">{title}</span>
+                                            <span class="plan-model">{model}</span>
                                             <span class=format!(
                                                 "plan-badge plan-{}",
-                                                plan.status.css_suffix(),
+                                                status.css_suffix(),
                                             )>
-                                                {plan.status.label()}
+                                                {status.label()}
                                             </span>
                                         </span>
                                     </A>

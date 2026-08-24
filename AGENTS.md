@@ -131,7 +131,8 @@ crates/
     scan.rs         Filesystem scanning  (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
-                    credential.rs, broker.rs (leases)
+                    catalogue.rs (live /models list), credential.rs,
+                    broker.rs (leases)
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, decree.rs, conversation.rs,
                     map/ (mod.rs + city.rs)
@@ -203,6 +204,13 @@ build on top of a placeholder believing it is real.
   `AwaitingReview` (or `Blocked`/`Failed`), releasing the lease on every path —
   including when the browser walks away mid-draft. Two providers: an offline
   deterministic `mock` (the default) and GitHub Copilot.
+- **Choosing a model and an effort, per plan.** The catalogue is read live from
+  Copilot's `/models` after the credential helper runs, so the picker offers
+  only models that will actually serve, and only the reasoning efforts each one
+  declares. The choice is settled when the plan opens and recorded on it, so a
+  conversation keeps being drawn by the model it started with; the last one used
+  is remembered in the browser, and a remembered model that has since been
+  withdrawn degrades to the default rather than failing the decree.
 - **Credential resolution** from `KINGDOM_API_KEY` or a helper command
   (`agency auth github` by default), with the contract tested.
 
@@ -226,8 +234,11 @@ important visual states unreachable during development. A test pins this.
 
 Copy `.kingdom.env.example` to `.kingdom.env` (gitignored). With nothing set,
 the offline mock drafts every plan, so a fresh clone works with no credential
-and no network. The decree bar's provider badge reports whether a credential
-actually resolves, not merely whether one is configured.
+and no network. `KINGDOM_MODEL_PROVIDER` and `KINGDOM_MODEL` now only decide
+which model the picker *opens on* — the King changes it per plan from the decree
+bar, and a Copilot credential unlocks the live catalogue. The decree bar's
+provider badge reports whether a credential actually resolves, not merely
+whether one is configured.
 
 ---
 

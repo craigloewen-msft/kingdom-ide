@@ -8,7 +8,7 @@
 
 #[cfg(feature = "ssr")]
 use kingdom_core::PlanId;
-use kingdom_core::{Kingdom, ModelStatus, Plan};
+use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan};
 use leptos::prelude::*;
 
 /// In-memory kingdom state.
@@ -111,7 +111,11 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 /// has been touched yet, so there is nothing to claim; a lease taken here would
 /// make the city look busy while the King is still reading.
 #[server(BeginPlan, "/api")]
-pub async fn begin_plan(prompt: String, city: Option<String>) -> Result<Plan, ServerFnError> {
+pub async fn begin_plan(
+    prompt: String,
+    city: Option<String>,
+    choice: Option<ModelChoice>,
+) -> Result<Plan, ServerFnError> {
     use kingdom_core::CityId;
 
     let prompt = prompt.trim().to_string();
@@ -123,13 +127,16 @@ pub async fn begin_plan(prompt: String, city: Option<String>) -> Result<Plan, Se
         city.ok_or_else(|| ServerFnError::new("Choose a city before issuing a decree."))?,
     );
 
+    // Resolved here rather than at draft time so the plan records what it will
+    // actually be drawn by from the instant it appears in the rail. A model the
+    // King's browser remembers but Copilot no longer serves degrades to the
+    // default rather than failing the decree outright.
+    let choice = crate::llm::catalogue::catalogue()
+        .await
+        .resolve(choice.as_ref());
+
     let plan_id = PlanId::new(format!("plan-{}", next_plan_number()));
-    let plan = Plan::opened(
-        plan_id,
-        city_id.clone(),
-        &prompt,
-        crate::llm::intended_model_name(),
-    );
+    let plan = Plan::opened(plan_id, city_id.clone(), &prompt, &choice);
 
     let mut kingdom = lock()?;
     if kingdom.city(&city_id).is_none() {
@@ -177,7 +184,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 
     let plan_id = PlanId::new(plan);
 
-    let (brief, transcript, prompt) = {
+    let (brief, transcript, prompt, choice) = {
         let mut kingdom = lock()?;
 
         let Some(existing) = kingdom.plan(&plan_id).cloned() else {
@@ -231,7 +238,10 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             }
         }
 
-        (brief, transcript, prompt)
+        // Drafting keeps whatever the plan is already being drawn by: switching
+        // model silently mid-conversation would make the transcript a record of
+        // nothing in particular. The choice was settled when the plan opened.
+        (brief, transcript, prompt, existing.choice())
     };
 
     // Spawned rather than awaited inline, because the lease is already held.
@@ -241,15 +251,8 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // permanently Drafting and blocking every later decree with no way to
     // clear it. A detached task loses only the reply, never the release.
     let handle = tokio::spawn(async move {
-        let outcome = match crate::llm::configured().await {
+        let outcome = match crate::llm::configured(&choice).await {
             Ok(model) => {
-                // Recorded now rather than at open: this is the model that
-                // actually did the work, credential and all.
-                if let Ok(mut kingdom) = lock() {
-                    update(&mut kingdom, &plan_id, |p| {
-                        p.model = model.name().to_string()
-                    });
-                }
                 model
                     .draft(&Brief {
                         city: brief,
@@ -312,6 +315,15 @@ fn settle(
 #[server(GetModelStatus, "/api")]
 pub async fn model_status() -> Result<ModelStatus, ServerFnError> {
     Ok(crate::llm::status().await)
+}
+
+/// Every model the King can choose between, and what each will accept.
+///
+/// Read live from the provider rather than hard-coded, so the picker cannot
+/// offer a model that has been withdrawn or hide one that has just landed.
+#[server(ListModels, "/api")]
+pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
+    Ok(crate::llm::catalogue::catalogue().await)
 }
 
 /// A suggested starting folder, so the King is not typing a path from scratch.

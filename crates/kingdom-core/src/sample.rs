@@ -46,12 +46,13 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         ),
     ];
 
+    let mock = ModelChoice::new("mock", None);
     let mut plans = Vec::new();
     for (i, (id, prompt, status, leases)) in scripted.into_iter().enumerate() {
         let city = &cities[i % cities.len()];
         let id = PlanId::new(id);
 
-        let mut plan = Plan::opened(id.clone(), city.id.clone(), prompt, "mock");
+        let mut plan = Plan::opened(id.clone(), city.id.clone(), prompt, &mock);
         plan.title = format!("{} of {}", plan_title(i), city.name);
         plan.summary = match status {
             PlanStatus::Blocked => format!(
@@ -84,7 +85,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         PlanId::new("plan-settled-approved"),
         first.id.clone(),
         "Harden the error paths",
-        "mock",
+        &mock,
     );
     approved.title = format!("The Old Ramparts of {}", first.name);
     approved.summary = "Hardened the error paths. Approved and built.".into();
@@ -96,7 +97,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         PlanId::new("plan-settled-rejected"),
         first.id.clone(),
         "Rewrite the scanner from scratch",
-        "mock",
+        &mock,
     );
     rejected.title = format!("The Folly of {}", first.name);
     rejected.summary = "Proposed rewriting the scanner. Refused.".into();
