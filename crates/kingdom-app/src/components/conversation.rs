@@ -7,7 +7,7 @@
 
 use crate::api::{draft_plan, get_kingdom, say};
 use crate::app::KingdomState;
-use kingdom_core::{Plan, PlanId, PlanStatus, Speaker};
+use kingdom_core::{Entry, Plan, PlanId, PlanStatus, Speaker};
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
@@ -51,8 +51,8 @@ pub fn Conversation() -> impl IntoView {
 
     // Drafting is kicked off here rather than by whoever opened the plan, so
     // that landing on a freshly opened plan and reloading one mid-draft take
-    // the same path. `draft_plan` is idempotent while a lease is held, so this
-    // cannot start a second draft over a running one.
+    // the same path. `draft_plan` is idempotent while its busy mark is set, so
+    // this cannot start a second draft over a running one.
     let draft = Action::new(move |id: &PlanId| {
         let id = id.to_string();
         async move {
@@ -74,7 +74,7 @@ pub fn Conversation() -> impl IntoView {
         let Some(p) = plan.get() else { return };
         let unstarted = p.status == PlanStatus::Drafting
             && !p.is_busy()
-            && !p.transcript.iter().any(|u| u.speaker == Speaker::Court);
+            && !p.said().any(|u| u.speaker == Speaker::Court);
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());
         }
@@ -141,6 +141,9 @@ fn ChamberBody(
     let summary = plan.summary.clone();
     let has_summary = !summary.is_empty();
     let has_touches = !touches.is_empty();
+    let workspace_label = plan.workspace.mode.label();
+    let workspace_path = plan.workspace.path.clone();
+    let workspace_isolated = plan.workspace.is_isolated();
 
     // `StoredValue` rather than a captured `PlanId`: a closure holding an owned
     // non-Copy value is `FnOnce` and cannot be used by both handlers below.
@@ -163,6 +166,16 @@ fn ChamberBody(
                         {move || city.get().unwrap_or_else(|| "unknown city".into())}
                     </span>
                     <span class="chamber-model">{plan.choice().label()}</span>
+                    // Isolation the King cannot see is isolation he cannot
+                    // trust, so where this plan works is stated next to what is
+                    // drafting it, with the full path on hover.
+                    <span
+                        class="chamber-workspace"
+                        class:isolated=workspace_isolated
+                        title=workspace_path
+                    >
+                        {workspace_label}
+                    </span>
                 </div>
             </div>
             <span class=format!("plan-badge plan-{}", status.css_suffix())>
@@ -230,7 +243,7 @@ fn ChamberBody(
     }
 }
 
-/// One plan's conversation, oldest first.
+/// One plan's log, oldest first: what was said, and what happened.
 #[component]
 fn Transcript(plan: Plan) -> impl IntoView {
     let lines = plan.transcript.clone();
@@ -242,14 +255,27 @@ fn Transcript(plan: Plan) -> impl IntoView {
         >
             {
                 let (_, line) = entry;
-                let royal = line.speaker == Speaker::King;
-                view! {
-                    <div class="chat-msg" class:royal=royal>
-                        <span class="msg-who">
-                            {if royal { "You" } else { "Court" }}
-                        </span>
-                        <span class="msg-body">{line.body.clone()}</span>
-                    </div>
+                match line {
+                    Entry::Said(u) => {
+                        let royal = u.speaker == Speaker::King;
+                        view! {
+                            <div class="chat-msg" class:royal=royal>
+                                <span class="msg-who">
+                                    {if royal { "You" } else { "Court" }}
+                                </span>
+                                <span class="msg-body">{u.body.clone()}</span>
+                            </div>
+                        }
+                        .into_any()
+                    }
+                    // Not a bubble: nothing said this, and dressing an app
+                    // notice as counsel would misrepresent who is speaking.
+                    Entry::Note(n) => view! {
+                        <div class=format!("chat-note note-{}", n.kind.css_suffix())>
+                            {n.body.clone()}
+                        </div>
+                    }
+                    .into_any(),
                 }
             }
         </For>

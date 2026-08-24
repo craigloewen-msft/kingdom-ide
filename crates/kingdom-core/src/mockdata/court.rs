@@ -13,7 +13,7 @@
 //! here when plans can genuinely collide.
 
 use crate::ids::PlanId;
-use crate::model::{City, ModelChoice, Plan, PlanStatus, Speaker};
+use crate::model::{City, ModelChoice, Plan, PlanStatus, Speaker, Workspace};
 
 /// The standard opening court: whatever [`crate::sample::populate_court`] makes.
 ///
@@ -37,6 +37,7 @@ pub fn quiet_court(cities: &[City]) -> Vec<Plan> {
         city.id.clone(),
         "Tidy the documentation",
         &ModelChoice::new("mock", None),
+        Workspace::in_place(&city.path),
     );
     plan.title = format!("The Quiet Works of {}", city.name);
     plan.summary = "Nothing in flight. All is well.".into();

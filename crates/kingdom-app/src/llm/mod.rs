@@ -10,7 +10,9 @@ pub mod copilot;
 pub mod credential;
 pub mod mock;
 
-use kingdom_core::{City, CredentialState, ModelChoice, ModelProvider, ModelStatus, Utterance};
+use kingdom_core::{
+    City, CredentialState, ModelChoice, ModelProvider, ModelStatus, Utterance, Workspace,
+};
 
 /// Everything a model is told about the work.
 ///
@@ -19,9 +21,15 @@ use kingdom_core::{City, CredentialState, ModelChoice, ModelProvider, ModelStatu
 #[derive(Debug, Clone)]
 pub struct Brief {
     pub city: CityBrief,
-    /// The conversation so far, oldest first, excluding `prompt`.
+    /// What has actually been *said*, oldest first, excluding `prompt`.
+    ///
+    /// [`Utterance`] rather than `kingdom_core::Entry` on purpose: Kingdom's own
+    /// notices -- a failed call or a workspace event -- are not words anybody spoke,
+    /// and replaying them as the model's own prior turns would teach it to
+    /// answer in the voice of the plumbing. The type is what prevents that;
+    /// see `Plan::said`.
     pub transcript: Vec<Utterance>,
-    /// The decree being answered now.
+    /// The message being answered now.
     pub prompt: String,
 }
 
@@ -41,11 +49,15 @@ pub struct CityBrief {
 }
 
 impl CityBrief {
-    /// Builds a brief from a scanned city and the kingdom root it sits under.
-    pub fn from_city(city: &City, kingdom_root: &str) -> Self {
+    /// Builds a brief from a scanned city and the workspace the plan works in.
+    ///
+    /// The path is the *workspace's*, not the project's: a plan drafting against
+    /// an isolated worktree must be told where it is actually working, or every
+    /// file it names is a file in somebody else's checkout.
+    pub fn from_city(city: &City, workspace: &Workspace) -> Self {
         Self {
             name: city.name.clone(),
-            path: format!("{}/{}", kingdom_root.trim_end_matches('/'), city.path),
+            path: workspace.path.clone(),
             stack: city.kind.label().to_string(),
             file_count: city.file_count,
             has_git: city.has_git,

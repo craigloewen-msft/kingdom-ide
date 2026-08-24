@@ -8,7 +8,7 @@
 
 #[cfg(feature = "ssr")]
 use kingdom_core::PlanId;
-use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan};
+use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan, WorkspaceMode};
 use leptos::prelude::*;
 
 /// In-memory kingdom state.
@@ -233,18 +233,19 @@ fn sandbox_enforced() -> bool {
 /// The split between opening and drafting is what lets the King land in the
 /// plan's conversation the moment he presses Start: the plan has an id, a
 /// title and his own words in its transcript before the model has been called
-/// at all. [`draft_plan`] then does the slow, resource-claiming half.
+/// at all. [`draft_plan`] then does the slow half.
 ///
-/// Deliberately takes **no lease** and makes **no model call**. Nothing shared
-/// has been touched yet, so there is nothing to claim; a lease taken here would
-/// make the city look busy while the King is still reading.
+/// Makes **no model call**. It does, however, prepare the workspace. A workspace
+/// that cannot be cut must fail loudly *before* a plan exists, rather than
+/// leaving a plan pointing nowhere.
 #[server(BeginPlan, "/api")]
 pub async fn begin_plan(
     prompt: String,
     city: Option<String>,
     choice: Option<ModelChoice>,
+    workspace: Option<WorkspaceMode>,
 ) -> Result<Plan, ServerFnError> {
-    use kingdom_core::CityId;
+    use kingdom_core::{CityId, NoteKind};
 
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -254,6 +255,7 @@ pub async fn begin_plan(
     let city_id = CityId::new(
         city.ok_or_else(|| ServerFnError::new("Choose a city before issuing a decree."))?,
     );
+    let mode = workspace.unwrap_or_default();
 
     // Resolved here rather than at draft time so the plan records what it will
     // actually be drawn by from the instant it appears in the rail. A model the
@@ -264,15 +266,55 @@ pub async fn begin_plan(
         .resolve(choice.as_ref());
 
     let plan_id = PlanId::new(format!("plan-{}", next_plan_number()));
-    let plan = Plan::opened(plan_id, city_id.clone(), &prompt, &choice);
 
-    let mut kingdom = lock()?;
-    if kingdom.city(&city_id).is_none() {
-        return Err(ServerFnError::new("No such city in this kingdom."));
-    }
-    kingdom.plans.push(plan.clone());
+    let city_root = {
+        let kingdom = lock()?;
+        let Some(city) = kingdom.city(&city_id) else {
+            return Err(ServerFnError::new("No such city in this kingdom."));
+        };
+        std::path::Path::new(&kingdom.root).join(&city.path)
+    };
+
+    let workspace = crate::worktree::prepare(&city_root, &mode)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut plan = Plan::opened(plan_id, city_id, &prompt, &choice, workspace.clone());
+    // Where an agent is fenced in is not something it said, it is something that
+    // happened -- and isolation the King cannot see is isolation he cannot
+    // trust, so it is recorded in the log rather than only in the header.
+    plan.note(
+        NoteKind::Workspace,
+        match &workspace.branch {
+            Some(branch) => format!("Working in {} on {branch}.", workspace.path),
+            None => format!("Working directly in {}, with no isolation.", workspace.path),
+        },
+    );
+
+    lock()?.plans.push(plan.clone());
 
     Ok(plan)
+}
+
+/// Local branches in a city's repository, for the workspace picker.
+///
+/// Offered as a list so the King picks a branch that exists rather than typing
+/// one that does not. A city with no git yields an empty list, which the picker
+/// reads as "nothing to offer here".
+#[server(ListBranches, "/api")]
+pub async fn list_branches(city: String) -> Result<Vec<String>, ServerFnError> {
+    use kingdom_core::CityId;
+
+    let city_id = CityId::new(city);
+    let root = {
+        let kingdom = lock()?;
+        let Some(city) = kingdom.city(&city_id) else {
+            return Ok(Vec::new());
+        };
+        std::path::Path::new(&kingdom.root).join(&city.path)
+    };
+
+    Ok(crate::worktree::branches(&root).await)
 }
 
 /// Records another decree on an existing plan, without drafting a reply.
@@ -329,19 +371,18 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         let Some(city) = kingdom.city(&existing.city).cloned() else {
             return Err(ServerFnError::new("That plan's city is gone."));
         };
-        let brief = CityBrief::from_city(&city, &kingdom.root);
+        // Briefed on the workspace it actually holds, not the project it was cut
+        // from: an isolated plan naming files in somebody else's checkout would
+        // be worse than useless.
+        let brief = CityBrief::from_city(&city, &existing.workspace);
 
-        // The decree being answered is the King's last word; everything before
-        // it is the context leading up to it.
-        let (transcript, prompt) = match existing
-            .transcript
-            .iter()
-            .rposition(|u| u.speaker == Speaker::King)
-        {
-            Some(i) => (
-                existing.transcript[..i].to_vec(),
-                existing.transcript[i].body.clone(),
-            ),
+        // The message being answered is the last thing the King *said*;
+        // everything said before it is the context leading up to it. Kingdom's
+        // own notices are not in this sequence at all -- `said()` is the only
+        // door between a plan's log and a model, and it does not open for them.
+        let said: Vec<_> = existing.said().cloned().collect();
+        let (transcript, prompt) = match said.iter().rposition(|u| u.speaker == Speaker::King) {
+            Some(i) => (said[..i].to_vec(), said[i].body.clone()),
             None => (Vec::new(), existing.prompt.clone()),
         };
 
@@ -394,7 +435,7 @@ fn settle(
     plan_id: PlanId,
     outcome: Result<crate::llm::Draft, crate::llm::ModelError>,
 ) -> Result<Plan, ServerFnError> {
-    use kingdom_core::{PlanStatus, Speaker};
+    use kingdom_core::{NoteKind, PlanStatus, Speaker};
 
     let mut kingdom = lock()?;
 
@@ -409,10 +450,12 @@ fn settle(
                 plan.say(Speaker::Court, draft.body.clone());
             }
             Err(e) => {
+                // A failure is Kingdom reporting, not the model speaking -- so
+                // the next turn must not replay it as prior counsel.
                 let message = e.to_string();
                 plan.status = PlanStatus::Failed;
                 plan.summary = message.clone();
-                plan.say(Speaker::Court, message);
+                plan.note(NoteKind::Failed, message);
             }
         }
     });

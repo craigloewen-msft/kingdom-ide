@@ -45,7 +45,13 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         let city = &cities[i % cities.len()];
         let id = PlanId::new(id);
 
-        let mut plan = Plan::opened(id.clone(), city.id.clone(), prompt, &mock);
+        let mut plan = Plan::opened(
+            id.clone(),
+            city.id.clone(),
+            prompt,
+            &mock,
+            Workspace::in_place(&city.path),
+        );
         plan.title = format!("{} of {}", plan_title(i), city.name);
         plan.summary = match status {
             PlanStatus::Failed => format!("The court could not reach a model for {}.", city.name),
@@ -53,7 +59,10 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         };
         plan.status = status;
         plan.touches = notable_files(city, 3);
-        plan.say(Speaker::Court, plan.summary.clone());
+        match status {
+            PlanStatus::Failed => plan.note(NoteKind::Failed, plan.summary.clone()),
+            _ => plan.say(Speaker::Court, plan.summary.clone()),
+        }
         // A plan mid-draft is the one state that carries a `working_on`, and it
         // is what puts a crane over the city on the map.
         if status == PlanStatus::Drafting {
@@ -72,6 +81,7 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         first.id.clone(),
         "Harden the error paths",
         &mock,
+        Workspace::in_place(&first.path),
     );
     approved.title = format!("The Old Ramparts of {}", first.name);
     approved.summary = "Hardened the error paths. Approved and built.".into();
@@ -84,6 +94,7 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         first.id.clone(),
         "Rewrite the scanner from scratch",
         &mock,
+        Workspace::in_place(&first.path),
     );
     rejected.title = format!("The Folly of {}", first.name);
     rejected.summary = "Proposed rewriting the scanner. Refused.".into();

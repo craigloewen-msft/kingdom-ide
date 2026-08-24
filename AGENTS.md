@@ -1,9 +1,7 @@
 # AGENTS.md
 
 Guidance for any agent (or human) working on **Kingdom IDE**. Read this before
-writing code here. It explains not just the conventions but the reasoning
-behind them, because the reasoning is what tells you what to do in the cases
-this document does not cover.
+writing code here.
 
 ---
 
@@ -49,15 +47,6 @@ about the **stance** the user takes toward their agents.
 | **City** | `City` | one project directory inside it |
 | **Architectural Plan** | `Plan` | a proposal, drafted by a model, awaiting your review |
 | **The King** | the user | the only one who approves anything |
-
-There was a **Crown Resource** / **Lease** pair here, for arbitrating contended
-machine resources. It was removed — see §3 for why, and for when it comes back.
-
-There is deliberately **no agent noun**. An earlier design had an `Architect`
-entity that owned plans, which meant two state machines to keep in sync for no
-gain: the King never reviews an architect, he reviews a plan. A `Plan` is now
-both the unit of work and the unit of review, and which model is drafting it is
-just a field on it.
 
 The point of the metaphor: **you are a sovereign reviewing proposals, not a
 typing-assisted programmer.** An architect brings you plans. You approve or
@@ -144,6 +133,7 @@ crates/
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
     mock.rs         Seeding a realm onto disk (ssr only)
+    worktree.rs     Preparing a plan's workspace via git (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
                     catalogue.rs (live /models list), credential.rs
@@ -206,7 +196,6 @@ build on top of a placeholder believing it is real.
   order, caps with honest aggregation (tested)
 - Pan, zoom, city selection, level-of-detail switching
 - The client/server round trip for every `#[server]` function
-- Lease compatibility logic (tested)
 - **Two routes, and a plan you can navigate to.** `/` is the realm (map plus the
   decree bar); `/plan/:id` is that plan's chamber — its transcript, status,
   summary and touched files. The rail links to both, and every plan has a URL
@@ -247,6 +236,18 @@ set `KINGDOM_SANDBOX=1` so the server enforces it rather than trusting you to
 remember. This matters more with every capability added: the moment plans get
 hands (§8 item 3), whatever folder is open is what an agent will be running
 commands against.
+- **A workspace per plan.** Every decree chooses where its work happens before
+  the plan exists: a **fresh worktree** (a GUID'd checkout under the city's
+  `.kingdom/`, on a branch of its own), **a named branch** checked out into its
+  own worktree, or **the folder itself** with no isolation. The choice is settled
+  when the plan opens, recorded on it, shown in the chamber header, and is what
+  the model is briefed with. A city with no `.git` refuses isolation loudly
+  rather than silently downgrading to working in place.
+- **A clean prompt.** Nothing of the metaphor reaches a model. The system prompt
+  is plain, and Kingdom's own notices (a failed call or a workspace cut) are
+  `Entry::Note`s rather than utterances, so they are structurally incapable of
+  being replayed to a model as its own prior words. `Plan::said()` is the only
+  door between a log and a provider, and it yields `Utterance`.
 
 **Faked — `kingdom_core::sample::populate_court`:**
 - The *opening* court: the plans a kingdom starts with, before the King has
@@ -254,6 +255,10 @@ commands against.
 
 **Not built at all:**
 - Agents that *do* anything beyond replying: no tool use, no commands, no edits
+  (a plan now has a workspace to do them *in*, but still only talks)
+- Removing worktrees. They persist under `.kingdom/` so the King can inspect or
+  merge them; deciding when one is disposable is its own question, and guessing
+  would throw away real work.
 - Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
 - Persistence (state is in memory; a restart empties the kingdom)
 - Plan approval/rejection actually doing anything

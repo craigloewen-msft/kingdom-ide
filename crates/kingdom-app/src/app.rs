@@ -2,7 +2,7 @@
 
 use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, DecreeBar, KingdomMap, Sidebar};
-use kingdom_core::{CityId, Kingdom, ModelChoice};
+use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
@@ -36,6 +36,12 @@ pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 const MODEL_KEY: &str = "kingdom.model";
 #[cfg(feature = "hydrate")]
 const EFFORT_KEY: &str = "kingdom.effort";
+/// Where the last-used workspace mode is remembered. Two keys, because a mode
+/// carrying a branch name has to store it and most modes have none.
+#[cfg(feature = "hydrate")]
+const WORKSPACE_KEY: &str = "kingdom.workspace";
+#[cfg(feature = "hydrate")]
+const BRANCH_KEY: &str = "kingdom.branch";
 
 /// Shared UI state, provided via context so the three regions stay in sync
 /// without threading props through every layer.
@@ -58,6 +64,8 @@ pub struct KingdomState {
     /// chosen or a remembered choice has been restored, at which point the
     /// server's catalogue default applies.
     pub choice: RwSignal<Option<ModelChoice>>,
+    /// How the next new plan will be isolated on disk.
+    pub workspace: RwSignal<WorkspaceMode>,
 }
 
 impl KingdomState {
@@ -70,6 +78,7 @@ impl KingdomState {
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             choice: RwSignal::new(None),
+            workspace: RwSignal::new(WorkspaceMode::default()),
         }
     }
 
@@ -77,6 +86,12 @@ impl KingdomState {
     pub fn choose_model(&self, choice: ModelChoice) {
         store_choice(&choice);
         self.choice.set(Some(choice));
+    }
+
+    /// Records how the next plan should be isolated, and remembers it.
+    pub fn choose_workspace(&self, mode: WorkspaceMode) {
+        store_workspace(&mode);
+        self.workspace.set(mode);
     }
 }
 
@@ -136,6 +151,62 @@ fn store_choice(choice: &ModelChoice) {
     let _ = choice;
 }
 
+/// Restores the remembered workspace mode, for the same reason and in the same
+/// place as [`restore_choice`].
+fn restore_workspace(mode: RwSignal<WorkspaceMode>) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(storage) = local_storage() else {
+            return;
+        };
+        let Some(stored) = storage.get_item(WORKSPACE_KEY).ok().flatten() else {
+            return;
+        };
+        let restored = match stored.as_str() {
+            "in-place" => WorkspaceMode::InPlace,
+            "branch" => storage
+                .get_item(BRANCH_KEY)
+                .ok()
+                .flatten()
+                .filter(|b| !b.trim().is_empty())
+                .map(WorkspaceMode::Branch)
+                // A remembered branch that has since been deleted or renamed
+                // degrades to a fresh worktree rather than failing the decree,
+                // exactly as a withdrawn model degrades to the default. The
+                // fallback is deliberately the isolated one.
+                .unwrap_or(WorkspaceMode::Fresh),
+            _ => WorkspaceMode::Fresh,
+        };
+        mode.set(restored);
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = mode;
+}
+
+fn store_workspace(mode: &WorkspaceMode) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        match mode {
+            WorkspaceMode::Fresh => {
+                let _ = storage.set_item(WORKSPACE_KEY, "fresh");
+                let _ = storage.remove_item(BRANCH_KEY);
+            }
+            WorkspaceMode::InPlace => {
+                let _ = storage.set_item(WORKSPACE_KEY, "in-place");
+                let _ = storage.remove_item(BRANCH_KEY);
+            }
+            WorkspaceMode::Branch(b) => {
+                let _ = storage.set_item(WORKSPACE_KEY, "branch");
+                let _ = storage.set_item(BRANCH_KEY, b);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = mode;
+}
+
 /// Root component: the throne room.
 #[component]
 pub fn App() -> impl IntoView {
@@ -144,6 +215,7 @@ pub fn App() -> impl IntoView {
     let state = KingdomState::new();
     provide_context(state);
     restore_choice(state.choice);
+    restore_workspace(state.workspace);
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the King back to the folder picker.

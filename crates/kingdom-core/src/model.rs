@@ -303,6 +303,74 @@ impl CityKind {
 }
 
 // ---------------------------------------------------------------------------
+// Workspaces -- where a plan actually works
+// ---------------------------------------------------------------------------
+
+/// How isolated a plan's working copy is.
+///
+/// This is the King's answer to "can this agent trample the folder I am in?".
+/// It is chosen per decree because the honest answer differs per decree: a
+/// survey wants the folder as it stands, a change wants somewhere of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceMode {
+    /// A throwaway worktree cut from the city's current HEAD.
+    Fresh,
+    /// A named branch, checked out into its own worktree.
+    Branch(String),
+    /// The project directory itself. No isolation.
+    InPlace,
+}
+
+impl WorkspaceMode {
+    /// Short label for the decree bar's chip and the chamber header.
+    pub fn label(&self) -> String {
+        match self {
+            WorkspaceMode::Fresh => "fresh worktree".to_string(),
+            WorkspaceMode::Branch(b) => format!("branch: {b}"),
+            WorkspaceMode::InPlace => "in place".to_string(),
+        }
+    }
+}
+
+impl Default for WorkspaceMode {
+    /// Isolation by default: the surprising outcome should be the one the King
+    /// asked for, not the one that quietly edits the folder he is sitting in.
+    fn default() -> Self {
+        WorkspaceMode::Fresh
+    }
+}
+
+/// A prepared place on disk for one plan to work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub mode: WorkspaceMode,
+    /// Absolute path the plan actually reads and writes.
+    pub path: String,
+    /// The branch checked out there, when there is one.
+    pub branch: Option<String>,
+    /// The GUID naming the worktree folder, for `Fresh` and `Branch`.
+    pub id: Option<String>,
+}
+
+impl Workspace {
+    /// The city's own directory, untouched.
+    pub fn in_place(path: impl Into<String>) -> Self {
+        Self {
+            mode: WorkspaceMode::InPlace,
+            path: path.into(),
+            branch: None,
+            id: None,
+        }
+    }
+
+    /// True when this plan has a checkout of its own, and so cannot collide
+    /// with a plan working elsewhere in the same repository.
+    pub fn is_isolated(&self) -> bool {
+        self.id.is_some()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plans -- the unit of work AND the unit of review
 // ---------------------------------------------------------------------------
 
@@ -331,9 +399,12 @@ pub struct Plan {
     /// How hard that model was asked to think. `None` is its own default,
     /// which is a different request from any explicit level.
     pub effort: Option<ModelEffort>,
-    /// The conversation so far, King and court alternating.
-    pub transcript: Vec<Utterance>,
+    /// The chat log so far: what was said, and what happened, in order.
+    pub transcript: Vec<Entry>,
     pub status: PlanStatus,
+    /// Where on disk this plan works. Settled when the plan opens and never
+    /// changed afterwards.
+    pub workspace: Workspace,
     /// What this plan is busy with right now, in plain language, or `None`
     /// when nothing is in flight.
     ///
@@ -353,6 +424,7 @@ impl Plan {
         city: CityId,
         prompt: impl Into<String>,
         choice: &ModelChoice,
+        workspace: Workspace,
     ) -> Self {
         let prompt = prompt.into();
         Self {
@@ -361,14 +433,15 @@ impl Plan {
             title: title_from_prompt(&prompt),
             summary: String::new(),
             touches: Vec::new(),
-            transcript: vec![Utterance {
+            transcript: vec![Entry::Said(Utterance {
                 speaker: Speaker::King,
                 body: prompt.clone(),
-            }],
+            })],
             prompt,
             model: choice.model.clone(),
             effort: choice.effort,
             status: PlanStatus::Drafting,
+            workspace,
             working_on: None,
         }
     }
@@ -391,11 +464,34 @@ impl Plan {
         !matches!(self.status, PlanStatus::Approved | PlanStatus::Rejected)
     }
 
+    /// Records words a participant produced. These, and only these, are ever
+    /// sent to a model.
     pub fn say(&mut self, speaker: Speaker, body: impl Into<String>) {
-        self.transcript.push(Utterance {
+        self.transcript.push(Entry::Said(Utterance {
             speaker,
             body: body.into(),
-        });
+        }));
+    }
+
+    /// Records something Kingdom itself reports. Never leaves the machine.
+    pub fn note(&mut self, kind: NoteKind, body: impl Into<String>) {
+        self.transcript.push(Entry::Note(Note {
+            kind,
+            body: body.into(),
+        }));
+    }
+
+    /// Just the utterances, in order.
+    ///
+    /// The single doorway between a plan's log and anything that talks to a
+    /// model. Because it yields [`Utterance`] rather than [`Entry`], a caller
+    /// downstream of it *cannot* forward a note by accident -- the exclusion is
+    /// the type, not a filter each caller has to remember.
+    pub fn said(&self) -> impl Iterator<Item = &Utterance> {
+        self.transcript.iter().filter_map(|e| match e {
+            Entry::Said(u) => Some(u),
+            Entry::Note(_) => None,
+        })
     }
 }
 
@@ -414,11 +510,54 @@ fn title_from_prompt(prompt: &str) -> String {
     }
 }
 
-/// One line of a plan's conversation.
+/// One line of a plan's chat log: either something was said, or something
+/// happened.
+///
+/// A notice is deliberately **not** a third [`Speaker`]. Nothing utters it,
+/// nothing can reply to it, and it is never part of the exchange -- it is
+/// information *about* the chat, shown inside the chat. As a speaker variant it
+/// would have to be excluded by hand at every match, and the first place that
+/// forgot would feed Kingdom's own plumbing back to a model as its own prior
+/// words. Splitting it out one level up makes that mistake unrepresentable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Entry {
+    /// Words a participant produced. These, and only these, go to a model.
+    Said(Utterance),
+    /// Something Kingdom itself reports: a failed call or a workspace cut.
+    /// Never sent anywhere.
+    Note(Note),
+}
+
+/// Something a participant said.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Utterance {
     pub speaker: Speaker,
     pub body: String,
+}
+
+/// Something that happened, reported by Kingdom itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub kind: NoteKind,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoteKind {
+    /// The model could not be reached, or refused.
+    Failed,
+    /// Where this plan is working, and how it was prepared.
+    Workspace,
+}
+
+impl NoteKind {
+    /// Suffix for the CSS class the chamber styles a note with.
+    pub fn css_suffix(self) -> &'static str {
+        match self {
+            NoteKind::Failed => "failed",
+            NoteKind::Workspace => "workspace",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -799,5 +938,52 @@ mod tests {
         let mock = ModelChoice::new("mock", None);
         assert_eq!(mock.provider(), ModelProvider::Mock);
         assert_eq!(mock.api_name(), "mock");
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+
+    /// Kingdom's own notices must never reach a model.
+    ///
+    /// This is the bug the `Entry`/`Note` split exists to make unrepresentable.
+    /// When every log line was an utterance, app notices and failed calls were
+    /// stored as things the *model* had said, and the next turn replayed them to
+    /// it as its own prior words -- teaching it to answer in the voice of the
+    /// plumbing. `said()` is the only door between a plan's log and a model,
+    /// so it is the thing worth pinning: notes never come through it, ordering
+    /// survives, and the last King turn is still findable as the live prompt.
+    #[test]
+    fn notes_never_reach_the_model_and_the_prompt_survives_them() {
+        let mut plan = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "First question",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+        plan.note(
+            NoteKind::Workspace,
+            "Working in /dev/testburg/.kingdom/abc.",
+        );
+        plan.say(Speaker::Court, "First answer");
+        plan.note(NoteKind::Failed, "The first request failed.");
+        plan.say(Speaker::King, "Second question");
+
+        let said: Vec<_> = plan.said().cloned().collect();
+        assert_eq!(
+            said.iter().map(|u| u.body.as_str()).collect::<Vec<_>>(),
+            vec!["First question", "First answer", "Second question"],
+            "only utterances pass, and they keep their order"
+        );
+
+        // The prompt is the last thing the King said, even though a note landed
+        // between the turns.
+        let i = said
+            .iter()
+            .rposition(|u| u.speaker == Speaker::King)
+            .expect("the King has spoken");
+        assert_eq!(said[i].body, "Second question");
     }
 }

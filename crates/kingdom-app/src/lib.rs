@@ -14,6 +14,8 @@ pub mod llm;
 pub mod mock;
 #[cfg(feature = "ssr")]
 pub mod scan;
+#[cfg(feature = "ssr")]
+pub mod worktree;
 
 /// Entry point for the wasm bundle. Called by the browser once the script loads.
 #[cfg(feature = "hydrate")]

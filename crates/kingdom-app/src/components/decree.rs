@@ -6,10 +6,11 @@
 //! sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
-use crate::api::{begin_plan, list_models, model_status};
+use crate::api::{begin_plan, list_branches, list_models, model_status};
 use crate::app::KingdomState;
 use kingdom_core::{
     City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, ModelStatus,
+    WorkspaceMode,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -22,6 +23,7 @@ pub fn DecreeBar() -> impl IntoView {
     let (draft, set_draft) = signal(String::new());
     let (showing_setup, set_showing_setup) = signal(false);
     let (showing_models, set_showing_models) = signal(false);
+    let (showing_workspace, set_showing_workspace) = signal(false);
 
     let status = Resource::new(|| (), |_| model_status());
     let catalogue = Resource::new(|| (), |_| list_models());
@@ -57,11 +59,12 @@ pub fn DecreeBar() -> impl IntoView {
         // Send what the chip promised, not the raw stored value: they differ
         // exactly when a remembered model has left the catalogue.
         let chosen = choice.get_untracked();
+        let workspace = state.workspace.get_untracked();
         let navigate = navigate.clone();
 
         async move {
-            match begin_plan(prompt, city, chosen).await {
-                // Opening is instant -- no model call -- so the King
+            match begin_plan(prompt, city, chosen, Some(workspace)).await {
+                // Opening makes no model call, so the King
                 // lands in the conversation while the court is still thinking.
                 // The chamber itself kicks off the drafting.
                 Ok(plan) => {
@@ -130,6 +133,7 @@ pub fn DecreeBar() -> impl IntoView {
                     title="Choose the model and how hard it thinks"
                     on:click=move |_| {
                         set_showing_setup.set(false);
+                        set_showing_workspace.set(false);
                         set_showing_models.update(|s| *s = !*s);
                     }
                 >
@@ -137,6 +141,23 @@ pub fn DecreeBar() -> impl IntoView {
                         Some(c) => c.label(),
                         None => "\u{2026}".to_string(),
                     }}
+                    <span class="chip-chevron">"\u{2304}"</span>
+                </button>
+
+                // Where the next plan will work. Beside the model chip because
+                // they are the same kind of decision: both are settled before a
+                // decree is spent, and both are recorded on the plan.
+                <button
+                    class="workspace-chip"
+                    class:isolated={move || state.workspace.get() != WorkspaceMode::InPlace}
+                    title="Choose where this work happens"
+                    on:click=move |_| {
+                        set_showing_setup.set(false);
+                        set_showing_models.set(false);
+                        set_showing_workspace.update(|s| *s = !*s);
+                    }
+                >
+                    {move || state.workspace.get().label()}
                     <span class="chip-chevron">"\u{2304}"</span>
                 </button>
 
@@ -150,6 +171,7 @@ pub fn DecreeBar() -> impl IntoView {
                     title="How plans get drafted"
                     on:click=move |_| {
                         set_showing_models.set(false);
+                        set_showing_workspace.set(false);
                         set_showing_setup.update(|s| *s = !*s);
                     }
                 >
@@ -171,6 +193,10 @@ pub fn DecreeBar() -> impl IntoView {
                     chosen={Signal::derive(move || choice.get())}
                     on_close=move || set_showing_models.set(false)
                 />
+            </Show>
+
+            <Show when={move || showing_workspace.get()}>
+                <WorkspacePicker on_close=move || set_showing_workspace.set(false)/>
             </Show>
 
             <Show when={move || showing_setup.get()}>
@@ -327,6 +353,140 @@ fn ModelPicker(
                     </For>
                 </div>
             </Show>
+        </div>
+    }
+}
+
+/// The workspace picker: where the next plan's work actually happens.
+///
+/// Three options rather than a toggle, because they are three genuinely
+/// different bargains -- isolation with a new branch, isolation continuing
+/// existing work, and no isolation at all -- and collapsing any two of them
+/// would hide the one the King most needs to make on purpose.
+#[component]
+fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let (showing_branches, set_showing_branches) = signal(false);
+
+    let current = Memo::new(move |_| state.workspace.get());
+
+    // Reloaded whenever the selected city changes: branches are per repository,
+    // and offering another project's would be worse than offering none.
+    let branches = Resource::new(
+        move || state.selected.get().map(|c| c.to_string()),
+        |city| async move {
+            match city {
+                Some(c) => list_branches(c).await.unwrap_or_default(),
+                None => Vec::new(),
+            }
+        },
+    );
+
+    let choose = move |mode: WorkspaceMode| {
+        state.choose_workspace(mode);
+        on_close();
+    };
+
+    let is_fresh = Memo::new(move |_| current.get() == WorkspaceMode::Fresh);
+    let is_in_place = Memo::new(move |_| current.get() == WorkspaceMode::InPlace);
+    let is_branch = Memo::new(move |_| matches!(current.get(), WorkspaceMode::Branch(_)));
+
+    view! {
+        <div class="workspace-picker">
+            <div class="picker-head">
+                <span class="picker-title">"Work in"</span>
+                <button class="picker-close" on:click=move |_| on_close()>"\u{2715}"</button>
+            </div>
+
+            <ul class="workspace-list">
+                <li>
+                    <button
+                        class="workspace-row"
+                        class:chosen={move || is_fresh.get()}
+                        on:click=move |_| choose(WorkspaceMode::Fresh)
+                    >
+                        <span class="workspace-name">"A fresh worktree"</span>
+                        <span class="workspace-detail">
+                            "A new checkout under .kingdom/, on a branch of its own."
+                        </span>
+                    </button>
+                </li>
+
+                <li>
+                    <button
+                        class="workspace-row"
+                        class:chosen={move || is_branch.get()}
+                        on:click=move |_| set_showing_branches.update(|s| *s = !*s)
+                    >
+                        <span class="workspace-name">
+                            {move || match current.get() {
+                                WorkspaceMode::Branch(b) => format!("A branch \u{2014} {b}"),
+                                _ => "A specific branch\u{2026}".to_string(),
+                            }}
+                        </span>
+                        <span class="workspace-detail">
+                            "Checked out into its own worktree, same as above."
+                        </span>
+                    </button>
+
+                    <Show when={move || showing_branches.get()}>
+                        <ul class="branch-list">
+                            {move || match branches.get() {
+                                Some(list) if !list.is_empty() => list
+                                    .into_iter()
+                                    .map(|b| {
+                                        let picked = b.clone();
+                                        let name = b.clone();
+                                        view! {
+                                            <li>
+                                                <button
+                                                    class="branch-row"
+                                                    class:chosen={move || {
+                                                        current.get()
+                                                            == WorkspaceMode::Branch(name.clone())
+                                                    }}
+                                                    on:click=move |_| {
+                                                        choose(WorkspaceMode::Branch(picked.clone()))
+                                                    }
+                                                >
+                                                    {b.clone()}
+                                                </button>
+                                            </li>
+                                        }
+                                    })
+                                    .collect_view()
+                                    .into_any(),
+                                // Distinguishing "no branches" from "still
+                                // looking" matters: the first means this city is
+                                // not a git repository at all.
+                                Some(_) => view! {
+                                    <li class="branch-empty">
+                                        "No branches here \u{2014} this project is not under git."
+                                    </li>
+                                }
+                                .into_any(),
+                                None => view! {
+                                    <li class="branch-empty">"Reading the branches\u{2026}"</li>
+                                }
+                                .into_any(),
+                            }}
+                        </ul>
+                    </Show>
+                </li>
+
+                <li>
+                    <button
+                        class="workspace-row"
+                        class:chosen={move || is_in_place.get()}
+                        on:click=move |_| choose(WorkspaceMode::InPlace)
+                    >
+                        <span class="workspace-name">"This folder"</span>
+                        <span class="workspace-detail">
+                            "The project directory itself. No isolation."
+                        </span>
+                    </button>
+                </li>
+            </ul>
         </div>
     }
 }

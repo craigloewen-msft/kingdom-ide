@@ -1,6 +1,6 @@
 //! A deterministic, offline model.
 //!
-//! This exists so the whole drafting path -- lease, draft, transcript, status
+//! This exists so the whole drafting path -- busy mark, draft, transcript, status
 //! transitions -- can be exercised without a credential, a network, or a bill.
 //! It is the default provider precisely so a fresh clone works immediately.
 //!
