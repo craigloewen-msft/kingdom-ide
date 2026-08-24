@@ -55,7 +55,7 @@ impl Kingdom {
     pub fn plans_in<'a>(&'a self, id: &'a CityId) -> impl Iterator<Item = &'a Plan> + 'a {
         self.plans
             .iter()
-            .filter(move |p| &p.city == id && !p.is_errand())
+            .filter(move |p| &p.city == id && !p.is_subagent())
     }
 
     /// The errands one call sent, in the order they were sent.
@@ -69,13 +69,13 @@ impl Kingdom {
     /// the deed would have to be kept in step with the plans themselves, and the
     /// failure -- a named errand that does not exist, or an errand no call
     /// admits to -- would be silent.
-    pub fn errands_of<'a>(
+    pub fn subagents_of<'a>(
         &'a self,
         parent: &'a PlanId,
         tool_call: &'a str,
     ) -> impl Iterator<Item = &'a Plan> + 'a {
-        self.plans.iter().filter(move |p| match &p.errand_for {
-            Some(errand) => &errand.parent == parent && errand.tool_call == tool_call,
+        self.plans.iter().filter(move |p| match &p.spawned_by {
+            Some(subagent) => &subagent.parent == parent && subagent.tool_call == tool_call,
             None => false,
         })
     }
@@ -106,7 +106,7 @@ impl Kingdom {
     pub fn pending_plans(&self) -> impl Iterator<Item = &Plan> {
         self.plans
             .iter()
-            .filter(|p| p.status == PlanStatus::AwaitingReview && !p.is_errand())
+            .filter(|p| p.status == PlanStatus::AwaitingReview && !p.is_subagent())
     }
 }
 
@@ -488,9 +488,9 @@ pub struct Plan {
     ///
     /// Being a plan rather than a type of its own is what gives an errand a
     /// chamber, a watch socket and a record on disk for free -- see the module
-    /// docs on [`Plan::sent`] for what that buys and what it costs.
+    /// docs on [`Plan::spawned`] for what that buys and what it costs.
     #[serde(default)]
-    pub errand_for: Option<Errand>,
+    pub spawned_by: Option<SpawnedBy>,
 }
 
 /// Which call an errand was sent to answer.
@@ -499,7 +499,7 @@ pub struct Plan {
 /// than once: without it, a second round's chamber would show the first round's
 /// errands under its call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Errand {
+pub struct SpawnedBy {
     /// The plan that sent this one.
     pub parent: PlanId,
     /// The [`ToolCall::id`] of the call that sent it.
@@ -534,7 +534,7 @@ impl Plan {
             outcome: None,
             workspace,
             working_on: None,
-            errand_for: None,
+            spawned_by: None,
         }
     }
 
@@ -548,7 +548,7 @@ impl Plan {
     /// therefore owns nothing on disk and must never be finished: merging it
     /// would land its parent's half-done work and then delete the worktree from
     /// under a plan still running in it. `api::finish_plan` refuses on
-    /// [`Plan::is_errand`], and that guard is load-bearing.
+    /// [`Plan::is_subagent`], and that guard is load-bearing.
     ///
     /// Its **model and effort**, so a fan-out is drafted by the thing the King
     /// chose rather than by whatever the default happens to be that day.
@@ -562,7 +562,7 @@ impl Plan {
     /// repair pass, the chamber -- to buy nothing but a label. The label is
     /// fixed where labels belong: the chamber renders an errand's King turns as
     /// "Commission".
-    pub fn sent(id: PlanId, parent: &Plan, tool_call: &str, task: impl Into<String>) -> Self {
+    pub fn spawned(id: PlanId, parent: &Plan, tool_call: &str, task: impl Into<String>) -> Self {
         let task = task.into();
         Self {
             id,
@@ -578,7 +578,7 @@ impl Plan {
             outcome: None,
             workspace: parent.workspace.clone(),
             working_on: None,
-            errand_for: Some(Errand {
+            spawned_by: Some(SpawnedBy {
                 parent: parent.id.clone(),
                 tool_call: tool_call.to_string(),
             }),
@@ -590,8 +590,8 @@ impl Plan {
     /// Read by every guard and every filter that has to tell the King's work
     /// from the court's own: the rail, the map, `say`, `draft_plan` and -- most
     /// importantly -- `finish_plan`.
-    pub fn is_errand(&self) -> bool {
-        self.errand_for.is_some()
+    pub fn is_subagent(&self) -> bool {
+        self.spawned_by.is_some()
     }
 
     /// True while a turn is in flight, so a second one is not started over it.
@@ -1664,11 +1664,11 @@ mod transcript_tests {
     ///
     /// Worth one test because this is a filter applied in several places from
     /// one predicate: the map reads `plans_in`, the rail reads `plans` with the
-    /// same condition, and the deed line reads `errands_of`. The failure is
+    /// same condition, and the deed line reads `subagents_of`. The failure is
     /// silent in both directions -- an errand in the rail is clutter, an errand
-    /// missing from `errands_of` is a chamber that shows a call sending nothing.
+    /// missing from `subagents_of` is a chamber that shows a call sending nothing.
     #[test]
-    fn errands_are_hidden_from_the_kings_views_and_found_by_their_call() {
+    fn subagents_are_hidden_from_the_users_views_and_found_by_their_call() {
         let city = CityId::new("c1");
         let parent = Plan::opened(
             PlanId::new("plan-1"),
@@ -1678,11 +1678,11 @@ mod transcript_tests {
             Workspace::in_place("/dev/testburg"),
         );
 
-        let mut first = Plan::sent(PlanId::new("plan-2"), &parent, "call-1", "Read the parser");
+        let mut first = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the parser");
         first.status = PlanStatus::AwaitingReview;
-        let second = Plan::sent(PlanId::new("plan-3"), &parent, "call-1", "Read the loader");
+        let second = Plan::spawned(PlanId::new("plan-3"), &parent, "call-1", "Read the loader");
         // A second round of errands, under a different call.
-        let later = Plan::sent(PlanId::new("plan-4"), &parent, "call-2", "Read the cache");
+        let later = Plan::spawned(PlanId::new("plan-4"), &parent, "call-2", "Read the cache");
 
         let kingdom = Kingdom {
             name: "Testburg".into(),
@@ -1707,7 +1707,7 @@ mod transcript_tests {
 
         assert_eq!(
             kingdom
-                .errands_of(&parent.id, "call-1")
+                .subagents_of(&parent.id, "call-1")
                 .map(|p| p.id.clone())
                 .collect::<Vec<_>>(),
             vec![PlanId::new("plan-2"), PlanId::new("plan-3")],
@@ -1716,12 +1716,12 @@ mod transcript_tests {
         );
     }
 
-    /// Plans are the one thing disk cannot tell us again, and `errand_for` is a
+    /// Plans are the one thing disk cannot tell us again, and `spawned_by` is a
     /// new field on a type that is already recorded. Additive-serde is a claim,
     /// not a fact, and the cost of being wrong is a kingdom that will not open.
     #[test]
-    fn a_plan_recorded_before_errands_existed_still_loads() {
-        let before_errands = r#"{
+    fn a_plan_recorded_before_subagents_existed_still_loads() {
+        let before_subagents = r#"{
             "id": "plan-old",
             "city": "c1",
             "title": "An older plan",
@@ -1743,10 +1743,10 @@ mod transcript_tests {
         }"#;
 
         let plan: Plan =
-            serde_json::from_str(before_errands).expect("an older plan record must still load");
+            serde_json::from_str(before_subagents).expect("an older plan record must still load");
 
         assert!(
-            !plan.is_errand(),
+            !plan.is_subagent(),
             "a plan recorded before errands existed is the King's own work, and \
              must not be mistaken for something the court sent"
         );

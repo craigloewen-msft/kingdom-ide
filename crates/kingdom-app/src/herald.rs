@@ -97,8 +97,8 @@ pub fn proclaim(plan: &Plan) {
 
     // The second channel is the *sender's*, not a broadcast: only the plan that
     // sent this errand hears about it.
-    if let Some(errand) = &plan.errand_for {
-        if let Some(tx) = channels.get(&errand.parent) {
+    if let Some(subagent) = &plan.spawned_by {
+        if let Some(tx) = channels.get(&subagent.parent) {
             let _ = tx.send(plan.clone());
         }
     }
@@ -201,19 +201,19 @@ mod tests {
     /// up as errand rows that never leave "working", with nothing in the
     /// chamber's own code to blame.
     #[tokio::test]
-    async fn a_parent_hears_its_errands_and_no_others() {
+    async fn a_parent_hears_its_subagents_and_no_others() {
         let parent = a_plan("parent");
         let mut watching_parent = listen(&parent.id);
 
         // Somebody else's errand first: if the second channel were a broadcast
         // rather than the sender's own parent, this is what would leak.
-        proclaim(&Plan::sent(
+        proclaim(&Plan::spawned(
             PlanId::new("stranger"),
             &a_plan("elsewhere"),
             "call-1",
             "Not ours",
         ));
-        proclaim(&Plan::sent(
+        proclaim(&Plan::spawned(
             PlanId::new("errand"),
             &parent,
             "call-1",

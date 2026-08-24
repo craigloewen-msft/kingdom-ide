@@ -442,7 +442,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
         // blocked on a tool call whose conversation would now have two hands on
         // it, and would be handed a report on a conversation that changed
         // underneath it.
-        if existing.is_errand() {
+        if existing.is_subagent() {
             return Err(ServerFnError::new(
                 "This is an errand the court sent, not a plan you decreed. \
                  Say what you want in the plan that sent it.",
@@ -508,7 +508,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         // running one of these loops over it. The chamber mounts identically
         // for an errand, so without this, a King who opens one while it works
         // would start a second loop over the same plan.
-        if existing.is_errand() {
+        if existing.is_subagent() {
             return Ok(existing);
         }
 
@@ -570,7 +570,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 /// been done to the workspace.
 ///
 /// Two callers: [`draft_plan`], for a plan the King decreed, and
-/// [`send_errands`], for each errand the court sends. They differ only in the
+/// [`spawn_subagents`], for each errand the court sends. They differ only in the
 /// `remit` and `cap` handed in -- an errand reads and reports, and gets fewer
 /// rounds to do it in. Sharing the loop is the point: an errand that drafted
 /// through a second, simpler path would be a second place for the busy mark,
@@ -722,7 +722,7 @@ pub(crate) async fn converse(
 /// Returns the reports as one block of text for the model, or `Err` with a
 /// reason to report to it when no errand could be sent at all.
 #[cfg(feature = "ssr")]
-pub(crate) async fn send_errands(
+pub(crate) async fn spawn_subagents(
     parent_id: &PlanId,
     tool_call: &str,
     tasks: Vec<String>,
@@ -733,7 +733,7 @@ pub(crate) async fn send_errands(
     // Everything the errands need is read once, under one lock: the parent they
     // are cut from, and the city they work in. Holding it across the model
     // calls below would freeze every other plan in the kingdom.
-    let (errands, city_brief, city_name) = {
+    let (subagents, city_brief, city_name) = {
         let mut kingdom = lock().map_err(|e| e.to_string())?;
 
         let Some(parent) = kingdom.plan(parent_id).cloned() else {
@@ -747,25 +747,25 @@ pub(crate) async fn send_errands(
         // it is sent to look at the work in progress, not at a pristine copy.
         let city_brief = crate::llm::CityBrief::from_city(&city, &parent.workspace);
 
-        let mut errands = Vec::new();
+        let mut subagents = Vec::new();
         for task in tasks {
             let id = PlanId::new(format!("plan-{}", next_plan_number()));
-            let mut errand = Plan::sent(id.clone(), &parent, tool_call, task.clone());
+            let mut subagent = Plan::spawned(id.clone(), &parent, tool_call, task.clone());
             let root = std::path::PathBuf::from(&kingdom.root);
-            remember(&root, &mut errand);
+            remember(&root, &mut subagent);
             // Pushed as well as recorded, so the parent's chamber can draw the
             // errand the instant it exists rather than when it first speaks.
-            crate::herald::proclaim(&errand);
-            kingdom.plans.push(errand);
-            errands.push((id, task));
+            crate::herald::proclaim(&subagent);
+            kingdom.plans.push(subagent);
+            subagents.push((id, task));
         }
 
-        (errands, city_brief, city.name)
+        (subagents, city_brief, city.name)
     };
 
     // All at once. The remit is what makes this safe: they share one worktree
     // and none of them can write to it.
-    let running: Vec<_> = errands
+    let running: Vec<_> = subagents
         .iter()
         .map(|(id, _)| {
             let id = id.clone();
@@ -810,7 +810,7 @@ pub(crate) async fn send_errands(
         outcomes.push(settled);
     }
 
-    Ok(report(&errands, &outcomes))
+    Ok(report(&subagents, &outcomes))
 }
 
 /// Renders what the errands found, for the model that sent them.
@@ -819,11 +819,11 @@ pub(crate) async fn send_errands(
 /// to one in its own reply -- and what lets the King find the same conversation
 /// the parent read.
 #[cfg(feature = "ssr")]
-fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
+fn report(subagents: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
     use kingdom_core::Speaker;
 
     let mut out = String::new();
-    for (i, (id, task)) in errands.iter().enumerate() {
+    for (i, (id, task)) in subagents.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
@@ -999,7 +999,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         // delete the worktree out from under a plan still running in it. The
         // chamber never offers the button, but the blast radius here is the
         // King's actual work, so the guard is here rather than in the UI.
-        if existing.is_errand() {
+        if existing.is_subagent() {
             return Err(ServerFnError::new(
                 "This is an errand, and it works in the worktree of the plan that \
                  sent it -- it has nothing of its own to merge or archive. \
@@ -1185,7 +1185,7 @@ mod tests {
     /// process-global lock to reach: this pins the decision, and the git work
     /// below it is `worktree.rs`'s business and already has its own tests.
     #[test]
-    fn an_errand_is_never_finished_on_its_own() {
+    fn a_subagent_is_never_finished_on_its_own() {
         use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
 
         let parent = Plan::opened(
@@ -1201,19 +1201,19 @@ mod tests {
                 base: Some("main".into()),
             },
         );
-        let errand = Plan::sent(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
+        let subagent = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
 
         assert_eq!(
-            errand.workspace, parent.workspace,
+            subagent.workspace, parent.workspace,
             "an errand works in its parent's checkout -- which is precisely why \
              finishing it would destroy work that is not its own"
         );
         assert!(
-            errand.is_errand(),
+            subagent.is_subagent(),
             "the predicate `finish_plan` refuses on must hold for a sent plan"
         );
         assert!(
-            !parent.is_errand(),
+            !parent.is_subagent(),
             "and must not hold for the plan that sent it, or the King could \
              never finish anything"
         );

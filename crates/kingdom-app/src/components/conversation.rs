@@ -81,7 +81,7 @@ pub fn Conversation() -> impl IntoView {
         let Some(p) = plan.get() else { return };
         let unstarted = p.status == PlanStatus::Drafting
             && !p.is_busy()
-            && !p.is_errand()
+            && !p.is_subagent()
             && !p.messages().any(|u| u.speaker == Speaker::Assistant);
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());
@@ -200,13 +200,13 @@ fn ChamberBody(
 
     // An errand is settled once and never changes, so it is read off the
     // snapshot rather than the live signal.
-    let errand = StoredValue::new(plan.errand_for.clone());
-    let is_errand = errand.get_value().is_some();
+    let subagent = StoredValue::new(plan.spawned_by.clone());
+    let is_subagent = subagent.get_value().is_some();
     // The plan that sent it, for the banner's link. Read live because the
     // parent's *title* is still being drafted while its errands run -- a
     // snapshot here would leave the banner naming a title that has moved on.
     let parent = Memo::new(move |_| {
-        let sent_by = errand.get_value()?;
+        let sent_by = subagent.get_value()?;
         let kingdom = state.kingdom.get();
         let parent = kingdom.plan(&sent_by.parent)?;
         Some((parent.id.clone(), parent.title.clone()))
@@ -265,7 +265,7 @@ fn ChamberBody(
     let (watching, set_watching) = signal(false);
 
     view! {
-        <header class="chamber-header" class:errand=is_errand>
+        <header class="chamber-header" class:subagent=is_subagent>
             // For an errand, "back" is the plan that sent it rather than the
             // realm: that is where the King came from, and where he has to go
             // to steer the work. Retargeting the arrow he already knows beats
@@ -279,7 +279,7 @@ fn ChamberBody(
                 // Where he is, above what he is reading -- the ordinary
                 // breadcrumb shape. Present only for an errand, because for a
                 // plan the King decreed there is no "above" to name.
-                <Show when=move || is_errand>
+                <Show when=move || is_subagent>
                     <div class="chamber-crumb">
                         <span class="crumb-mark">"\u{26b1}"</span>
                         "Errand of "
@@ -302,7 +302,7 @@ fn ChamberBody(
                 // goes on hover rather than onto a line of its own.
                 <h1
                     class="chamber-title"
-                    title=move || if is_errand { task.get_value() } else { String::new() }
+                    title=move || if is_subagent { task.get_value() } else { String::new() }
                 >{move || title.get()}</h1>
                 <div class="chamber-meta">
                     <span class="chamber-city">
@@ -325,7 +325,7 @@ fn ChamberBody(
                 {move || {
                     // An errand is never reviewed and never merged: it reports
                     // to the court that sent it. Same states, honest words.
-                    match (is_errand, status.get()) {
+                    match (is_subagent, status.get()) {
                         (true, PlanStatus::AwaitingReview) => "Reported",
                         (true, PlanStatus::Drafting) => "Working",
                         (_, s) => s.label(),
@@ -384,10 +384,10 @@ fn ChamberBody(
         // that sent it, and a second person steering it would leave the parent
         // reading a report on a conversation that changed under it.
         <Show
-            when={move || !settled.get() && !is_errand}
+            when={move || !settled.get() && !is_subagent}
             fallback={move || view! {
                 <Show
-                    when=move || !is_errand
+                    when=move || !is_subagent
                     fallback=move || view! {
                         <div class="chamber-outcome errand-outcome">
                             <span class="outcome-text">
@@ -552,7 +552,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     // text result is a summary, and the thing the King wants is
                     // the list of agents it sent and a way into each one.
                     Entry::Tool(d) if d.tool == "spawn_agents" => {
-                        view! { <Errands tool_call=d plan=plan_id/> }.into_any()
+                        view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
                     }
                     Entry::Tool(d) => view! { <DeedLine tool_call=d/> }.into_any(),
                 }
@@ -573,19 +573,19 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
 /// chamber has not seen before. So these come from the same signal everything
 /// else reads, with no separate subscription.
 #[component]
-fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
+fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let tool_call_id = StoredValue::new(tool_call.id.clone());
     let running = tool_call.in_flight();
 
-    let errands = Memo::new(move |_| {
+    let subagents = Memo::new(move |_| {
         let Some(parent) = plan.get() else {
             return Vec::new();
         };
         state
             .kingdom
             .get()
-            .errands_of(&parent, &tool_call_id.get_value())
+            .subagents_of(&parent, &tool_call_id.get_value())
             .cloned()
             .collect::<Vec<_>>()
     });
@@ -612,7 +612,7 @@ fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> imp
                 <span class="errands-mark">"\u{26b1}"</span>
                 <span class="errands-who">
                     {move || {
-                        let sent = errands.get().len().max(asked.get_value().len());
+                        let sent = subagents.get().len().max(asked.get_value().len());
                         match sent {
                             1 => "The court sent an errand".to_string(),
                             n => format!("The court sent {n} errands"),
@@ -623,7 +623,7 @@ fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> imp
 
             <ul class="errand-list">
                 {move || {
-                    let sent = errands.get();
+                    let sent = subagents.get();
                     if sent.is_empty() {
                         // Not yet created, or a record from before this chamber
                         // knew them: show what was asked, without a link that
@@ -643,10 +643,10 @@ fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> imp
                     }
 
                     sent.into_iter()
-                        .map(|errand| {
-                            let href = format!("/plan/{}", errand.id);
-                            let status = errand.status;
-                            let working = errand.working_on.clone();
+                        .map(|subagent| {
+                            let href = format!("/plan/{}", subagent.id);
+                            let status = subagent.status;
+                            let working = subagent.working_on.clone();
                             view! {
                                 <li class="errand-row">
                                     <a class="errand-link" href=href>
@@ -657,7 +657,7 @@ fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> imp
                                             )
                                             style:background=status.color()
                                         ></span>
-                                        <span class="errand-task">{errand.prompt.clone()}</span>
+                                        <span class="errand-task">{subagent.prompt.clone()}</span>
                                         <span class="errand-state">
                                             {match (status, working) {
                                                 // What it is doing beats what it
@@ -665,7 +665,7 @@ fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> imp
                                                 // working errand and tells the
                                                 // King nothing.
                                                 (_, Some(doing)) => doing,
-                                                (s, None) => errand_status(s).to_string(),
+                                                (s, None) => subagent_status(s).to_string(),
                                             }}
                                         </span>
                                     </a>
@@ -686,7 +686,7 @@ fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> imp
 /// sent it. Relabelled here rather than given its own `PlanStatus` variant: a
 /// sixth state would ripple through the map legend, `ALL` and every match on
 /// plan state to buy one word.
-fn errand_status(status: PlanStatus) -> &'static str {
+fn subagent_status(status: PlanStatus) -> &'static str {
     match status {
         PlanStatus::Drafting => "working\u{2026}",
         PlanStatus::AwaitingReview => "reported",

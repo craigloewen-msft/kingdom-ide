@@ -114,7 +114,7 @@ impl Tool for SpawnAgents {
         }
 
         // Outside a turn there is no call for an errand to belong to, and
-        // `errands_of` is keyed by it -- an errand recorded against no deed
+        // `subagents_of` is keyed by it -- an errand recorded against no deed
         // would be invisible in every chamber. Refusing beats orphaning it.
         let Some(tool_call) = shop.tool_call() else {
             return Refusal::Refused(
@@ -124,7 +124,7 @@ impl Tool for SpawnAgents {
             .into();
         };
 
-        match crate::api::send_errands(shop.plan(), tool_call, tasks, PATIENCE).await {
+        match crate::api::spawn_subagents(shop.plan(), tool_call, tasks, PATIENCE).await {
             Ok(reports) => ToolOutcome::done(reports),
             Err(why) => Refusal::Refused(why).into(),
         }

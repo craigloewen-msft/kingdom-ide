@@ -123,7 +123,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                 // the list of what the *King* decreed, and filling it with work
                 // the court sent itself makes it worse at that job. An errand
                 // is reached from the chamber of the plan that sent it.
-                .filter(|p| p.city == id && !p.is_errand() && (show_all || p.is_live()))
+                .filter(|p| p.city == id && !p.is_subagent() && (show_all || p.is_live()))
                 .collect::<Vec<_>>()
         })
     };
@@ -174,7 +174,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     .get()
                     .plans
                     .iter()
-                    .any(|p| p.city == id && p.is_live() && !p.is_errand())
+                    .any(|p| p.city == id && p.is_live() && !p.is_subagent())
         })
     };
 

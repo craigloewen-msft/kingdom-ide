@@ -99,7 +99,7 @@ pub enum Scenario {
     /// other test -- errands being created, drafted concurrently and collected
     /// -- and it is the only way to see the parent's errand rows go live
     /// without a credential.
-    Errand,
+    Subagents,
 }
 
 impl Scenario {
@@ -130,7 +130,7 @@ impl Scenario {
             "slow" => Some(Scenario::Slow),
             "error" => Some(Scenario::Error),
             "work" | "tools" => Some(Scenario::Work),
-            "errand" | "errands" => Some(Scenario::Errand),
+            "errand" | "errands" => Some(Scenario::Subagents),
             "ask" => Some(Scenario::Ask),
             _ => None,
         }
@@ -239,7 +239,7 @@ impl Model for MockModel {
             // The errands themselves are drafted by this same mock: their task
             // text hashes to an ordinary speaking scenario, which is exactly
             // the behaviour being rehearsed.
-            Scenario::Errand => Ok(match done_already(brief) {
+            Scenario::Subagents => Ok(match done_already(brief) {
                 None => Reply::Acts(vec![Act {
                     id: "mock-errand-1".to_string(),
                     tool: "spawn_agents".to_string(),
