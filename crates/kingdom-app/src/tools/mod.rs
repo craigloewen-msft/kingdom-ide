@@ -21,6 +21,7 @@
 
 pub mod ask_user_question;
 pub mod bash;
+pub mod browser;
 pub mod patch;
 pub mod read_file;
 pub mod search;
@@ -46,6 +47,16 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(tmux::TmuxRun),
         Box::new(tmux::Tmux),
         Box::new(patch::Patch),
+        Box::new(browser::BrowserNavigate),
+        Box::new(browser::BrowserClick),
+        Box::new(browser::BrowserType),
+        Box::new(browser::BrowserKeyPress),
+        Box::new(browser::BrowserEval),
+        Box::new(browser::BrowserWaitForSelector),
+        Box::new(browser::BrowserTakeScreenshot),
+        Box::new(browser::BrowserResize),
+        Box::new(browser::BrowserRecentConsoleLogs),
+        Box::new(browser::BrowserClearConsoleLogs),
         Box::new(ask_user_question::AskUserQuestion),
     ]
 }

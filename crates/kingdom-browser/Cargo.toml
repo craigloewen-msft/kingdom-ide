@@ -1,0 +1,25 @@
+[package]
+name = "kingdom-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless-browser engine for Kingdom IDE: the chromiumoxide/CDP driver and the per-plan session manager. Native only, and tool-free -- the Tool impls live in kingdom-app."
+
+[dependencies]
+# Browser automation over the Chrome DevTools Protocol. No default features:
+# the only one is `bytes`, which nothing here uses, and the `fetcher` family is
+# deliberately left off -- see the note on Chrome resolution in src/chrome.rs.
+chromiumoxide = { version = "0.9", default-features = false }
+
+# The CDP handler is a long-lived task and every page call is async, so the
+# runtime is not optional here the way it is in kingdom-app.
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+
+# `StreamExt`, to pump the CDP event stream the console listener reads.
+futures = "0.3"
+
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

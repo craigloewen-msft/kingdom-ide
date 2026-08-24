@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 kingdom-core.workspace = true
+kingdom-browser = { workspace = true, optional = true }
 serde.workspace = true
 # Needed on both targets: a `Deed`'s arguments are JSON, so the chamber renders
 # them and the watch socket parses plans off the wire.
@@ -98,6 +99,7 @@ hydrate = [
     "dep:js-sys",
 ]
 ssr = [
+    "dep:kingdom-browser",
     "dep:axum",
     "dep:tokio",
     "dep:leptos_axum",

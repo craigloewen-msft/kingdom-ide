@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/kingdom-core", "crates/kingdom-app"]
+members = [
+    "crates/kingdom-core",
+    "crates/kingdom-app",
+    "crates/kingdom-browser",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +13,7 @@ license = "MIT"
 
 [workspace.dependencies]
 kingdom-core = { path = "crates/kingdom-core" }
+kingdom-browser = { path = "crates/kingdom-browser" }
 serde = { version = "1", features = ["derive"] }
 # A tool call's arguments are the model's JSON, not a shape we declared, so the
 # domain stores them as JSON. Pure Rust and no I/O, so it still compiles to wasm.
