@@ -156,8 +156,26 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
 
     let has_plans = Memo::new(move |_| !plans.get().is_empty());
 
+    // Prominence follows *live* work, not whatever the filter happens to show.
+    // A city whose plans are all approved or rejected has nothing awaiting the
+    // King, so it recedes even in "All" -- otherwise switching filters would
+    // re-clutter the rail with settled history. The selected city never
+    // recedes: the King is looking at it deliberately.
+    let dormant = {
+        let id = id.clone();
+        Memo::new(move |_| {
+            !selected.get()
+                && !state
+                    .kingdom
+                    .get()
+                    .plans
+                    .iter()
+                    .any(|p| p.city == id && is_active(p.status))
+        })
+    };
+
     view! {
-        <li class="city-branch">
+        <li class="city-branch" class:dormant=dormant>
             <div class="city-row" class:selected=selected on:click=select>
                 <button
                     class="city-chevron"

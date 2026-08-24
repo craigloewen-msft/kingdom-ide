@@ -122,6 +122,20 @@
 .registry { list-style: none; margin: 0; padding: 6px; }
 .city-branch { list-style: none; }
 
+// A city with no plan still in play is history, not work. It stays in the rail
+// -- the King still needs to navigate to it -- but it recedes so the cities
+// actually awaiting judgement are what the eye lands on. Hover and keyboard
+// focus restore it to full strength, so nothing here is hard to read on
+// purpose; it is only quiet until looked at.
+.city-branch.dormant {
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+
+  &:hover, &:focus-within { opacity: 1; }
+
+  .kind-dot { filter: saturate(0.25); }
+}
+
 .city-row {
   display: flex;
   align-items: center;
