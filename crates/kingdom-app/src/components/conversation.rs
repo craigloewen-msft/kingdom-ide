@@ -307,7 +307,7 @@ fn ChamberBody(
                     disabled={move || drafting.get()}
                     on:click=move |_| submit()
                 >
-                    {move || if drafting.get() { "Drafting\u{2026}" } else { "Decree" }}
+                    {move || if drafting.get() { "Drafting\u{2026}" } else { "Send" }}
                 </button>
 
                 // Closing the plan sits beside sending to it, because they are
@@ -324,8 +324,8 @@ fn ChamberBody(
             </div>
 
             // Two rows and no confirmation dialog: both endings are recoverable
-            // -- one makes a revertable merge commit, the other keeps the branch
-            // and a patch -- and a modal would spend the King's attention to
+            // -- one makes a revertable merge commit, the other keeps a patch of
+            // the work -- and a modal would spend the King's attention to
             // prevent nothing.
             <Show when={move || showing_done.get()}>
                 <div class="done-picker">
@@ -359,8 +359,8 @@ fn ChamberBody(
                             >
                                 <span class="done-name">"Archive"</span>
                                 <span class="done-detail">
-                                    "Sets this aside. The branch and a patch are \
-                                     kept, so it can come back."
+                                    "Sets this aside. The work is kept as a \
+                                     patch and the branch cleared away."
                                 </span>
                             </button>
                         </li>

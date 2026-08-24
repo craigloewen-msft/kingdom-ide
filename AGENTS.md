@@ -162,6 +162,11 @@ flowchart TB
 - **Any resource arbitration at all** — see §3. This matters more now than it
   did: the court can bind ports and run builds, so two plans genuinely can
   collide. Nothing detects it.
+- Naming a plan with a model. A plan's branch is cut from its title today —
+  `kingdom/<slug>`, via `kingdom_core::naming::slugify`, with `-2`, `-3` walked
+  past on collision — but that title is still just the first clause of the
+  decree. Having a cheap model propose a real name is task 00070; when it lands
+  it changes the title, and the branch follows for free.
 
 **Tools the court does not have, and why each is its own decision:**
 - `read_image`. The court can take a screenshot and cannot look at it, which
