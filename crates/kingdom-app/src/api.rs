@@ -465,7 +465,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 /// user sees the plan stopped rather than finding a plausible answer that was
 /// actually a truncation.
 #[cfg(feature = "ssr")]
-const MOST_ROUNDS: usize = 24;
+const MOST_ROUNDS: usize = 500;
 
 /// Draws up the plan: marks it busy, then takes turns with the model until it
 /// has something to say.

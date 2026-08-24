@@ -21,7 +21,7 @@ const GUIDANCE_NAMES: &[&str] = &["AGENTS.md", "AGENT.md"];
 /// How much project guidance is worth sending.
 ///
 /// A cap rather than trust, because the cost is per *round*, not per turn: the
-/// whole prompt is resent on every pass of a loop that may run 24 times, so a
+/// whole prompt is resent on every pass of a loop that may run 500 times, so a
 /// megabyte of `AGENTS.md` is a bill rather than merely a long prompt. Generous
 /// enough that no honest guidance file comes near it.
 const MOST_GUIDANCE: usize = 64 * 1024;
