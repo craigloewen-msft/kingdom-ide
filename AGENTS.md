@@ -88,10 +88,18 @@ crates/
     mock.rs         Seeding a realm onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
-                    mod.rs (Model + Provider traits, Brief, the provider list),
-                    mock.rs (offline provider), copilot.rs (Copilot provider
-                    + its /models catalogue), catalogue.rs (assembles one
-                    catalogue from every provider), credential.rs
+                    mod.rs (Model + Provider traits, Brief, Reply, the provider
+                    list), mock.rs (offline provider), copilot.rs (Copilot
+                    provider + its /models catalogue), catalogue.rs (assembles
+                    one catalogue from every provider), credential.rs
+    tools/          What the court can do with its own hands (ssr only)
+                    mod.rs (Tool trait, Workshop = the workspace boundary),
+                    think, read_file, search, bash, tmux, patch, browser,
+                    ask_user_question
+
+  kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
+                    per-plan session manager. Native only — never in the wasm
+                    bundle. The Tool impls over it live in kingdom-app.
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, decree.rs, conversation.rs,
                     map/ (mod.rs + city.rs)
@@ -145,15 +153,30 @@ flowchart TB
   issued any decree. Plans he opens himself are entirely real.
 
 **Not built at all:**
-- Agents that *do* anything beyond replying: no tool use, no commands, no edits
-  (a plan now has a workspace to do them *in*, but still only talks)
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
 - Live updates beyond a plan's own chamber. The chamber is pushed to over a
   WebSocket (`herald.rs`, `watch.rs`), but the map and the rail still only
   learn of a change when something refetches the kingdom.
-- **Any resource arbitration at all** — see §3
+- **Any resource arbitration at all** — see §3. This matters more now than it
+  did: the court can bind ports and run builds, so two plans genuinely can
+  collide. Nothing detects it.
+
+**Tools the court does not have, and why each is its own decision:**
+- `read_image`. The court can take a screenshot and cannot look at it, which
+  makes the browser tools half a feature. The blocker is not the tool — it is
+  that `Brief` and `copilot.rs` build text-only messages, so this needs the
+  model layer to carry image content blocks first.
+- `spawn_agents`. Kingdom has no notion of a sub-plan. A spawned agent is
+  either a real `Plan` — and then: does it appear on the map, does it own a
+  worktree, who merges it? — or it is something invisible, which breaks the
+  product's first question. That is a design decision, not a port.
+- `keyword_search`. Wants a model call of its own. Genuinely useful, but
+  `search` plus `read_file` cover most of the ground, so it earns its place
+  only once someone finds the gap.
+- `skill`. Kingdom has no skills directory and no convention for one. Porting
+  a loader for a directory nobody populates would be building for no user.
 
 The placeholder court deliberately includes a **failed plan** and a plan **mid
 draft**, because those are states the UI exists to show. Do not "clean up" the
