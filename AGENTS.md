@@ -84,6 +84,7 @@ crates/
     scan.rs         Filesystem scanning  (ssr only)
     herald.rs       Proclaiming a plan's changes to its watchers (ssr only)
     watch.rs        The chamber's push socket (ssr only)
+    spyglass.rs     The King's live view of a plan's browser (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     mock.rs         Seeding a realm onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
@@ -94,14 +95,19 @@ crates/
                     one catalogue from every provider), credential.rs
     tools/          What the court can do with its own hands (ssr only)
                     mod.rs (Tool trait, Workshop = the workspace boundary),
-                    think, read_file, search, bash, tmux, patch, browser,
-                    ask_user_question
+                    think, read_file, read_image, search, bash, tmux, patch,
+                    browser, profile (browser_profile), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
                     bundle. The Tool impls over it live in kingdom-app.
+    session.rs      Per-plan Chrome, and the operations the tools call
+    screencast.rs   CDP screencast, relayed to the spyglass's viewers
+    profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
+    perf.rs         The in-page helper injected before any page script
+
     app.rs          Shell, routes, shared UI state
-    components/     sidebar.rs, decree.rs, conversation.rs,
+    components/     sidebar.rs, decree.rs, conversation.rs, spyglass.rs,
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
@@ -157,8 +163,11 @@ flowchart TB
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
 - Live updates beyond a plan's own chamber. The chamber is pushed to over a
-  WebSocket (`herald.rs`, `watch.rs`), but the map and the rail still only
-  learn of a change when something refetches the kingdom.
+  WebSocket (`herald.rs`, `watch.rs`), and the plan's browser is mirrored over a
+  second one (`spyglass.rs`) — but the map and the rail still only learn of a
+  change when something refetches the kingdom. The spyglass is deliberately
+  *not* surfaced on the map for that reason: a city lighting up because a plan
+  holds a live browser needs both this, and a plan that knows it owns a session.
 - **Any resource arbitration at all** — see §3. This matters more now than it
   did: the court can bind ports and run builds, so two plans genuinely can
   collide. Nothing detects it.
@@ -169,10 +178,6 @@ flowchart TB
   it changes the title, and the branch follows for free.
 
 **Tools the court does not have, and why each is its own decision:**
-- `read_image`. The court can take a screenshot and cannot look at it, which
-  makes the browser tools half a feature. The blocker is not the tool — it is
-  that `Brief` and `copilot.rs` build text-only messages, so this needs the
-  model layer to carry image content blocks first.
 - `spawn_agents`. Kingdom has no notion of a sub-plan. A spawned agent is
   either a real `Plan` — and then: does it appear on the map, does it own a
   worktree, who merges it? — or it is something invisible, which breaks the
@@ -182,6 +187,21 @@ flowchart TB
   only once someone finds the gap.
 - `skill`. Kingdom has no skills directory and no convention for one. Porting
   a loader for a directory nobody populates would be building for no user.
+
+**The court can see, and can be seen.** `read_image` closes the loop
+`browser_take_screenshot` opened, and it cost a domain change: `DeedOutcome`
+carries images beside its text. Two things about that are load-bearing and easy
+to undo by accident. Images are *not* persisted — `store.rs` strips them, because
+a plan's record is rewritten on every update and would otherwise grow by a
+megabyte per screenshot forever. And chat-completions has no image part on a
+tool result, so `copilot.rs` sends the picture as a following `user` message,
+built only on the wire and never as a `Turn` — the Responses API is the real fix
+and the comment there says so.
+
+A model that cannot see is never offered `read_image` (`ToolSpec::for_model`,
+beside the existing `can_act` narrowing). The vision flag is read from three
+places in Copilot's `/models` payload because the catalogue is not ours; if it
+ever reads as blind for everything, that is where to look.
 
 The placeholder court deliberately includes a **failed plan** and a plan **mid
 draft**, because those are states the UI exists to show. Do not "clean up" the

@@ -569,6 +569,55 @@ mod tests {
         );
     }
 
+    /// The spyglass must find the *same* browser the court is driving.
+    ///
+    /// The two reach it by different routes -- a tool goes through `Workshop`,
+    /// a viewer through the plan id off the socket's path -- and if those ever
+    /// disagreed the panel would report "no browser" for a plan that visibly
+    /// has one. Nothing else would catch it: both halves work, they would just
+    /// be working on different sessions.
+    #[tokio::test]
+    async fn the_spyglass_watches_the_browser_the_court_is_actually_driving() {
+        if !chrome_available() {
+            eprintln!("skipped: set KINGDOM_CHROME_EXECUTABLE to run this");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = kingdom_core::PlanId::new("shared-session");
+        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()))
+            .for_plan(plan.clone());
+
+        // Nobody has browsed yet: there is nothing to watch, and asking must not
+        // be what creates something.
+        assert!(
+            matches!(browsers().watch(plan.as_str()).await, Ok(None)),
+            "a viewer must not conjure a session"
+        );
+
+        // The court opens a page by the ordinary tool path.
+        let navigated = BrowserNavigate
+            .run(
+                serde_json::json!({ "url": "data:text/html,<h1>watched</h1>" }),
+                &shop,
+            )
+            .await;
+        assert!(
+            matches!(navigated, DeedOutcome::Done { .. }),
+            "navigation should succeed: {navigated:?}"
+        );
+
+        // And now the spyglass finds that same browser.
+        let watched = browsers()
+            .watch(plan.as_str())
+            .await
+            .expect("watching should succeed");
+        assert!(
+            watched.is_some(),
+            "the viewer must attach to the session the tools created"
+        );
+    }
+
     /// Without Chrome every tool must say so in words the model can act on.
     /// The alternative — hanging on a launch that will never succeed — spends
     /// the King's turn on nothing and tells him nothing.
