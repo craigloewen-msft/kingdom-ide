@@ -8,7 +8,9 @@ description = "Headless-browser engine for Kingdom IDE: the chromiumoxide/CDP dr
 [dependencies]
 # Browser automation over the Chrome DevTools Protocol. No default features:
 # the only one is `bytes`, which nothing here uses, and the `fetcher` family is
-# deliberately left off -- see the note on Chrome resolution in src/chrome.rs.
+# deliberately left off -- Kingdom finds a browser already on the machine rather
+# than downloading one behind the King's back. See `chrome_executable` in
+# src/session.rs.
 chromiumoxide = { version = "0.9", default-features = false }
 
 # The CDP handler is a long-lived task and every page call is async, so the

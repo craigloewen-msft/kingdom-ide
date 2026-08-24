@@ -80,3 +80,8 @@ metaphor, and an honest breakdown of what is real versus faked.
 cargo test -p kingdom-core
 cargo test -p kingdom-app --features ssr --no-default-features
 ```
+
+No test launches a browser, so the suite needs nothing installed. Kingdom finds
+Chrome itself at runtime — whatever is on `PATH` or in the usual install
+locations, and failing that a Chromium that Playwright or Puppeteer already
+downloaded. Set `KINGDOM_CHROME_EXECUTABLE` only to override that.

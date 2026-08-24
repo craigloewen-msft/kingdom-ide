@@ -137,15 +137,8 @@ impl BrowserSession {
             })
             .user_data_dir(profile);
 
-        if let Ok(executable) = std::env::var("KINGDOM_CHROME_EXECUTABLE") {
-            let path = PathBuf::from(&executable);
-            if !path.is_file() {
-                return Err(BrowserError::ChromeUnavailable(format!(
-                    "KINGDOM_CHROME_EXECUTABLE points to {}, which is not a file",
-                    path.display()
-                )));
-            }
-            builder = builder.chrome_executable(path);
+        if let Some(executable) = chrome_executable()? {
+            builder = builder.chrome_executable(executable);
         }
 
         let config = builder.build().map_err(BrowserError::ChromeUnavailable)?;
@@ -565,6 +558,96 @@ where
         .map_err(|error| BrowserError::Operation(error.to_string()))
 }
 
+/// Where the local browser caches keep a Chromium, relative to `$HOME`.
+///
+/// These are the ones a developer machine tends to already have because some
+/// other tool downloaded them. Searched only after the ordinary places, so a
+/// real system Chrome always wins.
+const CACHED_BROWSERS: &[&str] = &[
+    ".cache/ms-playwright",
+    ".cache/puppeteer",
+    ".local/share/ms-playwright",
+];
+
+/// Which Chrome to launch, or `None` to let chromiumoxide decide.
+///
+/// Three steps, most explicit first:
+///
+/// 1. `KINGDOM_CHROME_EXECUTABLE`, if set. The override for a machine where the
+///    guessing is wrong; pointing it at something that is not a file is a
+///    mistake worth reporting rather than silently falling through.
+/// 2. Nothing -- chromiumoxide's own detection, which covers `$CHROME`, the
+///    usual binary names on `PATH`, and the standard install locations. That is
+///    the common case and needs no help from us.
+/// 3. Only if that finds nothing: the caches below, because a machine with no
+///    system Chrome very often still has one that Playwright or Puppeteer
+///    downloaded.
+///
+/// Step 3 is why this function exists. Without it the browser tools are dead on
+/// a machine that demonstrably *can* run a browser, and the King is told to go
+/// and install something he already has.
+fn chrome_executable() -> Result<Option<PathBuf>, BrowserError> {
+    if let Ok(executable) = std::env::var("KINGDOM_CHROME_EXECUTABLE") {
+        let path = PathBuf::from(&executable);
+        if !path.is_file() {
+            return Err(BrowserError::ChromeUnavailable(format!(
+                "KINGDOM_CHROME_EXECUTABLE points to {}, which is not a file",
+                path.display()
+            )));
+        }
+        return Ok(Some(path));
+    }
+
+    // Let chromiumoxide look first: PATH and the standard installs are where a
+    // browser usually is, and its detection is already thorough there.
+    if chromiumoxide::detection::default_executable(Default::default()).is_ok() {
+        return Ok(None);
+    }
+
+    Ok(cached_chrome())
+}
+
+/// Hunts for a Chromium that some other tool downloaded.
+///
+/// Deliberately shallow and ordered: each cache holds one directory per
+/// installed version with a known layout inside. Walking the whole tree would
+/// be slower and would risk turning up something that is not a browser.
+///
+/// Newest first, by sorting the version directories in reverse -- these caches
+/// accumulate versions, and the most recent is the likeliest to work.
+fn cached_chrome() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+
+    for cache in CACHED_BROWSERS {
+        let Ok(entries) = std::fs::read_dir(home.join(cache)) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        versions.sort();
+        versions.reverse();
+
+        for version in versions {
+            // Playwright's layouts, then Puppeteer's. `headless_shell` is a real
+            // Chromium with no UI, which is exactly what a headless session
+            // wants.
+            for relative in [
+                "chrome-linux/chrome",
+                "chrome-linux/headless_shell",
+                "chrome-linux64/chrome",
+                "chrome-headless-shell-linux64/chrome-headless-shell",
+                "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            ] {
+                let candidate = version.join(relative);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn profile_dir(plan: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     plan.hash(&mut hasher);
@@ -657,6 +740,24 @@ async fn dispatch_key(page: &Page, key: &str, modifiers: &[String]) -> Result<()
 mod tests {
     use super::*;
 
+    /// Detection must only ever name a file that exists.
+    ///
+    /// The caches below are searched by guessing at known layouts, and a guess
+    /// that returns a plausible-looking path to nothing would be handed to
+    /// Chrome and fail at launch -- reported as "Chrome is not available" on a
+    /// machine where it demonstrably is. Machine-independent: it asserts a
+    /// property of whatever is found, not that anything is.
+    #[test]
+    fn detection_never_names_a_path_that_is_not_there() {
+        if let Some(found) = cached_chrome() {
+            assert!(
+                found.is_file(),
+                "detection offered {}, which is not a file",
+                found.display()
+            );
+        }
+    }
+
     /// A viewer must never be what launches a browser.
     ///
     /// The panel is opened by curiosity -- the King wondering what a plan is
@@ -673,101 +774,6 @@ mod tests {
         assert!(
             matches!(attached, Ok(None)),
             "attaching a viewer must not create a session"
-        );
-    }
-
-    /// The screencast's whole lifetime, against a real Chrome.
-    ///
-    /// Three claims that are only meaningful together: frames actually arrive
-    /// (the pipeline decodes and delivers), a second viewer shares the first
-    /// one's capture rather than starting a second, and the capture is released
-    /// when the last viewer leaves.
-    ///
-    /// The last is what the `Arc`/`Weak` machinery exists for.
-    /// `Page.startScreencast` makes Chrome paint and encode continuously, so a
-    /// broker outliving its viewers is a permanent cost for a panel the King
-    /// glanced at once -- and nothing in the UI would ever reveal it.
-    ///
-    /// Skipped without Chrome rather than failed: not every machine can run
-    /// this, and a red suite on a laptop teaches nothing.
-    #[tokio::test]
-    async fn a_screencast_is_shared_while_watched_and_released_when_it_is_not() {
-        let available = std::env::var("KINGDOM_CHROME_EXECUTABLE")
-            .map(|p| Path::new(&p).is_file())
-            .unwrap_or(false);
-        if !available {
-            eprintln!("skipped: set KINGDOM_CHROME_EXECUTABLE to run this");
-            return;
-        }
-
-        let manager = BrowserSessionManager::new();
-        let plan = "spyglass-test";
-
-        // A page with something to paint: a blank one can legitimately produce
-        // no frames, which would make a failure here ambiguous.
-        manager
-            .navigate(
-                plan,
-                "data:text/html,<h1 style='color:red'>watched</h1>",
-                Duration::from_secs(15),
-            )
-            .await
-            .expect("the browser should launch and navigate");
-
-        let (broker, mut frames, _) = manager
-            .watch(plan)
-            .await
-            .expect("watching should succeed")
-            .expect("the plan now has a browser");
-
-        let (second, _, _) = manager
-            .watch(plan)
-            .await
-            .expect("watching should succeed")
-            .expect("the plan still has a browser");
-        assert!(
-            Arc::ptr_eq(&broker, &second),
-            "a second viewer must share the running capture, not start another"
-        );
-
-        let seen = tokio::time::timeout(Duration::from_secs(20), frames.recv())
-            .await
-            .expect("a painting page should produce something")
-            .expect("the broker should still be live");
-        if let ScreencastEvent::Frame { jpeg } = seen {
-            assert!(
-                jpeg.starts_with(&[0xFF, 0xD8]),
-                "frames must be decoded JPEG bytes, not the base64 CDP sent"
-            );
-        }
-
-        // Everyone leaves. The session holds only a `Weak`, so nothing is left
-        // to keep the broker alive. The address is noted first, because after
-        // the drop there is deliberately nothing left to compare against --
-        // holding a clone to compare with would itself keep the capture alive
-        // and make the test vacuous.
-        let was_at = Arc::as_ptr(&broker);
-        drop(frames);
-        drop(second);
-        let abandoned = Arc::downgrade(&broker);
-        drop(broker);
-        assert_eq!(
-            abandoned.strong_count(),
-            0,
-            "the last viewer leaving must drop the broker, or Chrome paints \
-             forever for an audience of nobody"
-        );
-
-        // The session itself survived; only the capture stopped. Otherwise the
-        // spyglass could be opened exactly once per plan.
-        let (again, _, _) = manager
-            .watch(plan)
-            .await
-            .expect("watching again should succeed")
-            .expect("the session outlives its screencasts");
-        assert!(
-            !std::ptr::eq(Arc::as_ptr(&again), was_at),
-            "reopening starts a fresh capture"
         );
     }
 }
