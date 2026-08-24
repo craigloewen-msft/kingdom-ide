@@ -4,7 +4,6 @@
 //!
 //! ```text
 //! <kingdom_root>/.kingdom/
-//!   kingdom.json              format version, and when it was last opened
 //!   plans/<plan-id>.json      one document per plan
 //!   archive/<plan-id>.patch   the work an archived plan set aside
 //! ```
@@ -31,21 +30,6 @@ use std::path::{Path, PathBuf};
 
 /// Folder under the kingdom root holding everything Kingdom records.
 const STATE_DIR: &str = ".kingdom";
-
-/// Bumped when the on-disk shape changes in a way a reader must know about.
-///
-/// Additive changes do not need it -- new fields carry `#[serde(default)]`, the
-/// same way `sandbox` and `working_on` were added to types already on disk.
-const FORMAT_VERSION: u32 = 1;
-
-/// The kingdom-level record. Deliberately thin: everything about a *plan* lives
-/// in that plan's own file, so this exists to mark the format and nothing else.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct KingdomRecord {
-    version: u32,
-    /// When the kingdom was last opened, as milliseconds since the epoch.
-    opened_at: u128,
-}
 
 fn state_dir(root: &Path) -> PathBuf {
     root.join(STATE_DIR)
@@ -211,23 +195,13 @@ fn without_images(plan: &Plan) -> Plan {
     plan
 }
 
-/// Writes every plan, and stamps the kingdom record.
+/// Writes every plan.
 ///
-/// Used when a kingdom is first opened and a court is seated over it. Returns
-/// the first failure, so the caller can report it once rather than per plan.
+/// Used when a kingdom is first opened and its starter plans are seeded over
+/// it. Returns the first failure, so the caller can report it once rather than
+/// per plan.
 pub fn save_all(root: &Path, plans: &[Plan]) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir(root))?;
-
-    let record = KingdomRecord {
-        version: FORMAT_VERSION,
-        opened_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
-    };
-    let body = serde_json::to_vec_pretty(&record)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(state_dir(root).join("kingdom.json"), body)?;
 
     for plan in plans {
         save(root, plan)?;
