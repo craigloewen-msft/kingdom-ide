@@ -26,6 +26,14 @@ use std::fmt::Write as _;
 /// rest by offset, which costs one turn instead of a truncated context.
 const DEFAULT_LIMIT: usize = 2000;
 
+/// Beyond this, a whole-file read is worth remarking on.
+///
+/// Not a cap -- the file is still returned in full, because a tool that
+/// silently withheld part of what was asked for is worse than an expensive one.
+/// It only decides when the result is large enough that the model should know
+/// what it just committed to for the rest of the conversation.
+const LARGE_READ: usize = 32 * 1024;
+
 /// How far into a file we look for a NUL before calling it binary.
 ///
 /// A prefix rather than the whole file: the sniff runs on every read, and text
@@ -151,6 +159,19 @@ fn window(text: &str, offset: usize, limit: usize) -> String {
             "\n[{remaining} more lines not shown (total: {total}). \
              Call again with offset {} to continue.]",
             end + 1
+        );
+    } else if out.len() > LARGE_READ {
+        // Said only when the whole of a large file came back in one go, which
+        // is the case that costs: this result is now resent on every round for
+        // the rest of the conversation. A model that did not need all of it has
+        // no way to know that unless something says so, and the observed
+        // failure included a single 93 KB read of one file.
+        let _ = write!(
+            out,
+            "\n[This file is large ({} KB) and was returned in full. It stays in the \
+             conversation from here on, so prefer `search`, or `offset`/`limit`, when \
+             you need one part of something this size.]",
+            out.len() / 1024
         );
     }
 

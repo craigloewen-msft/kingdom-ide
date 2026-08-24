@@ -132,30 +132,46 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 /// pointing the tool at real files the default first act.
 #[server(EnterProvingGrounds, "/api")]
 pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
+    let name = fixture.unwrap_or_else(|| kingdom_core::mockdata::DEFAULT_FIXTURE.to_string());
+    open_fixture(&name).map_err(ServerFnError::new)
+}
+
+/// Seeds a named proving ground if it is not already standing, and opens it.
+///
+/// Not `async`, and not a `#[server]` function, because the server itself needs
+/// this too: `KINGDOM_REALM` opens a realm at boot, where there is no browser to
+/// call anything. Both paths go through here rather than each doing its own
+/// seed-then-scan, for the same reason [`assemble`] is shared -- two ways of
+/// opening a realm would differ in some detail nobody notices until one of them
+/// is wrong.
+///
+/// Errors are plain `String`s so the boot path can print one without dragging
+/// `ServerFnError` into a context that has no server function in it.
+#[cfg(feature = "ssr")]
+pub fn open_fixture(name: &str) -> Result<Kingdom, String> {
     use kingdom_core::mockdata;
 
-    let name = fixture.unwrap_or_else(|| mockdata::DEFAULT_FIXTURE.to_string());
-    let spec = mockdata::fixture(&name).ok_or_else(|| {
-        ServerFnError::new(format!(
+    let spec = mockdata::fixture(name).ok_or_else(|| {
+        format!(
             "No such realm: {name}. Known realms: {}.",
             mockdata::fixture_names().join(", ")
-        ))
+        )
     })?;
 
-    let root = crate::mock::fixture_path(&name);
+    let root = crate::mock::fixture_path(name);
 
     // Only seed when it is not already there, so entering twice is instant and
     // does not silently discard a fixture the user has been poking at.
     if !crate::mock::is_proving_ground(&root) {
         crate::mock::seed(&spec, &root)
-            .map_err(|e| ServerFnError::new(format!("Could not raise the proving grounds: {e}")))?;
+            .map_err(|e| format!("Could not raise the proving grounds: {e}"))?;
     }
 
     let root = root
         .canonicalize()
-        .map_err(|e| ServerFnError::new(format!("Could not resolve {}: {e}", root.display())))?;
+        .map_err(|e| format!("Could not resolve {}: {e}", root.display()))?;
 
-    assemble(&root, Some(spec.starter_plans))
+    assemble(&root, Some(spec.starter_plans)).map_err(|e| e.to_string())
 }
 
 /// Every fixture the user can enter, for the opening screen.
@@ -465,7 +481,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 /// user sees the plan stopped rather than finding a plausible answer that was
 /// actually a truncation.
 #[cfg(feature = "ssr")]
-const MOST_ROUNDS: usize = 24;
+const MOST_ROUNDS: usize = 500;
 
 /// Draws up the plan: marks it busy, then takes turns with the model until it
 /// has something to say.
@@ -649,7 +665,14 @@ pub(crate) async fn converse(
             Err(e) => return settle(plan_id, Err(e)),
 
             Ok(Reply::Acts(acts)) => {
-                for act in acts {
+                // One id for everything this reply asked for, so the calls can
+                // be replayed as the single decision they were rather than as a
+                // sequence the model deliberated through. See
+                // `kingdom_core::ToolCall::batch`.
+                let batch = format!("{}-{round}", plan_id.as_str());
+                let mut first = true;
+
+                for act in acts.calls {
                     // Recorded *before* it runs, and published by `update`, so
                     // the conversation shows the command while it is still
                     // going. This is the answer to "what is this agent doing
@@ -657,13 +680,25 @@ pub(crate) async fn converse(
                     // written down first.
                     {
                         let mut kingdom = lock()?;
+                        // The thinking rides on the first call of the batch and
+                        // nowhere else: one reply produced one piece of
+                        // reasoning, however many things it asked for, and
+                        // copying it onto each would replay it several times
+                        // over as though the model had thought it repeatedly.
+                        let reasoning = first.then(|| acts.reasoning.clone()).flatten();
+                        let narration = first.then(|| acts.narration.clone()).flatten();
+                        first = false;
+
                         update(&mut kingdom, &plan_id, |p| {
                             p.working_on = Some(describe(&act.tool, &act.input));
-                            p.begin_tool_call(ToolCall::started(
-                                act.id.clone(),
-                                act.tool.clone(),
-                                act.input.clone(),
-                            ));
+                            p.begin_tool_call(
+                                ToolCall::started(
+                                    act.id.clone(),
+                                    act.tool.clone(),
+                                    act.input.clone(),
+                                )
+                                .in_reply(batch.clone(), reasoning.clone(), narration.clone()),
+                            );
                         });
                     }
 
@@ -733,7 +768,6 @@ pub(crate) async fn converse(
                 }
 
                 // Back round to ask again, now with the results in the log.
-                let _ = round;
             }
         }
     }
@@ -979,7 +1013,11 @@ fn settle(
         plan.working_on = None;
         match &outcome {
             Ok(draft) => {
-                plan.title = draft.title.clone();
+                // The title is deliberately *not* touched here. It was written
+                // once from the decree and is rewritten only when the court
+                // proposes -- see `Plan::propose`. Setting it from whatever
+                // heading the model happened to lead this reply with made the
+                // rail label change under the user on every turn.
                 plan.summary = draft.summary.clone();
                 plan.status = PlanStatus::AwaitingReview;
                 plan.say(Speaker::Assistant, draft.body.clone());

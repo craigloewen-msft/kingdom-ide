@@ -15,7 +15,9 @@
 
 .decree-row {
   display: flex;
-  align-items: center;
+  // Bottom, not centre: the composer grows downward as lines are added, and the
+  // buttons should stay level with its last line rather than drift.
+  align-items: flex-end;
   gap: 10px;
   padding: 12px 16px;
 }
@@ -35,6 +37,13 @@
 .decree-input {
   @include m.field(11px 14px, 13px);
   background: t.$deep;
+  // A textarea, not an input: it must sit on the same baseline as the buttons
+  // beside it, take the page's font rather than the UA's monospace default,
+  // and never grow a drag handle -- its height is set from its own contents.
+  font-family: inherit;
+  line-height: 1.4;
+  resize: none;
+  overflow-y: hidden;
 
   // The composer sits against a darker fill than the opening screen's, where
   // the UA default placeholder is too dim to read.

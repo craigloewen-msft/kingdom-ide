@@ -7,6 +7,7 @@
 
 use crate::api::{approve_plan, draft_plan, finish_plan, get_kingdom, say, set_aside_plan};
 use crate::app::KingdomState;
+use crate::components::prompt_bar::autogrow;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use crate::components::BrowserView;
 use kingdom_core::{
@@ -322,6 +323,16 @@ fn ConversationBody(
         }),
     );
 
+    // Same composer behaviour as the decree bar: it grows with the reply and
+    // shrinks back once it is sent.
+    let composer = NodeRef::<leptos::html::Textarea>::new();
+    Effect::new(move |_| {
+        reply.track();
+        if let Some(el) = composer.get() {
+            autogrow(&el);
+        }
+    });
+
     // `StoredValue` rather than a captured `PlanId`: a closure holding an owned
     // non-Copy value is `FnOnce` and cannot be used by both handlers below.
     let submit = move || {
@@ -559,9 +570,12 @@ fn ConversationBody(
                     }}
                 >
                     <div class="chamber-composer">
-                        <input
+                        // Enter sends; Shift+Enter makes a line, so a long reply
+                        // does not have to be one paragraph.
+                        <textarea
                             class="decree-input"
-                            r#type="text"
+                            node_ref=composer
+                            rows="1"
                             placeholder=move || {
                                 // The composer says which conversation this is. While
                                 // the court is drawing something up, "ask for a change"
@@ -581,7 +595,10 @@ fn ConversationBody(
                             disabled={move || drafting.get()}
                             on:input=move |ev| set_reply.set(event_target_value(&ev))
                             on:keydown=move |ev| {
-                                if ev.key() == "Enter" { submit(); }
+                                if ev.key() == "Enter" && !ev.shift_key() {
+                                    ev.prevent_default();
+                                    submit();
+                                }
                             }
                         />
                         <button

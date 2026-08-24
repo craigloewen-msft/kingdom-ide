@@ -23,6 +23,11 @@ async fn main() {
         Err(e) => eprintln!("  Could not read .kingdom.env: {e}"),
     }
 
+    // Done before anything slow, so a misspelt realm is reported while the
+    // reader is still looking at the startup lines. The line it produces is
+    // held back to keep the banner in one block below.
+    let realm = opening_realm();
+
     let conf = get_configuration(None).expect("failed to read Leptos configuration");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
@@ -53,11 +58,18 @@ async fn main() {
 
     let catalogue = kingdom_app::llm::catalogue::catalogue().await;
     println!(
-        "     {} model(s) available, opening on {} \u{2014} {}\n",
+        "     {} model(s) available, opening on {} \u{2014} {}",
         catalogue.options.len(),
         catalogue.default_id,
         catalogue.detail
     );
+
+    // Said out loud, because the failure this setting invites is doing real
+    // work against fake cities without noticing. This is where you find out.
+    match realm {
+        Some(line) => println!("{line}\n"),
+        None => println!(),
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -65,6 +77,38 @@ async fn main() {
     axum::serve(listener, app.into_make_service())
         .await
         .expect("server error");
+}
+
+/// Opens the proving ground named by `KINGDOM_REALM`, if one is named.
+///
+/// The server otherwise comes up with no kingdom open, so every restart sends
+/// the user back to the folder picker -- and `cargo leptos watch` restarts on
+/// every save. Setting this makes the rehearsal loop land straight on a
+/// populated map.
+///
+/// A failure is a warning rather than a panic: refusing to boot over a
+/// convenience setting would be worse than starting on the picker, which still
+/// works and still has the button.
+///
+/// Returns the banner line to print, so the startup output stays in one block.
+#[cfg(feature = "ssr")]
+fn opening_realm() -> Option<String> {
+    let name = std::env::var("KINGDOM_REALM")
+        .ok()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())?;
+
+    match kingdom_app::api::open_fixture(&name) {
+        Ok(kingdom) => Some(format!(
+            "     Opened the proving ground '{name}' at {}",
+            kingdom.root
+        )),
+        Err(e) => {
+            eprintln!("  Could not open the proving ground '{name}': {e}");
+            eprintln!("  Starting on the folder picker instead.");
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "ssr"))]

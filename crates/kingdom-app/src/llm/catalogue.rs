@@ -94,6 +94,7 @@ mod tests {
             efforts: Vec::new(),
             can_act: true,
             can_see: false,
+            max_output_tokens: None,
         }
     }
 

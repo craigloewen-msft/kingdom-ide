@@ -728,6 +728,9 @@
 
 .chamber-composer {
   display: flex;
+  // As in the decree bar: the composer grows downward, so its neighbours sit at
+  // its base.
+  align-items: flex-end;
   gap: 10px;
   flex: 0 0 auto;
   padding: 12px 20px;
