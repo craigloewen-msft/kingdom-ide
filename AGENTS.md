@@ -162,7 +162,8 @@ crates/
 
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, prompt_bar.rs, conversation.rs,
-                    browser_view.rs,
+                    browser_view.rs, resizer.rs (the drag handle the rail
+                    and the spyglass share),
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
