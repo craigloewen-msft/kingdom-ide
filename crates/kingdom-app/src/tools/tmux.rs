@@ -3,8 +3,8 @@
 //!
 //! `bash` already answers "run this and tell me what happened". What it cannot
 //! answer is "start this and let me come back to it in an hour, and let the
-//! King look at it too": its handles live in this process's memory, its output
-//! is a captured pipe, and nothing the King can attach to exists. tmux gives
+//! user look at it too": its handles live in this process's memory, its output
+//! is a captured pipe, and nothing the user can attach to exists. tmux gives
 //! all three for free -- a real terminal, real scrollback, and a surface a
 //! human can attach to from his own shell.
 //!
@@ -13,7 +13,7 @@
 //! This is the whole reason this module is worth its length. The default tmux
 //! server is *shared*: a plan that runs `tmux kill-server`, or names a window
 //! `dev` that already exists, or lists windows to decide what to stop, is
-//! reaching straight into the King's own session and into every other plan's.
+//! reaching straight into the user's own session and into every other plan's.
 //! Two plans each starting a dev server is precisely the collision this product
 //! exists to make visible, and it would be absurd to introduce a fresh one
 //! here.
@@ -54,7 +54,7 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// The tail of the scrollback, not the visible screen: a dev server that
 /// printed its port and then scrolled it away is the common case, and a report
-/// showing only the last 24 rows would miss exactly the line the court wants.
+/// showing only the last 24 rows would miss exactly the line the model wants.
 const CAPTURE_START: &str = "-500";
 
 /// How often a readiness wait re-reads the pane.
@@ -68,13 +68,13 @@ const POLL: Duration = Duration::from_millis(100);
 /// The longest a readiness wait may be asked to block.
 ///
 /// A ceiling rather than trust, because the cost of a bad value is paid by the
-/// King waiting on a turn that looks hung.
+/// user waiting on a turn that looks hung.
 const MAX_READINESS_SECONDS: u64 = 300;
 
 /// The session every window is created under.
 ///
 /// One session rather than one per window, so `list-windows` without arguments
-/// shows the court everything it has started.
+/// shows the model everything it has started.
 const SESSION: &str = "main";
 
 pub struct TmuxRun;
@@ -169,9 +169,9 @@ impl Tool for TmuxRun {
             return Refusal::Refused(reason).into();
         }
 
-        // `bash -lc` rather than bare exec: the court writes commands with
+        // `bash -lc` rather than bare exec: the model writes commands with
         // pipes and `&&` in them, and a login shell is also what puts the
-        // King's toolchain managers on PATH -- a `cargo` that works in his
+        // user's toolchain managers on PATH -- a `cargo` that works in his
         // terminal and not in the pane is a bug report nobody can reproduce.
         let shell_command = format!("bash -lc {}", quote(cmd));
         let started = cli(
@@ -275,7 +275,7 @@ impl Tool for Tmux {
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         match cli(&socket_for(shop), &borrowed).await {
             Err(reason) => Refusal::Refused(reason).into(),
-            // A tmux that ran and complained has told the court something it
+            // A tmux that ran and complained has told the model something it
             // needs -- "can't find window @7" is how it learns the window is
             // gone. Only a call that never ran is a refusal.
             Ok(out) => ToolOutcome::done(joined(&out)),
@@ -288,7 +288,7 @@ impl Tool for Tmux {
 /// `-L`/`-S` are rejected only in the *leading* flags -- the ones tmux reads as
 /// server selection, before the subcommand. Rejecting them everywhere would
 /// break `capture-pane -S -200`, where `-S` is the scrollback start and has
-/// nothing to do with sockets: the court would be told off for the single most
+/// nothing to do with sockets: the model would be told off for the single most
 /// common call it makes.
 fn args(input: &Value) -> Result<Vec<String>, Refusal> {
     let Some(items) = input.get("args").and_then(Value::as_array) else {
@@ -376,7 +376,7 @@ fn readiness(input: &Value) -> Result<Option<(String, Duration)>, Refusal> {
 ///
 /// Answered once and remembered: the answer cannot change under a running
 /// server, and a `which` per call is a fork per call. The refusal names the
-/// package because the court cannot install it and the King can.
+/// package because the model cannot install it and the user can.
 fn tmux_is_installed() -> Result<(), Refusal> {
     static FOUND: OnceLock<bool> = OnceLock::new();
     let found = *FOUND.get_or_init(|| {
@@ -404,17 +404,17 @@ fn tmux_is_installed() -> Result<(), Refusal> {
 
 /// Kills the tmux server a plan was using, if it ever started one.
 ///
-/// Called when a plan settles. Without this a dev server the court started
+/// Called when a plan settles. Without this a dev server the model started
 /// outlives the plan that owned it: still bound to port 3000, still holding a
 /// target directory, and with nothing left in the records that knows what it
 /// was for. That is precisely the orphaned-work collision this whole product
-/// exists to prevent, so leaving it to the King to notice would be the product
+/// exists to prevent, so leaving it to the user to notice would be the product
 /// committing its own founding mistake.
 ///
 /// Deliberately infallible and quiet. It runs on the *success* path of merging
 /// or archiving, where the work has already landed -- failing a completed merge
 /// because a socket would not close would be a worse outcome than a stray tmux
-/// server, which the King can kill himself and which dies with his next reboot.
+/// server, which the user can kill himself and which dies with his next reboot.
 pub async fn dismiss(plan: &kingdom_core::PlanId) {
     // The workspace is irrelevant here -- only the plan decides which socket to
     // knock on -- so a placeholder is honest rather than lazy.
@@ -479,7 +479,7 @@ fn fingerprint(s: &str) -> u64 {
 /// Makes sure the plan's server and its session exist.
 ///
 /// Done before every start rather than once, because the server is a process
-/// like any other: the King may have killed it, or the machine may have
+/// like any other: the user may have killed it, or the machine may have
 /// rebooted, and a cached "it exists" would turn that into a confusing failure
 /// on the next window instead of a silent recovery.
 async fn ensure_server(socket: &Path, root: &Path) -> Result<(), String> {
@@ -509,11 +509,11 @@ async fn ensure_server(socket: &Path, root: &Path) -> Result<(), String> {
 
     // Set on the server's window defaults, once, so a command that exits
     // instantly still leaves its output readable. Without it the window
-    // vanishes with the process and the court is left with nothing to explain
+    // vanishes with the process and the model is left with nothing to explain
     // why its dev server is not there.
     let _ = cli(socket, &["set-option", "-g", "-w", "remain-on-exit", "on"]).await;
     // Deep scrollback: a build that scrolls its error off the top is a build
-    // whose failure the court cannot read.
+    // whose failure the model cannot read.
     let _ = cli(socket, &["set-option", "-g", "history-limit", "20000"]).await;
     Ok(())
 }
@@ -555,7 +555,7 @@ async fn cli(socket: &Path, args: &[&str]) -> Result<Output, String> {
 /// Polls the pane until the awaited text shows up.
 ///
 /// Returns whether it was seen. A timeout is deliberately not an error: the
-/// command is still running, and the court's next move -- read more of the
+/// command is still running, and the model's next move -- read more of the
 /// pane, wait again, give up -- depends on what the pane says, which it is
 /// about to be shown either way.
 async fn await_text(socket: &Path, window: &str, wanted: &str, limit: Duration) -> Option<bool> {
@@ -584,7 +584,7 @@ async fn capture(socket: &Path, window: &str) -> String {
     }
 }
 
-/// What the court is told about a window it just started.
+/// What the model is told about a window it just started.
 async fn report(
     socket: &Path,
     window: &str,
@@ -594,7 +594,7 @@ async fn report(
     seen: Option<bool>,
 ) -> String {
     // `pane_dead_status` is why the exit code needs no marker printed into the
-    // pane: tmux keeps it for a pane held open by remain-on-exit, so the court
+    // pane: tmux keeps it for a pane held open by remain-on-exit, so the model
     // reads the truth rather than something the command could have faked.
     let dead = cli(
         socket,
@@ -670,7 +670,7 @@ fn name_from(cmd: &str) -> String {
 /// Keeps a name usable as a tmux target.
 ///
 /// `.` and `:` are tmux's own window/pane separators, so a name containing them
-/// produces a window the court can create and then never address again.
+/// produces a window the model can create and then never address again.
 fn sanitise_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -697,11 +697,11 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// stdout and stderr as the court sees them.
+/// stdout and stderr as the model sees them.
 ///
 /// Interleaved into one answer, and stderr is *not* dropped on success: tmux
 /// reports "no server running" and "can't find window" there, which is the
-/// information the court most needs.
+/// information the model most needs.
 fn joined(out: &Output) -> String {
     let mut body = text(&out.stdout);
     let err = text(&out.stderr);
@@ -793,7 +793,7 @@ mod tests {
     }
 
     /// The other half: `-S` after the subcommand is scrollback depth, not a
-    /// socket. Refusing it would break the single most common call the court
+    /// socket. Refusing it would break the single most common call the model
     /// makes against a window it started.
     #[test]
     fn scrollback_depth_is_not_a_server_flag() {
@@ -801,7 +801,7 @@ mod tests {
     }
 
     /// Readiness is the reason this tool is not just `bash` with a pane: the
-    /// court needs to know a server is *up*, not merely started, and the
+    /// model needs to know a server is *up*, not merely started, and the
     /// alternative it reaches for otherwise is a sleep long enough to be wrong
     /// in both directions.
     #[tokio::test]
@@ -829,7 +829,7 @@ mod tests {
         let _ = cli(&socket_for(&shop), &["kill-server"]).await;
     }
 
-    /// A window starts where the plan works. Anywhere else and the court's
+    /// A window starts where the plan works. Anywhere else and the model's
     /// first `cargo build` runs against somebody else's checkout.
     #[tokio::test]
     async fn a_window_starts_in_the_workspace() {

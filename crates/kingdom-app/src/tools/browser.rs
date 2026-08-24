@@ -1,4 +1,4 @@
-//! Browser Deeds over Kingdom's native Chrome engine.
+//! Browser Tool calls over Kingdom's native Chrome engine.
 //!
 //! These adapters contain argument validation and model-facing wording only.
 //! Keeping CDP and session ownership in `kingdom-browser` avoids coupling a
@@ -7,10 +7,10 @@
 //!
 //! Sessions are selected with [`Sandbox::plan`], not the workspace path. Two
 //! plans may deliberately share a city path, but sharing browser cookies would
-//! let one court member inherit another's login. This is the same per-plan
+//! let one model member inherit another's login. This is the same per-plan
 //! isolation boundary as the tmux tool.
 //!
-//! The same per-plan session is what the King's spyglass attaches to; see
+//! The same per-plan session is what the user's screencast attaches to; see
 //! `crate::screencast`. An earlier note here called the screencast deliberately
 //! absent because it served a Phoenix UI feature Kingdom lacked -- that has
 //! since been built, and the reasoning no longer holds.
@@ -26,7 +26,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const LARGE_OUTPUT: usize = 4 * 1024;
 
 static BROWSERS: OnceLock<BrowserSessionManager> = OnceLock::new();
-/// The one browser session manager, shared by the tools and by the spyglass.
+/// The one browser session manager, shared by the tools and by the screencast.
 ///
 /// Public so `crate::screencast` can attach a viewer to a session the tools
 /// created. It deliberately does *not* create one -- see

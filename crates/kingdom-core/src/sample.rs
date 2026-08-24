@@ -1,26 +1,26 @@
 //! Placeholder data for the throne room.
 //!
 //! Cities are **real** and come from scanning the chosen folder. Plans opened
-//! from the decree bar are **real** too, and drafted by an actual model. What
-//! this module fabricates is a *starting* court, so a freshly opened kingdom
-//! has something to show before the King has issued a single decree.
+//! from the prompt bar are **real** too, and drafted by an actual model. What
+//! this module fabricates is a *starting* model, so a freshly opened kingdom
+//! has something to show before the user has issued a single prompt.
 //!
 //! It deliberately seeds a **failed plan** alongside ones awaiting review. A
-//! court that opens all-quiet makes the states worth noticing unreachable
+//! model that opens all-quiet makes the states worth noticing unreachable
 //! during development, which is exactly when a refactor would quietly lose
 //! them. A test pins this.
 
 use crate::ids::*;
 use crate::model::*;
 
-/// Fabricates a court of plans for the given cities, so the map has something
+/// Fabricates a model of plans for the given cities, so the map has something
 /// to show on first run.
 pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
     if cities.is_empty() {
         return Vec::new();
     }
 
-    // Each scripted plan: (id, decree, status).
+    // Each scripted plan: (id, prompt, status).
     let scripted = [
         (
             "plan-ramparts",
@@ -138,9 +138,9 @@ mod tests {
         }
     }
 
-    /// The court must open showing something worth the King's attention.
+    /// The model must open showing something worth the user's attention.
     ///
-    /// A court of nothing but tidy settled plans makes the states the UI exists
+    /// A model of nothing but tidy settled plans makes the states the UI exists
     /// to render unreachable during development -- and a refactor is exactly
     /// when that would happen quietly. It used to be a blocked plan and a
     /// contended resource; with lease arbitration gone, a *failed* plan is the

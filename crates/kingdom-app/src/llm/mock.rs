@@ -35,7 +35,7 @@ impl Provider for MockProvider {
     ///
     /// Not `recommended`, so it sinks below real models once any are on offer --
     /// but when a credential is missing it is the only entry, and therefore
-    /// still what the King lands on.
+    /// still what the user lands on.
     async fn catalogue(&self) -> ProviderCatalogue {
         ProviderCatalogue {
             options: vec![ModelOption {
@@ -79,7 +79,7 @@ pub enum Scenario {
     Slow,
     /// Fails, so the failure path is reachable on demand.
     Error,
-    /// Asks the King a question, then answers from what he chose.
+    /// Asks the user a question, then answers from what he chose.
     ///
     /// The offline rehearsal for the one thing request/response could never do:
     /// the server speaking first, and a tool call that parks until a person
@@ -92,19 +92,19 @@ pub enum Scenario {
     /// transcript. Without this the loop could only be exercised against a real
     /// gateway, which is exactly the dependency the mock exists to remove.
     Work,
-    /// Sends two errands, then answers from what they report.
+    /// Sends two subagents, then answers from what they report.
     ///
     /// The offline rehearsal for the fan-out: two sub-agents running at once,
-    /// each a real plan with its own chamber. It exercises the part that has no
-    /// other test -- errands being created, drafted concurrently and collected
-    /// -- and it is the only way to see the parent's errand rows go live
-    /// without a credential.
+    /// each a real plan with its own conversation. It exercises the part that
+    /// has no other test -- subagents being created, drafted concurrently and
+    /// collected -- and it is the only way to see the parent's subagent rows go
+    /// live without a credential.
     Subagents,
 }
 
 impl Scenario {
     /// Picks a scenario for a prompt: an explicit marker if present, otherwise a
-    /// stable hash so the same decree always produces the same draft.
+    /// stable hash so the same prompt always produces the same draft.
     pub fn for_prompt(prompt: &str) -> Scenario {
         if let Some(named) = Scenario::from_marker(prompt) {
             return named;
@@ -236,9 +236,9 @@ impl Model for MockModel {
             // Send on the first pass, speak on the second -- the same shape as
             // `Work`, and read from the transcript for the same reason.
             //
-            // The errands themselves are drafted by this same mock: their task
-            // text hashes to an ordinary speaking scenario, which is exactly
-            // the behaviour being rehearsed.
+            // The subagents themselves are drafted by this same mock: their
+            // task text hashes to an ordinary speaking scenario, which is
+            // exactly the behaviour being rehearsed.
             Scenario::Subagents => Ok(match done_already(brief) {
                 None => Reply::Acts(vec![Act {
                     id: "mock-errand-1".to_string(),
@@ -338,12 +338,12 @@ impl Model for MockModel {
     }
 }
 
-/// The last thing the King said, which is what a scenario is chosen from.
+/// The last thing the user said, which is what a scenario is chosen from.
 ///
 /// Read out of the transcript rather than handed over separately, because after
-/// a tool call the most recent turn is a deed, not a decree -- and the scenario
-/// must stay the one the King asked for across every pass of the loop, or the
-/// mock would change its mind halfway through its own rehearsal.
+/// a tool call the most recent turn is a tool call, not a prompt -- and the
+/// scenario must stay the one the user asked for across every pass of the loop,
+/// or the mock would change its mind halfway through its own rehearsal.
 fn latest_prompt(brief: &Brief) -> String {
     brief
         .turns

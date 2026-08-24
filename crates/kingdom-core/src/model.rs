@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 // Kingdom & Cities
 // ---------------------------------------------------------------------------
 
-/// The dev folder the King has opened. Everything else hangs off this.
+/// The dev folder the user has opened. Everything else hangs off this.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Kingdom {
     /// Display name, normally the folder's own name.
@@ -18,9 +18,9 @@ pub struct Kingdom {
     pub plans: Vec<Plan>,
     /// True when this kingdom is a seeded proving ground rather than real work.
     ///
-    /// The UI renders this loudly. A synthetic realm is *designed* to be
+    /// The UI renders this loudly. A synthetic fixture is *designed* to be
     /// indistinguishable from a real one on the map, which makes an unlabelled
-    /// one a trap -- for the King glancing at it, and equally for a model shown
+    /// one a trap -- for the user glancing at it, and equally for a model shown
     /// a screenshot of it later. Same instinct as `AGENTS.md` being explicit
     /// about what is real versus faked, applied to the running UI.
     #[serde(default)]
@@ -49,26 +49,27 @@ impl Kingdom {
 
     /// Plans drawn up in a given city.
     ///
-    /// Errands are excluded, and this is the reader that decides it for the map.
-    /// An errand holds no worktree of its own -- it works in its parent's -- so
-    /// a second pip on the same city would draw one piece of work twice.
+    /// Subagents are excluded, and this is the reader that decides it for the
+    /// map. A subagent holds no worktree of its own -- it works in its parent's
+    /// -- so a second pip on the same city would draw one piece of work twice.
     pub fn plans_in<'a>(&'a self, id: &'a CityId) -> impl Iterator<Item = &'a Plan> + 'a {
         self.plans
             .iter()
             .filter(move |p| &p.city == id && !p.is_subagent())
     }
 
-    /// The errands one call sent, in the order they were sent.
+    /// The subagents one call sent, in the order they were sent.
     ///
-    /// Keyed by the deed as well as the parent, so a plan that sends errands
-    /// twice does not show the first round's under the second round's call.
+    /// Keyed by the tool call as well as the parent, so a plan that sends
+    /// subagents twice does not show the first round's under the second round's
+    /// call.
     ///
-    /// This is the *only* way the parent's chamber finds its errands, and the
-    /// direction is deliberate: the link is a field on the errand rather than a
-    /// list on the [`ToolCall`], so there is one place it can be wrong. A list on
-    /// the deed would have to be kept in step with the plans themselves, and the
-    /// failure -- a named errand that does not exist, or an errand no call
-    /// admits to -- would be silent.
+    /// This is the *only* way the parent's conversation finds its subagents,
+    /// and the direction is deliberate: the link is a field on the subagent
+    /// rather than a list on the [`ToolCall`], so there is one place it can be
+    /// wrong. A list on the tool call would have to be kept in step with the
+    /// plans themselves, and the failure -- a named subagent that does not
+    /// exist, or a subagent no call admits to -- would be silent.
     pub fn subagents_of<'a>(
         &'a self,
         parent: &'a PlanId,
@@ -82,7 +83,7 @@ impl Kingdom {
 
     /// Files a plan into the kingdom, replacing whatever was there under its id.
     ///
-    /// The receiving half of push: the server proclaims a whole plan and the
+    /// The receiving half of push: the server publishes a whole plan and the
     /// browser absorbs it. Replacing rather than merging is the point -- see
     /// `events.rs` for why the wire carries whole plans rather than deltas.
     ///
@@ -99,10 +100,10 @@ impl Kingdom {
         self.plans.iter().find(|p| &p.id == id)
     }
 
-    /// Plans still awaiting the King's judgement.
+    /// Plans still awaiting the user's judgement.
     ///
-    /// Never an errand: an errand reports to the court that sent it, and nothing
-    /// about it is ever waiting on the King.
+    /// Never a subagent: a subagent reports to the model that sent it, and
+    /// nothing about it is ever waiting on the user.
     pub fn pending_plans(&self) -> impl Iterator<Item = &Plan> {
         self.plans
             .iter()
@@ -201,9 +202,10 @@ impl Folder {
 
 /// The language a file is written in, which tints its building.
 ///
-/// Colour is the fastest channel the King has for reading a city's composition
+/// Colour is the fastest channel the user has for reading a city's composition
 /// at a glance, so this is a small, visually distinct set rather than an
-/// exhaustive language list; anything unrecognised falls to [`Language::Other`].
+/// exhaustive language list; anything unrecognised falls to
+/// [`Language::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Language {
     Rust,
@@ -220,7 +222,7 @@ pub enum Language {
 }
 
 impl Language {
-    /// Every ward, in legend order.
+    /// Every language, in legend order.
     pub const ALL: [Language; 11] = [
         Language::Rust,
         Language::Web,
@@ -274,7 +276,8 @@ impl Language {
     /// The building's face colour.
     ///
     /// Deliberately avoids the status palette (green/amber/red), which is
-    /// reserved for what agents are doing; ward colour says what the code *is*.
+    /// reserved for what agents are doing; language colour says what the code
+    /// *is*.
     pub fn tint(&self) -> &'static str {
         match self {
             Language::Rust => "#fb923c",
@@ -324,7 +327,7 @@ pub enum CityKind {
 }
 
 impl CityKind {
-    /// Heraldic colour for the city's banner on the map.
+    /// Banner colour for the city's banner on the map.
     pub fn banner_color(&self) -> &'static str {
         match self {
             CityKind::Rust => "#d97706",
@@ -354,8 +357,8 @@ impl CityKind {
 
 /// How isolated a plan's working copy is.
 ///
-/// This is the King's answer to "can this agent trample the folder I am in?".
-/// It is chosen per decree because the honest answer differs per decree: a
+/// This is the user's answer to "can this agent trample the folder I am in?".
+/// It is chosen per prompt because the honest answer differs per prompt: a
 /// survey wants the folder as it stands, a change wants somewhere of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkspaceMode {
@@ -368,7 +371,7 @@ pub enum WorkspaceMode {
 }
 
 impl WorkspaceMode {
-    /// Short label for the decree bar's chip and the chamber header.
+    /// Short label for the prompt bar's chip and the conversation header.
     pub fn label(&self) -> String {
         match self {
             WorkspaceMode::Fresh => "fresh worktree".to_string(),
@@ -379,7 +382,7 @@ impl WorkspaceMode {
 }
 
 impl Default for WorkspaceMode {
-    /// Isolation by default: the surprising outcome should be the one the King
+    /// Isolation by default: the surprising outcome should be the one the user
     /// asked for, not the one that quietly edits the folder he is sitting in.
     fn default() -> Self {
         WorkspaceMode::Fresh
@@ -400,9 +403,9 @@ pub struct Workspace {
     /// true.
     ///
     /// This is what makes "merge this work back" honest. Reading the city's
-    /// current HEAD at merge time would land a plan wherever the King happens to
-    /// have wandered since it was opened -- which is the collision this product
-    /// exists to prevent, committed by the product itself.
+    /// current HEAD at merge time would land a plan wherever the user happens
+    /// to have wandered since it was opened -- which is the collision this
+    /// product exists to prevent, committed by the product itself.
     #[serde(default)]
     pub base: Option<String>,
 }
@@ -430,14 +433,15 @@ impl Workspace {
 // Plans -- the unit of work AND the unit of review
 // ---------------------------------------------------------------------------
 
-/// An architectural plan: a proposal drafted by a model, awaiting the King's
+/// An architectural plan: a proposal drafted by a model, awaiting the user's
 /// review.
 ///
 /// A plan is deliberately the *only* agent-shaped noun in the model. An earlier
-/// design had a separate `Architect` entity that owned plans, but the King never
-/// reviews an architect -- he reviews a plan. Collapsing the two removes a state
-/// machine that had to be kept in sync with this one for no gain: which model is
-/// drafting is an attribute of the work, not an actor with a life of its own.
+/// design had a separate `Architect` entity that owned plans, but the user
+/// never reviews an architect -- he reviews a plan. Collapsing the two removes
+/// a state machine that had to be kept in sync with this one for no gain: which
+/// model is drafting is an attribute of the work, not an actor with a life of
+/// its own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: PlanId,
@@ -445,7 +449,7 @@ pub struct Plan {
     pub city: CityId,
     pub title: String,
     /// The title as a git-safe slug. The plan's branch is cut from this, so the
-    /// name the King reads in the rail and the name he reads in `git branch`
+    /// name the user reads in the rail and the name he reads in `git branch`
     /// are the same name.
     ///
     /// `#[serde(default)]` because plan records written before plans had slugs
@@ -453,7 +457,7 @@ pub struct Plan {
     #[serde(default)]
     pub slug: String,
     pub summary: String,
-    /// The decree that opened this plan, verbatim.
+    /// The prompt that opened this plan, verbatim.
     pub prompt: String,
     /// Which model is drafting it, e.g. `"mock"` or `"copilot/claude-opus-5"`.
     pub model: String,
@@ -480,24 +484,24 @@ pub struct Plan {
     /// plan is prevented from working.
     #[serde(default)]
     pub working_on: Option<String>,
-    /// The call this plan was sent to answer, when it is an errand.
+    /// The call this plan was sent to answer, when it is a subagent.
     ///
-    /// `None` for a plan the King decreed, which is every plan he sees in the
-    /// rail or on the map. An errand is a plan the *court* sent, to answer a
+    /// `None` for a plan the user opened, which is every plan they see in the
+    /// rail or on the map. A subagent is a plan the *model* sent, to answer a
     /// question it had while working on its own.
     ///
-    /// Being a plan rather than a type of its own is what gives an errand a
-    /// chamber, a watch socket and a record on disk for free -- see the module
-    /// docs on [`Plan::spawned`] for what that buys and what it costs.
+    /// Being a plan rather than a type of its own is what gives a subagent a
+    /// conversation, a watch socket and a record on disk for free -- see the
+    /// module docs on [`Plan::spawned`] for what that buys and what it costs.
     #[serde(default)]
     pub spawned_by: Option<SpawnedBy>,
 }
 
-/// Which call an errand was sent to answer.
+/// Which call a subagent was sent to answer.
 ///
-/// The deed is carried as well as the plan because a plan may send errands more
-/// than once: without it, a second round's chamber would show the first round's
-/// errands under its call.
+/// The tool call is carried as well as the plan because a plan may send
+/// subagents more than once: without it, a second round's conversation would
+/// show the first round's subagents under its call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnedBy {
     /// The plan that sent this one.
@@ -507,7 +511,7 @@ pub struct SpawnedBy {
 }
 
 impl Plan {
-    /// A plan that has just been opened by a decree, before any drafting.
+    /// A plan that has just been opened by a prompt, before any drafting.
     pub fn opened(
         id: PlanId,
         city: CityId,
@@ -540,9 +544,9 @@ impl Plan {
 
     /// A plan sent by another plan to answer one question.
     ///
-    /// # What an errand shares with its parent, and why
+    /// # What a subagent shares with its parent, and why
     ///
-    /// Its **workspace, verbatim**. An errand is another agent working in the
+    /// Its **workspace, verbatim**. A subagent is another agent working in the
     /// same place on the same files, which is the whole point -- it is sent to
     /// look at the work in progress, not at a pristine copy of the project. It
     /// therefore owns nothing on disk and must never be finished: merging it
@@ -550,18 +554,18 @@ impl Plan {
     /// under a plan still running in it. `api::finish_plan` refuses on
     /// [`Plan::is_subagent`], and that guard is load-bearing.
     ///
-    /// Its **model and effort**, so a fan-out is drafted by the thing the King
+    /// Its **model and effort**, so a fan-out is drafted by the thing the user
     /// chose rather than by whatever the default happens to be that day.
     ///
-    /// # Why the task is recorded as the King speaking
+    /// # Why the task is recorded as the user speaking
     ///
-    /// It was the parent's court that said it, not the King, so this is a small
-    /// lie -- and it is the right one. [`Speaker`] maps directly onto the wire's
-    /// `user`/`assistant` roles, and a third variant would need a decision at
-    /// every match over a transcript -- the provider, the mock, the store's
-    /// repair pass, the chamber -- to buy nothing but a label. The label is
-    /// fixed where labels belong: the chamber renders an errand's King turns as
-    /// "Commission".
+    /// It was the parent's model that said it, not the user, so this is a small
+    /// lie -- and it is the right one. [`Speaker`] maps directly onto the
+    /// wire's `user`/`assistant` roles, and a third variant would need a
+    /// decision at every match over a transcript -- the provider, the mock, the
+    /// store's repair pass, the conversation -- to buy nothing but a label. The
+    /// label is fixed where labels belong: the conversation renders a
+    /// subagent's own turns as "Commission".
     pub fn spawned(id: PlanId, parent: &Plan, tool_call: &str, task: impl Into<String>) -> Self {
         let task = task.into();
         Self {
@@ -585,10 +589,11 @@ impl Plan {
         }
     }
 
-    /// True when this plan was sent by another plan rather than decreed.
+    /// True when this plan was spawned by another plan rather than opened by
+    /// the user.
     ///
-    /// Read by every guard and every filter that has to tell the King's work
-    /// from the court's own: the rail, the map, `say`, `draft_plan` and -- most
+    /// Read by every guard and every filter that has to tell the user's work
+    /// from the model's own: the rail, the map, `say`, `draft_plan` and -- most
     /// importantly -- `finish_plan`.
     pub fn is_subagent(&self) -> bool {
         self.spawned_by.is_some()
@@ -616,7 +621,7 @@ impl Plan {
     ///
     /// The one door from live to settled, so a status and an outcome cannot
     /// disagree -- a `Merged` plan with no commit recorded would be a plan the
-    /// chamber claims to have landed and cannot say where.
+    /// conversation claims to have landed and cannot say where.
     pub fn settle(&mut self, outcome: Outcome) {
         self.status = match &outcome {
             Outcome::Merged { .. } => PlanStatus::Merged,
@@ -638,11 +643,11 @@ impl Plan {
         self.transcript.push(Entry::Note(Note::new(kind, body)));
     }
 
-    /// Just the utterances, in order.
+    /// Just the messages, in order.
     ///
-    /// What the King and the court *said*, with tool calls and Kingdom's own
+    /// What the user and the model *said*, with tool calls and Kingdom's own
     /// notices both left out. Useful for questions about the conversation --
-    /// "has the court replied yet?" -- rather than for building a request.
+    /// "has the model replied yet?" -- rather than for building a request.
     /// [`Plan::turns`] is what a model is handed.
     pub fn messages(&self) -> impl Iterator<Item = &Message> {
         self.transcript.iter().filter_map(|e| match e {
@@ -673,10 +678,10 @@ impl Plan {
 
     /// Records a tool call as begun, before it has run.
     ///
-    /// Written down *before* the work rather than after it, so the chamber can
-    /// show a command while it is still running. A deed recorded only on
-    /// completion would make a five-minute build look like five minutes of an
-    /// agent doing nothing at all, which is the exact question this product
+    /// Written down *before* the work rather than after it, so the conversation
+    /// can show a command while it is still running. A tool call recorded only
+    /// on completion would make a five-minute build look like five minutes of
+    /// an agent doing nothing at all, which is the exact question this product
     /// exists to answer.
     pub fn begin_tool_call(&mut self, tool_call: ToolCall) {
         self.transcript.push(Entry::Tool(tool_call));
@@ -686,7 +691,7 @@ impl Plan {
     ///
     /// Returns false if there is no such call still in flight, which the caller
     /// should treat as a bug rather than ignore: it means a result arrived for
-    /// something never recorded as started, and the log the King reads is
+    /// something never recorded as started, and the log the user reads is
     /// missing an event the model believes happened.
     pub fn settle_tool_call(&mut self, id: &str, outcome: ToolOutcome) -> bool {
         for entry in self.transcript.iter_mut().rev() {
@@ -701,7 +706,7 @@ impl Plan {
     }
 }
 
-/// The slug a decree will produce, before there is a [`Plan`] to ask.
+/// The slug a prompt will produce, before there is a [`Plan`] to ask.
 ///
 /// Exists because of an ordering knot: the branch is named from the slug, but a
 /// plan cannot be built until its workspace -- and therefore its branch --
@@ -736,12 +741,13 @@ fn title_from_prompt(prompt: &str) -> String {
 /// forgot would feed Kingdom's own plumbing back to a model as its own prior
 /// words. Splitting it out one level up makes that mistake unrepresentable.
 ///
-/// A [`ToolCall`] is not a speaker either, for the first half of the same reason:
-/// nobody said it. But it parts company with a note on the second half -- a
-/// deed **does** go back to the model, because a tool result the model is never
-/// shown is a tool call it will immediately make again. So the log now holds
-/// three kinds of thing and exactly two of them are addressed to a model; see
-/// [`Plan::turns`], which is the only door between this log and one.
+/// A [`ToolCall`] is not a speaker either, for the first half of the same
+/// reason: nobody said it. But it parts company with a note on the second half
+/// -- a tool call **does** go back to the model, because a tool result the
+/// model is never shown is a tool call it will immediately make again. So the
+/// log now holds three kinds of thing and exactly two of them are addressed to
+/// a model; see [`Plan::turns`], which is the only door between this log and
+/// one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Entry {
     /// Words a participant produced.
@@ -749,16 +755,17 @@ pub enum Entry {
     /// Something Kingdom itself reports: a failed call or a workspace cut.
     /// Never sent anywhere.
     Note(Note),
-    /// Something the court did with its own hands, and what came back.
+    /// Something the model did with its own hands, and what came back.
     Tool(ToolCall),
 }
 
-/// A tool call the court made, and its result.
+/// A tool call the model made, and its result.
 ///
 /// Both halves live in one entry rather than two. A call and its outcome are
-/// one event in the King's reading of the chamber -- "it ran the tests, and they
-/// failed" -- and splitting them would let the log hold a result with no call,
-/// or two results for one call, neither of which is a thing that can happen.
+/// one event in the user's reading of the conversation -- "it ran the tests,
+/// and they failed" -- and splitting them would let the log hold a result with
+/// no call, or two results for one call, neither of which is a thing that can
+/// happen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// The provider's own correlation id for this call.
@@ -778,8 +785,8 @@ pub struct ToolCall {
     /// attempted is worth more than a tidy `None`.
     pub input: serde_json::Value,
     /// What came back. `None` while the call is still running, which is a state
-    /// the chamber renders -- it is how the King sees what an agent is doing
-    /// *right now* rather than only what it did.
+    /// the conversation renders -- it is how the user sees what an agent is
+    /// doing *right now* rather than only what it did.
     pub outcome: Option<ToolOutcome>,
     /// When the call was made. See [`Timestamp`].
     #[serde(default)]
@@ -853,20 +860,20 @@ pub struct ToolImage {
 /// How a tool call ended.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolOutcome {
-    /// The tool ran. Note that a command exiting non-zero is still `Done` --
-    /// a failing test suite is a successful tool call with bad news in it, and
-    /// conflating the two would have the chamber cry error over exactly the
-    /// result the King asked for.
+    /// The tool ran. Note that a command exiting non-zero is still `Done` -- a
+    /// failing test suite is a successful tool call with bad news in it, and
+    /// conflating the two would have the conversation cry error over exactly
+    /// the result the user asked for.
     Done {
         output: String,
         /// Pictures the tool produced.
         ///
         /// A separate channel from `output` rather than encoded into it. The
-        /// text is what the chamber renders and what a model without vision is
-        /// told; a megabyte of base64 spliced into it would be unreadable in
-        /// the one place and useless in the other. Keeping them apart is also
-        /// what lets the store drop the pictures and keep the words -- see
-        /// `store.rs`.
+        /// text is what the conversation renders and what a model without
+        /// vision is told; a megabyte of base64 spliced into it would be
+        /// unreadable in the one place and useless in the other. Keeping them
+        /// apart is also what lets the store drop the pictures and keep the
+        /// words -- see `store.rs`.
         ///
         /// Almost every tool leaves this empty, so it is skipped on the wire:
         /// a document written before this field existed still loads, and one
@@ -894,8 +901,8 @@ impl ToolOutcome {
 
     /// A tool that ran and produced something to look at.
     ///
-    /// The words are still required: they are what the chamber shows, what the
-    /// store keeps, and what a model that cannot see is given instead.
+    /// The words are still required: they are what the conversation shows, what
+    /// the store keeps, and what a model that cannot see is given instead.
     pub fn seen(output: impl Into<String>, images: Vec<ToolImage>) -> Self {
         ToolOutcome::Done {
             output: output.into(),
@@ -903,7 +910,8 @@ impl ToolOutcome {
         }
     }
 
-    /// Suffix for the CSS class the chamber styles a settled deed with.
+    /// Suffix for the CSS class the conversation styles a settled tool call
+    /// with.
     pub fn css_suffix(&self) -> &'static str {
         match self {
             ToolOutcome::Done { .. } => "done",
@@ -923,7 +931,7 @@ impl ToolOutcome {
     }
 }
 
-/// One turn of the exchange between the King and the court: the entries that
+/// One turn of the exchange between the user and the model: the entries that
 /// are addressed to a model, and only those.
 ///
 /// This exists so that "what goes to the model" is a type rather than a filter
@@ -953,7 +961,7 @@ pub struct Message {
 
 impl Message {
     /// Records words as said *now*, which is the only way a caller should make
-    /// one: an utterance whose time is chosen by hand is an utterance that can
+    /// one: a message whose time is chosen by hand is a message that can
     /// disagree with its own position in the log.
     pub fn new(speaker: Speaker, body: impl Into<String>) -> Self {
         Self {
@@ -998,7 +1006,7 @@ impl Timestamp {
     /// The current time, where there is a clock to read.
     ///
     /// `None` on wasm, and that absence is deliberately not papered over with a
-    /// zero: **the browser never authors a log entry**. Every utterance and note
+    /// zero: **the browser never authors a log entry**. Every message and note
     /// is made server-side, so the wasm arm is unreachable in practice, and a
     /// `0` sentinel would render an impossible line as "01:00, 1 Jan 1970"
     /// rather than as the missing thing it actually is.
@@ -1024,13 +1032,13 @@ pub enum NoteKind {
     Failed,
     /// Where this plan is working, and how it was prepared.
     Workspace,
-    /// What happened when the King moved to finish the plan: work landing, a
+    /// What happened when the user moved to finish the plan: work landing, a
     /// conflict git refused, a worktree disposed of.
     Merge,
 }
 
 impl NoteKind {
-    /// Suffix for the CSS class the chamber styles a note with.
+    /// Suffix for the CSS class the conversation styles a note with.
     pub fn css_suffix(self) -> &'static str {
         match self {
             NoteKind::Failed => "failed",
@@ -1062,13 +1070,13 @@ pub enum Speaker {
 /// `Approved` and `Rejected` went the same way, and were replaced rather than
 /// joined by the two states below. They named a judgement nobody could pass:
 /// only `sample.rs` ever produced them, because there was no code path by which
-/// the King could approve anything. `Merged` and `Archived` name what actually
-/// happens to a branch, and both are reachable from the chamber.
+/// the user could approve anything. `Merged` and `Archived` name what actually
+/// happens to a branch, and both are reachable from the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlanStatus {
     /// A model is drafting it right now.
     Drafting,
-    /// Drafted, and waiting on the King.
+    /// Drafted, and waiting on the user.
     AwaitingReview,
     /// The model could not be reached, or refused.
     Failed,
@@ -1130,7 +1138,7 @@ impl PlanStatus {
     }
 }
 
-/// What the King chose to do with a plan when he closed it.
+/// What the user chose to do with a plan when he closed it.
 ///
 /// Crosses the wire, so it lives here rather than in the server. Two options
 /// because there are two honest endings: the work belongs in the project, or it
@@ -1162,7 +1170,7 @@ pub enum Outcome {
     ///
     /// `pruned` says whether the branch was reclaimed along with the checkout.
     /// It is only ever true when a patch was actually written, so the work is
-    /// recoverable either way -- but the King must not be told to check out a
+    /// recoverable either way -- but the user must not be told to check out a
     /// branch that is no longer there.
     Archived {
         branch: String,
@@ -1175,7 +1183,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// How the chamber's footer states what became of the plan.
+    /// How the conversation's footer states what became of the plan.
     pub fn summary(&self) -> String {
         match self {
             Outcome::Merged { commit, into } => {
@@ -1206,7 +1214,7 @@ fn short_sha(sha: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Model access -- what the King can see about how plans get drafted
+// Model access -- what the user can see about how plans get drafted
 // ---------------------------------------------------------------------------
 
 /// Whether a credential could be obtained.
@@ -1276,7 +1284,7 @@ impl ModelEffort {
     }
 }
 
-/// What a decree is drafted with.
+/// What a prompt is drafted with.
 ///
 /// `effort: None` means *the model's own default*, which is a different request
 /// from any explicit level -- the field is omitted entirely rather than sent as
@@ -1338,7 +1346,7 @@ pub struct ModelOption {
     /// Who makes it, for grouping: `"Anthropic"`, `"OpenAI"`, `"Offline"`.
     pub vendor: String,
     pub context_window: usize,
-    /// Surfaced above the fold, before the King expands the full list.
+    /// Surfaced above the fold, before the user expands the full list.
     pub recommended: bool,
     /// The effort levels this model declares. Empty means it has no effort
     /// control at all, and the picker hides the row rather than offering
@@ -1347,7 +1355,7 @@ pub struct ModelOption {
     /// Whether this model can be handed tools.
     ///
     /// A model that cannot is still offered -- it drafts perfectly good prose,
-    /// and the King choosing a cheaper model should get a weaker answer rather
+    /// and the user choosing a cheaper model should get a weaker answer rather
     /// than an error. What it changes is the request: sending tools to a model
     /// that does not take them earns an opaque rejection from the gateway, so
     /// the turn is built without them and the system prompt says so.
@@ -1363,7 +1371,7 @@ pub struct ModelOption {
     /// cannot see is still perfectly good at everything else, so it stays in
     /// the picker and is simply never offered `read_image`. Sending an image to
     /// one that cannot take it fails the whole turn with a gateway error, while
-    /// withholding it from one that could merely means the King's court works
+    /// withholding it from one that could merely means the user's model works
     /// the way it did last week. The costs of guessing wrong are not
     /// symmetric, so absent is taken as "no".
     #[serde(default)]
@@ -1374,7 +1382,7 @@ pub struct ModelOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCatalogue {
     pub options: Vec<ModelOption>,
-    /// What a King who has never chosen gets.
+    /// What a user who has never chosen gets.
     pub default_id: String,
     pub credential: CredentialState,
     /// Plain-language detail: where the catalogue came from, or why it is thin.
@@ -1389,7 +1397,7 @@ impl ModelCatalogue {
     /// Resolves a remembered choice against what is actually available now.
     ///
     /// A model that has left the catalogue, or an effort it no longer declares,
-    /// degrades to the nearest valid thing instead of erroring. The King's
+    /// degrades to the nearest valid thing instead of erroring. The user's
     /// browser storage outlives any given catalogue, so a stale value there must
     /// never be able to wedge the dock.
     pub fn resolve(&self, wanted: Option<&ModelChoice>) -> ModelChoice {
@@ -1467,7 +1475,7 @@ mod tests {
         }
     }
 
-    /// The King's browser remembers a choice for longer than any catalogue
+    /// The user's browser remembers a choice for longer than any catalogue
     /// lives. A withdrawn model or an effort a model no longer declares must
     /// degrade quietly -- if either could error, last week's localStorage would
     /// wedge today's dock, and sending an undeclared effort earns an opaque 400.
@@ -1537,12 +1545,13 @@ mod transcript_tests {
     /// Kingdom's own notices must never reach a model.
     ///
     /// This is the bug the `Entry`/`Note` split exists to make unrepresentable.
-    /// When every log line was an utterance, app notices and failed calls were
-    /// stored as things the *model* had said, and the next turn replayed them to
-    /// it as its own prior words -- teaching it to answer in the voice of the
-    /// plumbing. `messages()` is the only door between a plan's log and a model,
-    /// so it is the thing worth pinning: notes never come through it, ordering
-    /// survives, and the last King turn is still findable as the live prompt.
+    /// When every log line was a message, app notices and failed calls were
+    /// stored as things the *model* had said, and the next turn replayed them
+    /// to it as its own prior words -- teaching it to answer in the voice of
+    /// the plumbing. `messages()` is the only door between a plan's log and a
+    /// model, so it is the thing worth pinning: notes never come through it,
+    /// ordering survives, and the last user turn is still findable as the live
+    /// prompt.
     #[test]
     fn notes_never_reach_the_model_and_the_prompt_survives_them() {
         let mut plan = Plan::opened(
@@ -1567,7 +1576,7 @@ mod transcript_tests {
             "only utterances pass, and they keep their order"
         );
 
-        // The prompt is the last thing the King said, even though a note landed
+        // The prompt is the last thing the user said, even though a note landed
         // between the turns.
         let i = messages
             .iter()
@@ -1576,8 +1585,8 @@ mod transcript_tests {
         assert_eq!(messages[i].body, "Second question");
     }
 
-    /// The same exclusion, now that the log holds a third kind of thing. A deed
-    /// must reach the model (a tool result it never sees is a tool call it
+    /// The same exclusion, now that the log holds a third kind of thing. A tool
+    /// call must reach the model (a tool result it never sees is a tool call it
     /// makes again) while a note still must not, and both must arrive in the
     /// order they happened -- a provider that sees a result before its call is
     /// rebuilding a conversation that never took place.
@@ -1619,10 +1628,10 @@ mod transcript_tests {
     }
 
     /// Plans are the one thing disk cannot tell us again, so a record written
-    /// before deeds existed must still load. `Entry` is externally tagged, which
-    /// makes a new variant additive -- but "should be additive" and "is" are
-    /// different claims, and the cost of being wrong is a kingdom that will not
-    /// open.
+    /// before tool calls existed must still load. `Entry` is externally tagged,
+    /// which makes a new variant additive -- but "should be additive" and "is"
+    /// are different claims, and the cost of being wrong is a kingdom that will
+    /// not open.
     #[test]
     fn a_plan_recorded_before_the_model_had_hands_still_loads() {
         let before_tool_calls = r#"{
@@ -1658,15 +1667,17 @@ mod transcript_tests {
         );
     }
 
-    /// An errand is a plan the King never asked for, so the readers that build
-    /// *his* views must not show it -- while the reader the parent's chamber
-    /// uses must find exactly the errands of the call that sent them.
+    /// A subagent is a plan the user never asked for, so the readers that build
+    /// *his* views must not show it -- while the reader the parent's
+    /// conversation uses must find exactly the subagents of the call that sent
+    /// them.
     ///
     /// Worth one test because this is a filter applied in several places from
     /// one predicate: the map reads `plans_in`, the rail reads `plans` with the
-    /// same condition, and the deed line reads `subagents_of`. The failure is
-    /// silent in both directions -- an errand in the rail is clutter, an errand
-    /// missing from `subagents_of` is a chamber that shows a call sending nothing.
+    /// same condition, and the tool call line reads `subagents_of`. The failure
+    /// is silent in both directions -- a subagent in the rail is clutter, a
+    /// subagent missing from `subagents_of` is a conversation that shows a call
+    /// sending nothing.
     #[test]
     fn subagents_are_hidden_from_the_users_views_and_found_by_their_call() {
         let city = CityId::new("c1");
@@ -1681,7 +1692,7 @@ mod transcript_tests {
         let mut first = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the parser");
         first.status = PlanStatus::AwaitingReview;
         let second = Plan::spawned(PlanId::new("plan-3"), &parent, "call-1", "Read the loader");
-        // A second round of errands, under a different call.
+        // A second round of subagents, under a different call.
         let later = Plan::spawned(PlanId::new("plan-4"), &parent, "call-2", "Read the cache");
 
         let kingdom = Kingdom {

@@ -25,13 +25,14 @@
 //! ## Terrain is decoration, and is held to decoration's rules
 //!
 //! `AGENTS.md` insists that colour on screen should mean something. Elevation
-//! noise means nothing, and this module does not pretend otherwise. It earns its
-//! place as *substrate*: it exists so that the things which do carry meaning --
-//! a gilded roof, a blocked architect, a contended port -- read as objects
-//! standing in a place. The discipline that keeps that honest lives in the
-//! stylesheet: terrain may only use desaturated slates and blues, and must never
-//! approach the saturation of a [`crate::Language`] tint or a status colour. If the
-//! terrain ever competes with a signal for attention, the terrain is wrong.
+//! noise means nothing, and this module does not pretend otherwise. It earns
+//! its place as *substrate*: it exists so that the things which do carry
+//! meaning -- a gilded roof, a blocked architect, a contended port -- read as
+//! objects standing in a place. The discipline that keeps that honest lives in
+//! the stylesheet: terrain may only use desaturated slates and blues, and must
+//! never approach the saturation of a [`crate::Language`] tint or a status
+//! colour. If the terrain ever competes with a signal for attention, the
+//! terrain is wrong.
 
 // ---------------------------------------------------------------------------
 // Shape constants

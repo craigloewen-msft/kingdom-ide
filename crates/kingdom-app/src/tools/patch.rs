@@ -1,10 +1,10 @@
 //! Editing a file, by naming the text to change rather than the line to change.
 //!
-//! The court's hands. Line numbers were the obvious alternative and are the
-//! wrong one: a model that read a file two deeds ago has stale numbers, and an
-//! edit aimed at line 412 lands wherever line 412 happens to be now. Anchoring
-//! on the text itself makes a stale view *fail* instead of silently corrupting
-//! a file, which is the only failure mode worth having here.
+//! The model's hands. Line numbers were the obvious alternative and are the
+//! wrong one: a model that read a file two tool calls ago has stale numbers,
+//! and an edit aimed at line 412 lands wherever line 412 happens to be now.
+//! Anchoring on the text itself makes a stale view *fail* instead of silently
+//! corrupting a file, which is the only failure mode worth having here.
 //!
 //! Three rules carry that promise, and each is a refusal rather than a guess:
 //!
@@ -21,7 +21,7 @@
 //!
 //! The write itself goes through a temp file and a rename. A source file caught
 //! half-written is worse than one left untouched: the plan's next build fails
-//! for a reason unrelated to anything the court believes it did.
+//! for a reason unrelated to anything the model believes it did.
 
 use super::{Refusal, Tool, Sandbox};
 use kingdom_core::ToolOutcome;
@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// How much diff one deed reports.
+/// How much diff one tool call reports.
 ///
 /// The diff is pasted into the next request to the model, so an overwrite of a
 /// large file would otherwise spend the context window restating a file the
@@ -53,13 +53,13 @@ const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 /// actually near is worse than none: it sends the model to edit the wrong site.
 const NEAR_MISS_THRESHOLD: f32 = 0.6;
 
-/// Named clipboards, per plan, outliving a single deed.
+/// Named clipboards, per plan, outliving a single tool call.
 ///
-/// A move is two deeds -- cut here, paste there -- and the whole point of the
-/// clipboard is that the text crossing between them is *the file's own bytes*,
-/// never retyped by the model. That requires state between calls, and a tool is
-/// a fresh value on every call by [`super::all`], so the state cannot live in
-/// `Patch`.
+/// A move is two tool calls -- cut here, paste there -- and the whole point of
+/// the clipboard is that the text crossing between them is *the file's own
+/// bytes*, never retyped by the model. That requires state between calls, and a
+/// tool is a fresh value on every call by [`super::all`], so the state cannot
+/// live in `Patch`.
 ///
 /// Keyed by plan so two plans working at once cannot read each other's
 /// clipboard -- which would be a cross-workspace content leak through a tool
@@ -679,7 +679,7 @@ fn bounded(diff: &str) -> String {
 ///
 /// The house pattern, from `store.rs::save`, and it matters more here: a plan's
 /// records can be rebuilt, but a source file truncated mid-write fails the next
-/// build for a reason that has nothing to do with the edit the court believes
+/// build for a reason that has nothing to do with the edit the model believes
 /// it made. Rename within a directory is atomic, so the file is either the old
 /// one or the new one.
 fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
@@ -902,9 +902,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched\n");
     }
 
-    /// The end to end path: the file on disk actually changes, and the deed
-    /// reports the diff so the King and the model can both see where the edit
-    /// landed without re-reading the file.
+    /// The end to end path: the file on disk actually changes, and the tool
+    /// call reports the diff so the user and the model can both see where the
+    /// edit landed without re-reading the file.
     #[tokio::test]
     async fn an_applied_patch_writes_the_file_and_reports_its_diff() {
         let dir = tempfile::tempdir().unwrap();

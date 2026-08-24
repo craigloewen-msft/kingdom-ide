@@ -1,43 +1,43 @@
 //! **The fake data. Edit this file to change it.**
 //!
-//! Each realm is a function returning a [`FixtureSpec`]. To add one, write the
-//! function and list it in [`fixtures()`] -- that is the whole procedure. The
-//! helpers in [`super::build`] (`rust_city`, `file`, `fill`, `text`, ...) are
-//! what keep a realm readable; see [`super`] for the full walkthrough.
+//! Each fixture is a function returning a [`FixtureSpec`]. To add one, write
+//! the function and list it in [`fixtures()`] -- that is the whole procedure.
+//! The helpers in [`super::build`] (`rust_city`, `file`, `fill`, `text`, ...)
+//! are what keep a fixture readable; see [`super`] for the full walkthrough.
 //!
 //! Two things to keep in mind when editing:
 //!
-//! - **Seeds are arbitrary but must not change casually.** Changing a realm's
-//!   seed reshuffles every generated file size in it, which moves every tower on
-//!   the map. That is fine when intended and confusing when not.
-//! - **Each realm should earn its place** by making some state reachable that
+//! - **Seeds are arbitrary but must not change casually.** Changing a
+//!   fixture's seed reshuffles every generated file size in it, which moves
+//!   every tower on the map. That is fine when intended and confusing when not.
+//! - **Each fixture should earn its place** by making some state reachable that
 //!   the others do not. They are fixtures, not a gallery.
 
 use super::build::*;
 use super::{CitySpec, FixtureSpec};
 use crate::model::Language;
 
-/// The realm the "Enter the Proving Grounds" button opens.
+/// The fixture the "Enter the Proving Grounds" button opens.
 pub const DEFAULT_FIXTURE: &str = "kingdom-mirror";
 
-// Per-realm seeds. Arbitrary values -- what matters is that they are *fixed*.
-// Changing one reshuffles every generated file size in that realm, which moves
-// every tower on its map; fine when intended, baffling when not.
+// Per-fixture seeds. Arbitrary values -- what matters is that they are *fixed*.
+// Changing one reshuffles every generated file size in that fixture, which
+// moves every tower on its map; fine when intended, baffling when not.
 const MIRROR_SEED: u64 = 0x_D1FF_0001;
 const CROWDED_SEED: u64 = 0x_C0FF_0002;
 const MONOREPO_SEED: u64 = 0x_BEEF_0003;
 
-/// Every realm the seeder can build. **Add yours here.**
+/// Every fixture the seeder can build. **Add yours here.**
 pub fn fixtures() -> Vec<FixtureSpec> {
     vec![kingdom_mirror(), crowded(), monorepo()]
 }
 
-/// Looks up a realm by name.
+/// Looks up a fixture by name.
 pub fn fixture(name: &str) -> Option<FixtureSpec> {
     fixtures().into_iter().find(|r| r.name == name)
 }
 
-/// Every realm name, for the CLI's listing and its unknown-name error.
+/// Every fixture name, for the CLI's listing and its unknown-name error.
 pub fn fixture_names() -> Vec<&'static str> {
     fixtures().into_iter().map(|r| r.name).collect()
 }
@@ -47,7 +47,7 @@ pub fn fixture_names() -> Vec<&'static str> {
 /// A fake dev folder shaped like a real one: mixed stacks, mixed sizes.
 ///
 /// The everyday proving ground, and what the button opens. Deliberately
-/// *modest* in size so it seeds in well under a second -- the realms that
+/// *modest* in size so it seeds in well under a second -- the fixtures that
 /// stress-test the scanner are separate, because a slow default would push
 /// people back towards opening their real folder.
 fn kingdom_mirror() -> FixtureSpec {
@@ -112,8 +112,8 @@ fn kingdom_mirror() -> FixtureSpec {
 /// Forty cities of wildly varying size.
 ///
 /// Exists so map layout, label collision and level-of-detail switching fail
-/// *here* rather than on the King's machine. Each city is tiny; the point is the
-/// count, not the bulk.
+/// *here* rather than on the user's machine. Each city is tiny; the point is
+/// the count, not the bulk.
 fn crowded() -> FixtureSpec {
     const NAMES: [&str; 40] = [
         "alder", "birch", "cedar", "dogwood", "elm", "fir", "gorse", "hazel", "ivy", "juniper",
@@ -124,8 +124,9 @@ fn crowded() -> FixtureSpec {
     ];
 
     let cities = NAMES.iter().enumerate().map(|(i, name)| {
-        // Sizes fan out by a factor of ~50 across the realm, which is what makes
-        // the map's size scaling and label thresholds meaningfully exercised.
+        // Sizes fan out by a factor of ~50 across the fixture, which is what
+        // makes the map's size scaling and label thresholds meaningfully
+        // exercised.
         let count = 2 + (i * 3) % 60;
         let city: CitySpec = match i % 4 {
             0 => rust_city(name).dir("src", [fill("mod_{i}.rs", count, 400..20_000, Language::Rust)]),
@@ -154,8 +155,8 @@ fn crowded() -> FixtureSpec {
 /// One enormous project, nested well past the scanner's depth cap.
 ///
 /// Drives every limit in `scan.rs` at once: `SCAN_DEPTH`, the `COUNT_CAP`
-/// budget, `FILES_PER_DISTRICT` pruning into `extra_files`/`extra_bytes`, and the
-/// assets-versus-code weighting. Those caps are invisible until something
+/// budget, `FILES_PER_DISTRICT` pruning into `extra_files`/`extra_bytes`, and
+/// the assets-versus-code weighting. Those caps are invisible until something
 /// crosses them, and a real monorepo is a bad place to discover they misbehave.
 fn monorepo() -> FixtureSpec {
     let deep = dir(

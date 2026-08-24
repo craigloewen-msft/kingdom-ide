@@ -3,7 +3,7 @@
 //! The tool that makes `browser_take_screenshot` worth calling. A screenshot
 //! that a model cannot look at is a file nobody opens; this is the other half
 //! of that feature, and it is deliberately general -- a diagram or a mockup the
-//! King left in the workspace is just as readable as a capture.
+//! user left in the workspace is just as readable as a capture.
 //!
 //! Unlike every other tool here, the result of this one is not words. See
 //! [`kingdom_core::ToolOutcome::seen`] for why images travel beside the text
@@ -133,9 +133,9 @@ impl Tool for ReadImage {
             }
         };
 
-        // The text is not a duplicate of the picture -- it is what the chamber
-        // renders, what the plan's record keeps, and what a model without
-        // vision is left with. The bytes ride the separate channel.
+        // The text is not a duplicate of the picture -- it is what the
+        // conversation renders, what the plan's record keeps, and what a model
+        // without vision is left with. The bytes ride the separate channel.
         ToolOutcome::seen(
             format!("Looked at {} ({} bytes).", path.display(), bytes.len()),
             vec![ToolImage {
@@ -163,7 +163,7 @@ mod tests {
 
     /// The whole point of the tool: bytes arrive on the image channel, and the
     /// text stays human-sized. If the payload ever leaks into `output` it would
-    /// work in a test that only checked success, while making the chamber
+    /// work in a test that only checked success, while making the conversation
     /// unreadable and the prompt enormous -- so both halves are asserted.
     #[tokio::test]
     async fn a_picture_travels_beside_the_words_not_inside_them() {

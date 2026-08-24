@@ -2,7 +2,7 @@
 //!
 //! This lives in `kingdom-core`, beside [`crate::layout`], for the same reason
 //! that city placement does: a building must land on the **same spot on every
-//! render and every reload**. The King navigates by spatial memory — "the tall
+//! render and every reload**. The user navigates by spatial memory — "the tall
 //! amber tower on the left of the auth district" — and that memory is worthless
 //! if the skyline reshuffles. Being a pure function of the file tree makes the
 //! stability testable rather than hoped for.
@@ -17,7 +17,7 @@
 //!   question.
 //! - **Height also rises with mass**, compressed by a power curve. Area and
 //!   height reinforce each other so the dominant module reads instantly, from
-//!   any zoom, without the King decoding a legend.
+//!   any zoom, without the user decoding a legend.
 //! - **Nothing is silently dropped.** Files pruned by the caps below are
 //!   aggregated into a *commons* lot that still carries their count and their
 //!   weight, so a huge folder always looks huge. A map that quietly under-reports
@@ -58,15 +58,15 @@ const EMPTY_FILE_WEIGHT: f64 = 64.0;
 
 /// Ceiling on how much a non-code file may weigh.
 ///
-/// Without this the map answers the wrong question. A single 40 MB demo video or
-/// a 2 MB `Cargo.lock` outweighs every source file in the project put together,
-/// so the city becomes a monument to its assets and the King cannot see the code
-/// at all. Capping keeps such files visible -- they are really there, and a
-/// folder full of them still reads as populated -- while stopping them from
-/// dominating area, height, or the choice of landmark.
+/// Without this the map answers the wrong question. A single 40 MB demo video
+/// or a 2 MB `Cargo.lock` outweighs every source file in the project put
+/// together, so the city becomes a monument to its assets and the user cannot
+/// see the code at all. Capping keeps such files visible -- they are really
+/// there, and a folder full of them still reads as populated -- while stopping
+/// them from dominating area, height, or the choice of landmark.
 const NON_CODE_CEILING: u64 = 8_192;
 
-/// True for wards that represent hand-written program logic.
+/// True for languages that represent hand-written program logic.
 fn is_code(language: Language) -> bool {
     matches!(
         language,
@@ -274,7 +274,7 @@ pub struct Plate {
     /// Nesting level; 0 is the city's own root plate.
     pub level: usize,
     pub files: usize,
-    /// The ward holding the most bytes here, used to tint the plate.
+    /// The language holding the most bytes here, used to tint the plate.
     pub language: Language,
 }
 
@@ -330,7 +330,7 @@ pub fn build_skyline(root: &Folder, radius: f64) -> Skyline {
 
     // The landmark answers "where is the bulk of my code?", so it must be code:
     // a project's largest file is very often a lockfile or a demo video, and
-    // crowning one of those would point the King at the least interesting thing
+    // crowning one of those would point the user at the least interesting thing
     // in the city.
     skyline.cathedral = skyline
         .lots
@@ -736,7 +736,7 @@ impl Trimmed {
         (self.total_bytes() as f64).max(files as f64 * EMPTY_FILE_WEIGHT)
     }
 
-    /// The ward holding the most bytes anywhere beneath this district.
+    /// The language holding the most bytes anywhere beneath this district.
     fn dominant_language(&self) -> Language {
         let mut totals = [0u64; Language::ALL.len()];
         self.tally(&mut totals);
@@ -823,7 +823,7 @@ fn insert(folder: &Folder, into: &mut Trimmed) {
 /// significant files always earn a tower, wherever they live; the remainder is
 /// still accounted for district by district, so no folder shrinks below its true
 /// mass. Code outranks assets here for the same reason it does when choosing the
-/// cathedral: a city drawn from its images tells the King nothing.
+/// cathedral: a city drawn from its images tells the user nothing.
 fn apply_budget(root: &mut Trimmed) {
     let mut all: Vec<(bool, u64, String)> = Vec::new();
     gather(root, &mut all);
@@ -872,8 +872,9 @@ fn demote(folder: &mut Trimmed, keep: &BTreeSet<String>) {
     });
 
     if dropped > 0 {
-        // Blend the demoted files' dominant ward with whatever the scanner had
-        // already set aside, so the commons block is tinted by what it holds.
+        // Blend the demoted files' dominant language with whatever the scanner
+        // had already set aside, so the commons block is tinted by what it
+        // holds.
         if folder.extra_files == 0 {
             if let Some((_, language)) = Language::ALL
                 .iter()
@@ -913,7 +914,7 @@ fn sort_tree(folder: &mut Trimmed) {
     }
 }
 
-/// Dominant ward of a raw district, used to tint aggregated remainders.
+/// Dominant language of a raw district, used to tint aggregated remainders.
 fn dominant_of(folder: &Folder) -> Language {
     let mut totals = [0u64; Language::ALL.len()];
 
@@ -1051,7 +1052,7 @@ mod tests {
         }
     }
 
-    /// The King navigates by spatial memory. If a building moves between
+    /// The user navigates by spatial memory. If a building moves between
     /// reloads, the map stops being worth reading -- the same reason
     /// `spiral_layout_is_deterministic` exists for cities.
     #[test]

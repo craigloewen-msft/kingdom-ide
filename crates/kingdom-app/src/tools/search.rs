@@ -1,6 +1,6 @@
 //! Searching the workspace for a pattern.
 //!
-//! The court's way of finding something it cannot yet name a path for. It walks
+//! The model's way of finding something it cannot yet name a path for. It walks
 //! the plan's workspace honouring `.gitignore`, which is the whole reason this
 //! is a tool and not a `grep` command: an unfiltered walk of a real project
 //! returns `target/` and `node_modules/` first and fills the model's context
@@ -32,13 +32,13 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 ///
 /// A ten-megabyte file that survived the ignore rules is a lockfile, a fixture
 /// or a bundle. Scanning it costs seconds and its matches are never the ones
-/// the court wanted.
+/// the model wanted.
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// A ceiling on directory entries visited, so a search cannot become a hang.
 ///
 /// A worktree with a stray `~/Downloads` symlink or a vendored monorepo will
-/// walk for minutes, and the King is sitting watching a plan that looks stuck.
+/// walk for minutes, and the user is sitting watching a plan that looks stuck.
 /// Stopping and *saying so* turns that into one more turn.
 const MAX_ENTRIES_VISITED: usize = 100_000;
 
@@ -47,7 +47,7 @@ const MAX_ENTRIES_VISITED: usize = 100_000;
 /// Belt and braces over `.gitignore`: these are ignored in most projects but
 /// not all, and a repository that happens to commit its `vendor/` is not a
 /// reason to bury every search under it. `.git` is here because hidden entries
-/// are deliberately *not* filtered -- the court has honest business in
+/// are deliberately *not* filtered -- the model has honest business in
 /// `.github/` and dotfiles.
 const SKIP_DIRS: &[&str] = &[
     ".git",

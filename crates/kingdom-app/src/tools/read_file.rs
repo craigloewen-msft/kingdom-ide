@@ -1,9 +1,9 @@
 //! Reading a file, with line numbers.
 //!
-//! The court's cheapest way to look at something. It exists as a tool of its
+//! The model's cheapest way to look at something. It exists as a tool of its
 //! own rather than as `cat` through a shell because the line numbers are the
 //! point: a model that has read a file numbered can ask for a window of it
-//! later, and can name a line to the King. `cat` gives it a wall of text with
+//! later, and can name a line to the user. `cat` gives it a wall of text with
 //! no coordinates, and the next request re-reads the whole file to find one
 //! function.
 //!

@@ -1,9 +1,10 @@
-//! Tools: what the court can do with its own hands.
+//! Tools: what the model can do with its own hands.
 //!
 //! Server-only, for the same reason `llm/` is. Named for what it is rather than
-//! given a metaphor noun -- the metaphor is carried by [`kingdom_core::ToolCall`],
-//! and inventing a second name for the plumbing would only obscure where the
-//! subprocess is spawned. The precedent is set at the top of `llm/mod.rs`.
+//! given a metaphor noun -- the metaphor is carried by
+//! [`kingdom_core::ToolCall`], and inventing a second name for the plumbing
+//! would only obscure where the subprocess is spawned. The precedent is set at
+//! the top of `llm/mod.rs`.
 //!
 //! # The boundary
 //!
@@ -41,35 +42,36 @@ use std::path::{Component, Path, PathBuf};
 /// the same reason: it is a rule about what a tool call may do, so it belongs
 /// at the seam every tool call passes through rather than inside the tools.
 ///
-/// It exists because errands share their parent's worktree. Several agents
+/// It exists because subagents share their parent's worktree. Several agents
 /// writing to one checkout at once is precisely the collision this product
 /// exists to prevent, and nothing here arbitrates -- so instead of detecting it
-/// after the fact, [`Permissions::ReadOnly`] makes it unrepresentable. That is what lets
-/// errands run in parallel without any lease machinery behind them.
+/// after the fact, [`Permissions::ReadOnly`] makes it unrepresentable. That is
+/// what lets subagents run in parallel without any lease machinery behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permissions {
     /// Reads and reports, and cannot touch the world.
     ///
-    /// No writing, no commands, no browser -- and no sending errands of its
+    /// No writing, no commands, no browser -- and no sending subagents of its
     /// own, which is what keeps the fan-out one level deep. A tree of agents
     /// needs an answer to "who is blocked behind whom" that Kingdom does not
     /// have yet.
     ReadOnly,
-    /// Everything the court has.
+    /// Everything the model has.
     Full,
 }
 
-/// Every tool available under a given remit.
+/// Every tool available under a given permission level.
 ///
 /// A plain list rather than a registry with registration macros, for the same
 /// reason `llm::providers()` is: a literal is the version of this a reader can
 /// take in at a glance, and a tool that is not in this list does not exist.
 /// Order is the order the model is shown them in.
 ///
-/// This is the *only* definition of what a remit permits. Both the list a model
-/// is shown ([`crate::llm::ToolSpec::all`]) and the list it may actually run
-/// ([`invoke`]) come through here, which is what stops the two disagreeing -- a
-/// model that invents `bash` under a survey remit must not be handed `bash`.
+/// This is the *only* definition of what a permission level permits. Both the
+/// list a model is shown ([`crate::llm::ToolSpec::all`]) and the list it may
+/// actually run ([`invoke`]) come through here, which is what stops the two
+/// disagreeing -- a model that invents `bash` under read-only permissions must
+/// not be handed `bash`.
 pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     let full = matches!(permissions, Permissions::Full);
     let mut tools: Vec<Box<dyn Tool>> = vec![
@@ -78,7 +80,7 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
         Box::new(search::Search),
         // Looking at a picture is a read, so it sits with the other reads
         // rather than with the browser tools it was built to pair with. An
-        // errand surveying a project may legitimately want to look at a
+        // subagent surveying a project may legitimately want to look at a
         // screenshot somebody already took; it still cannot take one.
         Box::new(read_image::ReadImage),
     ];
@@ -99,8 +101,9 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
             Box::new(browser::BrowserResize),
             Box::new(browser::BrowserRecentConsoleLogs),
             Box::new(browser::BrowserClearConsoleLogs),
-            // Driving a browser at all is a Full remit, and profiling drives
-            // one -- it navigates, clicks and throttles a real page.
+            // Driving a browser at all is a Full permission level, and
+            // profiling drives one -- it navigates, clicks and throttles a real
+            // page.
             Box::new(profile::BrowserProfile),
             Box::new(spawn_agents::SpawnAgents),
             Box::new(ask_user_question::AskUserQuestion),
@@ -110,16 +113,17 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     tools
 }
 
-/// Runs one tool call by name, inside the workspace's bounds and its remit.
+/// Runs one tool call by name, inside the workspace's bounds and its
+/// permissions.
 ///
 /// The single point where a name from a model becomes work on a real machine.
 /// An unknown name is a refusal reported back to the model rather than an
 /// error: models hallucinate tool names, and being told "there is no such tool"
 /// is something a model can recover from in one turn.
 ///
-/// A tool outside the remit gets that same answer, deliberately. It *is* the
-/// truth from where the model is standing -- it was never shown the tool -- and
-/// it is a refusal that reads as recoverable rather than as a wall.
+/// A tool outside the permissions gets that same answer, deliberately. It *is*
+/// the truth from where the model is standing -- it was never shown the tool --
+/// and it is a refusal that reads as recoverable rather than as a wall.
 pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
     match all(shop.permissions()).into_iter().find(|t| t.name() == tool) {
         Some(t) => t.run(input, shop).await,
@@ -136,16 +140,16 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
 ///
 /// It also carries *which call this is*. Most tools never look: a command does
 /// not care which plan asked for it. But a tool that has to reach back out --
-/// to put a question in front of the King and wait for his answer -- needs
-/// something the browser can name when it answers, and the deed it is already
-/// being rendered as is exactly that. Minting a second identifier would mean
-/// keeping two in step for no gain.
+/// to put a question in front of the user and wait for his answer -- needs
+/// something the browser can name when it answers, and the tool call it is
+/// already being rendered as is exactly that. Minting a second identifier would
+/// mean keeping two in step for no gain.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     workspace: Workspace,
     plan: kingdom_core::PlanId,
-    /// The deed this call is recorded as, once it is running. `None` outside a
-    /// turn, which is the case tests construct.
+    /// The tool call this call is recorded as, once it is running. `None`
+    /// outside a turn, which is the case tests construct.
     tool_call: Option<String>,
     /// How much of the world this plan may touch. See [`Permissions`].
     permissions: Permissions,
@@ -153,7 +157,7 @@ pub struct Sandbox {
 
 /// A refusal: the tool would not run, and why.
 ///
-/// The reason is written for the *model*, not for the King. It is fed back as
+/// The reason is written for the *model*, not for the user. It is fed back as
 /// the call's result, so it has to be actionable -- "that path is outside the
 /// workspace" lets a model correct itself, where a bare "refused" earns a retry
 /// of exactly the same call.
@@ -182,8 +186,8 @@ impl From<Refusal> for ToolOutcome {
 }
 
 impl Sandbox {
-    /// A workshop with the court's full hands, which is what a plan the King
-    /// decreed gets.
+    /// A sandbox with the model's full hands, which is what a plan the user
+    /// opened gets.
     pub fn new(workspace: Workspace) -> Self {
         Self {
             workspace,
@@ -193,7 +197,7 @@ impl Sandbox {
         }
     }
 
-    /// Narrows what this workshop may do. See [`Permissions`].
+    /// Narrows what this sandbox may do. See [`Permissions`].
     pub fn under(mut self, permissions: Permissions) -> Self {
         self.permissions = permissions;
         self
@@ -210,7 +214,7 @@ impl Sandbox {
         self
     }
 
-    /// A copy of this workshop bound to one recorded call.
+    /// A copy of this sandbox bound to one recorded call.
     ///
     /// Cloned per call rather than mutated, so a tool cannot see the id of a
     /// call that is not its own -- which is what would let one tool answer
@@ -227,7 +231,7 @@ impl Sandbox {
         &self.plan
     }
 
-    /// The deed this call is recorded as.
+    /// The tool call this call is recorded as.
     pub fn tool_call(&self) -> Option<&str> {
         self.tool_call.as_deref()
     }
@@ -248,7 +252,7 @@ impl Sandbox {
 
     /// True when this plan works in a worktree of its own.
     ///
-    /// False means the King chose to work directly in the city, so the boundary
+    /// False means the user chose to work directly in the city, so the boundary
     /// below is the project itself and gives no isolation from his own
     /// checkout. That is a choice he made knowingly and the tools honour it --
     /// but it must be a *visible* weaker guarantee rather than an accident,
@@ -314,7 +318,7 @@ fn normalise(path: &Path) -> PathBuf {
     out
 }
 
-/// One thing the court can do.
+/// One thing the model can do.
 ///
 /// Stateless: every tool is a singleton and all per-call context arrives in the
 /// [`Sandbox`]. That is what lets one instance serve every plan at once
@@ -322,7 +326,7 @@ fn normalise(path: &Path) -> PathBuf {
 /// that would make the boundary above a suggestion.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    /// The name the model calls it by, and the name recorded on the deed.
+    /// The name the model calls it by, and the name recorded on the tool call.
     fn name(&self) -> &'static str;
 
     /// What it does, written for a model.
@@ -333,10 +337,11 @@ pub trait Tool: Send + Sync {
 
     /// Runs the tool.
     ///
-    /// Returns a [`ToolOutcome`] rather than a `Result` because both endings are
-    /// results the model must be *told*: a refusal it never hears about is a
-    /// call it makes again immediately. Errors that are not the model's business
-    /// -- a poisoned lock, a vanished plan -- belong to the caller, not here.
+    /// Returns a [`ToolOutcome`] rather than a `Result` because both endings
+    /// are results the model must be *told*: a refusal it never hears about is
+    /// a call it makes again immediately. Errors that are not the model's
+    /// business -- a poisoned lock, a vanished plan -- belong to the caller,
+    /// not here.
     async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome;
 }
 
@@ -410,16 +415,16 @@ mod tests {
         ));
     }
 
-    /// The invariant errands rest on.
+    /// The invariant subagents rest on.
     ///
-    /// Errands run in parallel inside their parent's worktree, which is only
+    /// Subagents run in parallel inside their parent's worktree, which is only
     /// safe because they cannot write. That is enforced here, at the seam, and
     /// nowhere else -- so this is where it is worth pinning, beside the path
     /// check it sits next to for the same reason.
     ///
-    /// The refusal matters as much as the absence: a model under a survey remit
-    /// was never shown `bash`, but models invent tool names, and one that
-    /// invents this one must not be handed it.
+    /// The refusal matters as much as the absence: a model under read-only
+    /// permissions was never shown `bash`, but models invent tool names, and
+    /// one that invents this one must not be handed it.
     #[tokio::test]
     async fn a_survey_cannot_reach_the_tools_that_touch_the_world() {
         let surveying = sandbox().under(Permissions::ReadOnly);

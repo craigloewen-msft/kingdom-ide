@@ -445,7 +445,7 @@ fn Crane(radius: f64) -> impl IntoView {
     }
 }
 
-/// The city's heraldic banner, in its stack colour.
+/// The city's banner, in its stack colour.
 #[component]
 fn Banner(radius: f64, color: &'static str) -> impl IntoView {
     let (bx, by) = iso(-radius * 0.4, radius * 0.4, 0.0);

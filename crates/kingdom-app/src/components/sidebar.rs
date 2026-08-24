@@ -1,14 +1,14 @@
 //! The left rail: cities, and the plans drawn up inside each of them.
 //!
-//! Deliberately one list rather than a set of tabbed panels. The King's scarce
+//! Deliberately one list rather than a set of tabbed panels. The user's scarce
 //! resource is attention, so the rail answers exactly one question — what is
 //! being proposed, and where — and leaves agent status and resource contention
 //! to the map, which shows them spatially.
 //!
 //! It is also the app's primary navigator: every row goes somewhere. A city
-//! goes to the realm with that city selected; a plan goes to its conversation.
-//! A row that silently changed state on a screen that cannot show the result
-//! would be a dead end.
+//! goes to the fixture with that city selected; a plan goes to its
+//! conversation. A row that silently changed state on a screen that cannot show
+//! the result would be a dead end.
 
 use crate::app::{KingdomState, DEFAULT_SIDEBAR_WIDTH};
 use kingdom_core::{City, CityId, Plan};
@@ -47,7 +47,7 @@ pub fn Sidebar() -> impl IntoView {
                     <div class="kingdom-name">{move || state.kingdom.get().name}</div>
                     // A proving ground is *designed* to be indistinguishable
                     // from a real kingdom on the map, which makes an unlabelled
-                    // one a trap -- for the King glancing at it, and for anyone
+                    // one a trap -- for the user glancing at it, and for anyone
                     // reading a screenshot of it later. So the label sits with
                     // the kingdom's identity, not somewhere it scrolls away.
                     <Show when=move || state.kingdom.get().sandbox>
@@ -119,10 +119,11 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                 .get()
                 .plans
                 .into_iter()
-                // Errands are excluded here as they are on the map: the rail is
-                // the list of what the *King* decreed, and filling it with work
-                // the court sent itself makes it worse at that job. An errand
-                // is reached from the chamber of the plan that sent it.
+                // Subagents are excluded here as they are on the map: the rail
+                // is the list of what the *user* asked for, and filling it with
+                // work the model sent itself makes it worse at that job. A
+                // subagent is reached from the conversation of the plan that
+                // sent it.
                 .filter(|p| p.city == id && !p.is_subagent() && (show_all || p.is_live()))
                 .collect::<Vec<_>>()
         })
@@ -153,7 +154,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
             state.selected.set(Some(id.clone()));
             // A city is a place on the map, so selecting one goes to the map.
             // Otherwise clicking a city from inside a conversation would change
-            // a selection the King cannot see the effect of.
+            // a selection the user cannot see the effect of.
             navigate("/", Default::default());
         }
     };
@@ -162,9 +163,9 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
 
     // Prominence follows *live* work, not whatever the filter happens to show.
     // A city whose plans are all approved or rejected has nothing awaiting the
-    // King, so it recedes even in "All" -- otherwise switching filters would
+    // user, so it recedes even in "All" -- otherwise switching filters would
     // re-clutter the rail with settled history. The selected city never
-    // recedes: the King is looking at it deliberately.
+    // recedes: the user is looking at it deliberately.
     let dormant = {
         let id = id.clone();
         Memo::new(move |_| {
@@ -200,7 +201,8 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     // Keyed on what the row actually draws, not just the id: a
                     // `For` reuses a row whose key is unchanged, so keying on
                     // the id alone would leave a plan reading "Drafting" in the
-                    // rail long after its chamber showed the finished draft.
+                    // rail long after its conversation showed the finished
+                    // draft.
                     <For
                         each={move || plans.get()}
                         key=|p: &Plan| {

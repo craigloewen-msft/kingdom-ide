@@ -1,13 +1,13 @@
 //! Running a command, and living with the ones that do not finish.
 //!
-//! The court's hands. Everything a plan actually *does* to a machine -- build,
+//! The model's hands. Everything a plan actually *does* to a machine -- build,
 //! test, `git`, a script -- arrives here.
 //!
 //! # Why a command outlives its call
 //!
 //! The obvious shape is "run it, wait for it, return the output", with a
 //! timeout that kills anything slow. That shape breaks on the one command the
-//! court runs most: a build. A cold `cargo build` takes longer than any timeout
+//! model runs most: a build. A cold `cargo build` takes longer than any timeout
 //! anybody is willing to sit through, and killing it at the deadline throws
 //! away minutes of work and leaves a half-written target directory behind --
 //! then the model retries and pays the same cost again.
@@ -51,7 +51,7 @@ use tokio::sync::watch;
 ///
 /// The *tail*, not the head: when a build fails, the error is at the end. A cap
 /// on the head would faithfully retain a megabyte of "Compiling ..." and drop
-/// the one line the court needed.
+/// the one line the model needed.
 const RING_BYTES: usize = 256 * 1024;
 
 /// Lines returned by a peek when the caller does not say.
@@ -69,10 +69,10 @@ const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 /// Every command this process has started and not yet forgotten.
 ///
-/// Process-global rather than per-[`Sandbox`] because a handle must survive
-/// the call that minted it: the whole contract is that the court comes back for
-/// it in a *later* deed, with a fresh workshop. Follows the registry pattern in
-/// `events.rs`.
+/// Process-global rather than per-[`Sandbox`] because a handle must survive the
+/// call that minted it: the whole contract is that the model comes back for it
+/// in a *later* tool call, with a fresh sandbox. Follows the registry pattern
+/// in `events.rs`.
 static JOBS: OnceLock<Mutex<HashMap<String, Arc<Job>>>> = OnceLock::new();
 
 fn jobs() -> &'static Mutex<HashMap<String, Arc<Job>>> {
@@ -637,8 +637,8 @@ mod tests {
 
     /// The distinction the whole outcome type turns on. A failing test suite is
     /// a successful tool call carrying bad news; reporting it as a refusal
-    /// would have the chamber cry error over exactly the result the King asked
-    /// for, and send the model off to fix a call that was right.
+    /// would have the conversation cry error over exactly the result the user
+    /// asked for, and send the model off to fix a call that was right.
     #[tokio::test]
     async fn a_command_that_fails_still_ran() {
         let dir = tempfile::tempdir().unwrap();
@@ -659,7 +659,8 @@ mod tests {
 
     /// The reason this tool is not a one-shot: the deadline governs the *call*,
     /// and the command survives it to be found again through the registry in a
-    /// later deed. Killing at the deadline is what would throw away a build.
+    /// later tool call. Killing at the deadline is what would throw away a
+    /// build.
     #[tokio::test]
     async fn a_slow_command_survives_the_deadline_and_can_be_killed() {
         let dir = tempfile::tempdir().unwrap();

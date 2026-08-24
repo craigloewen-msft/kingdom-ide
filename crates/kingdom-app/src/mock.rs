@@ -1,8 +1,8 @@
 //! Materialising a proving ground on disk.
 //!
 //! The mirror image of [`crate::scan`]: that turns a folder into a `Kingdom`,
-//! this turns a [`FixtureSpec`] into a folder. Server-only, and deliberately the
-//! *only* place in the codebase that creates or deletes files.
+//! this turns a [`FixtureSpec`] into a folder. Server-only, and deliberately
+//! the *only* place in the codebase that creates or deletes files.
 //!
 //! # Why write real files at all
 //!
@@ -10,7 +10,7 @@
 //! a code path that never runs: `scan.rs`'s depth cap, its per-folder pruning
 //! into `extra_files`, its `SKIP_DIRS` and its marker sniffing are exactly the
 //! behaviour worth rehearsing, and faking above them means they are first
-//! exercised by a real monorepo on the King's machine. Writing real bytes also
+//! exercised by a real monorepo on the user's machine. Writing real bytes also
 //! gives a future agent with hands somewhere to actually act.
 //!
 //! # The safety rule
@@ -26,9 +26,9 @@ use std::path::{Path, PathBuf};
 /// Marks a directory as a proving ground, and therefore safe to destroy.
 pub const MARKER: &str = ".kingdom-mock";
 
-/// Where realms are seeded unless told otherwise.
+/// Where fixtures are seeded unless told otherwise.
 ///
-/// Under the repo rather than `/tmp` so a realm survives a reboot and can be
+/// Under the repo rather than `/tmp` so a fixture survives a reboot and can be
 /// poked at with ordinary tools while debugging what the map did with it; not
 /// under `target/` so `cargo clean` cannot delete it mid-investigation.
 /// `.gitignore` already excludes `/.kingdom/`.
@@ -39,7 +39,7 @@ pub fn sandbox_root() -> PathBuf {
     }
 }
 
-/// Where a named realm is seeded by default.
+/// Where a named fixture is seeded by default.
 pub fn fixture_path(name: &str) -> PathBuf {
     sandbox_root().join(name)
 }
@@ -48,13 +48,13 @@ pub fn fixture_path(name: &str) -> PathBuf {
 ///
 /// A sparse file reports its full length to `metadata().len()` -- which is what
 /// the scanner reads and the skyline draws -- while costing almost nothing on
-/// disk. That is what lets a realm hold a 40 MB asset, the exact case behind the
-/// tested "assets never outweigh code" invariant, for kilobytes.
+/// disk. That is what lets a fixture hold a 40 MB asset, the exact case behind
+/// the tested "assets never outweigh code" invariant, for kilobytes.
 const SPARSE_ABOVE: u64 = 64 * 1024;
 
 #[derive(Debug)]
 pub enum SeedError {
-    /// The realm itself is malformed. Author error, caught before any write.
+    /// The fixture itself is malformed. Author error, caught before any write.
     Spec(Vec<kingdom_core::mockdata::SpecError>),
     /// The target exists and is not a proving ground. **Never overridable.**
     NotAProvingGround(PathBuf),
@@ -149,9 +149,9 @@ fn ensure_seedable(path: &Path) -> Result<(), SeedError> {
     Err(SeedError::NotAProvingGround(path.to_path_buf()))
 }
 
-/// Materialises a realm at `into`, clearing any previous seeding of it.
+/// Materialises a fixture at `into`, clearing any previous seeding of it.
 pub fn seed(spec: &FixtureSpec, into: &Path) -> Result<SeedReport, SeedError> {
-    // Validate before touching anything: a realm that fails halfway through
+    // Validate before touching anything: a fixture that fails halfway through
     // leaves a folder that looks plausible and is not, which is worse than no
     // folder at all.
     spec.validate().map_err(SeedError::Spec)?;
@@ -200,7 +200,7 @@ fn write_marker(spec: &FixtureSpec, root: &Path) -> Result<(), SeedError> {
         root.join(MARKER),
         format!(
             "# Kingdom IDE proving ground -- generated, safe to delete.\n\
-             realm = {}\nseed = {:#x}\ngenerated_at = {stamp}\n\n\
+             fixture = {}\nseed = {:#x}\ngenerated_at = {stamp}\n\n\
              Every file under this directory is fake. Edit\n\
              crates/kingdom-core/src/mockdata/fixtures.rs and re-seed to change it.\n",
             spec.name, spec.seed
@@ -395,7 +395,8 @@ mod tests {
         let precious = temp.0.join("NOT_A_FIXTURE.txt");
         std::fs::write(&precious, "a user's real work").unwrap();
 
-        // Any bundled realm will do; which one is not what is under test here.
+        // Any bundled fixture will do; which one is not what is under test
+        // here.
         let fixture = kingdom_core::mockdata::fixture("kingdom-mirror").expect("bundled realm");
 
         let refused = seed(&fixture, &temp.0);
@@ -418,7 +419,7 @@ mod tests {
 
     /// Proves the whole chain is honest, end to end.
     ///
-    /// A realm declaring `CityKind::Rust` means nothing unless the *real*
+    /// A fixture declaring `CityKind::Rust` means nothing unless the *real*
     /// scanner independently infers Rust from the `Cargo.toml` that was
     /// actually written. Same for file counts: this is what catches the seeder
     /// silently dropping files, or `Fill` expanding to fewer than it claims.

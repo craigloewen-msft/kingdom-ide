@@ -1,8 +1,8 @@
-//! Terse constructors for writing realms.
+//! Terse constructors for writing fixtures.
 //!
-//! The user-facing promise of the proving grounds is "open `fixtures.rs`, change
-//! the fake data". A wall of struct literals would break that promise on
-//! contact, so realms are written with these instead.
+//! The user-facing promise of the proving grounds is "open `fixtures.rs`,
+//! change the fake data". A wall of struct literals would break that promise on
+//! contact, so fixtures are written with these instead.
 //!
 //! The city builders (`rust_city`, `node_city`, ...) write the **marker files**
 //! a real project of that stack would have. That is deliberate and load-bearing:
@@ -96,8 +96,8 @@ pub fn go_city(name: &str) -> CitySpec {
 
 /// A project with no stack markers at all -- docs, notes, assets.
 ///
-/// Worth having in a realm: `CityKind::Unknown` picks a different banner colour
-/// and is what any non-code folder in a real dev directory scans as.
+/// Worth having in a fixture: `CityKind::Unknown` picks a different banner
+/// colour and is what any non-code folder in a real dev directory scans as.
 pub fn docs_city(name: &str) -> CitySpec {
     CitySpec::new(name, CityKind::Unknown).files([text("README.md", readme(name, "documentation"))])
 }

@@ -3,10 +3,10 @@
 //! The one tool that does nothing. It exists because a model given only
 //! *acting* tools will act in order to think -- running a command it does not
 //! need so it has somewhere to reason -- and because a plan whose transcript
-//! shows the court's reasoning is a plan the King can actually review.
+//! shows the model's reasoning is a plan the user can actually review.
 //!
 //! It also earns its place as the first tool: it exercises the whole loop
-//! (schema out, call in, deed recorded, result back) without touching the
+//! (schema out, call in, tool call recorded, result back) without touching the
 //! filesystem, so a failure here is a failure in the machinery rather than in
 //! anything it drives.
 

@@ -1,4 +1,4 @@
-//! The plan's chamber: one plan's whole life, at its own URL.
+//! The plan's conversation: one plan's whole life, at its own URL.
 //!
 //! A `Plan` is both the unit of work and the unit of review, so it gets a place
 //! to be reviewed in. Everything here reads from server state rather than local
@@ -29,15 +29,15 @@ pub fn Conversation() -> impl IntoView {
         state.kingdom.get().city(&plan.city).map(|c| c.name.clone())
     });
 
-    // The rail and the map should agree with the URL about where the King is.
+    // The rail and the map should agree with the URL about where the user is.
     Effect::new(move |_| {
         if let Some(p) = plan.get() {
             state.selected.set(Some(p.city));
         }
     });
 
-    // `state.error` is shared with the opening screen and the decree bar, so
-    // whatever sits in it on arrival belongs to a screen the King has already
+    // `state.error` is shared with the opening screen and the prompt bar, so
+    // whatever sits in it on arrival belongs to a screen the user has already
     // left. Clearing it on entry stops another view's complaint from being
     // shown against this plan.
     Effect::new(move |_| {
@@ -73,8 +73,8 @@ pub fn Conversation() -> impl IntoView {
     // A plan that is Drafting, busy with nothing and has heard nothing back is
     // one nobody has started yet: exactly the state `begin_plan` leaves behind.
     //
-    // Never an errand: an errand is driven by the call that sent it, which is
-    // already looping over it. A King who opens one in the window before its
+    // Never a subagent: a subagent is driven by the call that sent it, which is
+    // already looping over it. A user who opens one in the window before its
     // first turn must not start a second loop over the same plan. The server
     // refuses this too -- this is the half that avoids the pointless request.
     Effect::new(move |_| {
@@ -90,13 +90,13 @@ pub fn Conversation() -> impl IntoView {
 
     // Whatever the server says about this plan, as it says it. A draft started
     // by another page -- a reload mid-flight, a second tab -- lands here just
-    // the same, because the chamber is watching the plan rather than awaiting
-    // its own request.
+    // the same, because the conversation is watching the plan rather than
+    // awaiting its own request.
     watch_plan(plan_id, move |updated| {
         state.kingdom.update(|k| k.insert(updated));
     });
 
-    // The King's words land first, then the court is asked -- so his half of
+    // The user's words land first, then the model is asked -- so his half of
     // the exchange never waits on the model.
     let speak = Callback::new(move |(id, text): (PlanId, String)| {
         leptos::task::spawn_local(async move {
@@ -157,7 +157,7 @@ pub fn Conversation() -> impl IntoView {
 
 #[component]
 fn ConversationBody(
-    /// The plan as it stood when this chamber was built.
+    /// The plan as it stood when this conversation was built.
     ///
     /// Read only for the parts of a plan that *cannot* change while it is open:
     /// its id, its city, the model drawing it, and the workspace it was cut in.
@@ -168,7 +168,7 @@ fn ConversationBody(
     /// Everything that moves during a turn -- status, title, outcome -- must be
     /// read through here rather than off `plan`. A snapshot taken at
     /// construction renders once and then lies: the badge sat on "Drafting"
-    /// after the court had already answered, because the status it was built
+    /// after the model had already answered, because the status it was built
     /// from was a value and not a signal.
     live: Memo<Option<Plan>>,
     city: Memo<Option<String>>,
@@ -198,12 +198,12 @@ fn ConversationBody(
     let settled = Memo::new(move |_| status.get().is_settled());
     let title = Memo::new(move |_| live.get().map(|p| p.title).unwrap_or_default());
 
-    // An errand is settled once and never changes, so it is read off the
+    // A subagent is settled once and never changes, so it is read off the
     // snapshot rather than the live signal.
     let subagent = StoredValue::new(plan.spawned_by.clone());
     let is_subagent = subagent.get_value().is_some();
     // The plan that sent it, for the banner's link. Read live because the
-    // parent's *title* is still being drafted while its errands run -- a
+    // parent's *title* is still being drafted while its subagents run -- a
     // snapshot here would leave the banner naming a title that has moved on.
     let parent = Memo::new(move |_| {
         let sent_by = subagent.get_value()?;
@@ -213,9 +213,9 @@ fn ConversationBody(
     });
     let task = StoredValue::new(plan.prompt.clone());
 
-    // Where the arrow goes. For an errand that is the plan that sent it; for
-    // anything else, the realm. A parent this browser has not loaded falls back
-    // to the realm rather than to a link that would lead nowhere.
+    // Where the arrow goes. For a subagent that is the plan that sent it; for
+    // anything else, the fixture. A parent this browser has not loaded falls
+    // back to the fixture rather than to a link that would lead nowhere.
     let back = Memo::new(move |_| match parent.get() {
         Some((id, _)) => (
             format!("/plan/{id}"),
@@ -231,7 +231,7 @@ fn ConversationBody(
     });
 
     // Keeps the newest line in view. A conversation longer than the viewport
-    // otherwise leaves the reply the King is waiting for below the fold.
+    // otherwise leaves the reply the user is waiting for below the fold.
     let log_ref = NodeRef::<leptos::html::Div>::new();
     stick_to_bottom(
         log_ref,
@@ -261,13 +261,13 @@ fn ConversationBody(
 
     // Closed by default. Opening it is what attaches a viewer and starts the
     // screencast, and closing it is what stops one -- so this signal is the
-    // King's direct control over whether Chrome is painting for an audience.
+    // user's direct control over whether Chrome is painting for an audience.
     let (watching, set_watching) = signal(false);
 
     view! {
         <header class="chamber-header" class:subagent=is_subagent>
-            // For an errand, "back" is the plan that sent it rather than the
-            // realm: that is where the King came from, and where he has to go
+            // For a subagent, "back" is the plan that sent it rather than the
+            // fixture: that is where the user came from, and where he has to go
             // to steer the work. Retargeting the arrow he already knows beats
             // adding a second one beside it.
             <a
@@ -277,8 +277,8 @@ fn ConversationBody(
             >"\u{2190}"</a>
             <div class="chamber-id">
                 // Where he is, above what he is reading -- the ordinary
-                // breadcrumb shape. Present only for an errand, because for a
-                // plan the King decreed there is no "above" to name.
+                // breadcrumb shape. Present only for a subagent, because for a
+                // plan the user opened there is no "above" to name.
                 <Show when=move || is_subagent>
                     <div class="chamber-crumb">
                         <span class="crumb-mark">"\u{26b1}"</span>
@@ -298,7 +298,7 @@ fn ConversationBody(
                         }}
                     </div>
                 </Show>
-                // An errand's title is cut from its task, so the full wording
+                // A subagent's title is cut from its task, so the full wording
                 // goes on hover rather than onto a line of its own.
                 <h1
                     class="chamber-title"
@@ -309,7 +309,7 @@ fn ConversationBody(
                         {move || city.get().unwrap_or_else(|| "unknown city".into())}
                     </span>
                     <span class="chamber-model">{plan.choice().label()}</span>
-                    // Isolation the King cannot see is isolation he cannot
+                    // Isolation the user cannot see is isolation he cannot
                     // trust, so where this plan works is stated next to what is
                     // drafting it, with the full path on hover.
                     <span
@@ -323,8 +323,8 @@ fn ConversationBody(
             </div>
             <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
                 {move || {
-                    // An errand is never reviewed and never merged: it reports
-                    // to the court that sent it. Same states, honest words.
+                    // A subagent is never reviewed and never merged: it reports
+                    // to the model that sent it. Same states, honest words.
                     match (is_subagent, status.get()) {
                         (true, PlanStatus::AwaitingReview) => "Reported",
                         (true, PlanStatus::Drafting) => "Working",
@@ -332,7 +332,7 @@ fn ConversationBody(
                     }
                 }}
             </span>
-            // The court's browser is headless, so without this the King's only
+            // The model's browser is headless, so without this the user's only
             // evidence of a browser flow is a list of tool names. Offered on
             // every plan rather than only those known to hold a session:
             // Kingdom has no field saying which do, and the panel's own
@@ -351,10 +351,10 @@ fn ConversationBody(
             <BrowserView plan=id.get_value()/>
         </Show>
 
-        // Everything the King and the court have exchanged, oldest first, and
+        // Everything the user and the model have exchanged, oldest first, and
         // nothing else. Plan *state* -- the summary, the status -- lives in the
         // header or the rail; mixing it into this column put blocks derived
-        // from the newest reply above the decree that opened the plan.
+        // from the newest reply above the prompt that opened the plan.
         <div class="chamber-log" node_ref=log_ref>
             <Transcript live=live/>
 
@@ -377,12 +377,12 @@ fn ConversationBody(
         </Show>
 
         // A settled plan is a record, not a place to type. The composer goes
-        // and the outcome takes its place, so the chamber says what became of
-        // the work rather than inviting more of it.
+        // and the outcome takes its place, so the conversation says what became
+        // of the work rather than inviting more of it.
         //
-        // An errand is a record for a different reason: it answers to the court
-        // that sent it, and a second person steering it would leave the parent
-        // reading a report on a conversation that changed under it.
+        // A subagent is a record for a different reason: it answers to the
+        // model that sent it, and a second person steering it would leave the
+        // parent reading a report on a conversation that changed under it.
         <Show
             when={move || !settled.get() && !is_subagent}
             fallback={move || view! {
@@ -425,7 +425,7 @@ fn ConversationBody(
                 </button>
 
                 // Closing the plan sits beside sending to it, because they are
-                // the two things the King does from here.
+                // the two things the user does from here.
                 <button
                     class="done-btn"
                     title="Finish with this plan"
@@ -439,7 +439,7 @@ fn ConversationBody(
 
             // Two rows and no confirmation dialog: both endings are recoverable
             // -- one makes a revertable merge commit, the other keeps a patch of
-            // the work -- and a modal would spend the King's attention to
+            // the work -- and a modal would spend the user's attention to
             // prevent nothing.
             <Show when={move || showing_done.get()}>
                 <div class="done-picker">
@@ -490,7 +490,7 @@ fn ConversationBody(
 ///
 /// Reads the plan live rather than taking a copy, because the whole point of
 /// the push socket is that lines arrive *during* a turn. A snapshot would show
-/// the transcript as it was when the King walked in.
+/// the transcript as it was when the user walked in.
 #[component]
 fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     let plan_id = Memo::new(move |_| live.get().map(|p| p.id));
@@ -504,11 +504,11 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     .enumerate()
                     .collect::<Vec<_>>()
             }}
-            // Keyed by position *and* by what the entry is, so a deed settling
-            // in place re-renders. Keying on the index alone would leave a
-            // running command showing "working..." forever -- the list is the
-            // same length when a result arrives as it was when the call was
-            // recorded.
+            // Keyed by position *and* by what the entry is, so a tool call
+            // settling in place re-renders. Keying on the index alone would
+            // leave a running command showing "working..." forever -- the list
+            // is the same length when a result arrives as it was when the call
+            // was recorded.
             key=|(i, entry)| (*i, entry_version(entry))
             let:entry
         >
@@ -538,9 +538,9 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     }
                     .into_any(),
                     // Also not a bubble, and for the first half of the same
-                    // reason -- but a deed is the court *working*, which is the
-                    // thing the King most wants to watch, so it gets its own
-                    // shape rather than a note's.
+                    // reason -- but a tool call is the model *working*, which
+                    // is the thing the user most wants to watch, so it gets its
+                    // own shape rather than a note's.
                     //
                     // A question still waiting on him is the exception: that is
                     // not something to watch, it is something to do, so it is
@@ -548,8 +548,8 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Tool(d) if is_open_question(&d) => {
                         view! { <Question tool_call=d plan=plan_id/> }.into_any()
                     }
-                    // Errands are not a line of output either: the call's own
-                    // text result is a summary, and the thing the King wants is
+                    // Subagents are not a line of output either: the call's own
+                    // text result is a summary, and the thing the user wants is
                     // the list of agents it sent and a way into each one.
                     Entry::Tool(d) if d.tool == "spawn_agents" => {
                         view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
@@ -561,17 +561,17 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     }
 }
 
-/// The errands one call sent, each a way into its own conversation.
+/// The subagents one call sent, each a way into its own conversation.
 ///
-/// Rendered from the *plans*, not from the deed's text output. The output is a
-/// summary written for the model; the King wants to know who is out there, what
-/// each was asked, and how each is getting on -- and to be able to go and read
-/// one. None of that survives being flattened into a paragraph.
+/// Rendered from the *plans*, not from the tool call's text output. The output
+/// is a summary written for the model; the user wants to know who is out there,
+/// what each was asked, and how each is getting on -- and to be able to go and
+/// read one. None of that survives being flattened into a paragraph.
 ///
-/// The rows are live for free: `events::publish` announces an errand on its
+/// The rows are live for free: `events::publish` announces a subagent on its
 /// parent's channel as well as its own, and `Kingdom::insert` files a plan the
-/// chamber has not seen before. So these come from the same signal everything
-/// else reads, with no separate subscription.
+/// conversation has not seen before. So these come from the same signal
+/// everything else reads, with no separate subscription.
 #[component]
 fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -590,7 +590,7 @@ fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> i
             .collect::<Vec<_>>()
     });
 
-    // The tasks as the model asked for them. Shown only until the errands
+    // The tasks as the model asked for them. Shown only until the subagents
     // themselves exist: between the call being recorded and the plans being
     // created there is a moment with nothing to list, and an empty box there
     // would read as a call that sent nobody.
@@ -625,9 +625,9 @@ fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> i
                 {move || {
                     let sent = subagents.get();
                     if sent.is_empty() {
-                        // Not yet created, or a record from before this chamber
-                        // knew them: show what was asked, without a link that
-                        // would lead nowhere.
+                        // Not yet created, or a record from before this
+                        // conversation knew them: show what was asked, without
+                        // a link that would lead nowhere.
                         return asked
                             .get_value()
                             .into_iter()
@@ -660,10 +660,10 @@ fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> i
                                         <span class="errand-task">{subagent.prompt.clone()}</span>
                                         <span class="errand-state">
                                             {match (status, working) {
-                                                // What it is doing beats what it
-                                                // is: "Drafting" is true of every
-                                                // working errand and tells the
-                                                // King nothing.
+                                                // What it is doing beats what
+                                                // it is: "Drafting" is true of
+                                                // every working subagent and
+                                                // tells the user nothing.
                                                 (_, Some(doing)) => doing,
                                                 (s, None) => subagent_status(s).to_string(),
                                             }}
@@ -680,12 +680,12 @@ fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> i
     }
 }
 
-/// How an errand's state reads, which is not how a plan's does.
+/// How a subagent's state reads, which is not how a plan's does.
 ///
-/// An errand is never reviewed and never merged -- it reports to the court that
-/// sent it. Relabelled here rather than given its own `PlanStatus` variant: a
-/// sixth state would ripple through the map legend, `ALL` and every match on
-/// plan state to buy one word.
+/// A subagent is never reviewed and never merged -- it reports to the model
+/// that sent it. Relabelled here rather than given its own `PlanStatus`
+/// variant: a sixth state would ripple through the map legend, `ALL` and every
+/// match on plan state to buy one word.
 fn subagent_status(status: PlanStatus) -> &'static str {
     match status {
         PlanStatus::Drafting => "working\u{2026}",
@@ -695,11 +695,11 @@ fn subagent_status(status: PlanStatus) -> &'static str {
     }
 }
 
-/// A question the court has stopped to ask, rendered where it was asked./// A question the court has stopped to ask, rendered where it was asked.
+/// A question the model has stopped to ask, rendered where it was asked.
 ///
 /// Inline in the transcript rather than as a modal. A modal would be the
 /// obvious choice and is the wrong one: it puts the question in front of the
-/// King with the work that prompted it hidden behind it, so he answers without
+/// user with the work that prompted it hidden behind it, so he answers without
 /// the context he needs. Here the reasoning and the commands that led to the
 /// question are right above it, and he can scroll.
 #[component]
@@ -774,7 +774,7 @@ fn Question(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> im
                     .collect_view()
             }}
 
-            // The listed options are the court's guesses at what the King might
+            // The listed options are the model's guesses at what the user might
             // want. He is the one deciding, so he must be able to say something
             // that was not on the list.
             <QuestionFreeText sent=sent on_answer=Callback::new(reply)/>
@@ -811,7 +811,7 @@ fn QuestionFreeText(sent: ReadSignal<bool>, on_answer: Callback<String>) -> impl
     }
 }
 
-/// One thing the court wants decided.
+/// One thing the model wants decided.
 #[derive(Clone)]
 struct Asked {
     question: String,
@@ -827,9 +827,9 @@ struct AskedOption {
 /// Reads the questions out of a call's arguments.
 ///
 /// Tolerant on purpose: these are a model's JSON, not a shape we declared, and
-/// a missing `description` or a malformed option must not cost the King the
+/// a missing `description` or a malformed option must not cost the user the
 /// whole question. A question that renders with one option missing is still
-/// answerable; one that fails to render at all leaves the court parked with
+/// answerable; one that fails to render at all leaves the model parked with
 /// nothing on screen to unpark it.
 fn parse_questions(input: &serde_json::Value) -> Vec<Asked> {
     input
@@ -862,19 +862,20 @@ fn parse_questions(input: &serde_json::Value) -> Vec<Asked> {
         .collect()
 }
 
-/// True for a question the King has not answered yet.
+/// True for a question the user has not answered yet.
 ///
-/// Once answered it is ordinary history and renders as any other deed, which is
-/// what stops him answering the same question twice.
+/// Once answered it is ordinary history and renders as any other tool call,
+/// which is what stops him answering the same question twice.
 fn is_open_question(entry: &kingdom_core::ToolCall) -> bool {
     entry.tool == "ask_user_question" && entry.in_flight()
 }
 
 /// Distinguishes an entry from a later version of *itself*.
 ///
-/// Only deeds have a later version: an utterance and a note are written once
-/// and never touched, but a deed is recorded in flight and settled afterwards.
-/// This is what tells the keyed list those are two different things to render.
+/// Only tool calls have a later version: a message and a note are written once
+/// and never touched, but a tool call is recorded in flight and settled
+/// afterwards. This is what tells the keyed list those are two different things
+/// to render.
 fn entry_version(entry: &Entry) -> u8 {
     match entry {
         Entry::Tool(d) if d.in_flight() => 1,
@@ -883,12 +884,12 @@ fn entry_version(entry: &Entry) -> u8 {
     }
 }
 
-/// One tool call, collapsed to a line the King can skim and expand when it
+/// One tool call, collapsed to a line the user can skim and expand when it
 /// matters.
 ///
 /// Collapsed by default because a transcript that renders every command's full
 /// output inline is unreadable at exactly the moment it becomes interesting:
-/// the King is watching for *what the court is doing*, and a thousand lines of
+/// the user is watching for *what the model is doing*, and a thousand lines of
 /// build log buries that. The summary line is the answer; the detail is one
 /// click away for when it is not.
 #[component]
@@ -910,7 +911,7 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
     let at = clock(tool_call.at);
     let tool = tool_call.tool.clone();
 
-    // The arguments matter more than the tool's name -- "bash" tells the King
+    // The arguments matter more than the tool's name -- "bash" tells the user
     // nothing, `cargo test` tells him everything -- so the most telling
     // argument is promoted onto the collapsed line.
     let gist = telling_argument(&tool_call.input);
@@ -951,7 +952,7 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
     }
 }
 
-/// The one argument worth showing on a collapsed deed line.
+/// The one argument worth showing on a collapsed tool call line.
 ///
 /// Every tool names its subject differently, and there is no shared field to
 /// rely on. Rather than teach this component about each tool's schema -- which
@@ -989,10 +990,10 @@ fn ellipsise(text: &str, max: usize) -> String {
     format!("{}\u{2026}", text.chars().take(max).collect::<String>())
 }
 
-/// A log entry's time as a bare `HH:MM` in the King's own timezone.
+/// A log entry's time as a bare `HH:MM` in the user's own timezone.
 ///
 /// Browser-only, and that is not a limitation: the stamp is UTC milliseconds and
-/// only the browser knows what the King's clock reads. Under SSR this is the
+/// only the browser knows what the user's clock reads. Under SSR this is the
 /// empty string, which never reaches him -- the whole app is gated behind a
 /// kingdom being open, and that only becomes true on the client.
 fn clock(at: Option<Timestamp>) -> String {
@@ -1031,7 +1032,8 @@ fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bo
     }
 }
 
-/// Watches one plan over the push socket, handing each proclamation to `insert`.
+/// Watches one plan over the push socket, handing each proclamation to
+/// `insert`.
 ///
 /// Browser-only: under SSR there is no socket and the first render is served
 /// from server state directly.
@@ -1046,8 +1048,8 @@ fn watch_plan(plan_id: Memo<Option<PlanId>>, insert: impl Fn(Plan) + Clone + 'st
     #[cfg(feature = "hydrate")]
     Effect::new(move |previous: Option<Option<PlanWatch>>| {
         // Close the previous socket before opening another, so moving between
-        // chambers cannot leave a socket behind feeding a plan nobody is
-        // looking at.
+        // conversation views cannot leave a socket behind feeding a plan nobody
+        // is looking at.
         drop(previous);
 
         let id = plan_id.get()?;
@@ -1069,7 +1071,7 @@ struct PlanWatch {
     _on_message: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>,
     _on_close: wasm_bindgen::closure::Closure<dyn FnMut()>,
     /// Cleared on drop, so a retry queued by a closing socket does not reopen
-    /// a chamber the King has already left.
+    /// a conversation the user has already left.
     retry: std::rc::Rc<std::cell::Cell<Option<i32>>>,
 }
 
@@ -1093,8 +1095,8 @@ impl PlanWatch {
                 };
                 // A message that will not parse means the server sent a shape
                 // this bundle does not know -- a stale tab after a rebuild,
-                // most likely. Dropping it leaves the chamber showing the last
-                // good state, which is better than tearing it down.
+                // most likely. Dropping it leaves the conversation showing the
+                // last good state, which is better than tearing it down.
                 if let Ok(plan) = serde_json::from_str::<Plan>(&text) {
                     insert(plan);
                 }
@@ -1118,14 +1120,14 @@ impl PlanWatch {
                         retry.set(None);
                         // Reopening replaces this watch's socket in place. The
                         // effect that owns it is not re-run, because nothing it
-                        // tracked changed -- the King is still in the same
-                        // chamber.
+                        // tracked changed -- the user is still in the same
+                        // conversation.
                         //
                         // Deliberately leaked: the reopened watch outlives this
                         // callback and has no owner to hand it back to. Bounded
-                        // by the number of disconnects in one chamber visit,
-                        // and the socket it holds is closed by the browser when
-                        // the page goes.
+                        // by the number of disconnects in one conversation
+                        // visit, and the socket it holds is closed by the
+                        // browser when the page goes.
                         std::mem::forget(PlanWatch::open(&id, insert));
                     }
                 });

@@ -10,8 +10,8 @@
 //!
 //! # How to change the fake data
 //!
-//! Everything is plain Rust. Open [`fixtures`] in `mockdata/fixtures.rs`, edit a
-//! fixture or add a function returning a [`FixtureSpec`], and list it in
+//! Everything is plain Rust. Open [`fixtures`] in `mockdata/fixtures.rs`, edit
+//! a fixture or add a function returning a [`FixtureSpec`], and list it in
 //! [`fixtures()`]. There is no config file and no parser: the types *are* the
 //! schema, so a mistyped fixture fails to compile rather than failing at seed
 //! time, and `CityKind`/`Language` are the real enums rather than strings that
@@ -53,10 +53,10 @@ use std::ops::Range;
 pub use build::{docs_city, file, fill, node_city, python_city, rust_city, text};
 pub use fixtures::{fixture, fixture_names, fixtures, DEFAULT_FIXTURE};
 
-/// How a realm's opening court is fabricated.
+/// How a fixture's opening model is fabricated.
 ///
 /// A plain `fn` pointer over the signature `sample::starter_plans` already
-/// has, rather than a new data format: a court is a handful of plans, and
+/// has, rather than a new data format: a model is a handful of plans, and
 /// expressing that as data would need a validator to say what the type system
 /// already says.
 pub type StarterPlansFn = fn(&[City]) -> Vec<Plan>;
@@ -69,10 +69,10 @@ pub struct FixtureSpec {
     /// One line shown by the seeder and the picker.
     pub blurb: &'static str,
     /// Everything generated is a pure function of this plus the spec, so two
-    /// machines seeding the same realm produce byte-identical folders.
+    /// machines seeding the same fixture produce byte-identical folders.
     pub seed: u64,
     pub cities: Vec<CitySpec>,
-    /// How this realm's opening court is fabricated.
+    /// How this fixture's opening model is fabricated.
     pub starter_plans: StarterPlansFn,
 }
 
@@ -102,7 +102,7 @@ impl FixtureSpec {
         self
     }
 
-    /// Every file this realm will contain, in a stable order.
+    /// Every file this fixture will contain, in a stable order.
     ///
     /// Pure and total: two calls on the same spec return identical paths *and*
     /// sizes, on any machine. See [`FileContent::Bulk`] for why sizes are drawn
@@ -115,12 +115,12 @@ impl FixtureSpec {
         out
     }
 
-    /// Total declared size of the realm, before sparse files save the disk.
+    /// Total declared size of the fixture, before sparse files save the disk.
     pub fn total_bytes(&self) -> u64 {
         self.expand().iter().map(|f| f.bytes).sum()
     }
 
-    /// Rejects a realm that cannot be seeded, before a byte is written.
+    /// Rejects a fixture that cannot be seeded, before a byte is written.
     ///
     /// These are all author mistakes rather than user input, but they are
     /// miserable to diagnose from a half-materialised folder -- an escaping
@@ -165,7 +165,7 @@ impl FixtureSpec {
     }
 }
 
-/// One project directory inside a realm.
+/// One project directory inside a fixture.
 #[derive(Debug, Clone)]
 pub struct CitySpec {
     pub name: String,
@@ -215,8 +215,8 @@ impl CitySpec {
         self
     }
 
-    /// Not a git repository. Worth having in a realm: `has_git: false` changes
-    /// what the map draws, so it must be reachable.
+    /// Not a git repository. Worth having in a fixture: `has_git: false`
+    /// changes what the map draws, so it must be reachable.
     pub fn no_git(mut self) -> Self {
         self.git = GitSpec::None;
         self
@@ -377,11 +377,11 @@ pub enum FileContent {
     Literal(String),
     /// A declared size, filled with generated filler.
     ///
-    /// Sizes are drawn from a splitmix64 PRNG seeded with the realm seed, the
+    /// Sizes are drawn from a splitmix64 PRNG seeded with the fixture seed, the
     /// city name and the file's own path -- deliberately **per file**, never a
     /// rolling stream. A rolling stream would make each file's size depend on
     /// how many files came before it, so inserting one entry at the top of a
-    /// city would silently resize the whole realm and move every tower on the
+    /// city would silently resize the whole fixture and move every tower on the
     /// map. Per-file seeding means an edit changes exactly what it names.
     Bulk(u64),
 }
@@ -396,7 +396,7 @@ pub struct PlannedFile {
     pub content: FileContent,
 }
 
-/// An author mistake in a realm, caught before anything is written.
+/// An author mistake in a fixture, caught before anything is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecError {
     pub fixture: &'static str,
@@ -421,7 +421,7 @@ impl std::fmt::Display for SpecError {
 ///
 /// Written out rather than pulled in as a dependency, and used instead of
 /// `DefaultHasher`, because the standard hasher is explicitly *not* stable
-/// across Rust releases -- which would break realm determinism silently, on a
+/// across Rust releases -- which would break fixture determinism silently, on a
 /// toolchain upgrade, months after anyone touched this file.
 pub(crate) fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -431,7 +431,7 @@ pub(crate) fn splitmix64(mut x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Mixes a realm seed with a city and path into one per-file seed.
+/// Mixes a fixture seed with a city and path into one per-file seed.
 pub(crate) fn file_seed(fixture_seed: u64, city: &str, path: &str) -> u64 {
     let mut h = splitmix64(fixture_seed);
     for byte in city
@@ -532,13 +532,13 @@ mod tests {
     /// Determinism, and the *scope* of a change, are what make the proving
     /// grounds usable as a fixture at all.
     ///
-    /// `AGENTS.md` demands deterministic layout so the King's spatial memory
+    /// `AGENTS.md` demands deterministic layout so the user's spatial memory
     /// works; that guarantee is worthless if the data underneath the map
     /// reshuffles. The second half is the subtler half: sizes are drawn
     /// per-file so that inserting one entry changes *only* that city. If
     /// someone "simplifies" the PRNG into a rolling stream, every edit to a
-    /// realm silently resizes every file after it and moves every tower on the
-    /// map -- a diff of one line producing a completely different picture.
+    /// fixture silently resizes every file after it and moves every tower on
+    /// the map -- a diff of one line producing a completely different picture.
     #[test]
     fn expansion_is_deterministic_and_edits_stay_local() {
         let before = spec_with(None);
@@ -601,8 +601,8 @@ mod tests {
         assert_eq!(errors.len(), 2, "both escaping paths should be reported");
     }
 
-    /// Every bundled realm must actually be seedable. This is the cheap guard
-    /// that stops a broken realm reaching the seeder, where the failure would
+    /// Every bundled fixture must actually be seedable. This is the cheap guard
+    /// that stops a broken fixture reaching the seeder, where the failure would
     /// look like an I/O bug rather than a typo.
     #[test]
     fn every_bundled_fixture_is_valid() {
