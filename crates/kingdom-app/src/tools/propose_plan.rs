@@ -1,7 +1,8 @@
-//! Putting a plan to the King.
+//! Putting a plan to the user.
 //!
-//! The gateway from counsel to work, and the only tool that does not act on the
-//! world at all: it ends the turn. The court says what it would do, and stops.
+//! The gateway from proposing to working, and the only tool that does not act
+//! on the world at all: it ends the turn. The model says what it would do, and
+//! stops.
 //!
 //! # Why this is an ordinary tool
 //!
@@ -22,10 +23,11 @@
 //! revisions table, and a status rename committed on approval.
 //!
 //! Kingdom needs none of it, because a plan is already a document. The body
-//! rides in the arguments, so it lands on the deed, so it is in the transcript,
-//! so it is on disk, so it is pushed to the chamber, and so it is in the
-//! model's own context next round -- all by machinery that already exists. The
-//! King's project stays free of files Kingdom invented, which is the point.
+//! rides in the arguments, so it lands on the tool call, so it is in the
+//! transcript,
+//! so it is on disk, so it is pushed to the conversation view, and so it is in
+//! the model's own context next round -- all by machinery that already exists.
+//! The user's project stays free of files Kingdom invented, which is the point.
 //!
 //! # Why it does not park
 //!
@@ -37,18 +39,18 @@
 //! mark the plan failed. Ending the turn costs nothing by comparison, because
 //! everything needed to resume is already written down.
 
-use super::{Refusal, Remit, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use super::{Permissions, Refusal, Sandbox, Tool};
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 
 /// What the tool reports when a proposal is accepted for review.
 ///
 /// Matched by [`crate::api::converse`] to know the turn is over. A constant
 /// rather than a literal in two places: the check and the message it looks for
-/// must not drift, and the failure would be silent -- a court that proposed and
+/// must not drift, and the failure would be silent -- a model that proposed and
 /// then carried straight on to do the work anyway.
-pub const PROPOSED: &str = "Plan put to the King. He will read it and either start you on it \
-                            or send back changes.";
+pub const PROPOSED: &str = "Plan put to the user. They will read it and either start you on \
+                            it or send back changes.";
 
 pub struct ProposePlan;
 
@@ -59,13 +61,14 @@ impl Tool for ProposePlan {
     }
 
     fn description(&self) -> String {
-        "Put a plan to the King for review. This is how you get the ability to change \
+        "Put a plan to the user for review. This is how you get the ability to change \
          anything: you have no hands until he accepts one.\n\n\
          Say what you would change, in which files, and why. Say what you checked and \
          what you are still assuming. Be concrete -- name real paths you have actually \
          looked at, not plausible ones.\n\n\
-         Your turn ends here. He will either start you on this plan or send back changes, \
-         and either way you will be asked again with his answer in front of you."
+         Your turn ends here. They will either start you on this plan or send back \
+         changes, and either way you will be asked again with their answer in front of \
+         you."
             .to_string()
     }
 
@@ -87,24 +90,24 @@ impl Tool for ProposePlan {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
-        // Each refusal is written so the model can recover in one turn: a court
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
+        // Each refusal is written so the model can recover in one turn: one
         // told only "refused" retries exactly the same call.
-        match shop.remit() {
-            Remit::Counsel => {}
-            Remit::Full => {
+        match shop.permissions() {
+            Permissions::Propose => {}
+            Permissions::Full => {
                 return Refusal::Refused(
-                    "You are already carrying out a plan the King approved, so there is \
+                    "You are already carrying out a plan the user approved, so there is \
                      nothing to propose. Do the work; if the plan turns out to be wrong, \
                      say so."
                         .to_string(),
                 )
                 .into()
             }
-            Remit::Survey => {
+            Permissions::ReadOnly => {
                 return Refusal::Refused(
                     "You were sent to answer a question, not to propose work. Report what \
-                     you found to the court that sent you."
+                     you found to the plan that sent you."
                         .to_string(),
                 )
                 .into()
@@ -115,8 +118,8 @@ impl Tool for ProposePlan {
         let body = text(&input, "body");
 
         // Both halves are load-bearing and neither can be filled in later: an
-        // empty title leaves the rail unreadable, and an empty body is a card
-        // asking the King to approve nothing at all.
+        // empty title leaves the sidebar unreadable, and an empty body is a
+        // card asking the user to approve nothing at all.
         let missing = match (title.is_empty(), body.is_empty()) {
             (true, true) => Some("a `title` and a `body`"),
             (true, false) => Some("a `title`"),
@@ -131,7 +134,7 @@ impl Tool for ProposePlan {
             .into();
         }
 
-        DeedOutcome::done(PROPOSED)
+        ToolOutcome::done(PROPOSED)
     }
 }
 
@@ -145,12 +148,12 @@ fn text(input: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// The title and body of a proposal, read back off the deed that made it.
+/// The title and body of a proposal, read off the arguments that carried it.
 ///
 /// The turn loop needs these to record the proposal on the plan, and reads them
-/// from the deed rather than being handed them by the tool -- the deed is what
-/// was actually recorded, so there is one source of truth and no way for the
-/// stored arguments and the stored proposal to disagree.
+/// from the same value the tool call was recorded with -- so there is one
+/// source of truth and no way for the stored arguments and the stored proposal
+/// to disagree.
 pub fn proposed(input: &Value) -> Option<(String, String)> {
     let title = text(input, "title");
     let body = text(input, "body");
@@ -162,34 +165,34 @@ mod tests {
     use super::*;
     use kingdom_core::Workspace;
 
-    fn shop(remit: Remit) -> Workshop {
-        Workshop::new(Workspace::in_place("/dev/city")).under(remit)
+    fn shop(permissions: Permissions) -> Sandbox {
+        Sandbox::new(Workspace::in_place("/dev/city")).under(permissions)
     }
 
     /// The guard that keeps the ladder one-way.
     ///
-    /// A plan with full hands is already carrying out a proposal the King
-    /// accepted. Letting it propose again would let a court manufacture a
+    /// A plan with full permissions is already carrying out a proposal the
+    /// user accepted. Letting it propose again would let a model manufacture a
     /// second approval card for authority it already holds -- and, worse, would
     /// park a working plan in `AwaitingReview` mid-job. The tool is not even
-    /// offered at that rung; this is the belt to that braces, because models
+    /// offered at that level; this is the belt to that braces, because models
     /// invent tool names.
     #[tokio::test]
-    async fn only_a_counselling_plan_may_propose() {
+    async fn only_a_proposing_plan_may_propose() {
         let refused = ProposePlan
             .run(
                 json!({ "title": "Do it", "body": "Change things." }),
-                &shop(Remit::Full),
+                &shop(Permissions::Full),
             )
             .await;
-        assert!(matches!(refused, DeedOutcome::Refused { .. }));
+        assert!(matches!(refused, ToolOutcome::Refused { .. }));
 
         let accepted = ProposePlan
             .run(
                 json!({ "title": "Do it", "body": "Change things." }),
-                &shop(Remit::Counsel),
+                &shop(Permissions::Propose),
             )
             .await;
-        assert_eq!(accepted, DeedOutcome::done(PROPOSED));
+        assert_eq!(accepted, ToolOutcome::done(PROPOSED));
     }
 }

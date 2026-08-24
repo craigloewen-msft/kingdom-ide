@@ -2,7 +2,7 @@
 //!
 //! Server-only. This is the one place where the metaphor touches the disk.
 
-use kingdom_core::{Building, City, CityId, CityKind, District, Ward};
+use kingdom_core::{SourceFile, City, CityId, CityKind, Folder, Language};
 use std::path::Path;
 
 /// Directories that are never projects and are expensive to walk.
@@ -33,7 +33,7 @@ const COUNT_CAP: usize = 5_000;
 /// The skyline can only draw so many buildings, and it aggregates the rest
 /// anyway; keeping the largest files from each folder is what makes that
 /// aggregation faithful. The remainder is still counted and weighed, never
-/// dropped -- see `District::extra_files`.
+/// dropped -- see `Folder::extra_files`.
 const FILES_PER_DISTRICT: usize = 64;
 
 /// Scans a dev folder, treating each immediate subdirectory as a city.
@@ -115,14 +115,14 @@ fn detect_kind(path: &Path) -> CityKind {
 ///
 /// `rel` is the path relative to the city root, which is what the map uses to
 /// identify a building.
-fn survey(dir: &Path, name: &str, rel: &str, depth: usize, budget: &mut usize) -> District {
-    let mut district = District::new(name, rel);
+fn survey(dir: &Path, name: &str, rel: &str, depth: usize, budget: &mut usize) -> Folder {
+    let mut folder = Folder::new(name, rel);
 
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return district;
+        return folder;
     };
 
-    let mut files: Vec<Building> = Vec::new();
+    let mut files: Vec<SourceFile> = Vec::new();
     let mut subdirs: Vec<(std::path::PathBuf, String)> = Vec::new();
 
     for entry in entries.flatten() {
@@ -156,11 +156,11 @@ fn survey(dir: &Path, name: &str, rel: &str, depth: usize, budget: &mut usize) -
         *budget -= 1;
 
         let child_rel = join_rel(rel, &entry_name);
-        files.push(Building {
-            ward: Ward::from_path(&child_rel),
+        files.push(SourceFile {
+            language: Language::from_path(&child_rel),
             // Size drives building height. `metadata` is the one extra syscall
             // the skyline costs, and only for files already being visited.
-            bulk: entry.metadata().map(|m| m.len()).unwrap_or(0),
+            bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
             name: entry_name,
             path: child_rel,
         });
@@ -168,13 +168,13 @@ fn survey(dir: &Path, name: &str, rel: &str, depth: usize, budget: &mut usize) -
 
     // Keep the largest files: they are the ones worth a tower of their own, and
     // the rest is preserved in aggregate rather than discarded.
-    files.sort_by(|a, b| b.bulk.cmp(&a.bulk).then_with(|| a.path.cmp(&b.path)));
+    files.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
     if files.len() > FILES_PER_DISTRICT {
         let pruned = files.split_off(FILES_PER_DISTRICT);
-        district.extra_files = pruned.len();
-        district.extra_bulk = pruned.iter().map(|b| b.bulk).sum();
+        folder.extra_files = pruned.len();
+        folder.extra_bytes = pruned.iter().map(|b| b.bytes).sum();
     }
-    district.buildings = files;
+    folder.source_files = files;
 
     // Deterministic recursion order, so two machines scanning the same project
     // produce the same tree and therefore the same skyline.
@@ -187,11 +187,11 @@ fn survey(dir: &Path, name: &str, rel: &str, depth: usize, budget: &mut usize) -
         let child_rel = join_rel(rel, &child_name);
         let child = survey(&path, &child_name, &child_rel, depth - 1, budget);
         if !child.is_empty() {
-            district.children.push(child);
+            folder.children.push(child);
         }
     }
 
-    district
+    folder
 }
 
 fn join_rel(rel: &str, name: &str) -> String {

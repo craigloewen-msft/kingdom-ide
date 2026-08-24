@@ -1,13 +1,13 @@
 //! The regions of the throne room, and the views routed inside it.
 
 mod conversation;
-mod decree;
+mod prompt_bar;
 mod map;
 mod sidebar;
-mod spyglass;
+mod browser_view;
 
 pub use conversation::Conversation;
-pub use decree::DecreeBar;
+pub use prompt_bar::PromptBar;
 pub use map::KingdomMap;
 pub use sidebar::Sidebar;
-pub use spyglass::Spyglass;
+pub use browser_view::BrowserView;

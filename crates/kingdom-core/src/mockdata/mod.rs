@@ -2,32 +2,32 @@
 //!
 //! # Why this exists
 //!
-//! Kingdom IDE is meant to be pointed at itself -- the King issues decrees and
-//! the court builds the next feature. Doing that against a *real* dev folder
+//! Kingdom IDE is meant to be pointed at itself -- the user issues prompts and
+//! the model builds the next feature. Doing that against a *real* dev folder
 //! means every rehearsal touches real projects, real git repos and real files.
-//! This module is the alternative: realms that look and behave like real dev
+//! This module is the alternative: fixtures that look and behave like real dev
 //! folders and are provably not one.
 //!
 //! # How to change the fake data
 //!
-//! Everything is plain Rust. Open [`realms`] in `mockdata/realms.rs`, edit a
-//! realm or add a function returning a [`RealmSpec`], and list it in
-//! [`realms()`]. There is no config file and no parser: the types *are* the
-//! schema, so a mistyped realm fails to compile rather than failing at seed
-//! time, and `CityKind`/`Ward` are the real enums rather than strings that have
-//! to be matched back to them.
+//! Everything is plain Rust. Open [`fixtures`] in `mockdata/fixtures.rs`, edit
+//! a fixture or add a function returning a [`FixtureSpec`], and list it in
+//! [`fixtures()`]. There is no config file and no parser: the types *are* the
+//! schema, so a mistyped fixture fails to compile rather than failing at seed
+//! time, and `CityKind`/`Language` are the real enums rather than strings that
+//! have to be matched back to them.
 //!
 //! ```no_run
-//! # use kingdom_core::mockdata::{RealmSpec, build::*, court};
-//! # use kingdom_core::Ward;
-//! fn my_realm() -> RealmSpec {
-//!     RealmSpec::new("my-realm", "What it is for.", 0x5EED)
-//!         .court(court::default_court)
+//! # use kingdom_core::mockdata::{FixtureSpec, build::*, starter_plans};
+//! # use kingdom_core::Language;
+//! fn my_fixture() -> FixtureSpec {
+//!     FixtureSpec::new("my-fixture", "What it is for.", 0x5EED)
+//!         .starter_plans(starter_plans::default_plans)
 //!         .city(
 //!             rust_city("orchard")
 //!                 .dir("src", [
 //!                     file("main.rs", 4_200),
-//!                     fill("module_{i}.rs", 24, 1_500..12_000, Ward::Rust),
+//!                     fill("module_{i}.rs", 24, 1_500..12_000, Language::Rust),
 //!                 ])
 //!                 .dirty(3),
 //!         )
@@ -36,59 +36,59 @@
 //!
 //! # The shape of the pipeline
 //!
-//! This module is pure: it computes *what* a realm contains, never writing a
-//! byte. [`RealmSpec::expand`] turns a realm into a flat list of
+//! This module is pure: it computes *what* a fixture contains, never writing a
+//! byte. [`FixtureSpec::expand`] turns a fixture into a flat list of
 //! [`PlannedFile`]s and `kingdom-app`'s seeder does nothing but write them down,
 //! after which the **ordinary scanner** reads the result. That last part is the
 //! point: the fixture exercises `scan.rs` for real rather than faking a
 //! `Vec<City>` above it.
 
 pub mod build;
-pub mod court;
-pub mod realms;
+pub mod starter_plans;
+pub mod fixtures;
 
-use crate::model::{City, CityKind, Plan, Ward};
+use crate::model::{City, CityKind, Language, Plan};
 use std::ops::Range;
 
 pub use build::{docs_city, file, fill, node_city, python_city, rust_city, text};
-pub use realms::{realm, realm_names, realms, DEFAULT_REALM};
+pub use fixtures::{fixture, fixture_names, fixtures, DEFAULT_FIXTURE};
 
-/// How a realm's opening court is fabricated.
+/// How a fixture's opening model is fabricated.
 ///
-/// A plain `fn` pointer over the signature `sample::populate_court` already
-/// has, rather than a new data format: a court is a handful of plans, and
+/// A plain `fn` pointer over the signature `sample::starter_plans` already
+/// has, rather than a new data format: a model is a handful of plans, and
 /// expressing that as data would need a validator to say what the type system
 /// already says.
-pub type CourtFn = fn(&[City]) -> Vec<Plan>;
+pub type StarterPlansFn = fn(&[City]) -> Vec<Plan>;
 
 /// A whole synthetic dev folder.
 #[derive(Debug, Clone)]
-pub struct RealmSpec {
+pub struct FixtureSpec {
     /// Folder name, and the kingdom's display name.
     pub name: &'static str,
     /// One line shown by the seeder and the picker.
     pub blurb: &'static str,
     /// Everything generated is a pure function of this plus the spec, so two
-    /// machines seeding the same realm produce byte-identical folders.
+    /// machines seeding the same fixture produce byte-identical folders.
     pub seed: u64,
     pub cities: Vec<CitySpec>,
-    /// How this realm's opening court is fabricated.
-    pub court: CourtFn,
+    /// How this fixture's opening model is fabricated.
+    pub starter_plans: StarterPlansFn,
 }
 
-impl RealmSpec {
+impl FixtureSpec {
     pub fn new(name: &'static str, blurb: &'static str, seed: u64) -> Self {
         Self {
             name,
             blurb,
             seed,
             cities: Vec::new(),
-            court: court::default_court,
+            starter_plans: starter_plans::default_plans,
         }
     }
 
-    pub fn court(mut self, court: CourtFn) -> Self {
-        self.court = court;
+    pub fn starter_plans(mut self, starter_plans: StarterPlansFn) -> Self {
+        self.starter_plans = starter_plans;
         self
     }
 
@@ -102,7 +102,7 @@ impl RealmSpec {
         self
     }
 
-    /// Every file this realm will contain, in a stable order.
+    /// Every file this fixture will contain, in a stable order.
     ///
     /// Pure and total: two calls on the same spec return identical paths *and*
     /// sizes, on any machine. See [`FileContent::Bulk`] for why sizes are drawn
@@ -115,12 +115,12 @@ impl RealmSpec {
         out
     }
 
-    /// Total declared size of the realm, before sparse files save the disk.
+    /// Total declared size of the fixture, before sparse files save the disk.
     pub fn total_bytes(&self) -> u64 {
         self.expand().iter().map(|f| f.bytes).sum()
     }
 
-    /// Rejects a realm that cannot be seeded, before a byte is written.
+    /// Rejects a fixture that cannot be seeded, before a byte is written.
     ///
     /// These are all author mistakes rather than user input, but they are
     /// miserable to diagnose from a half-materialised folder -- an escaping
@@ -131,7 +131,7 @@ impl RealmSpec {
 
         if self.name.trim().is_empty() || !is_safe_segment(self.name) {
             errors.push(SpecError {
-                realm: self.name,
+                fixture: self.name,
                 city: None,
                 detail: format!("realm name {:?} is not a safe folder name", self.name),
             });
@@ -139,7 +139,7 @@ impl RealmSpec {
 
         if self.cities.is_empty() {
             errors.push(SpecError {
-                realm: self.name,
+                fixture: self.name,
                 city: None,
                 detail: "a realm with no cities would open as an empty map".into(),
             });
@@ -149,7 +149,7 @@ impl RealmSpec {
         for city in &self.cities {
             if !seen_cities.insert(city.name.as_str()) {
                 errors.push(SpecError {
-                    realm: self.name,
+                    fixture: self.name,
                     city: Some(city.name.clone()),
                     detail: "two cities share a name, so one would overwrite the other".into(),
                 });
@@ -165,7 +165,7 @@ impl RealmSpec {
     }
 }
 
-/// One project directory inside a realm.
+/// One project directory inside a fixture.
 #[derive(Debug, Clone)]
 pub struct CitySpec {
     pub name: String,
@@ -215,23 +215,23 @@ impl CitySpec {
         self
     }
 
-    /// Not a git repository. Worth having in a realm: `has_git: false` changes
-    /// what the map draws, so it must be reachable.
+    /// Not a git repository. Worth having in a fixture: `has_git: false`
+    /// changes what the map draws, so it must be reachable.
     pub fn no_git(mut self) -> Self {
         self.git = GitSpec::None;
         self
     }
 
-    fn expand_into(&self, realm_seed: u64, out: &mut Vec<PlannedFile>) {
+    fn expand_into(&self, fixture_seed: u64, out: &mut Vec<PlannedFile>) {
         for entry in &self.tree {
-            entry.expand_into(realm_seed, &self.name, "", out);
+            entry.expand_into(fixture_seed, &self.name, "", out);
         }
     }
 
-    fn validate(&self, realm: &'static str, errors: &mut Vec<SpecError>) {
+    fn validate(&self, fixture: &'static str, errors: &mut Vec<SpecError>) {
         let mut push = |detail: String| {
             errors.push(SpecError {
-                realm,
+                fixture,
                 city: Some(self.name.clone()),
                 detail,
             })
@@ -294,12 +294,12 @@ pub enum TreeSpec {
         pattern: String,
         count: usize,
         bytes: Range<u64>,
-        ward: Ward,
+        language: Language,
     },
 }
 
 impl TreeSpec {
-    fn expand_into(&self, realm_seed: u64, city: &str, prefix: &str, out: &mut Vec<PlannedFile>) {
+    fn expand_into(&self, fixture_seed: u64, city: &str, prefix: &str, out: &mut Vec<PlannedFile>) {
         match self {
             TreeSpec::File { path, content } => {
                 let full = join(prefix, path);
@@ -317,20 +317,20 @@ impl TreeSpec {
             TreeSpec::Dir { name, children } => {
                 let child_prefix = join(prefix, name);
                 for child in children {
-                    child.expand_into(realm_seed, city, &child_prefix, out);
+                    child.expand_into(fixture_seed, city, &child_prefix, out);
                 }
             }
             TreeSpec::Fill {
                 pattern,
                 count,
                 bytes,
-                ward: _,
+                language: _,
             } => {
                 for i in 0..*count {
                     let path = join(prefix, &pattern.replace("{i}", &i.to_string()));
                     // Seeded per file, from the path itself -- see the note on
                     // `FileContent::Bulk`.
-                    let size = size_in(realm_seed, city, &path, bytes);
+                    let size = size_in(fixture_seed, city, &path, bytes);
                     out.push(PlannedFile {
                         city: city.to_string(),
                         path,
@@ -377,11 +377,11 @@ pub enum FileContent {
     Literal(String),
     /// A declared size, filled with generated filler.
     ///
-    /// Sizes are drawn from a splitmix64 PRNG seeded with the realm seed, the
+    /// Sizes are drawn from a splitmix64 PRNG seeded with the fixture seed, the
     /// city name and the file's own path -- deliberately **per file**, never a
     /// rolling stream. A rolling stream would make each file's size depend on
     /// how many files came before it, so inserting one entry at the top of a
-    /// city would silently resize the whole realm and move every tower on the
+    /// city would silently resize the whole fixture and move every tower on the
     /// map. Per-file seeding means an edit changes exactly what it names.
     Bulk(u64),
 }
@@ -396,10 +396,10 @@ pub struct PlannedFile {
     pub content: FileContent,
 }
 
-/// An author mistake in a realm, caught before anything is written.
+/// An author mistake in a fixture, caught before anything is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecError {
-    pub realm: &'static str,
+    pub fixture: &'static str,
     pub city: Option<String>,
     pub detail: String,
 }
@@ -407,8 +407,8 @@ pub struct SpecError {
 impl std::fmt::Display for SpecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.city {
-            Some(city) => write!(f, "{}/{}: {}", self.realm, city, self.detail),
-            None => write!(f, "{}: {}", self.realm, self.detail),
+            Some(city) => write!(f, "{}/{}: {}", self.fixture, city, self.detail),
+            None => write!(f, "{}: {}", self.fixture, self.detail),
         }
     }
 }
@@ -421,7 +421,7 @@ impl std::fmt::Display for SpecError {
 ///
 /// Written out rather than pulled in as a dependency, and used instead of
 /// `DefaultHasher`, because the standard hasher is explicitly *not* stable
-/// across Rust releases -- which would break realm determinism silently, on a
+/// across Rust releases -- which would break fixture determinism silently, on a
 /// toolchain upgrade, months after anyone touched this file.
 pub(crate) fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -431,9 +431,9 @@ pub(crate) fn splitmix64(mut x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Mixes a realm seed with a city and path into one per-file seed.
-pub(crate) fn file_seed(realm_seed: u64, city: &str, path: &str) -> u64 {
-    let mut h = splitmix64(realm_seed);
+/// Mixes a fixture seed with a city and path into one per-file seed.
+pub(crate) fn file_seed(fixture_seed: u64, city: &str, path: &str) -> u64 {
+    let mut h = splitmix64(fixture_seed);
     for byte in city
         .bytes()
         .chain(b"\0".iter().copied())
@@ -444,12 +444,12 @@ pub(crate) fn file_seed(realm_seed: u64, city: &str, path: &str) -> u64 {
     h
 }
 
-fn size_in(realm_seed: u64, city: &str, path: &str, range: &Range<u64>) -> u64 {
+fn size_in(fixture_seed: u64, city: &str, path: &str, range: &Range<u64>) -> u64 {
     if range.is_empty() {
         return range.start;
     }
     let span = range.end - range.start;
-    range.start + (file_seed(realm_seed, city, path) % span)
+    range.start + (file_seed(fixture_seed, city, path) % span)
 }
 
 // ---------------------------------------------------------------------------
@@ -501,21 +501,21 @@ fn check_relative(path: &str) -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
-    fn spec_with(extra: Option<TreeSpec>) -> RealmSpec {
+    fn spec_with(extra: Option<TreeSpec>) -> FixtureSpec {
         let mut orchard = CitySpec::new("orchard", CityKind::Rust).dir(
             "src",
             [TreeSpec::Fill {
                 pattern: "module_{i}.rs".into(),
                 count: 12,
                 bytes: 1_000..9_000,
-                ward: Ward::Rust,
+                language: Language::Rust,
             }],
         );
         if let Some(entry) = extra {
             orchard.tree.insert(0, entry);
         }
 
-        RealmSpec::new("t", "test realm", 0xABCD).cities([
+        FixtureSpec::new("t", "test realm", 0xABCD).cities([
             orchard,
             CitySpec::new("lantern", CityKind::Node).dir(
                 "src",
@@ -523,7 +523,7 @@ mod tests {
                     pattern: "view_{i}.ts".into(),
                     count: 9,
                     bytes: 500..4_000,
-                    ward: Ward::Web,
+                    language: Language::Web,
                 }],
             ),
         ])
@@ -532,13 +532,13 @@ mod tests {
     /// Determinism, and the *scope* of a change, are what make the proving
     /// grounds usable as a fixture at all.
     ///
-    /// `AGENTS.md` demands deterministic layout so the King's spatial memory
+    /// `AGENTS.md` demands deterministic layout so the user's spatial memory
     /// works; that guarantee is worthless if the data underneath the map
     /// reshuffles. The second half is the subtler half: sizes are drawn
     /// per-file so that inserting one entry changes *only* that city. If
     /// someone "simplifies" the PRNG into a rolling stream, every edit to a
-    /// realm silently resizes every file after it and moves every tower on the
-    /// map -- a diff of one line producing a completely different picture.
+    /// fixture silently resizes every file after it and moves every tower on
+    /// the map -- a diff of one line producing a completely different picture.
     #[test]
     fn expansion_is_deterministic_and_edits_stay_local() {
         let before = spec_with(None);
@@ -553,7 +553,7 @@ mod tests {
             content: FileContent::Literal("new".into()),
         }));
 
-        let untouched = |spec: &RealmSpec| -> Vec<PlannedFile> {
+        let untouched = |spec: &FixtureSpec| -> Vec<PlannedFile> {
             spec.expand()
                 .into_iter()
                 .filter(|f| f.city == "lantern")
@@ -566,7 +566,7 @@ mod tests {
         );
 
         // And within the edited city, the pre-existing files keep their sizes.
-        let sized = |spec: &RealmSpec| -> Vec<(String, u64)> {
+        let sized = |spec: &FixtureSpec| -> Vec<(String, u64)> {
             spec.expand()
                 .into_iter()
                 .filter(|f| f.city == "orchard" && f.path != "NOTES.md")
@@ -584,7 +584,7 @@ mod tests {
     /// the sandbox, so the escaping cases specifically must be caught.
     #[test]
     fn validate_rejects_paths_that_would_escape_the_city() {
-        let realm = RealmSpec::new("t", "", 1).city(CitySpec::new("c", CityKind::Unknown).files([
+        let fixture = FixtureSpec::new("t", "", 1).city(CitySpec::new("c", CityKind::Unknown).files([
             TreeSpec::File {
                 path: "../../etc/passwd".into(),
                 content: FileContent::Bulk(1),
@@ -595,22 +595,22 @@ mod tests {
             },
         ]));
 
-        let errors = realm
+        let errors = fixture
             .validate()
             .expect_err("escaping paths must be refused");
         assert_eq!(errors.len(), 2, "both escaping paths should be reported");
     }
 
-    /// Every bundled realm must actually be seedable. This is the cheap guard
-    /// that stops a broken realm reaching the seeder, where the failure would
+    /// Every bundled fixture must actually be seedable. This is the cheap guard
+    /// that stops a broken fixture reaching the seeder, where the failure would
     /// look like an I/O bug rather than a typo.
     #[test]
-    fn every_bundled_realm_is_valid() {
-        for realm in realms() {
-            if let Err(errors) = realm.validate() {
+    fn every_bundled_fixture_is_valid() {
+        for fixture in fixtures() {
+            if let Err(errors) = fixture.validate() {
                 panic!(
                     "realm {} is not seedable: {}",
-                    realm.name,
+                    fixture.name,
                     errors
                         .iter()
                         .map(|e| e.to_string())

@@ -1,8 +1,8 @@
-//! Terse constructors for writing realms.
+//! Terse constructors for writing fixtures.
 //!
-//! The user-facing promise of the proving grounds is "open `realms.rs`, change
-//! the fake data". A wall of struct literals would break that promise on
-//! contact, so realms are written with these instead.
+//! The user-facing promise of the proving grounds is "open `fixtures.rs`,
+//! change the fake data". A wall of struct literals would break that promise on
+//! contact, so fixtures are written with these instead.
 //!
 //! The city builders (`rust_city`, `node_city`, ...) write the **marker files**
 //! a real project of that stack would have. That is deliberate and load-bearing:
@@ -11,7 +11,7 @@
 //! rather than something it is told.
 
 use super::{CitySpec, FileContent, TreeSpec};
-use crate::model::{CityKind, Ward};
+use crate::model::{CityKind, Language};
 use std::ops::Range;
 
 /// A file of a given size, filled with generated filler.
@@ -31,12 +31,12 @@ pub fn text(path: impl Into<String>, content: impl Into<String>) -> TreeSpec {
 }
 
 /// `count` generated files from a pattern containing `{i}`.
-pub fn fill(pattern: impl Into<String>, count: usize, bytes: Range<u64>, ward: Ward) -> TreeSpec {
+pub fn fill(pattern: impl Into<String>, count: usize, bytes: Range<u64>, language: Language) -> TreeSpec {
     TreeSpec::Fill {
         pattern: pattern.into(),
         count,
         bytes,
-        ward,
+        language,
     }
 }
 
@@ -96,8 +96,8 @@ pub fn go_city(name: &str) -> CitySpec {
 
 /// A project with no stack markers at all -- docs, notes, assets.
 ///
-/// Worth having in a realm: `CityKind::Unknown` picks a different banner colour
-/// and is what any non-code folder in a real dev directory scans as.
+/// Worth having in a fixture: `CityKind::Unknown` picks a different banner
+/// colour and is what any non-code folder in a real dev directory scans as.
 pub fn docs_city(name: &str) -> CitySpec {
     CitySpec::new(name, CityKind::Unknown).files([text("README.md", readme(name, "documentation"))])
 }

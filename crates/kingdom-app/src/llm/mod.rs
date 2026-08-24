@@ -6,29 +6,29 @@
 //! for the plumbing would only obscure where the HTTP call lives.
 
 pub mod catalogue;
-pub mod charter;
 pub mod copilot;
 pub mod credential;
 pub mod mock;
+pub mod system_prompt;
 
-pub use charter::Charter;
 use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Turn, Workspace};
+pub use system_prompt::SystemPrompt;
 
 /// Everything a model is told about the work.
 ///
 /// The city context is the point: without it this is a generic chat box, and
-/// with it the King is talking to something that knows which project he means.
+/// with it the user is talking to something that knows which project he means.
 #[derive(Debug, Clone)]
 pub struct Brief {
-    /// What the court is told before it is asked anything: the project, where
+    /// What the model is told before it is asked anything: the project, where
     /// it is standing, what it may touch, and the project's own guidance.
     ///
     /// Replaces the bare [`CityBrief`] this used to carry. The city is still in
-    /// there -- see [`Charter::city`] -- but a provider now renders one
+    /// there -- see [`SystemPrompt::city`] -- but a provider now renders one
     /// assembled document rather than deciding for itself what a model should
     /// be told, which is a decision that belongs to Kingdom rather than to a
     /// gateway.
-    pub charter: Charter,
+    pub system_prompt: SystemPrompt,
     /// The whole exchange so far, oldest first: what was said and what was
     /// done, interleaved exactly as it happened.
     ///
@@ -39,12 +39,12 @@ pub struct Brief {
     /// that; see `Plan::turns`.
     ///
     /// Unlike the old shape this *includes* the message being answered. Once a
-    /// turn can end in a tool call rather than words, "the last thing the King
+    /// turn can end in a tool call rather than words, "the last thing the user
     /// said" is no longer where the conversation is -- the model may be
-    /// answering its own tool result, with the King's last words several turns
+    /// answering its own tool result, with the user's last words several turns
     /// back.
     pub turns: Vec<Turn>,
-    /// What the court may do with its own hands this turn.
+    /// What the model may do with its own hands this turn.
     ///
     /// Empty means a prose-only turn, which is what a model that cannot call
     /// tools gets. A provider must not invent tools when this is empty.
@@ -65,15 +65,15 @@ pub struct ToolSpec {
 }
 
 impl ToolSpec {
-    /// Describes every tool available under a remit.
+    /// Describes every tool available under a permission level.
     ///
     /// Goes through [`crate::tools::all`] rather than filtering here, so the
     /// list a model is *shown* and the list it may *run* are the same list.
     /// Two filters would eventually disagree, and the direction that fails
     /// quietly is the dangerous one: a tool offered but refused is confusing,
     /// while a tool refused but runnable is a hole in the boundary.
-    pub fn all(remit: crate::tools::Remit) -> Vec<Self> {
-        crate::tools::all(remit)
+    pub fn all(permissions: crate::tools::Permissions) -> Vec<Self> {
+        crate::tools::all(permissions)
             .iter()
             .map(|t| Self {
                 name: t.name().to_string(),
@@ -83,23 +83,24 @@ impl ToolSpec {
             .collect()
     }
 
-    /// Describes the tools this model can actually make use of, under a remit.
+    /// Describes the tools this model can actually make use of, under a
+    /// permission level.
     ///
-    /// Two narrowings, and they compose rather than compete. The remit is about
-    /// what a *plan* may do to the world -- an errand surveys and cannot write.
-    /// The capabilities are about what a *model* can make sense of -- one with
-    /// no vision would call `read_image`, be handed something it cannot look
-    /// at, and have spent one of the King's turns discovering that.
+    /// Two narrowings, and they compose rather than compete. The permissions is
+    /// about what a *plan* may do to the world -- a subagent surveys and cannot
+    /// write. The capabilities are about what a *model* can make sense of --
+    /// one with no vision would call `read_image`, be handed something it
+    /// cannot look at, and have spent one of the user's turns discovering that.
     ///
     /// Both live here so neither is a check a caller has to remember.
-    pub fn for_model(model: &dyn Model, remit: crate::tools::Remit) -> Vec<Self> {
+    pub fn for_model(model: &dyn Model, permissions: crate::tools::Permissions) -> Vec<Self> {
         if !model.can_act() {
             // Not merely "no tools worth offering" -- sending a `tools` array to
             // a gateway that does not accept one fails the request outright.
             return Vec::new();
         }
         let sighted = model.can_see();
-        Self::all(remit)
+        Self::all(permissions)
             .into_iter()
             .filter(|t| sighted || t.name != "read_image")
             .collect()
@@ -176,7 +177,7 @@ pub struct Draft {
 
 /// What a model does when asked.
 ///
-/// Two endings, because a turn can now finish in two ways: the court has
+/// Two endings, because a turn can now finish in two ways: the model has
 /// something to say, or it wants to do something first. Making this an enum
 /// rather than a `Draft` with an optional list of calls is deliberate -- the
 /// two are mutually exclusive in the loop that consumes them, and a shape that
@@ -193,7 +194,7 @@ pub enum Reply {
 #[derive(Debug, Clone)]
 pub struct Act {
     /// The provider's correlation id, quoted back with the result. See
-    /// [`kingdom_core::Deed::id`].
+    /// [`kingdom_core::ToolCall::id`].
     pub id: String,
     pub tool: String,
     /// The arguments as the model sent them. Already parsed where it sent valid
@@ -217,13 +218,13 @@ pub trait Model: Send + Sync {
     /// Takes one turn: either speaks, or asks to act.
     ///
     /// One call, not a loop. Driving the conversation is [`crate::api`]'s job,
-    /// because that is where the plan lives and where a deed can be recorded
-    /// before it runs -- a provider that ran its own tools would do so with
-    /// nothing watching, and the chamber would show a long silence followed by
-    /// an answer.
+    /// because that is where the plan lives and where a tool call can be
+    /// recorded before it runs -- a provider that ran its own tools would do so
+    /// with nothing watching, and the conversation would show a long silence
+    /// followed by an answer.
     async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError>;
 
-    /// The namespaced id, recorded on the plan so the King can see exactly what
+    /// The namespaced id, recorded on the plan so the user can see exactly what
     /// drew it. Namespaced rather than bare because that is what routes the
     /// *next* turn back to the same backend.
     fn id(&self) -> &str;
@@ -232,7 +233,7 @@ pub trait Model: Send + Sync {
     ///
     /// A model that cannot call them is still perfectly able to draft a plan,
     /// so it is offered a prose-only turn rather than withheld from the picker:
-    /// the King choosing a weaker model should get a weaker answer, not an
+    /// the user choosing a weaker model should get a weaker answer, not an
     /// error. The loop asks this and sends no tools when it is false, which is
     /// what stops a gateway rejecting the request outright.
     fn can_act(&self) -> bool {
@@ -300,7 +301,7 @@ pub fn providers() -> Vec<Box<dyn Provider>> {
     ]
 }
 
-/// The namespaced model id the picker opens on before the King has chosen,
+/// The namespaced model id the picker opens on before the user has chosen,
 /// when the environment names one.
 ///
 /// `None` means "take the best the catalogue offers" -- resolved in
@@ -333,15 +334,15 @@ pub async fn open(choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
 /// Real paths from a city, preferring source files, so a model can ground its
 /// answer in files that exist.
 fn notable_paths(city: &City, want: usize) -> Vec<String> {
-    use kingdom_core::{District, Ward};
+    use kingdom_core::{Folder, Language};
 
-    fn walk(d: &District, out: &mut Vec<(bool, u64, String)>) {
-        for b in &d.buildings {
+    fn walk(d: &Folder, out: &mut Vec<(bool, u64, String)>) {
+        for b in &d.source_files {
             let is_source = matches!(
-                b.ward,
-                Ward::Rust | Ward::Web | Ward::Python | Ward::Go | Ward::Systems
+                b.language,
+                Language::Rust | Language::Web | Language::Python | Language::Go | Language::Systems
             );
-            out.push((is_source, b.bulk, b.path.clone()));
+            out.push((is_source, b.bytes, b.path.clone()));
         }
         for child in &d.children {
             walk(child, out);

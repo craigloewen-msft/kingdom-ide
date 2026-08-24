@@ -1,13 +1,14 @@
-//! Tools: what the court can do with its own hands.
+//! Tools: what the model can do with its own hands.
 //!
 //! Server-only, for the same reason `llm/` is. Named for what it is rather than
-//! given a metaphor noun -- the metaphor is carried by [`kingdom_core::Deed`],
-//! and inventing a second name for the plumbing would only obscure where the
-//! subprocess is spawned. The precedent is set at the top of `llm/mod.rs`.
+//! given a metaphor noun -- the metaphor is carried by
+//! [`kingdom_core::ToolCall`], and inventing a second name for the plumbing
+//! would only obscure where the subprocess is spawned. The precedent is set at
+//! the top of `llm/mod.rs`.
 //!
 //! # The boundary
 //!
-//! Every tool is rooted at the plan's workspace, and [`Workshop`] is the only
+//! Every tool is rooted at the plan's workspace, and [`Sandbox`] is the only
 //! thing that knows where that is. A tool receives paths already resolved and
 //! checked; it cannot reach outside because it is never told how to.
 //!
@@ -15,8 +16,8 @@
 //! tool has to remember is a check the next tool will forget, and the tool that
 //! forgets is the one that quietly edits a file in somebody else's checkout.
 //!
-//! Read [`Workshop::resolve`] before adding a tool that touches the filesystem,
-//! and [`Workshop::root`] before adding one that spawns a process -- the
+//! Read [`Sandbox::resolve`] before adding a tool that touches the filesystem,
+//! and [`Sandbox::root`] before adding one that spawns a process -- the
 //! guarantee is real for the first and deliberately weaker for the second.
 
 pub mod ask_user_question;
@@ -32,44 +33,46 @@ pub mod spawn_agents;
 pub mod think;
 pub mod tmux;
 
-use kingdom_core::{DeedOutcome, Workspace};
+use kingdom_core::{ToolOutcome, Workspace};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-// `Remit` moved down into the domain -- it crosses the wire now, because the
-// chamber renders differently under counsel. Re-exported at its historical path
-// so every existing `tools::Remit` keeps resolving (move-down, re-export-up).
-pub use kingdom_core::Remit;
+// `Permissions` moved down into the domain -- it crosses the wire now, because
+// the conversation view renders differently while a plan is only proposing.
+// Re-exported at its historical path so every existing `tools::Permissions`
+// keeps resolving (move-down, re-export-up).
+pub use kingdom_core::Permissions;
 
-/// Every tool available under a given remit.
+/// Every tool available under a given permission level.
 ///
 /// A plain list rather than a registry with registration macros, for the same
 /// reason `llm::providers()` is: a literal is the version of this a reader can
 /// take in at a glance, and a tool that is not in this list does not exist.
 /// Order is the order the model is shown them in.
 ///
-/// This is the *only* definition of what a remit permits. Both the list a model
-/// is shown ([`crate::llm::ToolSpec::all`]) and the list it may actually run
-/// ([`invoke`]) come through here, which is what stops the two disagreeing -- a
-/// model that invents `bash` under a survey remit must not be handed `bash`.
+/// This is the *only* definition of what a permission level permits. Both the
+/// list a model is shown ([`crate::llm::ToolSpec::all`]) and the list it may
+/// actually run ([`invoke`]) come through here, which is what stops the two
+/// disagreeing -- a model that invents `bash` under read-only permissions must
+/// not be handed `bash`.
 ///
-/// # Why counsel keeps `bash` but loses `patch`
+/// # Why `Propose` keeps `bash` but loses `patch`
 ///
 /// These look inconsistent and are not. This list is **not a sandbox** -- see
-/// [`Workshop::root`], which says plainly that the path boundary does not
-/// contain a shell. Withholding `bash` from a counselling plan would therefore
-/// buy a guarantee Kingdom cannot keep, while costing the court `git log`,
+/// [`Sandbox::root`], which says plainly that the path boundary does not
+/// contain a shell. Withholding `bash` from a proposing plan would therefore
+/// buy a guarantee Kingdom cannot keep, while costing the model `git log`,
 /// `cargo tree`, and running the failing test it is proposing to fix.
 ///
 /// What the list *is* is a statement of the job. Offering `patch` says "you may
-/// edit"; withholding it says "you may not", and the charter says the rest in
-/// words. A model that means to follow its instructions is told clearly what
-/// they are; one that does not was never going to be stopped by a missing tool
-/// while it holds a shell.
-pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
-    // Reads: everything, at every rung. Looking at a picture is a read, so it
+/// edit"; withholding it says "you may not", and the system prompt says the
+/// rest in words. A model that means to follow its instructions is told clearly
+/// what they are; one that does not was never going to be stopped by a missing
+/// tool while it holds a shell.
+pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
+    // Reads: everything, at every level. Looking at a picture is a read, so it
     // sits with the other reads rather than with the browser tools it was built
-    // to pair with -- an errand surveying a project may legitimately want to
+    // to pair with -- a subagent surveying a project may legitimately want to
     // look at a screenshot somebody already took; it still cannot take one.
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(think::Think),
@@ -78,8 +81,8 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
         Box::new(read_image::ReadImage),
     ];
 
-    // Acting on the world without changing the project: counsel and above.
-    if matches!(remit, Remit::Counsel | Remit::Full) {
+    // Acting on the world without changing the project: Propose and above.
+    if matches!(permissions, Permissions::Propose | Permissions::Full) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
             Box::new(bash::Bash),
             Box::new(tmux::TmuxRun),
@@ -94,28 +97,28 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
             Box::new(browser::BrowserResize),
             Box::new(browser::BrowserRecentConsoleLogs),
             Box::new(browser::BrowserClearConsoleLogs),
-            // Driving a browser at all is more than a survey, and profiling
+            // Driving a browser at all is more than read-only, and profiling
             // drives one -- it navigates, clicks and throttles a real page.
             Box::new(profile::BrowserProfile),
             Box::new(ask_user_question::AskUserQuestion),
         ]);
     }
 
-    // Putting a plan to the King: only from counsel. A plan with full hands is
-    // already carrying out a proposal he accepted and cannot propose its way to
-    // more authority; an errand answers to the court that sent it, and nothing
-    // about it is ever waiting on the King.
-    if matches!(remit, Remit::Counsel) {
+    // Putting a plan to the user: only while proposing. A plan with full
+    // permissions is already carrying out a proposal they accepted and cannot
+    // propose its way to more authority; a subagent answers to the plan that
+    // sent it, and nothing about it is ever waiting on the user.
+    if matches!(permissions, Permissions::Propose) {
         tools.push(Box::new(propose_plan::ProposePlan));
     }
 
-    // Changing the project: only once the King has said so.
-    if matches!(remit, Remit::Full) {
+    // Changing the project: only once the user has said so.
+    if matches!(permissions, Permissions::Full) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
             Box::new(patch::Patch),
-            // Withheld under counsel for a duller reason than `patch`: an
-            // errand of a counselling plan is a case nobody has needed yet. It
-            // would inherit `Survey`, which is probably right -- but guessing
+            // Withheld while proposing for a duller reason than `patch`: a
+            // subagent of a proposing plan is a case nobody has needed yet. It
+            // would inherit `ReadOnly`, which is probably right -- but guessing
             // at an unasked-for shape is how the lease machinery happened.
             Box::new(spawn_agents::SpawnAgents),
         ]);
@@ -124,40 +127,45 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
     tools
 }
 
-/// Runs one tool call by name, inside the workspace's bounds and its remit.
+/// Runs one tool call by name, inside the workspace's bounds and its
+/// permissions.
 ///
 /// The single point where a name from a model becomes work on a real machine.
 /// An unknown name is a refusal reported back to the model rather than an
 /// error: models hallucinate tool names, and being told "there is no such tool"
 /// is something a model can recover from in one turn.
 ///
-/// A tool that exists but is outside the remit gets a *different* answer, and
-/// the difference earns its keep. "There is no such tool" is true from where a
-/// model stands -- it was never shown the tool -- but it is a dead end: the
-/// obvious recovery is to give up on the whole approach. Saying that the tool
-/// exists and is not available *yet* points at the actual next move, which for
-/// a counselling plan is to put a plan to the King.
-pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> DeedOutcome {
-    if let Some(t) = all(shop.remit()).into_iter().find(|t| t.name() == tool) {
+/// A tool that exists but is outside the current permissions gets a *different*
+/// answer, and the difference earns its keep. "There is no such tool" is true
+/// from where a model stands -- it was never shown the tool -- but it is a dead
+/// end: the obvious recovery is to give up on the whole approach. Saying that
+/// the tool exists and is not available *yet* points at the actual next move,
+/// which for a proposing plan is to put a plan to the user.
+pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
+    if let Some(t) = all(shop.permissions()).into_iter().find(|t| t.name() == tool) {
         return t.run(input, shop).await;
     }
 
-    // Known to Kingdom, but not at this rung. Worth distinguishing, because the
-    // model is not wrong about the tool existing -- only about what it may do
-    // right now.
-    let exists_elsewhere = [Remit::Survey, Remit::Counsel, Remit::Full]
-        .into_iter()
-        .any(|r| all(r).iter().any(|t| t.name() == tool));
+    // Known to Kingdom, but not at this level. Worth distinguishing, because
+    // the model is not wrong about the tool existing -- only about what it may
+    // do right now.
+    let exists_elsewhere = [
+        Permissions::ReadOnly,
+        Permissions::Propose,
+        Permissions::Full,
+    ]
+    .into_iter()
+    .any(|p| all(p).iter().any(|t| t.name() == tool));
 
-    match (exists_elsewhere, shop.remit()) {
-        (true, Remit::Counsel) => Refusal::Refused(format!(
+    match (exists_elsewhere, shop.permissions()) {
+        (true, Permissions::Propose) => Refusal::Refused(format!(
             "`{tool}` is not available while you are drawing up a plan. Put the plan to \
-             the King with `propose_plan`; if he starts you on it, you will have it."
+             the user with `propose_plan`; if they start you on it, you will have it."
         ))
         .into(),
-        (true, Remit::Survey) => Refusal::Refused(format!(
-            "`{tool}` is not available to an errand. You were sent to read and report, \
-             so report what you found to the court that sent you."
+        (true, Permissions::ReadOnly) => Refusal::Refused(format!(
+            "`{tool}` is not available to a subagent. You were sent to read and report, \
+             so report what you found to the plan that sent you."
         ))
         .into(),
         _ => Refusal::NoSuchTool(tool.to_string()).into(),
@@ -173,33 +181,31 @@ pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> DeedOutcome {
 ///
 /// It also carries *which call this is*. Most tools never look: a command does
 /// not care which plan asked for it. But a tool that has to reach back out --
-/// to put a question in front of the King and wait for his answer -- needs
-/// something the browser can name when it answers, and the deed it is already
-/// being rendered as is exactly that. Minting a second identifier would mean
-/// keeping two in step for no gain.
+/// to put a question in front of the user and wait for his answer -- needs
+/// something the browser can name when it answers, and the tool call it is
+/// already being rendered as is exactly that. Minting a second identifier would
+/// mean keeping two in step for no gain.
 #[derive(Debug, Clone)]
-pub struct Workshop {
+pub struct Sandbox {
     workspace: Workspace,
     plan: kingdom_core::PlanId,
-    /// The deed this call is recorded as, once it is running. `None` outside a
-    /// turn, which is the case tests construct.
-    deed: Option<String>,
-    /// How much of the world this plan may touch. See [`Remit`].
-    remit: Remit,
+    /// The tool call this call is recorded as, once it is running. `None`
+    /// outside a turn, which is the case tests construct.
+    tool_call: Option<String>,
+    /// How much of the world this plan may touch. See [`Permissions`].
+    permissions: Permissions,
 }
 
 /// A refusal: the tool would not run, and why.
 ///
-/// The reason is written for the *model*, not for the King. It is fed back as
+/// The reason is written for the *model*, not for the user. It is fed back as
 /// the call's result, so it has to be actionable -- "that path is outside the
 /// workspace" lets a model correct itself, where a bare "refused" earns a retry
 /// of exactly the same call.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error(
-        "{path} is outside this plan's workspace. Everything this plan may \
-             touch is under {root}; use a path inside it."
-    )]
+    #[error("{path} is outside this plan's workspace. Everything this plan may \
+             touch is under {root}; use a path inside it.")]
     OutsideWorkspace { path: String, root: String },
 
     #[error("{tool} was called with arguments it cannot read: {detail}")]
@@ -212,35 +218,35 @@ pub enum Refusal {
     Refused(String),
 }
 
-impl From<Refusal> for DeedOutcome {
+impl From<Refusal> for ToolOutcome {
     fn from(refusal: Refusal) -> Self {
-        DeedOutcome::Refused {
+        ToolOutcome::Refused {
             reason: refusal.to_string(),
         }
     }
 }
 
-impl Workshop {
-    /// A workshop with the court's full hands, which is what a plan the King
-    /// decreed gets.
+impl Sandbox {
+    /// A sandbox with the model's full hands, which is what a plan the user
+    /// opened gets.
     pub fn new(workspace: Workspace) -> Self {
         Self {
             workspace,
             plan: kingdom_core::PlanId::new(String::new()),
-            deed: None,
-            remit: Remit::Full,
+            tool_call: None,
+            permissions: Permissions::Full,
         }
     }
 
-    /// Narrows what this workshop may do. See [`Remit`].
-    pub fn under(mut self, remit: Remit) -> Self {
-        self.remit = remit;
+    /// Narrows what this sandbox may do. See [`Permissions`].
+    pub fn under(mut self, permissions: Permissions) -> Self {
+        self.permissions = permissions;
         self
     }
 
     /// How much of the world this plan may touch.
-    pub fn remit(&self) -> Remit {
-        self.remit
+    pub fn permissions(&self) -> Permissions {
+        self.permissions
     }
 
     /// Names the plan these tools work for.
@@ -249,14 +255,14 @@ impl Workshop {
         self
     }
 
-    /// A copy of this workshop bound to one recorded call.
+    /// A copy of this sandbox bound to one recorded call.
     ///
     /// Cloned per call rather than mutated, so a tool cannot see the id of a
     /// call that is not its own -- which is what would let one tool answer
     /// another's question.
-    pub fn for_deed(&self, deed: impl Into<String>) -> Self {
+    pub fn for_tool_call(&self, tool_call: impl Into<String>) -> Self {
         Self {
-            deed: Some(deed.into()),
+            tool_call: Some(tool_call.into()),
             ..self.clone()
         }
     }
@@ -266,9 +272,9 @@ impl Workshop {
         &self.plan
     }
 
-    /// The deed this call is recorded as.
-    pub fn deed(&self) -> Option<&str> {
-        self.deed.as_deref()
+    /// The tool call this call is recorded as.
+    pub fn tool_call(&self) -> Option<&str> {
+        self.tool_call.as_deref()
     }
 
     /// The directory everything this plan does happens under.
@@ -287,7 +293,7 @@ impl Workshop {
 
     /// True when this plan works in a worktree of its own.
     ///
-    /// False means the King chose to work directly in the city, so the boundary
+    /// False means the user chose to work directly in the city, so the boundary
     /// below is the project itself and gives no isolation from his own
     /// checkout. That is a choice he made knowingly and the tools honour it --
     /// but it must be a *visible* weaker guarantee rather than an accident,
@@ -353,15 +359,15 @@ fn normalise(path: &Path) -> PathBuf {
     out
 }
 
-/// One thing the court can do.
+/// One thing the model can do.
 ///
 /// Stateless: every tool is a singleton and all per-call context arrives in the
-/// [`Workshop`]. That is what lets one instance serve every plan at once
+/// [`Sandbox`]. That is what lets one instance serve every plan at once
 /// without a tool ever holding a plan's path in a field, which is the mistake
 /// that would make the boundary above a suggestion.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    /// The name the model calls it by, and the name recorded on the deed.
+    /// The name the model calls it by, and the name recorded on the tool call.
     fn name(&self) -> &'static str;
 
     /// What it does, written for a model.
@@ -372,19 +378,20 @@ pub trait Tool: Send + Sync {
 
     /// Runs the tool.
     ///
-    /// Returns a [`DeedOutcome`] rather than a `Result` because both endings are
-    /// results the model must be *told*: a refusal it never hears about is a
-    /// call it makes again immediately. Errors that are not the model's business
-    /// -- a poisoned lock, a vanished plan -- belong to the caller, not here.
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome;
+    /// Returns a [`ToolOutcome`] rather than a `Result` because both endings
+    /// are results the model must be *told*: a refusal it never hears about is
+    /// a call it makes again immediately. Errors that are not the model's
+    /// business -- a poisoned lock, a vanished plan -- belong to the caller,
+    /// not here.
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn workshop() -> Workshop {
-        Workshop::new(Workspace::in_place("/dev/city"))
+    fn sandbox() -> Sandbox {
+        Sandbox::new(Workspace::in_place("/dev/city"))
     }
 
     /// The invariant the whole tool surface rests on. It is tested here, at the
@@ -396,7 +403,7 @@ mod tests {
     /// lexically here is what stops the filesystem resolving it later.
     #[test]
     fn a_path_that_leaves_the_workspace_is_refused() {
-        let shop = workshop();
+        let shop = sandbox();
 
         for escape in [
             "../secrets",
@@ -405,7 +412,10 @@ mod tests {
             "src/./../../..",
         ] {
             assert!(
-                matches!(shop.resolve(escape), Err(Refusal::OutsideWorkspace { .. })),
+                matches!(
+                    shop.resolve(escape),
+                    Err(Refusal::OutsideWorkspace { .. })
+                ),
                 "{escape:?} leaves the workspace and must be refused"
             );
         }
@@ -417,7 +427,7 @@ mod tests {
     /// way to name a sibling.
     #[test]
     fn ordinary_paths_resolve_inside_the_workspace() {
-        let shop = workshop();
+        let shop = sandbox();
 
         assert_eq!(
             shop.resolve("src/main.rs").unwrap(),
@@ -441,40 +451,34 @@ mod tests {
     #[test]
     fn a_sibling_with_a_shared_prefix_is_not_inside() {
         assert!(matches!(
-            workshop().resolve("/dev/city-old/secrets"),
+            sandbox().resolve("/dev/city-old/secrets"),
             Err(Refusal::OutsideWorkspace { .. })
         ));
     }
 
-    /// The invariant errands rest on, and the rung that was added beside it.
+    /// The invariant subagents rest on, and the level that was added beside it.
     ///
-    /// Errands run in parallel inside their parent's worktree, which is only
+    /// Subagents run in parallel inside their parent's worktree, which is only
     /// safe because they cannot write. That is enforced here, at the seam, and
     /// nowhere else -- so this is where it is worth pinning, beside the path
     /// check it sits next to for the same reason.
     ///
-    /// The refusal matters as much as the absence: a model under a survey remit
-    /// was never shown `bash`, but models invent tool names, and one that
-    /// invents this one must not be handed it.
+    /// The refusal matters as much as the absence: a model under read-only
+    /// permissions was never shown `bash`, but models invent tool names, and
+    /// one that invents this one must not be handed it.
     #[tokio::test]
     async fn a_survey_cannot_reach_the_tools_that_touch_the_world() {
-        let surveying = workshop().under(Remit::Survey);
+        let surveying = sandbox().under(Permissions::ReadOnly);
 
-        for forbidden in [
-            "bash",
-            "patch",
-            "tmux_run",
-            "browser_navigate",
-            "spawn_agents",
-        ] {
+        for forbidden in ["bash", "patch", "tmux_run", "browser_navigate", "spawn_agents"] {
             assert!(
-                !all(Remit::Survey).iter().any(|t| t.name() == forbidden),
+                !all(Permissions::ReadOnly).iter().any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered to a survey"
             );
             assert!(
                 matches!(
                     invoke(forbidden, serde_json::json!({}), &surveying).await,
-                    DeedOutcome::Refused { .. }
+                    ToolOutcome::Refused { .. }
                 ),
                 "{forbidden} must be refused even when a survey asks for it by name"
             );
@@ -484,43 +488,43 @@ mod tests {
         // report, and it must still be able to.
         for allowed in ["think", "read_file", "search"] {
             assert!(
-                all(Remit::Survey).iter().any(|t| t.name() == allowed),
+                all(Permissions::ReadOnly).iter().any(|t| t.name() == allowed),
                 "{allowed} is how a survey does its job"
             );
         }
     }
 
-    /// The counsel rung: what a plan drawing up a proposal may and may not do.
+    /// The Propose level: what a plan drawing one up may and may not do.
     ///
     /// The withheld half is the load-bearing one, and it is narrower than it
-    /// looks. Counsel keeps `bash` deliberately -- see the note on [`all`] --
-    /// so `patch` is the single tool standing between a counselling court and
-    /// editing the project. If it ever leaks into this rung, every decree
-    /// silently goes back to changing files before the King has seen a plan,
+    /// looks. Propose keeps `bash` deliberately -- see the note on [`all`] --
+    /// so `patch` is the single tool standing between a proposing model and
+    /// editing the project. If it ever leaks into this level, every prompt
+    /// silently goes back to changing files before the user has seen a plan,
     /// and nothing else in the system would notice.
     ///
     /// The refusal is tested as well as the absence for the same reason as
     /// above: the list a model is *shown* and the list it may *run* must not
     /// disagree, and a model that invents `patch` must not be handed it.
     #[tokio::test]
-    async fn counsel_may_look_and_run_but_not_change_the_project() {
-        let counselling = workshop().under(Remit::Counsel);
+    async fn proposing_may_look_and_run_but_not_change_the_project() {
+        let proposing = sandbox().under(Permissions::Propose);
 
         for forbidden in ["patch", "spawn_agents"] {
             assert!(
-                !all(Remit::Counsel).iter().any(|t| t.name() == forbidden),
+                !all(Permissions::Propose).iter().any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered while drawing up a plan"
             );
             assert!(
                 matches!(
-                    invoke(forbidden, serde_json::json!({}), &counselling).await,
-                    DeedOutcome::Refused { .. }
+                    invoke(forbidden, serde_json::json!({}), &proposing).await,
+                    ToolOutcome::Refused { .. }
                 ),
-                "{forbidden} must be refused even when counsel asks for it by name"
+                "{forbidden} must be refused even when a proposing plan asks by name"
             );
         }
 
-        // Counsel is meant to be a *strong* explorer: it can run the failing
+        // Proposing is meant to be a *strong* explorer: it can run the failing
         // test it is proposing to fix, and look at the app it is changing.
         for allowed in [
             "think",
@@ -531,18 +535,18 @@ mod tests {
             "propose_plan",
         ] {
             assert!(
-                all(Remit::Counsel).iter().any(|t| t.name() == allowed),
-                "{allowed} is how counsel does its job"
+                all(Permissions::Propose).iter().any(|t| t.name() == allowed),
+                "{allowed} is how a proposing plan does its job"
             );
         }
 
-        // `propose_plan` is the one tool that belongs to counsel *alone*: a
-        // plan already working has nothing left to be granted, and an errand
-        // reports to the court that sent it rather than to the King.
-        for other in [Remit::Survey, Remit::Full] {
+        // `propose_plan` is the one tool that belongs to this level *alone*: a
+        // plan already working has nothing left to be granted, and a subagent
+        // reports to the plan that sent it rather than to the user.
+        for other in [Permissions::ReadOnly, Permissions::Full] {
             assert!(
                 !all(other).iter().any(|t| t.name() == "propose_plan"),
-                "only a counselling plan puts work to the King"
+                "only a proposing plan puts work to the user"
             );
         }
     }

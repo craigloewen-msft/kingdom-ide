@@ -1,9 +1,9 @@
-//! The spyglass panel: watching a plan's browser from its chamber.
+//! The screencast panel: watching a plan's browser from its conversation.
 //!
-//! The client half of `crate::spyglass`. Reads the binary frames that module
+//! The client half of `crate::screencast`. Reads the binary frames that module
 //! documents and paints them onto a canvas.
 //!
-//! **View-only.** The canvas is `pointer-events: none`, so a King who clicks it
+//! **View-only.** The canvas is `pointer-events: none`, so a user who clicks it
 //! gets nothing rather than an ambiguous non-response. The reasoning is in the
 //! server module and it is a permanent decision, not a missing feature.
 //!
@@ -12,10 +12,10 @@
 //! A city lighting up on the map because a plan holds a live browser is the
 //! obvious next thought, and it is deliberately not built. It needs two things
 //! Kingdom does not have: a plan that *knows* it owns a session (a field, set
-//! when a browser deed first launches one, proclaimed by the herald like any
-//! other change), and live updates reaching the map at all -- which `AGENTS.md`
-//! lists as unbuilt. Both are real; neither is this. Guessing at UI nobody has
-//! asked for is how the lease machinery happened.
+//! when a browser tool call first launches one, published by the event bus like
+//! any other change), and live updates reaching the map at all -- which
+//! `AGENTS.md` lists as unbuilt. Both are real; neither is this. Guessing at UI
+//! nobody has asked for is how the lease machinery happened.
 
 use leptos::prelude::*;
 
@@ -26,7 +26,7 @@ use leptos::prelude::*;
 /// rather than forgotten.
 #[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Sight {
+enum ConnectionState {
     Opening,
     /// The plan has no browser. Not an error -- the usual case, for a plan that
     /// has never been asked to look at a page.
@@ -35,22 +35,22 @@ enum Sight {
     Ended,
 }
 
-impl Sight {
+impl ConnectionState {
     fn tell(self) -> &'static str {
         match self {
-            Sight::Opening => "Raising the spyglass\u{2026}",
-            Sight::NoSession => "This plan has not opened a browser.",
-            Sight::Live => "",
-            Sight::Ended => "The court's browser has closed.",
+            ConnectionState::Opening => "Raising the spyglass\u{2026}",
+            ConnectionState::NoSession => "This plan has not opened a browser.",
+            ConnectionState::Live => "",
+            ConnectionState::Ended => "The court's browser has closed.",
         }
     }
 }
 
 /// A live view of one plan's browser.
 #[component]
-pub fn Spyglass(plan: kingdom_core::PlanId) -> impl IntoView {
+pub fn BrowserView(plan: kingdom_core::PlanId) -> impl IntoView {
     let canvas = NodeRef::<leptos::html::Canvas>::new();
-    let (sight, set_sight) = signal(Sight::Opening);
+    let (sight, set_sight) = signal(ConnectionState::Opening);
     let (url, set_url) = signal(String::new());
 
     watch_browser(plan, canvas, set_sight, set_url);
@@ -59,14 +59,14 @@ pub fn Spyglass(plan: kingdom_core::PlanId) -> impl IntoView {
         <div class="spyglass">
             <div class="spyglass-bar">
                 <span class="spyglass-url">{move || url.get()}</span>
-                // Said plainly rather than shown as a badge: the King is being
+                // Said plainly rather than shown as a badge: the user is being
                 // told he is watching and cannot touch, which is a sentence,
                 // not an icon.
                 <span class="spyglass-note">"watching"</span>
             </div>
             <div class="spyglass-stage">
                 <canvas class="spyglass-canvas" node_ref=canvas></canvas>
-                <Show when=move || sight.get() != Sight::Live>
+                <Show when=move || sight.get() != ConnectionState::Live>
                     <p class="spyglass-empty">{move || sight.get().tell()}</p>
                 </Show>
             </div>
@@ -83,12 +83,12 @@ pub fn Spyglass(plan: kingdom_core::PlanId) -> impl IntoView {
 fn watch_browser(
     plan: kingdom_core::PlanId,
     canvas: NodeRef<leptos::html::Canvas>,
-    set_sight: WriteSignal<Sight>,
+    set_sight: WriteSignal<ConnectionState>,
     set_url: WriteSignal<String>,
 ) {
-    // Owned by the effect, so leaving the chamber closes the socket -- which is
-    // what stops the screencast, because the last viewer detaching is what
-    // drops the broker. A leaked socket here is a Chrome painting forever.
+    // Owned by the effect, so leaving the conversation closes the socket --
+    // which is what stops the screencast, because the last viewer detaching is
+    // what drops the broker. A leaked socket here is a Chrome painting forever.
     let _watch = LocalResource::new(move || {
         let plan = plan.clone();
         async move { Watch::open(&plan, canvas, set_sight, set_url) }
@@ -99,12 +99,12 @@ fn watch_browser(
 fn watch_browser(
     _plan: kingdom_core::PlanId,
     _canvas: NodeRef<leptos::html::Canvas>,
-    _set_sight: WriteSignal<Sight>,
+    _set_sight: WriteSignal<ConnectionState>,
     _set_url: WriteSignal<String>,
 ) {
 }
 
-/// An open spyglass, which closes itself when dropped.
+/// An open screencast, which closes itself when dropped.
 #[cfg(feature = "hydrate")]
 struct Watch {
     socket: web_sys::WebSocket,
@@ -119,7 +119,7 @@ impl Watch {
     fn open(
         plan: &kingdom_core::PlanId,
         canvas: NodeRef<leptos::html::Canvas>,
-        set_sight: WriteSignal<Sight>,
+        set_sight: WriteSignal<ConnectionState>,
         set_url: WriteSignal<String>,
     ) -> Self {
         use wasm_bindgen::closure::Closure;
@@ -145,21 +145,21 @@ impl Watch {
                 match tag {
                     TAG_FRAME => {
                         // Skip the length prefix: the socket already framed the
-                        // message for us, so it is the server's own check rather
-                        // than something this end needs to parse.
+                        // message for us, so it is the server's own check
+                        // rather than something this end needs to parse.
                         if rest.len() > 4 {
-                            set_sight.set(Sight::Live);
+                            set_sight.set(ConnectionState::Live);
                             paint(canvas, &rest[4..]);
                         }
                     }
                     TAG_URL => set_url.set(String::from_utf8_lossy(rest).into_owned()),
                     TAG_STATUS => match String::from_utf8_lossy(rest).as_ref() {
-                        "no-session" => set_sight.set(Sight::NoSession),
-                        "ended" => set_sight.set(Sight::Ended),
-                        // "started" is not yet "live": the screencast is running
-                        // but nothing has been painted, and claiming otherwise
-                        // would show the King an empty canvas labelled as a
-                        // working browser.
+                        "no-session" => set_sight.set(ConnectionState::NoSession),
+                        "ended" => set_sight.set(ConnectionState::Ended),
+                        // "started" is not yet "live": the screencast is
+                        // running but nothing has been painted, and claiming
+                        // otherwise would show the user an empty canvas
+                        // labelled as a working browser.
                         _ => {}
                     },
                     _ => {}
@@ -231,8 +231,8 @@ fn paint(canvas: NodeRef<leptos::html::Canvas>, jpeg: &[u8]) {
         let image = image.clone();
         let src = src.clone();
         Closure::once_into_js(move || {
-            // Match the backing store to the frame, so a page at one size is not
-            // resampled into a canvas at another and shown blurred.
+            // Match the backing store to the frame, so a page at one size is
+            // not resampled into a canvas at another and shown blurred.
             canvas.set_width(image.natural_width());
             canvas.set_height(image.natural_height());
             if let Ok(Some(context)) = canvas.get_context("2d") {

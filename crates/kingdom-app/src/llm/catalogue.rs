@@ -4,7 +4,7 @@
 //! it, and pinned a hard-coded mock entry at the head of the list. Both of those
 //! now belong to the providers themselves, and what is left here is the only
 //! part that was ever about the catalogue as a whole -- putting the lists
-//! together, and deciding what the King lands on before he has chosen.
+//! together, and deciding what the user lands on before he has chosen.
 
 use super::providers;
 use kingdom_core::{CredentialState, ModelCatalogue};
@@ -13,7 +13,7 @@ use kingdom_core::{CredentialState, ModelCatalogue};
 /// which today cannot happen -- the mock always does.
 const FALLBACK_ID: &str = super::mock::MODEL_ID;
 
-/// Every model the King can choose between, from every backend.
+/// Every model the user can choose between, from every backend.
 pub async fn catalogue() -> ModelCatalogue {
     let mut options = Vec::new();
     let mut credential = CredentialState::Ready;
@@ -36,7 +36,7 @@ pub async fn catalogue() -> ModelCatalogue {
     }
 }
 
-/// What the picker opens on before the King has chosen.
+/// What the picker opens on before the user has chosen.
 ///
 /// The environment's `KINGDOM_MODEL` wins, but only if it names a model
 /// somebody actually serves -- otherwise it is a default pointing at nothing.
@@ -62,7 +62,7 @@ fn default_id(options: &[kingdom_core::ModelOption]) -> String {
 /// Combines two providers' credential states into the one the picker shows.
 ///
 /// Deliberately pessimistic. The mock is always `Ready`, so an optimistic rule
-/// would report a healthy credential while Copilot's is broken -- and the King
+/// would report a healthy credential while Copilot's is broken -- and the user
 /// would learn his token had expired only by wondering where the models went.
 fn worse_of(a: CredentialState, b: CredentialState) -> CredentialState {
     fn rank(state: CredentialState) -> u8 {
@@ -99,8 +99,8 @@ mod tests {
 
     /// A fresh clone with no credential must still be able to draft, *and* must
     /// still be told its credential is broken. Those two used to be separate
-    /// mechanisms -- a hard-coded mock entry, and a badge in the decree bar.
-    /// Both are gone, so this is the only thing standing between the King and a
+    /// mechanisms -- a hard-coded mock entry, and a badge in the prompt bar.
+    /// Both are gone, so this is the only thing standing between the user and a
     /// picker that either strands him with no models or lies about why it is
     /// short.
     #[test]
@@ -121,7 +121,7 @@ mod tests {
         );
     }
 
-    /// With a working credential the King opens on a real model, not on the
+    /// With a working credential the user opens on a real model, not on the
     /// offline one -- the mock is a fallback, not a default.
     #[test]
     fn the_best_available_model_wins_over_the_mock() {

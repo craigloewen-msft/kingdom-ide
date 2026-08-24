@@ -1,20 +1,17 @@
-//! The charter: everything the court is told before it is asked anything.
+//! The system prompt: everything the model is told before it is asked anything.
 //!
-//! Server-only, and lifted out of the provider on purpose. The system prompt
-//! used to be built inside `copilot.rs`, which made it *Copilot's* prompt: a
-//! second provider would have had to reinvent it, and the two would have
-//! drifted the first time either was touched. What a model is told about the
-//! work is content, not transport, so it is assembled once here and every
-//! provider renders the same words.
+//! Server-only, and lifted out of the provider on purpose. This used to be
+//! built inside `copilot.rs`, which made it *Copilot's* prompt: a second
+//! provider would have had to reinvent it, and the two would have drifted the
+//! first time either was touched. What a model is told about the work is
+//! content, not transport, so it is assembled once here and every provider
+//! renders the same words.
 //!
-//! Named on-metaphor, unlike its neighbours in `llm/`. The precedent there --
-//! `llm`, `tools` -- is that *plumbing* keeps its plain name; this is not
-//! plumbing. A charter is the document that grants and limits powers, which is
-//! exactly what this is: it tells the court where it is standing, what it may
-//! touch, and what the project expects of it.
+//! It tells the model where it is standing, what it may touch, and what the
+//! project expects of it.
 
 use super::CityBrief;
-use kingdom_core::Remit;
+use kingdom_core::Permissions;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -24,26 +21,26 @@ const GUIDANCE_NAMES: &[&str] = &["AGENTS.md", "AGENT.md"];
 /// How much project guidance is worth sending.
 ///
 /// A cap rather than trust, because the cost is per *round*, not per turn: the
-/// whole charter is resent on every pass of a loop that may run 24 times, so a
+/// whole prompt is resent on every pass of a loop that may run 24 times, so a
 /// megabyte of `AGENTS.md` is a bill rather than merely a long prompt. Generous
 /// enough that no honest guidance file comes near it.
 const MOST_GUIDANCE: usize = 64 * 1024;
 
-/// Everything the court is told about the work, assembled once per turn.
+/// Everything the model is told about the work, assembled once per turn.
 ///
 /// Held as parts rather than one finished string so a provider can place them
 /// as its own API prefers -- and so the pieces stay testable individually.
 #[derive(Debug, Clone, Default)]
-pub struct Charter {
+pub struct SystemPrompt {
     /// The project. Kept as the brief rather than as rendered prose because a
     /// provider occasionally needs a *fact* from it -- the city's name for a
     /// fallback headline -- and re-parsing it out of the rendering would be
     /// absurd.
     pub city: CityBrief,
-    /// Where the court is standing, and whether it is isolated.
+    /// Where the model is standing, and whether it is isolated.
     pub workspace: String,
     /// What it may do, and what it must not.
-    pub remit: String,
+    pub permissions: String,
     /// Every `AGENTS.md` found on the way up from the workspace.
     pub guidance: Vec<Guidance>,
 }
@@ -55,28 +52,28 @@ pub struct Guidance {
     pub body: String,
 }
 
-impl Charter {
-    /// Assembles the charter for one turn.
+impl SystemPrompt {
+    /// Assembles the prompt for one turn.
     ///
     /// `root` bounds the walk: guidance is gathered from the workspace up to
-    /// the kingdom root and no further, so a stray `AGENTS.md` in the King's
+    /// the kingdom root and no further, so a stray `AGENTS.md` in the user's
     /// home directory cannot silently instruct every plan in every project.
     pub fn assemble(
         city: &CityBrief,
         workspace: &kingdom_core::Workspace,
-        remit: Remit,
+        permissions: Permissions,
         approved: bool,
         root: &Path,
     ) -> Self {
         Self {
             city: city.clone(),
             workspace: workspace_block(workspace),
-            remit: remit_block(remit, approved),
+            permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(Path::new(&workspace.path), root),
         }
     }
 
-    /// The charter as one system prompt.
+    /// The prompt as one system prompt.
     ///
     /// Order carries reasoning and is not arbitrary. The remit comes before the
     /// testing directive, which comes before project guidance: a project's own
@@ -94,7 +91,7 @@ impl Charter {
         }
 
         out.push('\n');
-        out.push_str(&self.remit);
+        out.push_str(&self.permissions);
 
         out.push_str("\n\n");
         out.push_str(TESTING);
@@ -134,58 +131,58 @@ const TESTING: &str = "Tests are a liability as well as an asset: every test cos
      trivial accessors, or duplicate coverage that already exists. If a change needs no new \
      test, say so instead of inventing one.";
 
-const MERMAID: &str = "The chamber renders Markdown mermaid code fences as diagrams; prefer \
+const MERMAID: &str = "The conversation view renders Markdown mermaid code fences as diagrams; prefer \
      them when a diagram would help. Wrap a node label in double quotes when it contains \
      parentheses or quotes, so Mermaid does not read the punctuation as syntax.";
 
-/// Where the court is standing.
+/// Where the model is standing.
 ///
-/// The court is not told this anywhere else. `begin_plan` records the workspace
+/// The model is not told this anywhere else. `begin_plan` records the workspace
 /// as a [`kingdom_core::NoteKind::Workspace`] note, and `Plan::turns`
 /// deliberately withholds notes from the model -- so without this block an
 /// agent working in a worktree at `<city>/.kingdom/<uuid>` has no idea it is
 /// not in the project's own checkout, and will happily describe its work as
-/// having changed the King's files.
+/// having changed the user's files.
 fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
     let mut out = format!("Working directory: {}\n", workspace.path);
     match (&workspace.branch, workspace.is_isolated()) {
         (Some(branch), true) => out.push_str(&format!(
-            "This is an isolated worktree on branch {branch}. It is yours: the King's own \
+            "This is an isolated worktree on branch {branch}. It is yours: the user's own \
              checkout is elsewhere and is not affected by what you do here.\n"
         )),
         _ => out.push_str(
             "This is the project directory itself, with no isolation. Anything you change \
-             here changes the King's own checkout.\n",
+             here changes the user's own checkout.\n",
         ),
     }
     out
 }
 
-/// What the court may do, in the words it is told it.
-fn remit_block(remit: Remit, approved: bool) -> String {
-    match remit {
-        Remit::Survey => SURVEY.to_string(),
-        Remit::Counsel => COUNSEL.to_string(),
-        Remit::Full if approved => format!("{FULL}\n\n{CARRYING_OUT}"),
-        Remit::Full => FULL.to_string(),
+/// What the model may do, in the words it is told it.
+fn permissions_block(permissions: Permissions, approved: bool) -> String {
+    match permissions {
+        Permissions::ReadOnly => READ_ONLY.to_string(),
+        Permissions::Propose => PROPOSE.to_string(),
+        Permissions::Full if approved => format!("{FULL}\n\n{CARRYING_OUT}"),
+        Permissions::Full => FULL.to_string(),
     }
 }
 
-const SURVEY: &str = "\nYou were sent to answer one question and report back. You can read \
-     and search, and that is all: you cannot run commands, edit files, or send errands of \
+const READ_ONLY: &str = "\nYou were sent to answer one question and report back. You can read \
+     and search, and that is all: you cannot run commands, edit files, or spawn subagents of \
      your own. Answer what you were asked, concretely, citing the files you looked at.";
 
-/// The counsel block: the heart of this whole arrangement.
+/// The proposing block: the heart of this whole arrangement.
 ///
 /// Note what it says about `bash`, and why it says it. The tool list is not a
-/// sandbox -- `Workshop::root` is explicit that the path boundary does not
+/// sandbox -- `Sandbox::root` is explicit that the path boundary does not
 /// contain a shell -- so a command that names an absolute path can write
 /// anywhere. Withholding `bash` would buy a guarantee Kingdom cannot keep while
-/// costing the court `git log`, `cargo tree`, and running the failing test it
+/// costing the model `git log`, `cargo tree`, and running the failing test it
 /// is proposing to fix. So the limit is stated as what it is: a boundary the
-/// court is trusted to keep. Pretending otherwise would be worse, because the
-/// King would believe in a fence that is not there.
-const COUNSEL: &str = "\nYou are drawing up a plan, not carrying it out. Read, search, and \
+/// model is trusted to keep. Pretending otherwise would be worse, because the
+/// user would believe in a fence that is not there.
+const PROPOSE: &str = "\nYou are drawing up a plan, not carrying it out. Read, search, and \
      run whatever you need in order to understand the work -- but change nothing. No edits \
      to files, no commits, nothing written into the project.\n\n\
      You have `bash`, and it is not fenced in: a command that names an absolute path can \
@@ -194,9 +191,9 @@ const COUNSEL: &str = "\nYou are drawing up a plan, not carrying it out. Read, s
      which fail -- and never to change.\n\n\
      When you know what should be done, call `propose_plan` with a title and the plan \
      itself. Say what you would change, in which files, and why; say what you checked and \
-     what you are assuming. The King reads it and either starts you on it or sends back \
-     changes, and you have no hands until he does.\n\n\
-     If he asks you to change something directly, explain that you must put a plan to him \
+     what you are assuming. The user reads it and either starts you on it or sends back \
+     changes, and you cannot edit anything until they do.\n\n\
+     If they ask you to change something directly, explain that you must put a plan to them \
      first.";
 
 const FULL: &str = "\nYou have tools and are working in the directory above. Use them: read \
@@ -205,7 +202,7 @@ const FULL: &str = "\nYou have tools and are working in the directory above. Use
      what you did and what it means for the reader -- concisely, and without repeating the \
      output of commands they can already see.";
 
-const CARRYING_OUT: &str = "You are carrying out a plan the King approved. It is above, in \
+const CARRYING_OUT: &str = "You are carrying out a plan the user approved. It is above, in \
      the record of your own `propose_plan` call. Follow it; if you find it was wrong, say so \
      rather than quietly doing something else.";
 
@@ -231,7 +228,7 @@ fn discover_guidance(from: &Path, root: &Path) -> Vec<Guidance> {
             found.push(file);
         }
         // The kingdom root is included, then the walk stops: guidance above it
-        // belongs to the King's machine, not to this kingdom.
+        // belongs to the user's machine, not to this kingdom.
         if dir == root {
             break;
         }
@@ -293,7 +290,7 @@ mod tests {
 
     fn temp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "kingdom-charter-{}-{}",
+            "kingdom-system-prompt-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -341,8 +338,8 @@ mod tests {
     }
 
     /// The walk stops at the kingdom root. Guidance above it belongs to the
-    /// King's machine rather than to this kingdom, and picking it up would let
-    /// a file he forgot about instruct every plan in every project.
+    /// user's machine rather than to this kingdom, and picking it up would let
+    /// a file they forgot about instruct every plan in every project.
     #[test]
     fn guidance_above_the_kingdom_is_left_alone() {
         let outer = temp();

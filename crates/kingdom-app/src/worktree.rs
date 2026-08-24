@@ -2,7 +2,7 @@
 //!
 //! Server-only. Everything here shells out to `git` rather than linking a git
 //! library: the operations are few, the CLI's behaviour is the contract users
-//! already know, and its refusals are written in words worth showing the King
+//! already know, and its refusals are written in words worth showing the user
 //! verbatim.
 //!
 //! A worktree is disposable exactly when its work has been dealt with -- landed
@@ -34,7 +34,7 @@ pub enum WorktreeError {
     Git(String),
 }
 
-/// Prepares the workspace a decree asked for.
+/// Prepares the workspace a prompt asked for.
 ///
 /// `city_root` is the absolute path to the project. `slug` is the plan's name in
 /// git-safe form ([`kingdom_core::naming::slugify`]); a fresh workspace's branch
@@ -61,11 +61,11 @@ pub async fn prepare(
 
     // Kingdom's own scratch space must not show up as uncommitted work in the
     // repo it is isolating. `info/exclude` rather than `.gitignore`, because the
-    // King's repository is not ours to commit to.
+    // user's repository is not ours to commit to.
     exclude_worktree_dir(city_root);
 
     // Recorded now, while it is unambiguously true. Asking at merge time would
-    // land the work wherever the King had wandered to since.
+    // land the work wherever the user had wandered to since.
     let base = git(city_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .await
         .ok()
@@ -78,7 +78,7 @@ pub async fn prepare(
 
     let branch = match mode {
         // A fresh worktree gets a branch of its own, so committing in it cannot
-        // move a branch the King is using elsewhere.
+        // move a branch the user is using elsewhere.
         WorkspaceMode::Fresh => fresh_branch(city_root, slug, &id, &dir_arg).await?,
         // An existing branch is checked out as-is. git refuses if it is already
         // checked out in another worktree, and that refusal is the right answer:
@@ -102,8 +102,8 @@ pub async fn prepare(
 /// How many `-2`, `-3`, ... suffixes to try before falling back to the uuid.
 ///
 /// Small on purpose. Past a handful of identically-named plans the number has
-/// stopped being informative anyway, and the point of the bound is that a decree
-/// can never be refused merely for resembling an earlier one.
+/// stopped being informative anyway, and the point of the bound is that a
+/// prompt can never be refused merely for resembling an earlier one.
 const MAX_ATTEMPTS: u32 = 20;
 
 /// Cuts a fresh worktree on a branch named after the plan.
@@ -111,8 +111,8 @@ const MAX_ATTEMPTS: u32 = 20;
 /// Names collide routinely -- "fix the tests" twice in one afternoon is the
 /// ordinary case, not the exotic one -- so a taken name is walked past rather
 /// than reported. The uuid is kept as the last resort: an ugly branch name is a
-/// far better outcome than a refused decree, and it is also what happens for a
-/// decree with no ASCII in it at all, where every plan would otherwise be
+/// far better outcome than a refused prompt, and it is also what happens for a
+/// prompt with no ASCII in it at all, where every plan would otherwise be
 /// fighting over `kingdom/plan`.
 async fn fresh_branch(
     city_root: &Path,
@@ -171,7 +171,7 @@ fn is_name_clash(e: &WorktreeError) -> bool {
 ///
 /// A refusal is **not** an `Err`. git declining to merge -- a conflict, a dirty
 /// tree, the wrong branch checked out -- is a real event in the plan's life and
-/// belongs in the plan's log, where the King is already looking. `Err` is kept
+/// belongs in the plan's log, where the user is already looking. `Err` is kept
 /// for the server being unable to do the work at all.
 pub enum Finish {
     /// It is done. The plan settles with this outcome.
@@ -185,11 +185,11 @@ pub enum Finish {
 ///
 /// Every failure stops the whole thing and leaves the city exactly as it was:
 /// a refused merge is aborted, so there is never a half-merged working tree for
-/// the King to discover later.
+/// the user to discover later.
 pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, WorktreeError> {
     // Working in place, there is nothing to merge -- the work is already in the
     // folder. Saying so plainly beats pretending to merge (a lie) or refusing
-    // (a plan the King cannot close).
+    // (a plan the user cannot close).
     let Some(branch) = workspace
         .branch
         .as_deref()
@@ -213,7 +213,7 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
     commit_pending(&worktree, "Kingdom: work in progress").await?;
 
     // Merging requires the base branch to be the one checked out here. Checking
-    // it out ourselves would move the King's working copy out from under him --
+    // it out ourselves would move the user's working copy out from under him --
     // precisely the collision this product exists to prevent.
     let on = git(city_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .await?
@@ -233,7 +233,7 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
     let merged = git(city_root, &["merge", "--no-ff", "-m", &message, branch]).await;
 
     if let Err(e) = merged {
-        // Leave the city exactly as it was found. A half-merged tree the King
+        // Leave the city exactly as it was found. A half-merged tree the user
         // discovers hours later is far worse than a refusal he reads now.
         let conflicts = git(city_root, &["diff", "--name-only", "--diff-filter=U"])
             .await
@@ -279,7 +279,7 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
 /// branch is written to `patch_path`, replayable with `git am`, and it is that
 /// patch -- not the branch -- that is the record. Once it is safely on disk the
 /// branch goes too, so archiving a dozen plans does not leave a dozen
-/// `kingdom/<uuid>` entries in the King's `git branch`.
+/// `kingdom/<uuid>` entries in the user's `git branch`.
 pub async fn archive(
     city_root: &Path,
     workspace: &Workspace,
@@ -341,7 +341,7 @@ pub async fn archive(
     .await?;
 
     // Two conditions, both load-bearing. Without a patch the branch is the only
-    // copy of the work. And a branch Kingdom did not create is the King's own:
+    // copy of the work. And a branch Kingdom did not create is the user's own:
     // deleting that would be destroying his work, not tidying up after ours.
     let pruned = if patch.is_some() && branch.starts_with(BRANCH_PREFIX) {
         // `-D`, because the branch was never merged -- that is the whole point.
@@ -364,7 +364,7 @@ pub async fn archive(
 
 /// Commits whatever is uncommitted in a worktree, if anything is.
 ///
-/// Both endings do this first. Refusing until the King tidies up would strand
+/// Both endings do this first. Refusing until the user tidies up would strand
 /// work behind a UI that offers no way to tidy; a commit on a throwaway branch
 /// is fully reversible, and a discarded edit is not.
 async fn commit_pending(worktree: &Path, message: &str) -> Result<bool, WorktreeError> {
@@ -385,7 +385,7 @@ async fn head_of(repo: &Path) -> Result<String, WorktreeError> {
 
 /// Local branches in a repository, HEAD's branch first.
 ///
-/// Offered to the picker so the King chooses a branch that exists rather than
+/// Offered to the picker so the user chooses a branch that exists rather than
 /// typing one that does not. A non-git or unreadable folder yields an empty list
 /// rather than an error: the picker simply has nothing to offer, which is true.
 pub async fn branches(city_root: &Path) -> Vec<String> {
@@ -407,7 +407,7 @@ pub async fn branches(city_root: &Path) -> Vec<String> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         // Branches Kingdom cut for its own worktrees are noise in a list whose
-        // whole purpose is picking work the King already has in flight.
+        // whole purpose is picking work the user already has in flight.
         .filter(|l| !l.starts_with(BRANCH_PREFIX))
         .map(str::to_string)
         .collect();
@@ -427,7 +427,7 @@ pub async fn branches(city_root: &Path) -> Vec<String> {
 ///
 /// Best-effort: a repo whose `info/exclude` cannot be written still works, it
 /// just shows Kingdom's scratch folder as untracked. That is cosmetic, and not a
-/// reason to refuse the King a workspace.
+/// reason to refuse the user a workspace.
 fn exclude_worktree_dir(city_root: &Path) {
     let entry = format!("{WORKTREE_DIR}/");
     let exclude = city_root.join(".git").join("info").join("exclude");
@@ -492,7 +492,7 @@ mod tests {
 
     /// The whole point of the feature: each mode must put the plan somewhere
     /// that really is what it claims to be, and two isolated plans must never
-    /// land in the same directory. The King's trust that an agent is fenced in
+    /// land in the same directory. The user's trust that an agent is fenced in
     /// rests on this being true on disk rather than merely in the type.
     #[tokio::test]
     async fn each_mode_prepares_the_checkout_it_promises() {
@@ -538,7 +538,7 @@ mod tests {
         );
 
         // A second fresh worktree must not collide with the first -- and with
-        // names rather than uuids, an identical decree collides by default, so
+        // names rather than uuids, an identical prompt collides by default, so
         // this is the ordinary case rather than a rare one.
         let other = prepare(root, &WorkspaceMode::Fresh, "tidy-the-sidebar")
             .await
@@ -590,7 +590,7 @@ mod tests {
         );
     }
 
-    /// The King asked to be fenced in. Quietly handing him the live folder
+    /// The user asked to be fenced in. Quietly handing him the live folder
     /// instead would be the exact failure this feature exists to prevent, so a
     /// non-git city must refuse rather than downgrade.
     #[tokio::test]
@@ -610,10 +610,10 @@ mod tests {
     }
 
     /// The invariant the whole feature rests on: a merge that cannot be done
-    /// must leave the King's project exactly as it was found.
+    /// must leave the user's project exactly as it was found.
     ///
     /// A half-merged working tree discovered hours later is far worse than a
-    /// refusal read now -- the King would have no way of telling which of the
+    /// refusal read now -- the user would have no way of telling which of the
     /// files in front of him were his own work and which an agent's. So the
     /// abort matters as much as the refusal, and both are pinned here along
     /// with the worktree surviving, so the work is still there to retry with.
@@ -675,7 +675,7 @@ mod tests {
         let worktree = PathBuf::from(&workspace.path);
         let branch = workspace.branch.clone().unwrap();
 
-        // Uncommitted on purpose: the King should not have to tidy up before he
+        // Uncommitted on purpose: the user should not have to tidy up before he
         // can finish, and a UI that offers no way to tidy would strand the work.
         std::fs::write(worktree.join("tower.rs"), "fn build() {}").unwrap();
 
@@ -763,11 +763,11 @@ mod tests {
         );
     }
 
-    /// The destructive edge of pruning: a plan working on a branch the King
+    /// The destructive edge of pruning: a plan working on a branch the user
     /// named is working on *his* branch, which almost certainly has a life
     /// beyond this plan. Tidying up after ourselves must never reach that far.
     #[tokio::test]
-    async fn archiving_never_deletes_a_branch_the_king_named() {
+    async fn archiving_never_deletes_a_branch_the_user_named() {
         let dir = repo().await;
         let root = dir.path();
 

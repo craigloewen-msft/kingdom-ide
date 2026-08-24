@@ -54,9 +54,53 @@ reject. You do not draw the blueprints yourself. Every UI decision should
 reinforce that stance — the user's scarce resource is *attention and judgement*,
 not keystrokes.
 
-Use this vocabulary in type names, function names, UI copy, and commit
-messages. Consistency is what makes a metaphor explain itself instead of
-needing a glossary.
+### Where the metaphor lives, and where it does not
+
+**The metaphor is presentation, not domain.** It belongs in everything the King
+reads, and nowhere the compiler reads.
+
+| Layer | Vocabulary |
+|---|---|
+| UI copy — every string the King sees | **metaphor**: "The court sent an errand" |
+| CSS class names, `style/` | **metaphor**: `.deed-mark`, `.chamber-log` |
+| Type names, functions, variables, modules | **standard**: `ToolCall`, `Permissions` |
+| Doc comments and commit messages | **standard**: "the model", "a tool call" |
+
+The reason is asymmetric cost. In the UI the metaphor is the product's voice and
+costs a reader nothing. In the code it is a second vocabulary every reader must
+learn before they can read a match arm — and one that no error message, crate
+doc or Stack Overflow answer will ever use back.
+
+The translation, in full:
+
+| Shown as | Called in code |
+|---|---|
+| a deed | `ToolCall`, `ToolOutcome`, `Entry::Tool` |
+| the Court | `Speaker::Assistant` |
+| the King | `Speaker::User`, "the user" |
+| an errand | a subagent — `Plan::spawned`, `SpawnedBy`, `subagents_of` |
+| a decree | a prompt — `slug_for_prompt`, `PromptBar` |
+| the chamber | the conversation — `Conversation`, `conversation.rs` |
+| the spyglass | the screencast — `screencast.rs`, `BrowserView` |
+| the herald | the event bus — `events::publish`, `events::subscribe` |
+| a remit | `Permissions::ReadOnly` / `Permissions::Full` |
+| a workshop | `Sandbox` |
+| a realm (fixture) | `FixtureSpec`, `fixtures.rs` |
+| a ward | `Language` |
+| a district / building | `Folder` / `SourceFile` |
+
+`Kingdom`, `City` and `Plan` are deliberately **both**. They are the crate names,
+the routes and the `.kingdom/` directory, and they are also ordinary English for
+a folder, a project and a unit of proposed work — so they need no translation.
+
+The one other exception is the map's own geometry: `layout.rs`, `terrain.rs` and
+`skyline.rs` keep `Realm`, `Road`, `CityPlacement`, `Lot` and `Plate`. That code
+draws a literal map of cities and roads, so there the metaphor *is* the subject
+matter rather than a euphemism for something else.
+
+When you add a concept, name the type for what it is and let the view call it
+what the King calls it. If you find yourself writing a glossary comment to
+explain an identifier, that is the signal you named it for the UI.
 
 ## 3. Architecture
 
@@ -67,15 +111,16 @@ crates/
   kingdom-core/     Domain model. No I/O, no framework deps. Compiles to
                     BOTH native and wasm32 — keep it that way.
     ids.rs          Newtyped IDs (CityId, PlanId)
-    model.rs        Kingdom, City, Plan, Proposal (a plan put to the King),
-                    District/Building/Ward (a project's shape on disk)
-    remit.rs        Remit = how much of the world a plan may touch
+    model.rs        Kingdom, City, Plan, Proposal (a plan put to the user),
+                    Folder/SourceFile/Language (a project's shape on disk)
+    permissions.rs  Permissions = what a plan may do to the world
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
-    sample.rs       Placeholder court data
-    mockdata/       The Proving Grounds: synthetic realms, in Rust
-                    mod.rs (RealmSpec + expansion), realms.rs (THE FAKE DATA),
-                    build.rs (terse constructors), court.rs (opening courts)
+    sample.rs       Placeholder starter plans
+    mockdata/       The Proving Grounds: synthetic fixtures, in Rust
+                    mod.rs (FixtureSpec + expansion), fixtures.rs (THE FAKE
+                    DATA), build.rs (terse constructors),
+                    starter_plans.rs (the plans a kingdom opens with)
 
   kingdom-app/      Server + UI in one crate, split by feature flag.
     main.rs         Axum binary          (feature: ssr)
@@ -83,26 +128,27 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
-    herald.rs       Proclaiming a plan's changes to its watchers (ssr only)
+    events.rs       Publishing a plan's changes to its watchers (ssr only)
     watch.rs        The chamber's push socket (ssr only)
-    spyglass.rs     The King's live view of a plan's browser (ssr only)
+    screencast.rs   The King's live view of a plan's browser (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
-    mock.rs         Seeding a realm onto disk (ssr only)
+    mock.rs         Seeding a fixture onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model + Provider traits, Brief, Reply, the provider
-                    list), charter.rs (everything the court is told: the city,
-                    where it stands, its remit, and the project's AGENTS.md),
+                    list), system_prompt.rs (everything the model is told: the
+                    city, where it stands, its permissions, and the project's
+                    AGENTS.md),
                     mock.rs (offline provider), copilot.rs (Copilot provider +
                     its /models catalogue), catalogue.rs (assembles one
                     catalogue from every provider), credential.rs
     tools/          What the court can do with its own hands (ssr only)
-                    mod.rs (Tool trait, Workshop = the workspace boundary,
-                    and the one place a Remit becomes a list of tools),
+                    mod.rs (Tool trait, Sandbox = the workspace boundary,
+                    and the one place Permissions become a list of tools),
                     think, read_file, read_image, search, bash, tmux, patch,
                     browser, profile (browser_profile),
-                    propose_plan (counsel's gateway to work),
-                    spawn_agents (errands), ask_user_question
+                    propose_plan (the gateway from proposing to working),
+                    spawn_agents (subagents), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -110,11 +156,13 @@ crates/
     session.rs      Per-plan Chrome, finding one on the machine, and the
                     operations the tools call
     screencast.rs   CDP screencast, relayed to the spyglass's viewers
+                    (the panel is components/browser_view.rs)
     profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
     perf.rs         The in-page helper injected before any page script
 
     app.rs          Shell, routes, shared UI state
-    components/     sidebar.rs, decree.rs, conversation.rs, spyglass.rs,
+    components/     sidebar.rs, prompt_bar.rs, conversation.rs,
+                    browser_view.rs,
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
@@ -161,52 +209,55 @@ flowchart TB
 
 ## 4. What is still faked today
 
-**Faked — `kingdom_core::sample::populate_court`:**
+**Faked — `kingdom_core::sample::starter_plans`:**
 - The *opening* court: the plans a kingdom starts with, before the King has
   issued any decree. Plans he opens himself are entirely real.
 
-**How a plan actually runs.** A decree opens under `Remit::Counsel`: the court
-may read, search, and run commands, but has no `patch` and cannot change the
-project. When it knows what to do it calls `propose_plan`, which ends the turn
-and parks the plan in `AwaitingReview` with a `Proposal` standing on it. The
-King either sends notes back — ordinary `say` + `draft_plan`, the composer's own
-path — or presses **Start with this**, which is `approve_plan`: the remit widens
-to `Full` and the same conversation carries on with hands it did not have.
+**How a plan actually runs.** A prompt opens under `Permissions::Propose`: the
+model may read, search, and run commands, but has no `patch` and cannot change
+the project. When it knows what to do it calls `propose_plan`, which ends the
+turn and parks the plan in `AwaitingReview` with a `Proposal` standing on it.
+The user either sends notes back — ordinary `say` + `draft_plan`, the composer's
+own path — or presses **Start with this**, which is `approve_plan`: the
+permissions widen to `Full` and the same conversation carries on with tools it
+did not have.
 
-Nothing is parked while he reads. The turn genuinely ends, so a server restart
+Nothing is parked while they read. The turn genuinely ends, so a server restart
 mid-review loses nothing — the proposal is on the plan and the plan is on disk.
 That is the whole reason `propose_plan` does not work like `ask_user_question`,
 which holds a request open on a oneshot; the module docs there spell it out.
 
-**The counsel boundary is a statement of the job, not a sandbox.** Counsel keeps
-`bash`, which `Workshop::root` is explicit about not containing — a command that
+**The `Propose` boundary is a statement of the job, not a sandbox.** It keeps
+`bash`, which `Sandbox::root` is explicit about not containing — a command that
 names an absolute path writes wherever it likes. Withholding it would buy a
-guarantee Kingdom cannot keep while costing the court `git log`, `cargo tree`
-and running the failing test it is proposing to fix. What counsel loses is
-`patch`: offering the editing tool says *you may edit*, and withholding it says
-*you may not*. `charter.rs` says the rest in words, and says plainly that the
-shell is a boundary the court is trusted to keep rather than one that is
-enforced. Closing that properly means an OS-level sandbox, which is a deliberate
+guarantee Kingdom cannot keep while costing the model `git log`, `cargo tree`
+and running the failing test it is proposing to fix. What it loses is `patch`:
+offering the editing tool says *you may edit*, and withholding it says *you may
+not*. `system_prompt.rs` says the rest in words, and says plainly that the shell
+is a boundary the model is trusted to keep rather than one that is enforced. Closing that properly means an OS-level sandbox, which is a deliberate
 later decision.
 
 **Not built at all:**
-- **Errands with hands, and errands that send errands.** An errand is read-only
-  (`Remit::Survey`), which is what makes running several of them in one worktree
-  safe without arbitrating anything. Both extensions need the same missing
-  piece: the moment an errand can write, two of them can collide, and that is
-  the resource question above. `Remit::Full` is the seam either would arrive at.
-- **Errands while drawing up a plan.** `spawn_agents` is `Remit::Full` only, so
-  a counselling plan cannot fan out — which is a shame, because exploring a
-  codebase to write a proposal is the most fan-out-shaped work there is. It was
-  left out rather than guessed at; the case for adding it is that `Plan::sent`
-  already pins an errand to `Survey` unconditionally, so an errand of a
-  counselling plan would be the same read-only thing an errand always is.
+- **Subagents with tools, and subagents that spawn subagents.** A subagent is
+  read-only
+  (`Permissions::ReadOnly`), which is what makes running several of them in one
+  worktree safe without arbitrating anything. Both extensions need the same
+  missing piece: the moment a subagent can write, two of them can collide, and
+  that is the resource question above. `Permissions::Full` is the seam either
+  would arrive at.
+- **Subagents while drawing up a plan.** `spawn_agents` is `Permissions::Full`
+  only, so a proposing plan cannot fan out — which is a shame, because exploring
+  a codebase to write a proposal is the most fan-out-shaped work there is. It
+  was left out rather than guessed at; the case for adding it is that
+  `Plan::spawned` already pins a subagent to `ReadOnly` unconditionally, so a
+  subagent of a proposing plan would be the same read-only thing a subagent
+  always is.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
 - Live updates beyond a plan's own chamber. The chamber is pushed to over a
-  WebSocket (`herald.rs`, `watch.rs`), and the plan's browser is mirrored over a
-  second one (`spyglass.rs`) — but the map and the rail still only learn of a
+  WebSocket (`events.rs`, `watch.rs`), and the plan's browser is mirrored over a
+  second one (`screencast.rs`) — but the map and the rail still only learn of a
   change when something refetches the kingdom. The spyglass is deliberately
   *not* surfaced on the map for that reason: a city lighting up because a plan
   holds a live browser needs both this, and a plan that knows it owns a session.
@@ -227,7 +278,7 @@ later decision.
   a loader for a directory nobody populates would be building for no user.
 
 **The court can see, and can be seen.** `read_image` closes the loop
-`browser_take_screenshot` opened, and it cost a domain change: `DeedOutcome`
+`browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
 carries images beside its text. Two things about that are load-bearing and easy
 to undo by accident. Images are *not* persisted — `store.rs` strips them, because
 a plan's record is rewritten on every update and would otherwise grow by a
@@ -242,7 +293,7 @@ places in Copilot's `/models` payload because the catalogue is not ours; if it
 ever reads as blind for everything, that is where to look.
 
 The placeholder court deliberately includes a **failed plan**, a plan **mid
-draft**, and one with a **proposal standing in front of the King**, because
+draft**, and one with a **proposal standing in front of the user**, because
 those are states the UI exists to show — and the last is the one the product's
 whole stance rests on. Do not "clean up" the sample data into a court of tidy
 settled plans — it would make the most important visual states unreachable
@@ -254,7 +305,6 @@ Plans are kept as one JSON document each under the kingdom root:
 
 ```
 <kingdom_root>/.kingdom/
-  kingdom.json              format version
   plans/<plan-id>.json      one document per plan
   archive/<plan-id>.patch   the work an archived plan set aside
 ```
@@ -292,9 +342,9 @@ cargo run -p kingdom-app --bin kingdom-seed -- --list
 cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror [--force]
 ```
 
-To change the fake data, edit `crates/kingdom-core/src/mockdata/realms.rs` and
+To change the fake data, edit `crates/kingdom-core/src/mockdata/fixtures.rs` and
 re-seed with `--force`. It is plain Rust with terse builders — no config format,
-no parser, and a mistyped realm fails to compile rather than at seed time.
+no parser, and a mistyped fixture fails to compile rather than at seed time.
 
 The browser cannot hand a server a real filesystem path, so the opening screen
 asks the King to type one; the server reads it directly from disk. A native

@@ -1,13 +1,13 @@
 //! Running a command, and living with the ones that do not finish.
 //!
-//! The court's hands. Everything a plan actually *does* to a machine -- build,
+//! The model's hands. Everything a plan actually *does* to a machine -- build,
 //! test, `git`, a script -- arrives here.
 //!
 //! # Why a command outlives its call
 //!
 //! The obvious shape is "run it, wait for it, return the output", with a
 //! timeout that kills anything slow. That shape breaks on the one command the
-//! court runs most: a build. A cold `cargo build` takes longer than any timeout
+//! model runs most: a build. A cold `cargo build` takes longer than any timeout
 //! anybody is willing to sit through, and killing it at the deadline throws
 //! away minutes of work and leaves a half-written target directory behind --
 //! then the model retries and pays the same cost again.
@@ -20,7 +20,7 @@
 //!
 //! # Why the boundary is thinner here than anywhere else
 //!
-//! The command's working directory is [`Workshop::root`], and that is the whole
+//! The command's working directory is [`Sandbox::root`], and that is the whole
 //! of the containment. A shell can `cd /`, name an absolute path, or `ssh`
 //! somewhere else entirely, and nothing here stops it. That hole is stated
 //! plainly rather than papered over, because a guarantee people believe in and
@@ -35,8 +35,8 @@
 //! would be worse than the crash: the model would reason from output it thinks
 //! is complete.
 
-use super::{Refusal, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use super::{Refusal, Tool, Sandbox};
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -51,7 +51,7 @@ use tokio::sync::watch;
 ///
 /// The *tail*, not the head: when a build fails, the error is at the end. A cap
 /// on the head would faithfully retain a megabyte of "Compiling ..." and drop
-/// the one line the court needed.
+/// the one line the model needed.
 const RING_BYTES: usize = 256 * 1024;
 
 /// Lines returned by a peek when the caller does not say.
@@ -69,10 +69,10 @@ const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 /// Every command this process has started and not yet forgotten.
 ///
-/// Process-global rather than per-[`Workshop`] because a handle must survive
-/// the call that minted it: the whole contract is that the court comes back for
-/// it in a *later* deed, with a fresh workshop. Follows the registry pattern in
-/// `herald.rs`.
+/// Process-global rather than per-[`Sandbox`] because a handle must survive the
+/// call that minted it: the whole contract is that the model comes back for it
+/// in a *later* tool call, with a fresh sandbox. Follows the registry pattern
+/// in `events.rs`.
 static JOBS: OnceLock<Mutex<HashMap<String, Arc<Job>>>> = OnceLock::new();
 
 fn jobs() -> &'static Mutex<HashMap<String, Arc<Job>>> {
@@ -137,7 +137,7 @@ impl Tool for Bash {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         match op(&input) {
             Err(refusal) => refusal.into(),
             Ok(Op::Run) => start(&input, shop).await,
@@ -145,7 +145,7 @@ impl Tool for Bash {
             Ok(Op::Wait) => match job(&input) {
                 Ok(job) => {
                     let waited = job.settle(wait_seconds(&input)).await;
-                    DeedOutcome::done(job.report(waited, DEFAULT_PEEK_LINES))
+                    ToolOutcome::done(job.report(waited, DEFAULT_PEEK_LINES))
                 }
                 Err(refusal) => refusal.into(),
             },
@@ -202,7 +202,7 @@ fn job(input: &Value) -> Result<Arc<Job>, Refusal> {
     })
 }
 
-async fn start(input: &Value, shop: &Workshop) -> DeedOutcome {
+async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
     let Some(cmd) = input.get("cmd").and_then(Value::as_str) else {
         return Refusal::BadArguments {
             tool: "bash".to_string(),
@@ -228,10 +228,10 @@ async fn start(input: &Value, shop: &Workshop) -> DeedOutcome {
     }
 
     let settled = job.settle(wait_seconds(input)).await;
-    DeedOutcome::done(job.report(settled, usize::MAX))
+    ToolOutcome::done(job.report(settled, usize::MAX))
 }
 
-fn peek(input: &Value) -> DeedOutcome {
+fn peek(input: &Value) -> ToolOutcome {
     let job = match job(input) {
         Ok(job) => job,
         Err(refusal) => return refusal.into(),
@@ -241,10 +241,10 @@ fn peek(input: &Value) -> DeedOutcome {
         .and_then(Value::as_u64)
         .map_or(DEFAULT_PEEK_LINES, |n| (n as usize).max(1));
 
-    DeedOutcome::done(job.report(job.finished(), lines))
+    ToolOutcome::done(job.report(job.finished(), lines))
 }
 
-fn kill(input: &Value) -> DeedOutcome {
+fn kill(input: &Value) -> ToolOutcome {
     let job = match job(input) {
         Ok(job) => job,
         Err(refusal) => return refusal.into(),
@@ -262,7 +262,7 @@ fn kill(input: &Value) -> DeedOutcome {
         }
     };
 
-    DeedOutcome::done(job.signal(signal))
+    ToolOutcome::done(job.signal(signal))
 }
 
 /// Drops handles that finished long ago.
@@ -620,10 +620,10 @@ mod tests {
     use kingdom_core::Workspace;
 
     async fn bash(root: &std::path::Path, input: Value) -> String {
-        let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(root.to_str().unwrap()));
         match Bash.run(input, &shop).await {
-            DeedOutcome::Done { output, .. } => output,
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => output,
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -637,29 +637,30 @@ mod tests {
 
     /// The distinction the whole outcome type turns on. A failing test suite is
     /// a successful tool call carrying bad news; reporting it as a refusal
-    /// would have the chamber cry error over exactly the result the King asked
-    /// for, and send the model off to fix a call that was right.
+    /// would have the conversation cry error over exactly the result the user
+    /// asked for, and send the model off to fix a call that was right.
     #[tokio::test]
     async fn a_command_that_fails_still_ran() {
         let dir = tempfile::tempdir().unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
 
         let outcome = Bash
             .run(json!({"op": "run", "cmd": "echo nope >&2; exit 3"}), &shop)
             .await;
 
         match outcome {
-            DeedOutcome::Done { output, .. } => {
+            ToolOutcome::Done { output, .. } => {
                 assert!(output.contains("exit code: 3"), "{output}");
                 assert!(output.contains("nope"), "stderr belongs in the output: {output}");
             }
-            DeedOutcome::Refused { reason } => panic!("a non-zero exit is not a refusal: {reason}"),
+            ToolOutcome::Refused { reason } => panic!("a non-zero exit is not a refusal: {reason}"),
         }
     }
 
     /// The reason this tool is not a one-shot: the deadline governs the *call*,
     /// and the command survives it to be found again through the registry in a
-    /// later deed. Killing at the deadline is what would throw away a build.
+    /// later tool call. Killing at the deadline is what would throw away a
+    /// build.
     #[tokio::test]
     async fn a_slow_command_survives_the_deadline_and_can_be_killed() {
         let dir = tempfile::tempdir().unwrap();
@@ -722,13 +723,13 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_handle_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
 
         let outcome = Bash
             .run(json!({"op": "peek", "handle": "b-nosuch"}), &shop)
             .await;
 
-        assert!(matches!(outcome, DeedOutcome::Refused { .. }), "{outcome:?}");
+        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
     }
 
     /// Process groups earn their keep here: a command's children must die with

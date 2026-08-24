@@ -1,13 +1,14 @@
-//! The King's spyglass: `/watch/plan/{id}/browser`, a live view of a court's page.
+//! The user's screencast: `/watch/plan/{id}/browser`, a live view of a model's
+//! page.
 //!
-//! The chamber's [`crate::watch`] socket carries *plans*; this one carries
+//! The conversation's [`crate::watch`] socket carries *plans*; this one carries
 //! pixels. They are siblings rather than one socket with a mode, because a
 //! transcript entry and a video frame have nothing in common but a direction.
 //!
 //! # The wire
 //!
 //! Binary frames, tagged by their first byte. Deliberately trivial, so this
-//! module and `components/spyglass.rs` can be read side by side and checked
+//! module and `components/screencast.rs` can be read side by side and checked
 //! against each other by eye:
 //!
 //! ```text
@@ -19,10 +20,10 @@
 //! # View-only, permanently
 //!
 //! There is no tag for input and there will not be one. A page driven by both
-//! the court and the King, with nothing arbitrating between them, is precisely
+//! the model and the user, with nothing arbitrating between them, is precisely
 //! the collision this product exists to *surface* -- building one into the
 //! instrument meant to reveal such collisions would be self-refuting. The
-//! canvas is `pointer-events: none` at the other end so the King never has to
+//! canvas is `pointer-events: none` at the other end so the user never has to
 //! wonder whether a click landed.
 //!
 //! Nothing here creates a browser either. A viewer attaches to whatever session
@@ -35,7 +36,7 @@ use axum::response::Response;
 use kingdom_browser::ScreencastEvent;
 use tokio::sync::broadcast::error::RecvError;
 
-/// The path the spyglass connects to. One plan per socket.
+/// The path the screencast connects to. One plan per socket.
 pub const ROUTE: &str = "/watch/plan/{id}/browser";
 
 const TAG_FRAME: u8 = 0x00;
@@ -47,7 +48,7 @@ pub async fn upgrade(ws: WebSocketUpgrade, Path(id): Path<String>) -> Response {
 }
 
 async fn watch(mut socket: WebSocket, plan: String) {
-    // Attach to a browser that already exists, or say so and close. The King
+    // Attach to a browser that already exists, or say so and close. The user
     // opening a panel must never be what starts a Chrome.
     let attached = crate::tools::browser::browsers().watch(&plan).await;
 
@@ -91,7 +92,7 @@ async fn watch(mut socket: WebSocket, plan: String) {
                 // This viewer fell behind. Skip to the present rather than
                 // work through a backlog: on a live view the frames that were
                 // missed are already wrong, and the next one is complete on its
-                // own. The same reasoning as the chamber's lagged plans.
+                // own. The same reasoning as the conversation's lagged plans.
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => {
                     let _ = send(&mut socket, status("ended")).await;

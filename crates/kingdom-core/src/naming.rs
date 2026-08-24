@@ -7,7 +7,7 @@
 //!
 //! The hard requirement is `git check-ref-format`. Everything below that is
 //! taste; everything at that level is a failed `git worktree add` in front of
-//! the King if it is wrong.
+//! the user if it is wrong.
 
 /// Longest slug we will produce, in characters.
 ///
@@ -27,7 +27,7 @@ const EMPTY: &str = "plan";
 ///
 /// Non-ASCII is dropped rather than transliterated. git would accept the bytes,
 /// but a branch name is typed, tab-completed and pasted into shells, and a
-/// half-transliterated one is worse than a short honest one. A decree with no
+/// half-transliterated one is worse than a short honest one. A prompt with no
 /// ASCII at all falls back to `"plan"`, which is the caller's cue that
 /// uniqueness has to come from somewhere else.
 pub fn slugify(text: &str) -> String {
@@ -73,9 +73,9 @@ pub fn slugify(text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The one test that matters: whatever the King types, git must accept the
-    /// result. Every case here is a decree somebody could plausibly issue, and
-    /// a failure is a refused decree rather than a cosmetic wart.
+    /// The one test that matters: whatever the user types, git must accept the
+    /// result. Every case here is a prompt somebody could plausibly issue, and
+    /// a failure is a refused prompt rather than a cosmetic wart.
     ///
     /// The assertions restate `git check-ref-format`'s rules rather than
     /// pinning exact strings, so the slug's *taste* can change without
@@ -131,9 +131,9 @@ mod tests {
     }
 
     /// The everyday case, pinned so the slug stays something a human recognises
-    /// as their own decree rather than merely something git tolerates.
+    /// as their own prompt rather than merely something git tolerates.
     #[test]
-    fn slugify_reads_like_the_decree_it_came_from() {
+    fn slugify_reads_like_the_prompt_it_came_from() {
         assert_eq!(slugify("Tidy the sidebar"), "tidy-the-sidebar");
         assert_eq!(
             slugify("Fix the parser's off-by-one"),

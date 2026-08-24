@@ -1,9 +1,9 @@
-//! The decree bar: where the King starts a new task.
+//! The prompt bar: where the user starts a new task.
 //!
 //! Deliberately *only* the composer, plus the two controls that answer "what
-//! will draft this, and will it work?" before a decree is spent. A plan's
-//! conversation lives in its own chamber at `/plan/:id`, so this bar turns a
-//! sentence and a chosen city into a plan and then gets out of the way by
+//! will draft this, and will it work?" before a prompt is spent. A plan's
+//! conversation lives in its own conversation at `/plan/:id`, so this bar turns
+//! a sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
 use crate::api::{begin_plan, list_branches, list_models};
@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 
 #[component]
-pub fn DecreeBar() -> impl IntoView {
+pub fn PromptBar() -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let navigate = use_navigate();
 
@@ -25,7 +25,7 @@ pub fn DecreeBar() -> impl IntoView {
 
     let catalogue = Resource::new(|| (), |_| list_models());
 
-    // The decree targets whichever city is selected, so choosing on the map and
+    // The prompt targets whichever city is selected, so choosing on the map and
     // typing here are one continuous gesture.
     let target_name = Memo::new(move |_| {
         state
@@ -34,18 +34,18 @@ pub fn DecreeBar() -> impl IntoView {
             .and_then(|id| state.kingdom.get().city(&id).map(|c: &City| c.name.clone()))
     });
 
-    // What the chip shows, and what the next decree will carry: the King's own
+    // What the chip shows, and what the next prompt will carry: the user's own
     // choice if he has made one, otherwise the catalogue's default.
     //
     // Passed through the catalogue before it is shown, because the server
     // resolves the same way before drafting -- a chip advertising a model that
-    // has left the catalogue would be a promise the decree cannot keep.
+    // has left the catalogue would be a promise the prompt cannot keep.
     let choice = Memo::new(move |_| {
         let wanted = state.choice.get();
         match catalogue.get() {
             Some(Ok(c)) => Some(c.resolve(wanted.as_ref())),
             // Before the catalogue lands there is nothing to check against, so
-            // show the King's own choice rather than a placeholder.
+            // show the user's own choice rather than a placeholder.
             _ => wanted,
         }
     });
@@ -61,16 +61,16 @@ pub fn DecreeBar() -> impl IntoView {
 
         async move {
             match begin_plan(prompt, city, chosen, Some(workspace)).await {
-                // Opening makes no model call, so the King
-                // lands in the conversation while the court is still thinking.
-                // The chamber itself kicks off the drafting.
+                // Opening makes no model call, so the user
+                // lands in the conversation while the model is still thinking.
+                // The conversation itself kicks off the drafting.
                 Ok(plan) => {
                     state.error.set(None);
                     let href = format!("/plan/{}", plan.id);
                     // Insert rather than refetch: opening claimed nothing, so
                     // the new plan is the only thing that changed. Navigating
-                    // without it would land the chamber on a plan its own copy
-                    // of the kingdom does not yet know about.
+                    // without it would land the conversation on a plan its own
+                    // copy of the kingdom does not yet know about.
                     state.kingdom.update(|k| k.plans.push(plan));
                     navigate(&href, Default::default());
                 }
@@ -145,7 +145,7 @@ pub fn DecreeBar() -> impl IntoView {
 
                 // Where the next plan will work. Beside the model chip because
                 // they are the same kind of decision: both are settled before a
-                // decree is spent, and both are recorded on the plan.
+                // prompt is spent, and both are recorded on the plan.
                 <button
                     class="workspace-chip"
                     class:isolated={move || state.workspace.get() != WorkspaceMode::InPlace}
@@ -182,12 +182,12 @@ pub fn DecreeBar() -> impl IntoView {
 /// The picker: which model, and how hard it thinks.
 ///
 /// Recommended models first, the rest behind a toggle -- the full Copilot
-/// catalogue runs to dozens of entries, most of which the King will never pick,
+/// catalogue runs to dozens of entries, most of which the user will never pick,
 /// and a wall of them costs more attention than it saves.
 ///
 /// This is also where a broken credential surfaces. There is no separate status
-/// badge: a thin list and the reason it is thin belong in the same place, at the
-/// moment the King notices the models he expected are missing.
+/// badge: a thin list and the reason it is thin belong in the same place, at
+/// the moment the user notices the models he expected are missing.
 #[component]
 fn ModelPicker(
     catalogue: Resource<Result<ModelCatalogue, ServerFnError>>,
@@ -197,7 +197,7 @@ fn ModelPicker(
     let state = expect_context::<KingdomState>();
     let (show_all, set_show_all) = signal(false);
 
-    /// Named so a King who cannot see the model he wants knows exactly what to
+    /// Named so a user who cannot see the model he wants knows exactly what to
     /// set, rather than reading the source to find out.
     const EXAMPLE: &str = "# .kingdom.env \u{2014} either credential path works
 
@@ -210,8 +210,8 @@ KINGDOM_API_KEY_HELPER=agency auth github
 # optional: which model the picker opens on
 KINGDOM_MODEL=copilot/claude-opus-5";
 
-    // Shown only when something is actually wrong, so a healthy court does not
-    // spend the King's attention on setup instructions he does not need.
+    // Shown only when something is actually wrong, so a healthy model does not
+    // spend the user's attention on setup instructions he does not need.
     let needs_help = Memo::new(
         move |_| matches!(catalogue.get(), Some(Ok(c)) if c.credential != CredentialState::Ready),
     );
@@ -221,10 +221,10 @@ KINGDOM_MODEL=copilot/claude-opus-5";
         _ => Vec::new(),
     });
 
-    // Recommended only, until the King asks for everything -- except when
+    // Recommended only, until the user asks for everything -- except when
     // nothing is recommended at all. That happens exactly when no credential
     // works and the offline mock is the only model left: filtering it out would
-    // leave the King staring at an empty picker with no way to draft.
+    // leave the user staring at an empty picker with no way to draft.
     let visible = Memo::new(move |_| {
         let all = show_all.get();
         let options = options.get();
@@ -369,7 +369,7 @@ KINGDOM_MODEL=copilot/claude-opus-5";
 /// Three options rather than a toggle, because they are three genuinely
 /// different bargains -- isolation with a new branch, isolation continuing
 /// existing work, and no isolation at all -- and collapsing any two of them
-/// would hide the one the King most needs to make on purpose.
+/// would hide the one the user most needs to make on purpose.
 #[component]
 fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -464,8 +464,8 @@ fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
                                     .collect_view()
                                     .into_any(),
                                 // Distinguishing "no branches" from "still
-                                // looking" matters: the first means this city is
-                                // not a git repository at all.
+                                // looking" matters: the first means this city
+                                // is not a git repository at all.
                                 Some(_) => view! {
                                     <li class="branch-empty">
                                         "No branches here \u{2014} this project is not under git."

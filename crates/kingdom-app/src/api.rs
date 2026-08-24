@@ -47,14 +47,14 @@ fn next_plan_number() -> u64 {
     state::PLAN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Applies a change to one plan, records it, proclaims it, and returns the
+/// Applies a change to one plan, records it, publishes it, and returns the
 /// result, so callers hand the browser the same value that was just stored.
 ///
 /// The single funnel for plan mutations, which is why both persistence and push
 /// hang off it: a caller cannot change a plan and forget to write it, and
-/// equally cannot change a plan and forget to tell the chamber watching it.
-/// See [`crate::herald`] for why that second one had to live here rather than
-/// at each call site.
+/// equally cannot change a plan and forget to tell the conversation watching
+/// it. See [`crate::events`] for why that second one had to live here rather
+/// than at each call site.
 #[cfg(feature = "ssr")]
 fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) -> Option<Plan> {
     let root = std::path::PathBuf::from(&kingdom.root);
@@ -62,9 +62,9 @@ fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) ->
     change(plan);
     remember(&root, plan);
     // After `remember`, not before: a failed write appends a note to the plan,
-    // and the chamber should be told the thing that was actually stored rather
-    // than an optimistic version of it.
-    crate::herald::proclaim(plan);
+    // and the conversation should be told the thing that was actually stored
+    // rather than an optimistic version of it.
+    crate::events::publish(plan);
     Some(plan.clone())
 }
 
@@ -72,16 +72,16 @@ fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) ->
 ///
 /// Exists for the watch socket's opening message, which needs a plan without
 /// going through a `#[server]` function -- it is already inside the server.
-/// Returns `None` rather than erroring for an unknown id: a chamber may connect
-/// to a plan that has since been forgotten, and an empty stream is the honest
-/// answer.
+/// Returns `None` rather than erroring for an unknown id: a conversation may
+/// connect to a plan that has since been forgotten, and an empty stream is the
+/// honest answer.
 #[cfg(feature = "ssr")]
 pub fn snapshot(id: &PlanId) -> Option<Plan> {
     lock().ok()?.plan(id).cloned()
 }
 
-/// Writes a plan to the records, turning a failed write into something the King
-/// can see rather than something that fails his decree.
+/// Writes a plan to the records, turning a failed write into something the user
+/// can see rather than something that fails his prompt.
 ///
 /// Refusing the work because the disk was full would be a worse outcome than an
 /// unsaved plan he can see is unsaved -- the work itself is on a branch either
@@ -106,7 +106,7 @@ pub async fn get_kingdom() -> Result<Kingdom, ServerFnError> {
     Ok(lock()?.clone())
 }
 
-/// Opens a dev folder as the kingdom: scans it for cities and seats a court.
+/// Opens a dev folder as the kingdom: scans it for cities and seats a model.
 #[server(OpenKingdom, "/api")]
 pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
     use std::path::PathBuf;
@@ -131,21 +131,21 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 /// absolute path to real work before showing anything at all, which makes
 /// pointing the tool at real files the default first act.
 #[server(EnterProvingGrounds, "/api")]
-pub async fn enter_proving_grounds(realm: Option<String>) -> Result<Kingdom, ServerFnError> {
+pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
     use kingdom_core::mockdata;
 
-    let name = realm.unwrap_or_else(|| mockdata::DEFAULT_REALM.to_string());
-    let spec = mockdata::realm(&name).ok_or_else(|| {
+    let name = fixture.unwrap_or_else(|| mockdata::DEFAULT_FIXTURE.to_string());
+    let spec = mockdata::fixture(&name).ok_or_else(|| {
         ServerFnError::new(format!(
             "No such realm: {name}. Known realms: {}.",
-            mockdata::realm_names().join(", ")
+            mockdata::fixture_names().join(", ")
         ))
     })?;
 
-    let root = crate::mock::realm_path(&name);
+    let root = crate::mock::fixture_path(&name);
 
     // Only seed when it is not already there, so entering twice is instant and
-    // does not silently discard a realm the King has been poking at.
+    // does not silently discard a fixture the user has been poking at.
     if !crate::mock::is_proving_ground(&root) {
         crate::mock::seed(&spec, &root)
             .map_err(|e| ServerFnError::new(format!("Could not raise the proving grounds: {e}")))?;
@@ -155,27 +155,27 @@ pub async fn enter_proving_grounds(realm: Option<String>) -> Result<Kingdom, Ser
         .canonicalize()
         .map_err(|e| ServerFnError::new(format!("Could not resolve {}: {e}", root.display())))?;
 
-    assemble(&root, Some(spec.court))
+    assemble(&root, Some(spec.starter_plans))
 }
 
-/// Every realm the King can enter, for the opening screen.
+/// Every fixture the user can enter, for the opening screen.
 #[server(ListRealms, "/api")]
-pub async fn list_realms() -> Result<Vec<(String, String)>, ServerFnError> {
-    Ok(kingdom_core::mockdata::realms()
+pub async fn list_fixtures() -> Result<Vec<(String, String)>, ServerFnError> {
+    Ok(kingdom_core::mockdata::fixtures()
         .into_iter()
         .map(|r| (r.name.to_string(), r.blurb.to_string()))
         .collect())
 }
 
-/// Scans a folder and seats a court over it, then stores it as the kingdom.
+/// Scans a folder and seats a model over it, then stores it as the kingdom.
 ///
 /// Shared by the real-folder and proving-ground paths so the two cannot drift:
 /// a proving ground goes through exactly the same scanner, and the only
-/// difference is which court is seated and the `sandbox` flag.
+/// difference is which model is seated and the `sandbox` flag.
 #[cfg(feature = "ssr")]
 fn assemble(
     root: &std::path::Path,
-    court: Option<kingdom_core::mockdata::CourtFn>,
+    starter_plans: Option<kingdom_core::mockdata::StarterPlansFn>,
 ) -> Result<Kingdom, ServerFnError> {
     use crate::scan::scan_kingdom;
 
@@ -185,14 +185,14 @@ fn assemble(
     // Cities are rescanned every time -- disk is their source of truth. Plans
     // are not: they are the one thing here that disk cannot tell us again.
     let recorded = crate::store::load(root);
-    let seating_court = recorded.is_empty();
-    let court = court.unwrap_or(kingdom_core::sample::populate_court);
-    let plans = open_court(recorded, &cities, court);
+    let seeding_starter_plans = recorded.is_empty();
+    let starter_plans = starter_plans.unwrap_or(kingdom_core::sample::starter_plans);
+    let plans = seed_starter_plans(recorded, &cities, starter_plans);
 
-    // A fabricated court is fabricated exactly once per kingdom. Written
+    // A fabricated model is fabricated exactly once per kingdom. Written
     // immediately so the next open reads it back as ordinary history rather
     // than seating a second one over the top of the first.
-    if seating_court && !plans.is_empty() {
+    if seeding_starter_plans && !plans.is_empty() {
         if let Err(e) = crate::store::save_all(root, &plans) {
             leptos::logging::warn!("could not record the opening court: {e}");
         }
@@ -224,19 +224,19 @@ fn assemble(
 
 /// The plans a freshly opened kingdom starts with.
 ///
-/// A court is seated **only over an empty store**. Fabricating one every time
-/// would duplicate the whole opening court on the second open -- the King's
+/// A model is seated **only over an empty store**. Fabricating one every time
+/// would duplicate the whole opening model on the second open -- the user's
 /// real replies to a sample plan sitting beside a pristine copy of the same
 /// plan. Split out from [`assemble`] so the rule is testable without the
 /// process-global kingdom.
 #[cfg(feature = "ssr")]
-fn open_court(
+fn seed_starter_plans(
     recorded: Vec<Plan>,
     cities: &[kingdom_core::City],
-    court: kingdom_core::mockdata::CourtFn,
+    starter_plans: kingdom_core::mockdata::StarterPlansFn,
 ) -> Vec<Plan> {
     if recorded.is_empty() {
-        court(cities)
+        starter_plans(cities)
     } else {
         recorded
     }
@@ -245,7 +245,7 @@ fn open_court(
 /// Refuses any folder outside the sandbox when `KINGDOM_SANDBOX` is set.
 ///
 /// This is the setting for a session where Kingdom IDE is working on Kingdom
-/// IDE. It turns "I meant to open the fake one" from something the King must
+/// IDE. It turns "I meant to open the fake one" from something the user must
 /// remember into something the server enforces -- and when plans get hands, it
 /// is the wall that keeps an agent's first destructive command inside the
 /// proving grounds.
@@ -313,7 +313,7 @@ fn sandbox_enforced() -> bool {
 
 /// Opens a plan and returns immediately, before any drafting happens.
 ///
-/// The split between opening and drafting is what lets the King land in the
+/// The split between opening and drafting is what lets the user land in the
 /// plan's conversation the moment he presses Start: the plan has an id, a
 /// title and his own words in its transcript before the model has been called
 /// at all. [`draft_plan`] then does the slow half.
@@ -342,8 +342,8 @@ pub async fn begin_plan(
 
     // Resolved here rather than at draft time so the plan records what it will
     // actually be drawn by from the instant it appears in the rail. A model the
-    // King's browser remembers but Copilot no longer serves degrades to the
-    // default rather than failing the decree outright.
+    // user's browser remembers but Copilot no longer serves degrades to the
+    // default rather than failing the prompt outright.
     let choice = crate::llm::catalogue::catalogue()
         .await
         .resolve(choice.as_ref());
@@ -359,16 +359,16 @@ pub async fn begin_plan(
     };
 
     // The branch is named after the plan, so the name has to be settled before
-    // the workspace is cut. `slug_for_decree` is the same derivation
+    // the workspace is cut. `slug_for_prompt` is the same derivation
     // `Plan::opened` uses below, so the plan's `slug` and its branch agree.
     let workspace =
-        crate::worktree::prepare(&city_root, &mode, &kingdom_core::slug_for_decree(&prompt))
+        crate::worktree::prepare(&city_root, &mode, &kingdom_core::slug_for_prompt(&prompt))
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut plan = Plan::opened(plan_id, city_id, &prompt, &choice, workspace.clone());
     // Where an agent is fenced in is not something it said, it is something that
-    // happened -- and isolation the King cannot see is isolation he cannot
+    // happened -- and isolation the user cannot see is isolation he cannot
     // trust, so it is recorded in the log rather than only in the header.
     plan.note(
         NoteKind::Workspace,
@@ -388,7 +388,7 @@ pub async fn begin_plan(
 
 /// Local branches in a city's repository, for the workspace picker.
 ///
-/// Offered as a list so the King picks a branch that exists rather than typing
+/// Offered as a list so the user picks a branch that exists rather than typing
 /// one that does not. A city with no git yields an empty list, which the picker
 /// reads as "nothing to offer here".
 #[server(ListBranches, "/api")]
@@ -407,11 +407,11 @@ pub async fn list_branches(city: String) -> Result<Vec<String>, ServerFnError> {
     Ok(crate::worktree::branches(&root).await)
 }
 
-/// Records another decree on an existing plan, without drafting a reply.
+/// Records another prompt on an existing plan, without drafting a reply.
 ///
-/// Paired with [`draft_plan`] for the same reason as [`begin_plan`]: the King's
+/// Paired with [`draft_plan`] for the same reason as [`begin_plan`]: the user's
 /// own words appear in the conversation the instant he sends them, rather than
-/// only once the court has finished thinking.
+/// only once the model has finished thinking.
 #[server(Say, "/api")]
 pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
     use kingdom_core::{PlanStatus, Speaker};
@@ -436,13 +436,13 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
             )));
         }
 
-        // An errand answers to the court that sent it, not to the King. Its
-        // chamber renders no composer, so this is only reachable from a stale
-        // tab or a hand-made request -- but the damage is real: the parent is
-        // blocked on a tool call whose conversation would now have two hands on
-        // it, and would be handed a report on a conversation that changed
-        // underneath it.
-        if existing.is_errand() {
+        // A subagent answers to the model that sent it, not to the user. Its
+        // conversation renders no composer, so this is only reachable from a
+        // stale tab or a hand-made request -- but the damage is real: the
+        // parent is blocked on a tool call whose conversation would now have
+        // two hands on it, and would be handed a report on a conversation that
+        // changed underneath it.
+        if existing.is_subagent() {
             return Err(ServerFnError::new(
                 "This is an errand the court sent, not a plan you decreed. \
                  Say what you want in the plan that sent it.",
@@ -452,17 +452,17 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 
     update(&mut kingdom, &plan_id, |p| {
         p.status = PlanStatus::Drafting;
-        p.say(Speaker::King, prompt);
+        p.say(Speaker::User, prompt);
     })
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
-/// How many times the court may act before it must speak.
+/// How many times the model may act before it must speak.
 ///
 /// A loop that never ends is the failure mode worth being loud about: an agent
 /// retrying a broken command against a paid model spends real money producing
 /// nothing, and it does so quietly. Reaching this is recorded as a note, so the
-/// King sees the plan stopped rather than finding a plausible answer that was
+/// user sees the plan stopped rather than finding a plausible answer that was
 /// actually a truncation.
 #[cfg(feature = "ssr")]
 const MOST_ROUNDS: usize = 24;
@@ -470,11 +470,11 @@ const MOST_ROUNDS: usize = 24;
 /// Draws up the plan: marks it busy, then takes turns with the model until it
 /// has something to say.
 ///
-/// A turn is no longer one call. The court may act -- read a file, run a
+/// A turn is no longer one call. The model may act -- read a file, run a
 /// command -- and each act is recorded, run, and answered before the model is
 /// asked again. The request stays open for the whole conversation, but nothing
-/// waits on it: every step is proclaimed to the chamber as it happens, which is
-/// what makes a five-minute turn watchable instead of a spinner.
+/// waits on it: every step is published to the conversation as it happens,
+/// which is what makes a five-minute turn watchable instead of a spinner.
 #[server(DraftPlan, "/api")]
 pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     use kingdom_core::PlanStatus;
@@ -497,18 +497,18 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             return Ok(existing);
         }
 
-        // Likewise a settled plan: the chamber mounts the same way for history
-        // as for live work, and drafting against a workspace that has been
-        // cleared from disk would brief the model on nothing.
+        // Likewise a settled plan: the conversation mounts the same way for
+        // history as for live work, and drafting against a workspace that has
+        // been cleared from disk would brief the model on nothing.
         if existing.status.is_settled() {
             return Ok(existing);
         }
 
-        // An errand is driven by the call that sent it, which is already
-        // running one of these loops over it. The chamber mounts identically
-        // for an errand, so without this, a King who opens one while it works
-        // would start a second loop over the same plan.
-        if existing.is_errand() {
+        // A subagent is driven by the call that sent it, which is already
+        // running one of these loops over it. The conversation mounts
+        // identically for a subagent, so without this, a user who opens one
+        // while it works would start a second loop over the same plan.
+        if existing.is_subagent() {
             return Ok(existing);
         }
 
@@ -543,9 +543,9 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // busy. If the browser navigates away mid-turn, Axum drops this request's
     // future -- which would cancel the conversation *after* the mark and
     // *before* it is cleared, leaving a plan permanently Drafting that no later
-    // decree could restart. A detached task loses only this caller's view of
+    // prompt could restart. A detached task loses only this caller's view of
     // the result, never the clearing; and since every step is pushed to the
-    // chamber, that view was never the only way to see it.
+    // conversation, that view was never the only way to see it.
     let handle = tokio::spawn(async move {
         converse(
             plan_id,
@@ -569,17 +569,18 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 ///
 /// The loop lives here rather than behind the [`crate::llm::Model`] trait
 /// because this is where the plan is. A provider running its own tools would do
-/// so with nothing recording them: the chamber would show a long silence and
-/// then an answer, and a crash mid-way would leave no trace of what had already
-/// been done to the workspace.
+/// so with nothing recording them: the conversation would show a long silence
+/// and then an answer, and a crash mid-way would leave no trace of what had
+/// already been done to the workspace.
 ///
-/// Two callers: [`draft_plan`], for a plan the King decreed, and
-/// [`send_errands`], for each errand the court sends. They differ only in the
-/// `cap` handed in -- an errand gets fewer rounds. The *remit* is no longer a
-/// parameter: it is read back off the plan each pass, because it can change
-/// mid-conversation when the King accepts a proposal. Sharing the loop is the
-/// point: an errand that drafted through a second, simpler path would be a
-/// second place for the busy mark, the deed recording and the push to drift.
+/// Two callers: [`draft_plan`], for a plan the user opened, and
+/// [`spawn_subagents`], for each subagent the model sends. They differ only in
+/// the `cap` handed in -- a subagent gets fewer rounds. The *permissions* are
+/// no longer a parameter: they are read back off the plan each pass, because
+/// they can change mid-conversation when the user accepts a proposal. Sharing
+/// the loop is the point: a subagent that drafted through a second, simpler
+/// path would be a second place for the busy mark, the tool call recording and
+/// the push to drift.
 #[cfg(feature = "ssr")]
 pub(crate) async fn converse(
     plan_id: PlanId,
@@ -590,21 +591,21 @@ pub(crate) async fn converse(
     root: std::path::PathBuf,
     cap: usize,
 ) -> Result<Plan, ServerFnError> {
-    use crate::llm::{Brief, Charter, Reply, ToolSpec};
-    use crate::tools::Workshop;
-    use kingdom_core::{Deed, DeedOutcome, NoteKind};
+    use crate::llm::{Brief, Reply, SystemPrompt, ToolSpec};
+    use crate::tools::Sandbox;
+    use kingdom_core::{NoteKind, ToolCall, ToolOutcome};
 
     let model = match crate::llm::open(&choice).await {
         Ok(model) => model,
-        // A missing credential surfaces as a failed plan the King can see and
+        // A missing credential surfaces as a failed plan the user can see and
         // retry, rather than an error attached to nothing.
         Err(e) => return settle(plan_id, Err(e)),
     };
 
     for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than
-        // accumulated in a local. The deeds recorded below are already in it,
-        // and reading them back is what makes this loop's state the plan's
+        // accumulated in a local. The tool calls recorded below are already in
+        // it, and reading them back is what makes this loop's state the plan's
         // state -- so a reader of the transcript sees exactly what the model
         // saw.
         //
@@ -614,14 +615,14 @@ pub(crate) async fn converse(
         // the remit, and the very next pass must offer the tools that grant
         // implies. Resolving the tools once before the loop -- as this used to
         // -- would have left an approved plan holding a counsellor's toolbox.
-        let (turns, remit, approved) = {
+        let (turns, permissions, approved) = {
             let kingdom = lock()?;
             let Some(plan) = kingdom.plan(&plan_id) else {
                 return Err(ServerFnError::new("That plan vanished mid-decree."));
             };
             (
                 plan.turns().collect::<Vec<_>>(),
-                plan.remit,
+                plan.permissions,
                 plan.approved_proposal().is_some(),
             )
         };
@@ -632,13 +633,13 @@ pub(crate) async fn converse(
         // narrower remit is not offered the tools it may not run. All three
         // narrowings live in `ToolSpec::for_model`, so the reasoning is in one
         // place and no caller has to remember any of them.
-        let tools = ToolSpec::for_model(model.as_ref(), remit);
-        let shop = Workshop::new(workspace.clone())
+        let tools = ToolSpec::for_model(model.as_ref(), permissions);
+        let shop = Sandbox::new(workspace.clone())
             .for_plan(plan_id.clone())
-            .under(remit);
+            .under(permissions);
 
         let brief = Brief {
-            charter: Charter::assemble(&city, &workspace, remit, approved, &root),
+            system_prompt: SystemPrompt::assemble(&city, &workspace, permissions, approved, &root),
             turns,
             tools: tools.clone(),
         };
@@ -649,16 +650,16 @@ pub(crate) async fn converse(
 
             Ok(Reply::Acts(acts)) => {
                 for act in acts {
-                    // Recorded *before* it runs, and proclaimed by `update`, so
-                    // the chamber shows the command while it is still going.
-                    // This is the answer to "what is this agent doing right
-                    // now", and it only works because the deed is written down
-                    // first.
+                    // Recorded *before* it runs, and published by `update`, so
+                    // the conversation shows the command while it is still
+                    // going. This is the answer to "what is this agent doing
+                    // right now", and it only works because the tool call is
+                    // written down first.
                     {
                         let mut kingdom = lock()?;
                         update(&mut kingdom, &plan_id, |p| {
                             p.working_on = Some(describe(&act.tool, &act.input));
-                            p.begin_deed(Deed::begun(
+                            p.begin_tool_call(ToolCall::started(
                                 act.id.clone(),
                                 act.tool.clone(),
                                 act.input.clone(),
@@ -677,22 +678,23 @@ pub(crate) async fn converse(
                     // The lock is deliberately not held across this. A tool can
                     // take minutes -- and `ask_user_question` waits on a person
                     // -- so a held lock would freeze every other plan and every
-                    // chamber in the kingdom behind it.
+                    // conversation in the kingdom behind it.
                     //
-                    // Bound to this deed, so a tool that has to reach back out
-                    // to the King has something the browser can name when it
-                    // answers.
+                    // Bound to this tool call, so a tool that has to reach back
+                    // out to the user has something the browser can name when
+                    // it answers.
                     let outcome =
-                        crate::tools::invoke(&act.tool, act.input, &shop.for_deed(&act.id)).await;
+                        crate::tools::invoke(&act.tool, act.input, &shop.for_tool_call(&act.id)).await;
 
                     let mut kingdom = lock()?;
                     let mut proposed = None;
                     update(&mut kingdom, &plan_id, |p| {
-                        if !p.settle_deed(&act.id, outcome.clone()) {
-                            // Cannot happen -- the deed was recorded a moment
-                            // ago under the same id -- but a silently dropped
-                            // result would leave the model waiting forever for
-                            // a call the transcript says it never made.
+                        if !p.settle_tool_call(&act.id, outcome.clone()) {
+                            // Cannot happen -- the tool call was recorded a
+                            // moment ago under the same id -- but a silently
+                            // dropped result would leave the model waiting
+                            // forever for a call the transcript says it never
+                            // made.
                             p.note(
                                 NoteKind::Failed,
                                 format!(
@@ -710,7 +712,7 @@ pub(crate) async fn converse(
                         // is one the model should be told about and allowed to
                         // correct on the next round, not one that parks the
                         // plan in front of the King with nothing to read.
-                        let accepted = matches!(&outcome, DeedOutcome::Done { output, .. }
+                        let accepted = matches!(&outcome, ToolOutcome::Done { output, .. }
                             if output == crate::tools::propose_plan::PROPOSED);
                         if let (Some((title, body)), true) = (put.clone(), accepted) {
                             p.propose(title, body);
@@ -737,7 +739,7 @@ pub(crate) async fn converse(
     }
 
     // Out of rope. Recorded as a note rather than a reply: nothing was said,
-    // and dressing a truncation as counsel would hand the King an answer that
+    // and dressing a truncation as counsel would hand the user an answer that
     // is really an unfinished job.
     let mut kingdom = lock()?;
     let updated = update(&mut kingdom, &plan_id, |p| {
@@ -757,34 +759,35 @@ pub(crate) async fn converse(
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
-/// Sends a set of errands and waits for them all to report.
+/// Sends a set of subagents and waits for them all to report.
 ///
 /// Called by the `spawn_agents` tool, which is itself running inside its
 /// parent's [`converse`] loop -- so this is the turn loop calling itself, one
-/// level down, with a narrower remit. That shape is why `converse` is
+/// level down, with narrower permissions. That shape is why `converse` is
 /// `pub(crate)` rather than private.
 ///
-/// Each errand is a real plan: recorded, watched and pushed like any other,
-/// which is what lets the King open one and read it while it works. They run
-/// concurrently, which is only safe because an errand is born under
-/// [`kingdom_core::Remit::Survey`] and so cannot write -- see [`Plan::sent`],
-/// which is where that is now settled, and `tools::spawn_agents`.
+/// Each subagent is a real plan: recorded, watched and pushed like any other,
+/// which is what lets the user open one and read it while it works. They run
+/// concurrently, which is only safe because a subagent is born under
+/// [`kingdom_core::Permissions::ReadOnly`] and so cannot write -- see
+/// [`Plan::spawned`], which is where that is now settled, and
+/// `tools::spawn_agents`.
 ///
 /// Returns the reports as one block of text for the model, or `Err` with a
-/// reason to report to it when no errand could be sent at all.
+/// reason to report to it when no subagent could be sent at all.
 #[cfg(feature = "ssr")]
-pub(crate) async fn send_errands(
+pub(crate) async fn spawn_subagents(
     parent_id: &PlanId,
-    deed: &str,
+    tool_call: &str,
     tasks: Vec<String>,
     patience: std::time::Duration,
 ) -> Result<String, String> {
-    use crate::tools::spawn_agents::MOST_ERRAND_ROUNDS;
+    use crate::tools::spawn_agents::MOST_SUBAGENT_ROUNDS;
 
-    // Everything the errands need is read once, under one lock: the parent they
-    // are cut from, and the city they work in. Holding it across the model
+    // Everything the subagents need is read once, under one lock: the parent
+    // they are cut from, and the city they work in. Holding it across the model
     // calls below would freeze every other plan in the kingdom.
-    let (errands, city_brief, city_name, root) = {
+    let (subagents, city_brief, city_name, root) = {
         let mut kingdom = lock().map_err(|e| e.to_string())?;
 
         let Some(parent) = kingdom.plan(parent_id).cloned() else {
@@ -796,43 +799,44 @@ pub(crate) async fn send_errands(
             return Err("That plan's city is gone.".to_string());
         };
 
-        // An errand is briefed on the *workspace*, exactly as its parent is:
+        // A subagent is briefed on the *workspace*, exactly as its parent is:
         // it is sent to look at the work in progress, not at a pristine copy.
         let city_brief = crate::llm::CityBrief::from_city(&city, &parent.workspace);
 
-        let mut errands = Vec::new();
+        let mut subagents = Vec::new();
         for task in tasks {
             let id = PlanId::new(format!("plan-{}", next_plan_number()));
-            let mut errand = Plan::sent(id.clone(), &parent, deed, task.clone());
+            let mut subagent = Plan::spawned(id.clone(), &parent, tool_call, task.clone());
             let root = std::path::PathBuf::from(&kingdom.root);
-            remember(&root, &mut errand);
-            // Pushed as well as recorded, so the parent's chamber can draw the
-            // errand the instant it exists rather than when it first speaks.
-            crate::herald::proclaim(&errand);
-            kingdom.plans.push(errand);
-            errands.push((id, task));
+            remember(&root, &mut subagent);
+            // Pushed as well as recorded, so the parent's conversation can draw
+            // the subagent the instant it exists rather than when it first
+            // speaks.
+            crate::events::publish(&subagent);
+            kingdom.plans.push(subagent);
+            subagents.push((id, task));
         }
 
         (
-            errands,
+            subagents,
             city_brief,
             city.name,
             std::path::PathBuf::from(&kingdom.root),
         )
     };
 
-    // All at once. The remit is what makes this safe: they share one worktree
-    // and none of them can write to it. It is settled on the errand itself, by
-    // `Plan::sent`, and read back by the loop -- so the invariant travels with
-    // the plan rather than with this call site.
-    let running: Vec<_> = errands
+    // All at once. The permissions are what make this safe: they share one
+    // worktree and none of them can write to it. That is settled on the
+    // subagent itself, by `Plan::spawned`, and read back by the loop -- so the
+    // invariant travels with the plan rather than with this call site.
+    let running: Vec<_> = subagents
         .iter()
         .map(|(id, _)| {
             let id = id.clone();
             let city_brief = city_brief.clone();
             let city_name = city_name.clone();
             let root = root.clone();
-            // Read back rather than carried down, so an errand is drafted by
+            // Read back rather than carried down, so a subagent is drafted by
             // what its own record says -- the same rule `draft_plan` follows.
             let found = snapshot(&id).map(|p| (p.workspace.clone(), p.choice()));
             tokio::spawn(async move {
@@ -846,18 +850,18 @@ pub(crate) async fn send_errands(
                     city_name,
                     choice,
                     root,
-                    MOST_ERRAND_ROUNDS,
+                    MOST_SUBAGENT_ROUNDS,
                 )
                 .await
             })
         })
         .collect();
 
-    // One deadline across the whole call rather than one per errand: they run
+    // One deadline across the whole call rather than one per subagent: they run
     // concurrently, so the bound that matters is how long the *parent* waits.
     //
     // Collected one at a time against that shared deadline, which is what keeps
-    // a partial answer possible -- an errand that has already reported is
+    // a partial answer possible -- a subagent that has already reported is
     // collected even if a later one has to be given up on. Timing the whole
     // batch out as a unit would throw away work that was finished and paid for.
     let deadline = tokio::time::Instant::now() + patience;
@@ -871,20 +875,20 @@ pub(crate) async fn send_errands(
         outcomes.push(settled);
     }
 
-    Ok(report(&errands, &outcomes))
+    Ok(report(&subagents, &outcomes))
 }
 
-/// Renders what the errands found, for the model that sent them.
+/// Renders what the subagents found, for the model that sent them.
 ///
-/// Each block names the errand's plan id, which is what lets the parent refer
-/// to one in its own reply -- and what lets the King find the same conversation
+/// Each block names the subagent's plan id, which is what lets the parent refer
+/// to one in its own reply -- and what lets the user find the same conversation
 /// the parent read.
 #[cfg(feature = "ssr")]
-fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
+fn report(subagents: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
     use kingdom_core::Speaker;
 
     let mut out = String::new();
-    for (i, (id, task)) in errands.iter().enumerate() {
+    for (i, (id, task)) in subagents.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
@@ -893,7 +897,7 @@ fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
             i + 1
         ));
 
-        // Read from the record rather than from the returned plan: an errand
+        // Read from the record rather than from the returned plan: a subagent
         // that timed out here may still have said something, and its record is
         // where that would be.
         let plan = outcomes
@@ -901,16 +905,16 @@ fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
             .and_then(|p| p.clone())
             .or_else(|| snapshot(id));
 
-        // The last thing the *court* said is the errand's answer. Read with a
-        // fold rather than `next_back` because `said()` yields a plain forward
-        // iterator; taking the last match is the whole intent.
-        let said = plan.as_ref().and_then(|p| {
-            p.said()
-                .filter(|u| u.speaker == Speaker::Court)
+        // The last thing the *model* said is the subagent's answer. Read with a
+        // fold rather than `next_back` because `messages()` yields a plain
+        // forward iterator; taking the last match is the whole intent.
+        let messages = plan.as_ref().and_then(|p| {
+            p.messages()
+                .filter(|u| u.speaker == Speaker::Assistant)
                 .last()
                 .map(|u| u.body.clone())
         });
-        match said {
+        match messages {
             Some(body) => out.push_str(&body),
             None => out.push_str(
                 "This errand did not report back. It may have run out of rope or \
@@ -922,9 +926,9 @@ fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
     out
 }
 
-/// Plain-language "what is happening right now", for the rail and the map./// Plain-language "what is happening right now", for the rail and the map.
+/// Plain-language "what is happening right now", for the rail and the map.
 ///
-/// The tool's name alone is close to useless to the King -- "bash" tells him
+/// The tool's name alone is close to useless to the user -- "bash" tells him
 /// nothing that "an agent is working" did not. The argument is the information,
 /// so it is what gets shown.
 #[cfg(feature = "ssr")]
@@ -978,8 +982,8 @@ fn settle(
                 plan.title = draft.title.clone();
                 plan.summary = draft.summary.clone();
                 plan.status = PlanStatus::AwaitingReview;
-                plan.say(Speaker::Court, draft.body.clone());
-                // The court has spoken, so any proposal the King had not
+                plan.say(Speaker::Assistant, draft.body.clone());
+                // The model has spoken, so any proposal the user had not
                 // accepted is no longer the question on the table. Without
                 // this, a plan that proposed, was asked something, and answered
                 // in prose would still be offering to start work the
@@ -1001,7 +1005,7 @@ fn settle(
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
-/// Carries the King's answer to a question the court is waiting on.
+/// Carries the user's answer to a question the model is waiting on.
 ///
 /// Deliberately a `#[server]` function rather than a message on the watch
 /// socket. The socket exists for what HTTP cannot do -- let the server speak
@@ -1011,18 +1015,18 @@ fn settle(
 /// project is Rust on both ends.
 ///
 /// Returns the plan, so the caller sees the same state everything else does.
-/// The deed is settled by the turn loop when the parked call resumes, not here:
-/// this only unblocks it. Recording the outcome in two places is how a
+/// The tool call is settled by the turn loop when the parked call resumes, not
+/// here: this only unblocks it. Recording the outcome in two places is how a
 /// transcript ends up disagreeing with itself.
 #[server(AnswerQuestion, "/api")]
 pub async fn answer_question(
     plan: String,
-    deed: String,
+    tool_call: String,
     answer: String,
 ) -> Result<Plan, ServerFnError> {
     let plan_id = PlanId::new(plan);
 
-    if !crate::tools::ask_user_question::answer(&plan_id, &deed, answer) {
+    if !crate::tools::ask_user_question::answer(&plan_id, &tool_call, answer) {
         return Err(ServerFnError::new(
             "Nothing is waiting on that answer. It may have been answered in \
              another tab, or the server may have restarted since it was asked.",
@@ -1082,7 +1086,7 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
         // been a new kind of message with its own handling on the wire; making
         // it something the King said needs no provider to know anything, and is
         // also simply true.
-        p.say(Speaker::King, kingdom_core::APPROVAL);
+        p.say(Speaker::User, kingdom_core::APPROVAL);
         p.status = PlanStatus::Drafting;
     })
     .ok_or_else(|| ServerFnError::new("That plan vanished as it was being approved."))
@@ -1140,15 +1144,15 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
             return Ok(existing.clone());
         }
 
-        // An errand's workspace is a *clone of its parent's* -- same path, same
-        // branch, same id -- because an errand works alongside the plan that
-        // sent it rather than in a checkout of its own.
+        // A subagent's workspace is a *clone of its parent's* -- same path,
+        // same branch, same id -- because a subagent works alongside the plan
+        // that sent it rather than in a checkout of its own.
         //
         // So finishing one would merge the parent's half-finished work and then
         // delete the worktree out from under a plan still running in it. The
-        // chamber never offers the button, but the blast radius here is the
-        // King's actual work, so the guard is here rather than in the UI.
-        if existing.is_errand() {
+        // conversation never offers the button, but the blast radius here is
+        // the user's actual work, so the guard is here rather than in the UI.
+        if existing.is_subagent() {
             return Err(ServerFnError::new(
                 "This is an errand, and it works in the worktree of the plan that \
                  sent it -- it has nothing of its own to merge or archive. \
@@ -1177,7 +1181,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Only once the work has actually landed. A refused merge leaves the plan
-    // in play, and killing the court's dev server under a plan the King is
+    // in play, and killing the model's dev server under a plan the user is
     // about to retry would take away the thing he needs to see to fix it.
     if matches!(finish, Finish::Settled(_)) {
         crate::tools::tmux::dismiss(&plan_id).await;
@@ -1196,7 +1200,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
-/// Every model the King can choose between, and what each will accept.
+/// Every model the user can choose between, and what each will accept.
 ///
 /// Read live from each provider rather than hard-coded, so the picker cannot
 /// offer a model that has been withdrawn or hide one that has just landed. It
@@ -1207,7 +1211,7 @@ pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
     Ok(crate::llm::catalogue::catalogue().await)
 }
 
-/// A suggested starting folder, so the King is not typing a path from scratch.
+/// A suggested starting folder, so the user is not typing a path from scratch.
 #[server(SuggestRoot, "/api")]
 pub async fn suggest_root() -> Result<String, ServerFnError> {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1240,7 +1244,7 @@ mod tests {
     /// Containment must survive traversal, not merely prefix-matching.
     ///
     /// This is the wall that keeps a session working on Kingdom IDE from
-    /// opening the King's real projects -- and, once plans have hands, the wall
+    /// opening the user's real projects -- and, once plans have hands, the wall
     /// that keeps an agent's first destructive command inside the proving
     /// grounds. The `..` case is the one that matters: a check written as a
     /// `starts_with` on the strings as typed would happily admit
@@ -1254,13 +1258,13 @@ mod tests {
             .as_nanos();
         let base = std::env::temp_dir().join(format!("kingdom-sandbox-{unique}"));
         let sandbox = base.join("realms");
-        let realm = sandbox.join("kingdom-mirror");
+        let fixture = sandbox.join("kingdom-mirror");
         let outside = base.join("real-work");
-        std::fs::create_dir_all(&realm).unwrap();
+        std::fs::create_dir_all(&fixture).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
 
         assert!(
-            within_sandbox(&sandbox, &realm).is_ok(),
+            within_sandbox(&sandbox, &fixture).is_ok(),
             "a realm inside the sandbox must be openable"
         );
 
@@ -1279,18 +1283,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A kingdom is opened many times; its court is fabricated once.
+    /// A kingdom is opened many times; its model is fabricated once.
     ///
-    /// Without this the second open would seat a fresh court *over* the stored
-    /// one -- the King's real replies to a sample plan sitting beside a pristine
-    /// copy of the same plan, multiplying on every restart. The opening court
-    /// exists to give a new kingdom something to show, and a kingdom with
-    /// records is not new.
+    /// Without this the second open would seat a fresh model *over* the stored
+    /// one -- the user's real replies to a sample plan sitting beside a
+    /// pristine copy of the same plan, multiplying on every restart. The
+    /// opening model exists to give a new kingdom something to show, and a
+    /// kingdom with records is not new.
     #[test]
-    fn a_court_is_seated_only_over_an_empty_store() {
+    fn starter_plans_are_seeded_only_over_an_empty_store() {
         use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
 
-        fn court(_: &[kingdom_core::City]) -> Vec<Plan> {
+        fn starter_plans(_: &[kingdom_core::City]) -> Vec<Plan> {
             vec![Plan::opened(
                 PlanId::new("plan-fabricated"),
                 CityId::new("c1"),
@@ -1300,7 +1304,7 @@ mod tests {
             )]
         }
 
-        let seated = open_court(Vec::new(), &[], court);
+        let seated = seed_starter_plans(Vec::new(), &[], starter_plans);
         assert_eq!(
             seated.len(),
             1,
@@ -1315,7 +1319,7 @@ mod tests {
             Workspace::in_place("/dev/testburg"),
         )];
         assert_eq!(
-            open_court(recorded.clone(), &[], court),
+            seed_starter_plans(recorded.clone(), &[], starter_plans),
             recorded,
             "a kingdom with records keeps them, and gets no second court"
         );
@@ -1323,18 +1327,18 @@ mod tests {
 
     /// The guard with the largest blast radius in the codebase.
     ///
-    /// An errand's workspace is a clone of its parent's, so finishing one would
-    /// merge the parent's half-finished work and then delete the worktree from
-    /// under a plan still running in it. The chamber never offers the button --
-    /// but "the UI does not offer it" is not a guarantee, and the thing being
-    /// protected is the King's real work.
+    /// A subagent's workspace is a clone of its parent's, so finishing one
+    /// would merge the parent's half-finished work and then delete the worktree
+    /// from under a plan still running in it. The conversation never offers the
+    /// button -- but "the UI does not offer it" is not a guarantee, and the
+    /// thing being protected is the user's real work.
     ///
     /// Tested through the guard's own predicate rather than through
     /// `finish_plan`, which needs a git repository, a scanned kingdom and a
     /// process-global lock to reach: this pins the decision, and the git work
     /// below it is `worktree.rs`'s business and already has its own tests.
     #[test]
-    fn an_errand_is_never_finished_on_its_own() {
+    fn a_subagent_is_never_finished_on_its_own() {
         use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
 
         let parent = Plan::opened(
@@ -1350,19 +1354,19 @@ mod tests {
                 base: Some("main".into()),
             },
         );
-        let errand = Plan::sent(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
+        let subagent = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
 
         assert_eq!(
-            errand.workspace, parent.workspace,
+            subagent.workspace, parent.workspace,
             "an errand works in its parent's checkout -- which is precisely why \
              finishing it would destroy work that is not its own"
         );
         assert!(
-            errand.is_errand(),
+            subagent.is_subagent(),
             "the predicate `finish_plan` refuses on must hold for a sent plan"
         );
         assert!(
-            !parent.is_errand(),
+            !parent.is_subagent(),
             "and must not hold for the plan that sent it, or the King could \
              never finish anything"
         );

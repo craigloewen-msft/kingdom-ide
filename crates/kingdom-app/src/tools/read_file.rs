@@ -1,20 +1,20 @@
 //! Reading a file, with line numbers.
 //!
-//! The court's cheapest way to look at something. It exists as a tool of its
+//! The model's cheapest way to look at something. It exists as a tool of its
 //! own rather than as `cat` through a shell because the line numbers are the
 //! point: a model that has read a file numbered can ask for a window of it
-//! later, and can name a line to the King. `cat` gives it a wall of text with
+//! later, and can name a line to the user. `cat` gives it a wall of text with
 //! no coordinates, and the next request re-reads the whole file to find one
 //! function.
 //!
-//! Every path arrives through [`Workshop::resolve`]. Phoenix, where this is
+//! Every path arrives through [`Sandbox::resolve`]. Phoenix, where this is
 //! ported from, deliberately dropped that check so its agent could read stdlib
 //! sources and toolchain caches -- reasonable there, wrong here: a plan owns a
 //! worktree precisely so that what it touches is knowable, and a reader that
 //! wanders into another city's checkout makes the boundary a fiction.
 
-use super::{Refusal, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use super::{Refusal, Tool, Sandbox};
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 
@@ -68,7 +68,7 @@ impl Tool for ReadFile {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let Some(path) = input.get("path").and_then(Value::as_str) else {
             return Refusal::BadArguments {
                 tool: "read_file".to_string(),
@@ -120,7 +120,7 @@ impl Tool for ReadFile {
             .and_then(Value::as_u64)
             .map_or(DEFAULT_LIMIT, |n| n as usize);
 
-        DeedOutcome::done(window(&text, offset, limit))
+        ToolOutcome::done(window(&text, offset, limit))
     }
 }
 
@@ -173,14 +173,14 @@ mod tests {
     use kingdom_core::Workspace;
     use std::path::Path;
 
-    fn shop(root: &Path) -> Workshop {
-        Workshop::new(Workspace::in_place(root.to_str().unwrap()))
+    fn shop(root: &Path) -> Sandbox {
+        Sandbox::new(Workspace::in_place(root.to_str().unwrap()))
     }
 
     async fn read(root: &Path, input: Value) -> String {
         match ReadFile.run(input, &shop(root)).await {
-            DeedOutcome::Done { output, .. } => output,
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => output,
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -217,7 +217,7 @@ mod tests {
     }
 
     /// The boundary, exercised through the tool rather than through
-    /// [`Workshop::resolve`] alone -- the check is only worth anything if the
+    /// [`Sandbox::resolve`] alone -- the check is only worth anything if the
     /// tool actually routes its path through it, and that is what regresses.
     #[tokio::test]
     async fn a_path_outside_the_workspace_is_refused() {
@@ -233,8 +233,8 @@ mod tests {
             .await;
 
         match outcome {
-            DeedOutcome::Refused { reason } => assert!(reason.contains("outside"), "{reason}"),
-            DeedOutcome::Done { output, .. } => panic!("read a file outside the workspace: {output}"),
+            ToolOutcome::Refused { reason } => assert!(reason.contains("outside"), "{reason}"),
+            ToolOutcome::Done { output, .. } => panic!("read a file outside the workspace: {output}"),
         }
     }
 }

@@ -14,7 +14,7 @@
 //! | Architectural Plan  | [`Plan`]    | a proposal, drafted by a model, awaiting review |
 //!
 //! A plan is deliberately both the unit of work and the unit of review. There
-//! is no separate agent entity: the King reviews proposals, not agents, and
+//! is no separate agent entity: the user reviews proposals, not agents, and
 //! which model is drafting is an attribute of the plan.
 //!
 //! See `AGENTS.md` at the repository root for the philosophy behind this.
@@ -24,11 +24,11 @@ pub mod layout;
 pub mod mockdata;
 pub mod model;
 pub mod naming;
-pub mod remit;
+pub mod permissions;
 pub mod sample;
 pub mod skyline;
 pub mod terrain;
 
 pub use ids::*;
 pub use model::*;
-pub use remit::*;
+pub use permissions::*;

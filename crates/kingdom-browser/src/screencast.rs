@@ -1,6 +1,6 @@
-//! The spyglass's source: a CDP screencast, relayed to whoever is watching.
+//! The screencast's source: a CDP screencast, relayed to whoever is watching.
 //!
-//! A plan's Chrome is headless, so the only way the King can see what his court
+//! A plan's Chrome is headless, so the only way the user can see what his model
 //! is doing to a page is for us to ask Chrome for pictures of it.
 //! `Page.startScreencast` does exactly that, and this module fans the frames out
 //! to any number of viewers.
@@ -22,8 +22,8 @@
 //! # View-only
 //!
 //! Nothing here accepts input, and that is deliberate rather than unfinished --
-//! see the note on the same subject in `kingdom-app`'s `spyglass` module. This
-//! is a one-way relay from Chrome to a socket.
+//! see the note on the same subject in `kingdom-app`'s `screencast` module.
+//! This is a one-way relay from Chrome to a socket.
 
 use base64::Engine;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -57,10 +57,11 @@ pub enum ScreencastEvent {
     ///
     /// `Arc` because every attached viewer receives the same bytes; cloning the
     /// image per socket would multiply a 100KB frame by the number of tabs the
-    /// King has open.
+    /// user has open.
     Frame { jpeg: Arc<[u8]> },
-    /// The page navigated. The chamber shows this above the picture, so the
-    /// King can see *where* the court is, not merely that something changed.
+    /// The page navigated. The conversation shows this above the picture, so
+    /// the user can see *where* the model is, not merely that something
+    /// changed.
     Url(String),
 }
 
@@ -103,7 +104,7 @@ impl ScreencastBroker {
         let last_url = Arc::new(Mutex::new(None));
 
         // Seed from wherever the page already is, so the first viewer gets a URL
-        // even if the court never navigates again.
+        // even if the model never navigates again.
         if let Ok(Some(url)) = page.url().await {
             *last_url.lock().await = Some(url);
         }

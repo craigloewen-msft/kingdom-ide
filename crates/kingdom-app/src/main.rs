@@ -1,9 +1,9 @@
 //! The Axum server binary.
 
-// Leptos builds one deeply-nested generic type per `view!` tree, and the realm
-// view has grown nested enough to exceed rustc's default query depth while
-// laying out the SSR future. Raising the limit is the compiler's own suggested
-// fix and costs nothing at runtime.
+// Leptos builds one deeply-nested generic type per `view!` tree, and the
+// fixture view has grown nested enough to exceed rustc's default query depth
+// while laying out the SSR future. Raising the limit is the compiler's own
+// suggested fix and costs nothing at runtime.
 #![recursion_limit = "512"]
 
 #[cfg(feature = "ssr")]
@@ -29,18 +29,18 @@ async fn main() {
     let routes = generate_route_list(App);
 
     let app = Router::new()
-        // Before the Leptos routes, because this is not one: the chamber's
+        // Before the Leptos routes, because this is not one: the conversation's
         // push channel is a plain Axum handler and must not be swallowed by
         // the SSR fallback.
         .route(
             kingdom_app::watch::ROUTE,
             axum::routing::get(kingdom_app::watch::upgrade),
         )
-        // The spyglass, for the same reason and on the same terms: pixels
+        // The screencast, for the same reason and on the same terms: pixels
         // rather than plans, but equally not a Leptos route.
         .route(
-            kingdom_app::spyglass::ROUTE,
-            axum::routing::get(kingdom_app::spyglass::upgrade),
+            kingdom_app::screencast::ROUTE,
+            axum::routing::get(kingdom_app::screencast::upgrade),
         )
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();

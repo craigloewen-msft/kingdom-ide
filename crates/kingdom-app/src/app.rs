@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, DecreeBar, KingdomMap, Sidebar};
+use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar};
 use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -49,8 +49,8 @@ const BRANCH_KEY: &str = "kingdom.branch";
 pub struct KingdomState {
     /// The kingdom as last loaded from the server.
     pub kingdom: RwSignal<Kingdom>,
-    /// The city the King has selected, if any. Highlighted on the map and
-    /// used as the target for a new decree.
+    /// The city the user has selected, if any. Highlighted on the map and
+    /// used as the target for a new prompt.
     pub selected: RwSignal<Option<CityId>>,
     /// Current width of the left rail, in pixels. Driven by the resizer.
     pub sidebar_width: RwSignal<f64>,
@@ -60,7 +60,7 @@ pub struct KingdomState {
     pub loading: RwSignal<bool>,
     /// Most recent error, shown in the chat dock.
     pub error: RwSignal<Option<String>>,
-    /// What the next new plan will be drafted with. `None` until the King has
+    /// What the next new plan will be drafted with. `None` until the user has
     /// chosen or a remembered choice has been restored, at which point the
     /// server's catalogue default applies.
     pub choice: RwSignal<Option<ModelChoice>>,
@@ -82,7 +82,7 @@ impl KingdomState {
         }
     }
 
-    /// Records the King's choice and remembers it for next time.
+    /// Records the user's choice and remembers it for next time.
     pub fn choose_model(&self, choice: ModelChoice) {
         store_choice(&choice);
         self.choice.set(Some(choice));
@@ -104,7 +104,7 @@ fn local_storage() -> Option<web_sys::Storage> {
 /// client -- reading storage during rendering would make the server emit
 /// different markup than hydration expects. Whatever comes back is still passed
 /// through the server's catalogue before it is used, so a model withdrawn since
-/// it was stored degrades rather than failing a decree.
+/// it was stored degrades rather than failing a prompt.
 fn restore_choice(choice: RwSignal<Option<ModelChoice>>) {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
@@ -171,7 +171,7 @@ fn restore_workspace(mode: RwSignal<WorkspaceMode>) {
                 .filter(|b| !b.trim().is_empty())
                 .map(WorkspaceMode::Branch)
                 // A remembered branch that has since been deleted or renamed
-                // degrades to a fresh worktree rather than failing the decree,
+                // degrades to a fresh worktree rather than failing the prompt,
                 // exactly as a withdrawn model degrades to the default. The
                 // fallback is deliberately the isolated one.
                 .unwrap_or(WorkspaceMode::Fresh),
@@ -218,7 +218,7 @@ pub fn App() -> impl IntoView {
     restore_workspace(state.workspace);
 
     // Load any kingdom the server already has open, so a refresh does not
-    // send the King back to the folder picker.
+    // send the user back to the folder picker.
     let initial = Resource::new(|| (), |_| get_kingdom());
     Effect::new(move |_| {
         if let Some(Ok(k)) = initial.get() {
@@ -237,8 +237,9 @@ pub fn App() -> impl IntoView {
             fallback=move || view! { <ChooseKingdom/> }
         >
             // The rail lives on the parent route so it never unmounts: moving
-            // between the realm and a plan's chamber is then instant, and the
-            // rail keeps its scroll position and collapse state across the move.
+            // between the fixture and a plan's conversation is then instant,
+            // and the rail keeps its scroll position and collapse state across
+            // the move.
             <Router>
                 <Routes fallback=|| view! { <NoSuchPlace/> }>
                     <ParentRoute path=path!("") view=ThroneRoom>
@@ -271,7 +272,7 @@ fn ThroneRoom() -> impl IntoView {
     }
 }
 
-/// `/` -- the whole realm, with the decree bar beneath it.
+/// `/` -- the whole fixture, with the prompt bar beneath it.
 #[component]
 fn Realm() -> impl IntoView {
     view! {
@@ -279,12 +280,12 @@ fn Realm() -> impl IntoView {
             <div class="map-region">
                 <KingdomMap/>
             </div>
-            <DecreeBar/>
+            <PromptBar/>
         </div>
     }
 }
 
-/// A URL that matches nothing. Rare, but a blank screen would leave the King
+/// A URL that matches nothing. Rare, but a blank screen would leave the user
 /// with no way back.
 #[component]
 fn NoSuchPlace() -> impl IntoView {
@@ -302,7 +303,7 @@ fn ChooseKingdom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let (path, set_path) = signal(String::new());
 
-    // Pre-fill with a likely dev folder so the King usually just presses enter.
+    // Pre-fill with a likely dev folder so the user usually just presses enter.
     let suggested = Resource::new(|| (), |_| crate::api::suggest_root());
     Effect::new(move |_| {
         if let Some(Ok(s)) = suggested.get() {
@@ -328,15 +329,15 @@ fn ChooseKingdom() -> impl IntoView {
     let submit = move || claim.dispatch(path.get());
 
     // Raising a proving ground is the safe path, so it gets its own action
-    // rather than being something the King must first read about and then type
+    // rather than being something the user must first read about and then type
     // a path to reach.
-    let realms = Resource::new(|| (), |_| crate::api::list_realms());
-    let enter = Action::new(move |realm: &Option<String>| {
-        let realm = realm.clone();
+    let fixtures = Resource::new(|| (), |_| crate::api::list_fixtures());
+    let enter = Action::new(move |fixture: &Option<String>| {
+        let fixture = fixture.clone();
         async move {
             state.loading.set(true);
             state.error.set(None);
-            match crate::api::enter_proving_grounds(realm).await {
+            match crate::api::enter_proving_grounds(fixture).await {
                 Ok(k) => state.kingdom.set(k),
                 Err(e) => state.error.set(Some(e.to_string())),
             }
@@ -375,7 +376,7 @@ fn ChooseKingdom() -> impl IntoView {
                 </div>
 
                 // The browser cannot hand a server a real filesystem path, so
-                // the King types one. A native file dialog would need the app
+                // the user types one. A native file dialog would need the app
                 // to ship as a desktop shell.
                 <p class="hint">"The server reads this path directly from disk."</p>
 
@@ -403,7 +404,7 @@ fn ChooseKingdom() -> impl IntoView {
                     <div class="pg-realms">
                         <Suspense>
                             {move || {
-                                realms
+                                fixtures
                                     .get()
                                     .and_then(|r| r.ok())
                                     .map(|list| {

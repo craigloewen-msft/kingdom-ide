@@ -1,26 +1,27 @@
 //! Placeholder data for the throne room.
 //!
 //! Cities are **real** and come from scanning the chosen folder. Plans opened
-//! from the decree bar are **real** too, and drafted by an actual model. What
-//! this module fabricates is a *starting* court, so a freshly opened kingdom
-//! has something to show before the King has issued a single decree.
+//! from the prompt bar are **real** too, and drafted by an actual model. What
+//! this module fabricates is a *starting* set of plans, so a freshly opened
+//! kingdom has something to show before the user has issued a single prompt.
 //!
 //! It deliberately seeds a **failed plan** alongside ones awaiting review, and
-//! a plan with a **proposal standing in front of the King**. A court that opens
-//! all-quiet makes the states worth noticing unreachable during development,
-//! which is exactly when a refactor would quietly lose them. A test pins this.
+//! a plan with a **proposal standing in front of the user**. A starting set
+//! that is all-quiet makes the states worth noticing unreachable during
+//! development, which is exactly when a refactor would quietly lose them. A
+//! test pins this.
 
 use crate::ids::*;
 use crate::model::*;
 
-/// Fabricates a court of plans for the given cities, so the map has something
+/// Fabricates a set of plans for the given cities, so the map has something
 /// to show on first run.
-pub fn populate_court(cities: &[City]) -> Vec<Plan> {
+pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
     if cities.is_empty() {
         return Vec::new();
     }
 
-    // Each scripted plan: (id, decree, status).
+    // Each scripted plan: (id, prompt, status).
     let scripted = [
         (
             "plan-ramparts",
@@ -60,7 +61,7 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         plan.status = status;
         match status {
             PlanStatus::Failed => plan.note(NoteKind::Failed, plan.summary.clone()),
-            _ => plan.say(Speaker::Court, plan.summary.clone()),
+            _ => plan.say(Speaker::Assistant, plan.summary.clone()),
         }
         // A plan mid-draft is the one state that carries a `working_on`, and it
         // is what puts a crane over the city on the map.
@@ -109,12 +110,12 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
     });
     plans.push(archived);
 
-    // A plan waiting on the King's word, which is the state the whole product
-    // turns on: the court has drawn something up and stopped, and nothing moves
-    // until he decides. Without one here the proposal card is unreachable on a
+    // A plan waiting on the user's word, which is the state the whole product
+    // turns on: the model has drawn something up and stopped, and nothing moves
+    // until they decide. Without one here the proposal card is unreachable on a
     // fresh kingdom, and an unreachable state is one a refactor breaks quietly.
     let mut proposing = Plan::opened(
-        PlanId::new("plan-counsel"),
+        PlanId::new("plan-proposing"),
         first.id.clone(),
         "Speed up the start-up path",
         &mock,
@@ -171,9 +172,9 @@ mod tests {
         }
     }
 
-    /// The court must open showing something worth the King's attention.
+    /// The model must open showing something worth the user's attention.
     ///
-    /// A court of nothing but tidy settled plans makes the states the UI exists
+    /// A model of nothing but tidy settled plans makes the states the UI exists
     /// to render unreachable during development -- and a refactor is exactly
     /// when that would happen quietly. It used to be a blocked plan and a
     /// contended resource; with lease arbitration gone, a *failed* plan is the
@@ -184,9 +185,9 @@ mod tests {
     /// the four: it is the state the product's whole stance rests on, and the
     /// only one whose UI is a decision rather than a display.
     #[test]
-    fn the_opening_court_always_shows_trouble_and_history() {
+    fn the_starter_plans_always_show_trouble_and_history() {
         let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
-        let plans = populate_court(&cities);
+        let plans = starter_plans(&cities);
 
         assert!(
             plans.iter().any(|p| p.status == PlanStatus::Failed),
@@ -202,7 +203,7 @@ mod tests {
         );
         assert!(
             plans.iter().any(|p| p.standing_proposal().is_some()),
-            "a plan awaiting the King's word must be visible, or the proposal card \
+            "a plan awaiting the user's word must be visible, or the proposal card \
              — the state this whole product turns on — is unreachable on a fresh kingdom"
         );
     }

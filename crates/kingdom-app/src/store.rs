@@ -4,7 +4,6 @@
 //!
 //! ```text
 //! <kingdom_root>/.kingdom/
-//!   kingdom.json              format version, and when it was last opened
 //!   plans/<plan-id>.json      one document per plan
 //!   archive/<plan-id>.patch   the work an archived plan set aside
 //! ```
@@ -12,7 +11,7 @@
 //! **Why here and not in each project.** The rail and the map read every plan at
 //! once, so sharding them across cities would mean walking every repository on
 //! each load -- and losing a plan outright when its city is renamed. More to the
-//! point, the King's repository is not ours to write to; `worktree.rs` already
+//! point, the user's repository is not ours to write to; `worktree.rs` already
 //! made that call when it chose `.git/info/exclude` over `.gitignore`.
 //!
 //! **Why files and not a database.** There is exactly one writer, the whole
@@ -24,28 +23,13 @@
 //!
 //! Every read is failure-tolerant. A kingdom whose records cannot be parsed
 //! opens empty rather than refusing to open, and one unreadable plan costs that
-//! plan rather than the whole court.
+//! plan rather than the whole model.
 
 use kingdom_core::{Plan, PlanId};
 use std::path::{Path, PathBuf};
 
 /// Folder under the kingdom root holding everything Kingdom records.
 const STATE_DIR: &str = ".kingdom";
-
-/// Bumped when the on-disk shape changes in a way a reader must know about.
-///
-/// Additive changes do not need it -- new fields carry `#[serde(default)]`, the
-/// same way `sandbox` and `working_on` were added to types already on disk.
-const FORMAT_VERSION: u32 = 1;
-
-/// The kingdom-level record. Deliberately thin: everything about a *plan* lives
-/// in that plan's own file, so this exists to mark the format and nothing else.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct KingdomRecord {
-    version: u32,
-    /// When the kingdom was last opened, as milliseconds since the epoch.
-    opened_at: u128,
-}
 
 fn state_dir(root: &Path) -> PathBuf {
     root.join(STATE_DIR)
@@ -58,7 +42,7 @@ fn plans_dir(root: &Path) -> PathBuf {
 /// Where an archived plan's patch is kept.
 ///
 /// Public because archiving writes it and the plan's outcome records the path,
-/// so the King can find it later without knowing this module's layout.
+/// so the user can find it later without knowing this module's layout.
 pub fn archive_patch(root: &Path, id: &PlanId) -> PathBuf {
     state_dir(root).join("archive").join(format!("{id}.patch"))
 }
@@ -67,7 +51,7 @@ pub fn archive_patch(root: &Path, id: &PlanId) -> PathBuf {
 ///
 /// Returns empty for a kingdom that has never been opened, which is the same
 /// answer as "no plans yet" and needs no distinguishing: both mean the opening
-/// court should be seated.
+/// model should be seated.
 pub fn load(root: &Path) -> Vec<Plan> {
     let Ok(entries) = std::fs::read_dir(plans_dir(root)) else {
         return Vec::new();
@@ -78,7 +62,7 @@ pub fn load(root: &Path) -> Vec<Plan> {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         // A document that will not parse is skipped rather than fatal: one bad
-        // file must not cost the King his whole court, and he can still see the
+        // file must not cost the user his whole model, and he can still see the
         // rest of it while he works out what happened to that one.
         .filter_map(|p| std::fs::read_to_string(&p).ok())
         .filter_map(|raw| serde_json::from_str::<Plan>(&raw).ok())
@@ -93,13 +77,13 @@ pub fn load(root: &Path) -> Vec<Plan> {
 
 /// Repairs a plan whose turn died with the process that was taking it.
 ///
-/// A plan is marked `Drafting` for as long as the court is working, and the
+/// A plan is marked `Drafting` for as long as the model is working, and the
 /// mark is cleared when the turn ends. If the server stops in between -- a
 /// crash, a rebuild, Ctrl-C -- the record on disk keeps a status that says
-/// "working" with nothing working on it, and the plan is *stuck*: the chamber
-/// disables its composer while a plan is drafting, so the King cannot even say
-/// something to nudge it. Nothing on the running server can fix it, because
-/// the task that would have is gone.
+/// "working" with nothing working on it, and the plan is *stuck*: the
+/// conversation disables its composer while a plan is drafting, so the user
+/// cannot even say something to nudge it. Nothing on the running server can fix
+/// it, because the task that would have is gone.
 ///
 /// Reconciling on load is the only place with enough information to know: a
 /// process that has just started cannot have a turn already in flight, so any
@@ -110,21 +94,21 @@ pub fn load(root: &Path) -> Vec<Plan> {
 /// This matters far more than it used to. A turn was one HTTP call and the
 /// window was a second or two; a turn is now a loop that can run for minutes.
 fn reconcile(mut plan: Plan) -> Plan {
-    use kingdom_core::{DeedOutcome, Entry, NoteKind, PlanStatus, Speaker};
+    use kingdom_core::{ToolOutcome, Entry, NoteKind, PlanStatus, Speaker};
 
     if plan.status != PlanStatus::Drafting {
         return plan;
     }
 
-    // A plan the King opened but whose first turn never began looks exactly the
+    // A plan the user opened but whose first turn never began looks exactly the
     // same on disk: `Drafting`, busy with nothing. It is *not* damaged -- the
-    // chamber starts it on mount -- so touching it here would mark a perfectly
-    // healthy new plan as failed before it had a chance. The difference is
-    // whether anything but the King has been in the log.
+    // conversation starts it on mount -- so touching it here would mark a
+    // perfectly healthy new plan as failed before it had a chance. The
+    // difference is whether anything but the user has been in the log.
     let had_begun = plan
         .transcript
         .iter()
-        .any(|e| !matches!(e, Entry::Said(u) if u.speaker == Speaker::King));
+        .any(|e| !matches!(e, Entry::Message(u) if u.speaker == Speaker::User));
 
     if !had_begun {
         return plan;
@@ -137,14 +121,14 @@ fn reconcile(mut plan: Plan) -> Plan {
         .transcript
         .iter()
         .filter_map(|e| match e {
-            Entry::Did(d) if d.in_flight() => Some(d.id.clone()),
+            Entry::Tool(d) if d.in_flight() => Some(d.id.clone()),
             _ => None,
         })
         .collect();
     for id in orphans {
-        plan.settle_deed(
+        plan.settle_tool_call(
             &id,
-            DeedOutcome::Refused {
+            ToolOutcome::Refused {
                 reason: "The server stopped while this was running. Whether it \
                          finished is unknown."
                     .to_string(),
@@ -171,14 +155,14 @@ fn reconcile(mut plan: Plan) -> Plan {
 /// half-written document is worse than a missing one -- it is the one state
 /// [`load`] cannot tell from corruption.
 ///
-/// **Pictures are not written.** A deed that looked at an image carries the
-/// bytes in memory so the model can be shown them for the rest of the turn, but
-/// this file is rewritten on *every* update to the plan -- so persisting them
-/// would mean rewriting a megabyte per screenshot for the life of the plan, to
-/// store something nothing ever reads back. The words survive (`"Image loaded:
-/// <path> (N bytes)"`) and so does the file in the workspace, so a reloaded
-/// plan can still say what was looked at. It simply cannot show it again
-/// without looking again, which is what `read_image` is for.
+/// **Pictures are not written.** A tool call that looked at an image carries
+/// the bytes in memory so the model can be shown them for the rest of the turn,
+/// but this file is rewritten on *every* update to the plan -- so persisting
+/// them would mean rewriting a megabyte per screenshot for the life of the
+/// plan, to store something nothing ever reads back. The words survive (`"Image
+/// loaded: <path> (N bytes)"`) and so does the file in the workspace, so a
+/// reloaded plan can still say what was looked at. It simply cannot show it
+/// again without looking again, which is what `read_image` is for.
 pub fn save(root: &Path, plan: &Plan) -> std::io::Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir)?;
@@ -194,7 +178,7 @@ pub fn save(root: &Path, plan: &Plan) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A copy of this plan with every deed's images stripped, ready for disk.
+/// A copy of this plan with every tool call's images stripped, ready for disk.
 ///
 /// Cloned rather than stripping in place because the caller's plan is the live
 /// one, still being shown to a model this turn: blinding it as a side effect of
@@ -204,30 +188,20 @@ fn without_images(plan: &Plan) -> Plan {
 
     let mut plan = plan.clone();
     for entry in &mut plan.transcript {
-        if let Entry::Did(deed) = entry {
-            deed.outcome = deed.outcome.take().map(kingdom_core::DeedOutcome::without_images);
+        if let Entry::Tool(tool_call) = entry {
+            tool_call.outcome = tool_call.outcome.take().map(kingdom_core::ToolOutcome::without_images);
         }
     }
     plan
 }
 
-/// Writes every plan, and stamps the kingdom record.
+/// Writes every plan.
 ///
-/// Used when a kingdom is first opened and a court is seated over it. Returns
-/// the first failure, so the caller can report it once rather than per plan.
+/// Used when a kingdom is first opened and its starter plans are seeded over
+/// it. Returns the first failure, so the caller can report it once rather than
+/// per plan.
 pub fn save_all(root: &Path, plans: &[Plan]) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir(root))?;
-
-    let record = KingdomRecord {
-        version: FORMAT_VERSION,
-        opened_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
-    };
-    let body = serde_json::to_vec_pretty(&record)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(state_dir(root).join("kingdom.json"), body)?;
 
     for plan in plans {
         save(root, plan)?;
@@ -240,7 +214,7 @@ pub fn save_all(root: &Path, plans: &[Plan]) -> std::io::Result<()> {
 ///
 /// Derived from the plans themselves rather than from a stored counter, because
 /// a counter can drift from what is actually on disk and `max + 1` cannot. Ids
-/// that are not `plan-<number>` -- the sample court's `plan-ramparts`, say --
+/// that are not `plan-<number>` -- the sample model's `plan-ramparts`, say --
 /// simply do not participate.
 pub fn next_number(plans: &[Plan]) -> u64 {
     plans
@@ -287,8 +261,8 @@ mod tests {
         assert_eq!(next_number(&[]), 1, "the first plan of a kingdom is plan-1");
 
         let mut first = plan("plan-1");
-        first.say(Speaker::Court, "Here is what I propose.");
-        // Settled out of Drafting, as it would be once the court had replied.
+        first.say(Speaker::Assistant, "Here is what I propose.");
+        // Settled out of Drafting, as it would be once the model had replied.
         // Left mid-turn it would be *repaired* on load rather than returned
         // verbatim, which is the neighbouring test's business, not this one's.
         first.status = kingdom_core::PlanStatus::AwaitingReview;
@@ -328,18 +302,18 @@ mod tests {
     }
 
     /// A turn that died with the process leaves a record claiming to be working
-    /// with nothing working on it, and that plan is *unusable*: the chamber
-    /// disables its composer while a plan drafts, so the King cannot even nudge
-    /// it, and nothing on the fresh server knows to. Load is the only place
-    /// with the standing to fix it -- a process that has just started cannot
-    /// have a turn in flight.
+    /// with nothing working on it, and that plan is *unusable*: the
+    /// conversation disables its composer while a plan drafts, so the user
+    /// cannot even nudge it, and nothing on the fresh server knows to. Load is
+    /// the only place with the standing to fix it -- a process that has just
+    /// started cannot have a turn in flight.
     ///
     /// The two halves must both hold. A freshly opened plan looks identical on
     /// disk (Drafting, not busy) and is perfectly healthy, so failing that one
-    /// would break every plan the King opens just before a restart.
+    /// would break every plan the user opens just before a restart.
     #[test]
     fn an_interrupted_turn_is_repaired_but_an_unstarted_one_is_left_alone() {
-        use kingdom_core::{Deed, NoteKind, PlanStatus};
+        use kingdom_core::{ToolCall, NoteKind, PlanStatus};
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -347,10 +321,10 @@ mod tests {
         // Opened a moment before the server stopped: nothing has happened yet.
         let unstarted = plan("plan-1");
 
-        // Mid-turn: the court had spoken and a tool call was still running.
+        // Mid-turn: the model had spoken and a tool call was still running.
         let mut interrupted = plan("plan-2");
-        interrupted.say(Speaker::Court, "I will look into it.");
-        interrupted.begin_deed(Deed::begun("call-1", "bash", serde_json::json!({})));
+        interrupted.say(Speaker::Assistant, "I will look into it.");
+        interrupted.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
         interrupted.working_on = Some("bash: cargo test".into());
 
         save_all(root, &[unstarted, interrupted]).unwrap();
@@ -375,7 +349,7 @@ mod tests {
             "the King must be told why, not just find a plan that failed silently"
         );
         assert!(
-            repaired.turns().all(|t| !matches!(t, kingdom_core::Turn::Did(d) if d.in_flight())),
+            repaired.turns().all(|t| !matches!(t, kingdom_core::Turn::Tool(d) if d.in_flight())),
             "a call left in flight would be replayed to the model as still running, forever"
         );
     }
@@ -387,7 +361,7 @@ mod tests {
     /// update to the plan, so persisting image payloads would cost a megabyte
     /// per screenshot per save, forever, to store something nothing reads back.
     /// And a document written before images existed must still *load*, because
-    /// the alternative is a King whose court vanishes after an upgrade.
+    /// the alternative is a user whose model vanishes after an upgrade.
     #[test]
     fn a_picture_is_shown_but_never_filed() {
         let dir = tempfile::tempdir().unwrap();
@@ -395,16 +369,16 @@ mod tests {
 
         let mut seen = plan("plan-1");
         seen.status = kingdom_core::PlanStatus::AwaitingReview;
-        seen.begin_deed(kingdom_core::Deed::begun(
+        seen.begin_tool_call(kingdom_core::ToolCall::started(
             "call-1",
             "read_image",
             serde_json::json!({ "path": "shot.png" }),
         ));
-        seen.settle_deed(
+        seen.settle_tool_call(
             "call-1",
-            kingdom_core::DeedOutcome::seen(
+            kingdom_core::ToolOutcome::seen(
                 "Looked at shot.png (3 bytes).",
-                vec![kingdom_core::DeedImage {
+                vec![kingdom_core::ToolImage {
                     media_type: "image/png".into(),
                     data: "QUJD".repeat(1000),
                 }],
@@ -413,12 +387,12 @@ mod tests {
 
         save(root, &seen).unwrap();
 
-        // The live plan keeps its picture: saving must not blind the court
+        // The live plan keeps its picture: saving must not blind the model
         // mid-turn.
         assert_eq!(
             seen.turns()
                 .filter_map(|t| match t {
-                    kingdom_core::Turn::Did(d) => Some(d.shown().len()),
+                    kingdom_core::Turn::Tool(d) => Some(d.shown().len()),
                     _ => None,
                 })
                 .sum::<usize>(),
@@ -437,21 +411,21 @@ mod tests {
         );
 
         let reloaded = load(root);
-        let deed = reloaded[0]
+        let tool_call = reloaded[0]
             .turns()
             .find_map(|t| match t {
-                kingdom_core::Turn::Did(d) => Some(d.clone()),
+                kingdom_core::Turn::Tool(d) => Some(d.clone()),
                 _ => None,
             })
             .expect("the deed itself is still recorded");
-        assert!(deed.shown().is_empty());
-        assert_eq!(deed.report(), "Looked at shot.png (3 bytes).");
+        assert!(tool_call.shown().is_empty());
+        assert_eq!(tool_call.report(), "Looked at shot.png (3 bytes).");
     }
 
-    /// A plan document written before deeds could carry images -- no `images`
-    /// key anywhere -- must still load. Written as literal JSON rather than by
-    /// round-tripping today's types, because a round trip would serialise the
-    /// *current* shape and prove nothing about the old one.
+    /// A plan document written before tool calls could carry images -- no
+    /// `images` key anywhere -- must still load. Written as literal JSON rather
+    /// than by round-tripping today's types, because a round trip would
+    /// serialise the *current* shape and prove nothing about the old one.
     #[test]
     fn a_plan_recorded_before_images_existed_still_loads() {
         let dir = tempfile::tempdir().unwrap();
@@ -468,7 +442,7 @@ mod tests {
             "model": "mock",
             "effort": null,
             "transcript": [
-                { "Did": {
+                { "Tool": {
                     "id": "call-1",
                     "tool": "bash",
                     "input": { "cmd": "cargo test" },
@@ -491,15 +465,15 @@ mod tests {
 
         let loaded = load(root);
         assert_eq!(loaded.len(), 1, "an older document must not be skipped");
-        let deed = loaded[0]
+        let tool_call = loaded[0]
             .turns()
             .find_map(|t| match t {
-                kingdom_core::Turn::Did(d) => Some(d.clone()),
+                kingdom_core::Turn::Tool(d) => Some(d.clone()),
                 _ => None,
             })
             .expect("its deed must survive the upgrade");
-        assert_eq!(deed.report(), "ok");
-        assert!(deed.shown().is_empty(), "absent means no pictures, not a parse failure");
+        assert_eq!(tool_call.report(), "ok");
+        assert!(tool_call.shown().is_empty(), "absent means no pictures, not a parse failure");
     }
 }
 

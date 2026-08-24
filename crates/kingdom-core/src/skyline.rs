@@ -2,7 +2,7 @@
 //!
 //! This lives in `kingdom-core`, beside [`crate::layout`], for the same reason
 //! that city placement does: a building must land on the **same spot on every
-//! render and every reload**. The King navigates by spatial memory — "the tall
+//! render and every reload**. The user navigates by spatial memory — "the tall
 //! amber tower on the left of the auth district" — and that memory is worthless
 //! if the skyline reshuffles. Being a pure function of the file tree makes the
 //! stability testable rather than hoped for.
@@ -17,13 +17,13 @@
 //!   question.
 //! - **Height also rises with mass**, compressed by a power curve. Area and
 //!   height reinforce each other so the dominant module reads instantly, from
-//!   any zoom, without the King decoding a legend.
+//!   any zoom, without the user decoding a legend.
 //! - **Nothing is silently dropped.** Files pruned by the caps below are
 //!   aggregated into a *commons* lot that still carries their count and their
 //!   weight, so a huge folder always looks huge. A map that quietly under-reports
 //!   mass would be worse than no map.
 
-use crate::model::{Building, District, Ward};
+use crate::model::{SourceFile, Folder, Language};
 use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
@@ -58,19 +58,19 @@ const EMPTY_FILE_WEIGHT: f64 = 64.0;
 
 /// Ceiling on how much a non-code file may weigh.
 ///
-/// Without this the map answers the wrong question. A single 40 MB demo video or
-/// a 2 MB `Cargo.lock` outweighs every source file in the project put together,
-/// so the city becomes a monument to its assets and the King cannot see the code
-/// at all. Capping keeps such files visible -- they are really there, and a
-/// folder full of them still reads as populated -- while stopping them from
-/// dominating area, height, or the choice of landmark.
+/// Without this the map answers the wrong question. A single 40 MB demo video
+/// or a 2 MB `Cargo.lock` outweighs every source file in the project put
+/// together, so the city becomes a monument to its assets and the user cannot
+/// see the code at all. Capping keeps such files visible -- they are really
+/// there, and a folder full of them still reads as populated -- while stopping
+/// them from dominating area, height, or the choice of landmark.
 const NON_CODE_CEILING: u64 = 8_192;
 
-/// True for wards that represent hand-written program logic.
-fn is_code(ward: Ward) -> bool {
+/// True for languages that represent hand-written program logic.
+fn is_code(language: Language) -> bool {
     matches!(
-        ward,
-        Ward::Rust | Ward::Web | Ward::Python | Ward::Go | Ward::Systems | Ward::Shell
+        language,
+        Language::Rust | Language::Web | Language::Python | Language::Go | Language::Systems | Language::Shell
     )
 }
 
@@ -78,11 +78,11 @@ fn is_code(ward: Ward) -> bool {
 ///
 /// This is the difference between "where are my bytes?" and "where is my code?",
 /// and only the second is worth a map.
-fn mass(ward: Ward, bulk: u64) -> u64 {
-    if is_code(ward) {
-        bulk
+fn mass(language: Language, bytes: u64) -> u64 {
+    if is_code(language) {
+        bytes
     } else {
-        bulk.min(NON_CODE_CEILING)
+        bytes.min(NON_CODE_CEILING)
     }
 }
 
@@ -111,7 +111,7 @@ pub struct Lot {
     pub width: f64,
     pub depth: f64,
     pub height: f64,
-    pub ward: Ward,
+    pub language: Language,
     pub kind: LotKind,
     /// How many real files this lot represents: 1 for a tower, N for a commons.
     pub files: usize,
@@ -274,8 +274,8 @@ pub struct Plate {
     /// Nesting level; 0 is the city's own root plate.
     pub level: usize,
     pub files: usize,
-    /// The ward holding the most bytes here, used to tint the plate.
-    pub ward: Ward,
+    /// The language holding the most bytes here, used to tint the plate.
+    pub language: Language,
 }
 
 /// A city's fully laid-out skyline.
@@ -300,7 +300,7 @@ pub struct Skyline {
 /// Lays out a project's folder tree as a city of the given radius.
 ///
 /// `radius` is the city's footprint from [`crate::layout::CityPlacement`].
-pub fn build_skyline(root: &District, radius: f64) -> Skyline {
+pub fn build_skyline(root: &Folder, radius: f64) -> Skyline {
     let half = radius * BUILD_EXTENT;
     let mut skyline = Skyline {
         half_extent: half,
@@ -314,7 +314,7 @@ pub fn build_skyline(root: &District, radius: f64) -> Skyline {
 
     // Height is normalised against the city's own largest file, so a small
     // library still gets a legible skyline instead of a uniform pancake.
-    let tallest = trimmed.max_bulk().max(1) as f64;
+    let tallest = trimmed.max_bytes().max(1) as f64;
 
     let ground = Rect {
         x: -half,
@@ -323,14 +323,14 @@ pub fn build_skyline(root: &District, radius: f64) -> Skyline {
         h: half * 2.0,
     };
 
-    lay_district(&trimmed, ground, 0, radius, tallest, &mut skyline);
+    lay_folder(&trimmed, ground, 0, radius, tallest, &mut skyline);
 
     // SVG has no depth buffer, so draw order carries the whole 3D illusion.
     order_for_painting(&mut skyline.lots);
 
     // The landmark answers "where is the bulk of my code?", so it must be code:
     // a project's largest file is very often a lockfile or a demo video, and
-    // crowning one of those would point the King at the least interesting thing
+    // crowning one of those would point the user at the least interesting thing
     // in the city.
     skyline.cathedral = skyline
         .lots
@@ -338,8 +338,8 @@ pub fn build_skyline(root: &District, radius: f64) -> Skyline {
         .enumerate()
         .filter(|(_, l)| l.kind == LotKind::Tower)
         .max_by(|(_, a), (_, b)| {
-            is_code(a.ward)
-                .cmp(&is_code(b.ward))
+            is_code(a.language)
+                .cmp(&is_code(b.language))
                 .then_with(|| {
                     a.height
                         .partial_cmp(&b.height)
@@ -396,8 +396,8 @@ impl Rect {
     }
 }
 
-fn lay_district(
-    district: &Trimmed,
+fn lay_folder(
+    folder: &Trimmed,
     cell: Rect,
     level: usize,
     radius: f64,
@@ -407,88 +407,88 @@ fn lay_district(
     let plate = cell.inset(plate_pad(cell, level));
 
     out.plates.push(Plate {
-        path: district.path.clone(),
-        name: district.name.clone(),
+        path: folder.path.clone(),
+        name: folder.name.clone(),
         x: plate.cx(),
         y: plate.cy(),
         width: plate.w,
         depth: plate.h,
         level,
-        files: district.total_files(),
-        ward: district.dominant_ward(),
+        files: folder.total_files(),
+        language: folder.dominant_language(),
     });
 
     // Children compete for area with this district's own files, which are
     // treated as one more claimant so a folder that is mostly loose files still
     // reads as heavy against its sub-folders.
-    let own_weight = district.own_weight();
-    let mut weights: Vec<f64> = district.children.iter().map(Trimmed::weight).collect();
+    let own_weight = folder.own_weight();
+    let mut weights: Vec<f64> = folder.children.iter().map(Trimmed::weight).collect();
     if own_weight > 0.0 {
         weights.push(own_weight);
     }
 
     let cells = squarify(&weights, plate);
 
-    for (child, cell) in district.children.iter().zip(&cells) {
-        lay_district(child, *cell, level + 1, radius, tallest, out);
+    for (child, cell) in folder.children.iter().zip(&cells) {
+        lay_folder(child, *cell, level + 1, radius, tallest, out);
     }
 
     if own_weight > 0.0 {
-        if let Some(cell) = cells.get(district.children.len()) {
-            lay_buildings(district, *cell, radius, tallest, out);
+        if let Some(cell) = cells.get(folder.children.len()) {
+            lay_source_files(folder, *cell, radius, tallest, out);
         }
     }
 }
 
 /// Places one district's own files inside its cell, again by treemap so that
 /// footprint area stays proportional to file size.
-fn lay_buildings(district: &Trimmed, cell: Rect, radius: f64, tallest: f64, out: &mut Skyline) {
-    let mut weights: Vec<f64> = district
-        .buildings
+fn lay_source_files(folder: &Trimmed, cell: Rect, radius: f64, tallest: f64, out: &mut Skyline) {
+    let mut weights: Vec<f64> = folder
+        .source_files
         .iter()
-        .map(|b| (mass(b.ward, b.bulk) as f64).max(EMPTY_FILE_WEIGHT))
+        .map(|b| (mass(b.language, b.bytes) as f64).max(EMPTY_FILE_WEIGHT))
         .collect();
 
-    let has_commons = district.extra_files > 0;
+    let has_commons = folder.extra_files > 0;
     if has_commons {
-        weights.push(district.extra_weight());
+        weights.push(folder.extra_weight());
     }
 
     let cells = squarify(&weights, cell);
 
-    for (building, cell) in district.buildings.iter().zip(&cells) {
+    for (source_file, cell) in folder.source_files.iter().zip(&cells) {
         let foot = footprint(*cell);
         out.lots.push(Lot {
-            path: building.path.clone(),
-            name: building.name.clone(),
+            path: source_file.path.clone(),
+            name: source_file.name.clone(),
             x: foot.cx(),
             y: foot.cy(),
             width: foot.w,
             depth: foot.h,
-            height: height_for(mass(building.ward, building.bulk), tallest, radius),
-            ward: building.ward,
+            height: height_for(mass(source_file.language, source_file.bytes), tallest, radius),
+            language: source_file.language,
             kind: LotKind::Tower,
             files: 1,
         });
     }
 
     if has_commons {
-        if let Some(cell) = cells.get(district.buildings.len()) {
+        if let Some(cell) = cells.get(folder.source_files.len()) {
             let foot = footprint(*cell);
             // The commons stands for many files at once, so it is sized by their
             // mean rather than their sum: a low, broad block, not a false spire.
-            let mean = district.extra_bulk / district.extra_files.max(1) as u64;
+            let mean = folder.extra_bytes / folder.extra_files.max(1) as u64;
             out.lots.push(Lot {
-                path: format!("{}\u{1f}commons", district.path),
-                name: format!("{} more files", district.extra_files),
+                path: format!("{}\u{1f}commons", folder.path),
+                name: format!("{} more files", folder.extra_files),
                 x: foot.cx(),
                 y: foot.cy(),
                 width: foot.w,
                 depth: foot.h,
                 height: height_for(mean, tallest, radius) * 0.6,
-                ward: district.extra_ward,
+                language: folder.extra_language,
                 kind: LotKind::Commons,
-                files: district.extra_files,
+                files: folder.extra_files,
             });
         }
     }
@@ -536,8 +536,8 @@ fn plate_pad(cell: Rect, level: usize) -> f64 {
 /// lockfile and hundreds of small modules, and a linear scale would render the
 /// latter as a flat plain. The ceiling is generous because vertical presence is
 /// what makes a city read as a city rather than as a patterned floor.
-fn height_for(bulk: u64, tallest: f64, radius: f64) -> f64 {
-    let norm = (bulk as f64 / tallest).clamp(0.0, 1.0);
+fn height_for(bytes: u64, tallest: f64, radius: f64) -> f64 {
+    let norm = (bytes as f64 / tallest).clamp(0.0, 1.0);
     let min = radius * 0.09;
     let max = radius * 0.95;
     min + norm.powf(0.42) * (max - min)
@@ -671,17 +671,17 @@ fn worst_aspect(sum: f64, max: f64, min: f64, side: f64) -> f64 {
 struct Trimmed {
     name: String,
     path: String,
-    buildings: Vec<Building>,
+    source_files: Vec<SourceFile>,
     children: Vec<Trimmed>,
     /// Files folded away by the caps, still counted and still weighed.
     extra_files: usize,
-    extra_bulk: u64,
-    extra_ward: Ward,
+    extra_bytes: u64,
+    extra_language: Language,
 }
 
 impl Trimmed {
     fn total_files(&self) -> usize {
-        self.buildings.len()
+        self.source_files.len()
             + self.extra_files
             + self
                 .children
@@ -690,23 +690,23 @@ impl Trimmed {
                 .sum::<usize>()
     }
 
-    fn own_bulk(&self) -> u64 {
-        self.buildings
+    fn own_bytes(&self) -> u64 {
+        self.source_files
             .iter()
-            .map(|b| mass(b.ward, b.bulk))
+            .map(|b| mass(b.language, b.bytes))
             .sum::<u64>()
-            + self.extra_bulk
+            + self.extra_bytes
     }
 
-    fn total_bulk(&self) -> u64 {
-        self.own_bulk() + self.children.iter().map(Trimmed::total_bulk).sum::<u64>()
+    fn total_bytes(&self) -> u64 {
+        self.own_bytes() + self.children.iter().map(Trimmed::total_bytes).sum::<u64>()
     }
 
-    fn max_bulk(&self) -> u64 {
-        self.buildings
+    fn max_bytes(&self) -> u64 {
+        self.source_files
             .iter()
-            .map(|b| mass(b.ward, b.bulk))
-            .chain(self.children.iter().map(Trimmed::max_bulk))
+            .map(|b| mass(b.language, b.bytes))
+            .chain(self.children.iter().map(Trimmed::max_bytes))
             .max()
             .unwrap_or(0)
     }
@@ -714,18 +714,18 @@ impl Trimmed {
     /// Weight of this district's own files, floored by count so that even a
     /// folder of empty files still claims ground.
     fn own_weight(&self) -> f64 {
-        let files = self.buildings.len() + self.extra_files;
+        let files = self.source_files.len() + self.extra_files;
         if files == 0 {
             return 0.0;
         }
-        (self.own_bulk() as f64).max(files as f64 * EMPTY_FILE_WEIGHT)
+        (self.own_bytes() as f64).max(files as f64 * EMPTY_FILE_WEIGHT)
     }
 
     fn extra_weight(&self) -> f64 {
         if self.extra_files == 0 {
             return 0.0;
         }
-        (self.extra_bulk as f64).max(self.extra_files as f64 * EMPTY_FILE_WEIGHT)
+        (self.extra_bytes as f64).max(self.extra_files as f64 * EMPTY_FILE_WEIGHT)
     }
 
     fn weight(&self) -> f64 {
@@ -733,28 +733,28 @@ impl Trimmed {
         if files == 0 {
             return 0.0;
         }
-        (self.total_bulk() as f64).max(files as f64 * EMPTY_FILE_WEIGHT)
+        (self.total_bytes() as f64).max(files as f64 * EMPTY_FILE_WEIGHT)
     }
 
-    /// The ward holding the most bytes anywhere beneath this district.
-    fn dominant_ward(&self) -> Ward {
-        let mut totals = [0u64; Ward::ALL.len()];
+    /// The language holding the most bytes anywhere beneath this district.
+    fn dominant_language(&self) -> Language {
+        let mut totals = [0u64; Language::ALL.len()];
         self.tally(&mut totals);
-        Ward::ALL
+        Language::ALL
             .iter()
             .enumerate()
             .max_by_key(|(i, _)| totals[*i])
             .filter(|(i, _)| totals[*i] > 0)
             .map(|(_, w)| *w)
-            .unwrap_or(Ward::Other)
+            .unwrap_or(Language::Other)
     }
 
-    fn tally(&self, totals: &mut [u64; Ward::ALL.len()]) {
-        for b in &self.buildings {
-            totals[ward_index(b.ward)] += mass(b.ward, b.bulk).max(1);
+    fn tally(&self, totals: &mut [u64; Language::ALL.len()]) {
+        for b in &self.source_files {
+            totals[language_index(b.language)] += mass(b.language, b.bytes).max(1);
         }
         if self.extra_files > 0 {
-            totals[ward_index(self.extra_ward)] += self.extra_bulk.max(1);
+            totals[language_index(self.extra_language)] += self.extra_bytes.max(1);
         }
         for c in &self.children {
             c.tally(totals);
@@ -762,12 +762,12 @@ impl Trimmed {
     }
 }
 
-fn ward_index(ward: Ward) -> usize {
-    Ward::ALL.iter().position(|w| *w == ward).unwrap_or(0)
+fn language_index(language: Language) -> usize {
+    Language::ALL.iter().position(|w| *w == language).unwrap_or(0)
 }
 
 /// Applies both caps: depth first, then the building budget.
-fn trim(root: &District) -> Trimmed {
+fn trim(root: &Folder) -> Trimmed {
     let mut trimmed = collapse(root, MAX_DEPTH);
     apply_budget(&mut trimmed);
     sort_tree(&mut trimmed);
@@ -778,23 +778,23 @@ fn trim(root: &District) -> Trimmed {
 ///
 /// Their files keep their full paths, so a plan touching a deeply nested file
 /// still lights up a real building.
-fn collapse(district: &District, depth_left: usize) -> Trimmed {
+fn collapse(folder: &Folder, depth_left: usize) -> Trimmed {
     let mut out = Trimmed {
-        name: district.name.clone(),
-        path: district.path.clone(),
-        buildings: district.buildings.clone(),
+        name: folder.name.clone(),
+        path: folder.path.clone(),
+        source_files: folder.source_files.clone(),
         children: Vec::new(),
-        extra_files: district.extra_files,
-        extra_bulk: district.extra_bulk,
-        extra_ward: Ward::Other,
+        extra_files: folder.extra_files,
+        extra_bytes: folder.extra_bytes,
+        extra_language: Language::Other,
     };
 
     if depth_left == 0 {
-        for child in &district.children {
-            absorb(child, &mut out);
+        for child in &folder.children {
+            insert(child, &mut out);
         }
     } else {
-        for child in &district.children {
+        for child in &folder.children {
             if child.total_files() == 0 {
                 continue;
             }
@@ -802,17 +802,17 @@ fn collapse(district: &District, depth_left: usize) -> Trimmed {
         }
     }
 
-    out.extra_ward = dominant_of(district);
+    out.extra_language = dominant_of(folder);
     out
 }
 
 /// Folds an entire subtree's files into one district's own building list.
-fn absorb(district: &District, into: &mut Trimmed) {
-    into.buildings.extend(district.buildings.iter().cloned());
-    into.extra_files += district.extra_files;
-    into.extra_bulk += district.extra_bulk;
-    for child in &district.children {
-        absorb(child, into);
+fn insert(folder: &Folder, into: &mut Trimmed) {
+    into.source_files.extend(folder.source_files.iter().cloned());
+    into.extra_files += folder.extra_files;
+    into.extra_bytes += folder.extra_bytes;
+    for child in &folder.children {
+        insert(child, into);
     }
 }
 
@@ -823,7 +823,7 @@ fn absorb(district: &District, into: &mut Trimmed) {
 /// significant files always earn a tower, wherever they live; the remainder is
 /// still accounted for district by district, so no folder shrinks below its true
 /// mass. Code outranks assets here for the same reason it does when choosing the
-/// cathedral: a city drawn from its images tells the King nothing.
+/// cathedral: a city drawn from its images tells the user nothing.
 fn apply_budget(root: &mut Trimmed) {
     let mut all: Vec<(bool, u64, String)> = Vec::new();
     gather(root, &mut all);
@@ -846,49 +846,50 @@ fn apply_budget(root: &mut Trimmed) {
     demote(root, &keep);
 }
 
-fn gather(district: &Trimmed, out: &mut Vec<(bool, u64, String)>) {
-    for b in &district.buildings {
-        out.push((is_code(b.ward), mass(b.ward, b.bulk), b.path.clone()));
+fn gather(folder: &Trimmed, out: &mut Vec<(bool, u64, String)>) {
+    for b in &folder.source_files {
+        out.push((is_code(b.language), mass(b.language, b.bytes), b.path.clone()));
     }
-    for c in &district.children {
+    for c in &folder.children {
         gather(c, out);
     }
 }
 
-fn demote(district: &mut Trimmed, keep: &BTreeSet<String>) {
-    let mut dropped_bulk = 0u64;
+fn demote(folder: &mut Trimmed, keep: &BTreeSet<String>) {
+    let mut dropped_bytes = 0u64;
     let mut dropped = 0usize;
-    let mut dropped_wards = [0u64; Ward::ALL.len()];
+    let mut dropped_languages = [0u64; Language::ALL.len()];
 
-    district.buildings.retain(|b| {
+    folder.source_files.retain(|b| {
         if keep.contains(&b.path) {
             true
         } else {
             dropped += 1;
-            dropped_bulk += mass(b.ward, b.bulk);
-            dropped_wards[ward_index(b.ward)] += mass(b.ward, b.bulk).max(1);
+            dropped_bytes += mass(b.language, b.bytes);
+            dropped_languages[language_index(b.language)] += mass(b.language, b.bytes).max(1);
             false
         }
     });
 
     if dropped > 0 {
-        // Blend the demoted files' dominant ward with whatever the scanner had
-        // already set aside, so the commons block is tinted by what it holds.
-        if district.extra_files == 0 {
-            if let Some((_, ward)) = Ward::ALL
+        // Blend the demoted files' dominant language with whatever the scanner
+        // had already set aside, so the commons block is tinted by what it
+        // holds.
+        if folder.extra_files == 0 {
+            if let Some((_, language)) = Language::ALL
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| dropped_wards[*i] > 0)
-                .max_by_key(|(i, _)| dropped_wards[*i])
+                .filter(|(i, _)| dropped_languages[*i] > 0)
+                .max_by_key(|(i, _)| dropped_languages[*i])
             {
-                district.extra_ward = *ward;
+                folder.extra_language = *language;
             }
         }
-        district.extra_files += dropped;
-        district.extra_bulk += dropped_bulk;
+        folder.extra_files += dropped;
+        folder.extra_bytes += dropped_bytes;
     }
 
-    for child in &mut district.children {
+    for child in &mut folder.children {
         demote(child, keep);
     }
 }
@@ -896,45 +897,45 @@ fn demote(district: &mut Trimmed, keep: &BTreeSet<String>) {
 /// Sorts every level so placement never depends on directory-read order.
 ///
 /// This is what makes the layout reproducible across machines and reloads.
-fn sort_tree(district: &mut Trimmed) {
-    district.buildings.sort_by(|a, b| {
-        mass(b.ward, b.bulk)
-            .cmp(&mass(a.ward, a.bulk))
+fn sort_tree(folder: &mut Trimmed) {
+    folder.source_files.sort_by(|a, b| {
+        mass(b.language, b.bytes)
+            .cmp(&mass(a.language, a.bytes))
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.name.cmp(&b.name))
     });
-    district.children.sort_by(|a, b| {
-        b.total_bulk()
-            .cmp(&a.total_bulk())
+    folder.children.sort_by(|a, b| {
+        b.total_bytes()
+            .cmp(&a.total_bytes())
             .then_with(|| a.path.cmp(&b.path))
     });
-    for child in &mut district.children {
+    for child in &mut folder.children {
         sort_tree(child);
     }
 }
 
-/// Dominant ward of a raw district, used to tint aggregated remainders.
-fn dominant_of(district: &District) -> Ward {
-    let mut totals = [0u64; Ward::ALL.len()];
+/// Dominant language of a raw district, used to tint aggregated remainders.
+fn dominant_of(folder: &Folder) -> Language {
+    let mut totals = [0u64; Language::ALL.len()];
 
-    fn walk(d: &District, totals: &mut [u64; Ward::ALL.len()]) {
-        for b in &d.buildings {
-            totals[ward_index(b.ward)] += mass(b.ward, b.bulk).max(1);
+    fn walk(d: &Folder, totals: &mut [u64; Language::ALL.len()]) {
+        for b in &d.source_files {
+            totals[language_index(b.language)] += mass(b.language, b.bytes).max(1);
         }
         for c in &d.children {
             walk(c, totals);
         }
     }
 
-    walk(district, &mut totals);
+    walk(folder, &mut totals);
 
-    Ward::ALL
+    Language::ALL
         .iter()
         .enumerate()
         .filter(|(i, _)| totals[*i] > 0)
         .max_by_key(|(i, _)| totals[*i])
         .map(|(_, w)| *w)
-        .unwrap_or(Ward::Other)
+        .unwrap_or(Language::Other)
 }
 
 #[cfg(test)]
@@ -943,10 +944,10 @@ mod tests {
 
     /// Builds a district tree from `(path, bytes)` pairs, creating folders as
     /// needed, so tests read as the shapes of real projects.
-    fn tree(files: &[(&str, u64)]) -> District {
-        let mut root = District::new("root", "");
+    fn tree(files: &[(&str, u64)]) -> Folder {
+        let mut root = Folder::new("root", "");
 
-        for (path, bulk) in files {
+        for (path, bytes) in files {
             let parts: Vec<&str> = path.split('/').collect();
             let (name, folders) = parts.split_last().expect("path has a file name");
 
@@ -962,18 +963,18 @@ mod tests {
                 let idx = match existing {
                     Some(i) => i,
                     None => {
-                        node.children.push(District::new(*folder, prefix.clone()));
+                        node.children.push(Folder::new(*folder, prefix.clone()));
                         node.children.len() - 1
                     }
                 };
                 node = &mut node.children[idx];
             }
 
-            node.buildings.push(Building {
+            node.source_files.push(SourceFile {
                 name: (*name).to_string(),
                 path: (*path).to_string(),
-                ward: Ward::from_path(path),
-                bulk: *bulk,
+                language: Language::from_path(path),
+                bytes: *bytes,
             });
         }
 
@@ -981,7 +982,7 @@ mod tests {
     }
 
     /// A project shaped like a real one: nested, lopsided, mixed languages.
-    fn sample_project(files: usize) -> District {
+    fn sample_project(files: usize) -> Folder {
         let owned: Vec<(String, u64)> = (0..files)
             .map(|i| {
                 let path = match i % 5 {
@@ -1051,7 +1052,7 @@ mod tests {
         }
     }
 
-    /// The King navigates by spatial memory. If a building moves between
+    /// The user navigates by spatial memory. If a building moves between
     /// reloads, the map stops being worth reading -- the same reason
     /// `spiral_layout_is_deterministic` exists for cities.
     #[test]
@@ -1063,7 +1064,7 @@ mod tests {
         let mut shuffled = project.clone();
         shuffled.children.reverse();
         for child in &mut shuffled.children {
-            child.buildings.reverse();
+            child.source_files.reverse();
         }
         assert_eq!(
             build_skyline(&project, 90.0),

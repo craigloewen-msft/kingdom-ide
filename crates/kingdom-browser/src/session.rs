@@ -1,9 +1,9 @@
 //! Per-plan Chrome sessions and the CDP operations shared by browser tools.
 //!
 //! The manager owns state instead of each tool value because Kingdom rebuilds
-//! its tool list for every Deed. State on a tool would therefore look persistent
-//! in one call and vanish in the next, breaking login and any other flow whose
-//! meaning spans multiple browser actions.
+//! its tool list for every Tool call. State on a tool would therefore look
+//! persistent in one call and vanish in the next, breaking login and any other
+//! flow whose meaning spans multiple browser actions.
 
 
 use crate::profile::{PerfReading, ProfilingState};
@@ -118,9 +118,10 @@ impl BrowserSession {
 
 impl BrowserSession {
     async fn launch(plan: &str) -> Result<Self, BrowserError> {
-        // Profiles persist between Deeds because the Chrome process persists.
-        // Reusing one after a server crash leaves Chromium's SingletonLock
-        // behind and turns every future launch into a false "Chrome missing".
+        // Profiles persist between Tool calls because the Chrome process
+        // persists. Reusing one after a server crash leaves Chromium's
+        // SingletonLock behind and turns every future launch into a false
+        // "Chrome missing".
         let profile = profile_dir(plan);
         let _ = std::fs::remove_dir_all(&profile);
         let mut builder = BrowserConfig::builder()
@@ -227,8 +228,9 @@ impl BrowserSession {
 /// Owns one live Chrome session per plan.
 ///
 /// A process-global browser would leak cookies and page state between plans;
-/// per-Deed browsers lose exactly the continuity these tools exist to inspect.
-/// The plan id is therefore the session boundary, just as it is for tmux.
+/// per-Tool call browsers lose exactly the continuity these tools exist to
+/// inspect. The plan id is therefore the session boundary, just as it is for
+/// tmux.
 pub struct BrowserSessionManager {
     sessions: RwLock<HashMap<String, Arc<RwLock<BrowserSession>>>>,
 }
@@ -252,7 +254,7 @@ impl BrowserSessionManager {
             return Ok(session);
         }
         // Keep the write lock through launch. Launch is rare, and allowing two
-        // concurrent first Deeds to race would orphan one Chrome process.
+        // concurrent first Tool calls to race would orphan one Chrome process.
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get(plan).cloned() {
             return Ok(session);
@@ -266,10 +268,10 @@ impl BrowserSessionManager {
     ///
     /// **Never launches Chrome.** `Ok(None)` means this plan has no browser and
     /// the caller should say so. That restraint is the point: looking must not
-    /// be an act that spawns a process. A spyglass that started a browser by
+    /// be an act that spawns a process. A screencast that started a browser by
     /// being opened would manufacture exactly the invisible resource this
-    /// product exists to make visible -- and the King would be watching a blank
-    /// page his court never asked for.
+    /// product exists to make visible -- and the user would be watching a blank
+    /// page his model never asked for.
     ///
     /// The returned `Arc` is what keeps the screencast alive; dropping it
     /// detaches this viewer, and dropping the last one stops the capture.
@@ -584,7 +586,7 @@ const CACHED_BROWSERS: &[&str] = &[
 ///    downloaded.
 ///
 /// Step 3 is why this function exists. Without it the browser tools are dead on
-/// a machine that demonstrably *can* run a browser, and the King is told to go
+/// a machine that demonstrably *can* run a browser, and the user is told to go
 /// and install something he already has.
 fn chrome_executable() -> Result<Option<PathBuf>, BrowserError> {
     if let Ok(executable) = std::env::var("KINGDOM_CHROME_EXECUTABLE") {
@@ -760,7 +762,7 @@ mod tests {
 
     /// A viewer must never be what launches a browser.
     ///
-    /// The panel is opened by curiosity -- the King wondering what a plan is
+    /// The panel is opened by curiosity -- the user wondering what a plan is
     /// doing -- and if looking spawned a Chrome, then the act of looking would
     /// itself manufacture the kind of invisible resource this product exists to
     /// surface. `Ok(None)` is the honest answer for a plan that has never

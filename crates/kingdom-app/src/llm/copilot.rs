@@ -54,7 +54,7 @@ const SKIP: &[&str] = &[
     "trajectory-compaction",
 ];
 
-/// Copilot reports a raw model family; the King thinks in vendors.
+/// Copilot reports a raw model family; the user thinks in vendors.
 const VENDOR_BY_PREFIX: &[(&str, &str)] = &[
     ("claude", "Anthropic"),
     ("gemini", "Google"),
@@ -88,7 +88,7 @@ impl Provider for CopilotProvider {
     /// that 404 while hiding ones that work.
     ///
     /// A failure yields no models and says why, rather than erroring: the
-    /// picker stays usable and the King is told what to fix, which is more
+    /// picker stays usable and the user is told what to fix, which is more
     /// useful than an empty list and a toast.
     async fn catalogue(&self) -> ProviderCatalogue {
         if let Some(options) = cached() {
@@ -200,7 +200,7 @@ async fn fetch(token: &str) -> Result<Vec<ModelOption>, String> {
 ///
 /// Every filter here is a refusal to guess: a model whose shape we do not
 /// recognise is dropped rather than listed with invented capabilities, because
-/// a listed-but-broken model costs the King a decree to discover.
+/// a listed-but-broken model costs the user a prompt to discover.
 fn parse(payload: &Value) -> Vec<ModelOption> {
     let mut options: Vec<ModelOption> = payload["data"]
         .as_array()
@@ -239,7 +239,7 @@ fn parse_one(model: &Value) -> Option<ModelOption> {
     }
 
     // No declared window means we do not know how much this model can hold, and
-    // a guess here would be a guess the King acts on.
+    // a guess here would be a guess the user acts on.
     let context_window = capabilities["limits"]["max_context_window_tokens"].as_u64()? as usize;
 
     let efforts = capabilities["supports"]["reasoning_effort"]
@@ -353,7 +353,7 @@ impl CopilotModel {
 
 /// Builds the chat completions payload.
 ///
-/// `reasoning_effort` is present only when the King explicitly chose a level.
+/// `reasoning_effort` is present only when the user explicitly chose a level.
 /// Omitting it asks for the model's native default; sending `"none"` asks for a
 /// specific level that only some models accept. Conflating the two either
 /// silently changes how hard the model thinks or earns an opaque 400, so the
@@ -408,46 +408,46 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 
     for turn in &brief.turns {
         match turn {
-            Turn::Said(u) => out.push(json!({
+            Turn::Message(u) => out.push(json!({
                 "role": match u.speaker {
-                    Speaker::King => "user",
-                    Speaker::Court => "assistant",
+                    Speaker::User => "user",
+                    Speaker::Assistant => "assistant",
                 },
                 "content": u.body,
             })),
-            Turn::Did(deed) => {
+            Turn::Tool(tool_call) => {
                 out.push(json!({
                     "role": "assistant",
                     "content": Value::Null,
                     "tool_calls": [{
-                        "id": deed.id,
+                        "id": tool_call.id,
                         "type": "function",
                         "function": {
-                            "name": deed.tool,
-                            "arguments": deed.input.to_string(),
+                            "name": tool_call.tool,
+                            "arguments": tool_call.input.to_string(),
                         }
                     }],
                 }));
                 out.push(json!({
                     "role": "tool",
-                    "tool_call_id": deed.id,
+                    "tool_call_id": tool_call.id,
                     // A call still in flight cannot happen here -- the loop
-                    // settles every deed before asking again -- but saying so
-                    // beats sending an empty result, which the model would read
-                    // as a command that printed nothing.
-                    "content": if deed.in_flight() {
+                    // settles every tool call before asking again -- but saying
+                    // so beats sending an empty result, which the model would
+                    // read as a command that printed nothing.
+                    "content": if tool_call.in_flight() {
                         "(still running)"
                     } else {
-                        deed.report()
+                        tool_call.report()
                     },
                 }));
                 // Belt as well as braces: `ToolSpec::for_model` already keeps
-                // `read_image` away from a model with no vision, so a deed with
-                // pictures should be unreachable here. Checking anyway costs a
-                // branch and avoids failing a whole turn if that filter is ever
-                // bypassed.
+                // `read_image` away from a model with no vision, so a tool call
+                // with pictures should be unreachable here. Checking anyway
+                // costs a branch and avoids failing a whole turn if that filter
+                // is ever bypassed.
                 if can_see {
-                    if let Some(message) = shown(deed) {
+                    if let Some(message) = shown(tool_call) {
                         out.push(message);
                     }
                 }
@@ -467,20 +467,20 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 /// images outright (`phoenix-llm/src/openai.rs`); a shown picture is worth a
 /// synthetic turn.
 ///
-/// **Why this is safe.** The message is built here, from a [`Deed`], and exists
-/// only inside this request body. It is never a `Turn::Said`, never an
-/// `Utterance`, never in the transcript. That containment is the whole defence:
-/// the doc on [`kingdom_core::Turn`] argues that Kingdom's plumbing must not be
-/// replayed to a model in the King's voice, and a `user` message the King never
-/// said is exactly that hazard -- so it is never allowed to exist as a domain
-/// value where something could mistake it for one.
+/// **Why this is safe.** The message is built here, from a [`ToolCall`], and
+/// exists only inside this request body. It is never a `Turn::Message`, never
+/// an `Message`, never in the transcript. That containment is the whole
+/// defence: the doc on [`kingdom_core::Turn`] argues that Kingdom's plumbing
+/// must not be replayed to a model in the user's voice, and a `user` message
+/// the user never said is exactly that hazard -- so it is never allowed to
+/// exist as a domain value where something could mistake it for one.
 ///
 /// **What should replace it.** Copilot's Responses API carries images natively
 /// on a `FunctionCallOutput`, with no invented turn. That is the correct wire
 /// format and the eventual answer here; it is a rewrite of this module's
 /// request and response shapes, which is why this shim exists in the meantime.
-fn shown(deed: &kingdom_core::Deed) -> Option<Value> {
-    let images = deed.shown();
+fn shown(tool_call: &kingdom_core::ToolCall) -> Option<Value> {
+    let images = tool_call.shown();
     if images.is_empty() {
         return None;
     }
@@ -489,7 +489,7 @@ fn shown(deed: &kingdom_core::Deed) -> Option<Value> {
     // model to guess why it is suddenly looking at something.
     let mut parts = vec![json!({
         "type": "text",
-        "text": format!("The image from the {} call above:", deed.tool),
+        "text": format!("The image from the {} call above:", tool_call.tool),
     })];
     parts.extend(images.iter().map(|image| {
         json!({
@@ -530,7 +530,7 @@ impl Model for CopilotModel {
 
         if !status.is_success() {
             // Surface the provider's own words. An opaque "request failed" here
-            // is the fastest way to waste the King's afternoon.
+            // is the fastest way to waste the user's afternoon.
             return Err(ModelError::Refused(format!(
                 "Copilot returned {}: {}",
                 status.as_u16(),
@@ -546,7 +546,7 @@ impl Model for CopilotModel {
         // Tool calls take precedence over any prose alongside them. A model
         // often narrates what it is about to do in the same message; treating
         // that narration as the finished answer would settle the plan while the
-        // court still had work it wanted to do.
+        // model still had work it wanted to do.
         let acts = parse_acts(&message["tool_calls"]);
         if !acts.is_empty() {
             return Ok(Reply::Acts(acts));
@@ -561,7 +561,7 @@ impl Model for CopilotModel {
         }
 
         Ok(Reply::Spoke(Draft {
-            title: headline(&text, &brief.charter.city.name),
+            title: headline(&text, &brief.system_prompt.city.name),
             summary: first_sentence(&text),
             body: text,
         }))
@@ -609,20 +609,20 @@ fn parse_acts(tool_calls: &Value) -> Vec<Act> {
         .collect()
 }
 
-/// The system prompt: whatever the charter says.
+/// The system prompt: whatever `system_prompt.rs` assembled.
 ///
 /// Deliberately thin. This used to *build* the prompt, which quietly made it
 /// Copilot's prompt rather than Kingdom's -- a second provider would have had
 /// to reinvent it, and the two would have drifted the first time either was
 /// touched. What a model is told is content, and content belongs in
-/// [`crate::llm::charter`]; a provider's job is transport.
+/// [`crate::llm::system_prompt`]; a provider's job is transport.
 ///
-/// The metaphor is still deliberately absent from it. Kings, courts and decrees
-/// exist to give the *user* a stance toward his agents; they are not
-/// information about the work, and sending them only nudges the model into
-/// answering in costume instead of answering the question.
+/// The metaphor is still deliberately absent from it. It exists to give the
+/// *user* a stance toward their agents; it is not information about the work,
+/// and sending it only nudges the model into answering in costume instead of
+/// answering the question.
 fn system_prompt(brief: &Brief) -> String {
-    brief.charter.render()
+    brief.system_prompt.render()
 }
 
 /// Pulls `{"error":{"message":…}}` out of an error body, falling back to the
@@ -676,16 +676,16 @@ mod tests {
     use super::*;
 
     /// A brief holding one settled tool call, optionally with a picture.
-    fn brief_with_deed(images: Vec<kingdom_core::DeedImage>) -> Brief {
-        let mut deed = kingdom_core::Deed::begun(
+    fn brief_with_tool_call(images: Vec<kingdom_core::ToolImage>) -> Brief {
+        let mut tool_call = kingdom_core::ToolCall::started(
             "call-1",
             "read_image",
             serde_json::json!({ "path": "shot.png" }),
         );
-        deed.outcome = Some(kingdom_core::DeedOutcome::seen("Looked at shot.png.", images));
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::seen("Looked at shot.png.", images));
 
         Brief {
-            charter: crate::llm::Charter {
+            system_prompt: crate::llm::SystemPrompt {
                 city: crate::llm::CityBrief {
                     name: "Testburg".into(),
                     path: "/dev/testburg".into(),
@@ -697,13 +697,13 @@ mod tests {
                 },
                 ..Default::default()
             },
-            turns: vec![Turn::Did(deed)],
+            turns: vec![Turn::Tool(tool_call)],
             tools: Vec::new(),
         }
     }
 
-    fn a_picture() -> Vec<kingdom_core::DeedImage> {
-        vec![kingdom_core::DeedImage {
+    fn a_picture() -> Vec<kingdom_core::ToolImage> {
+        vec![kingdom_core::ToolImage {
             media_type: "image/png".into(),
             data: "QUJD".into(),
         }]
@@ -715,11 +715,11 @@ mod tests {
     /// A `role:"tool"` message cannot carry an image part, so the picture has to
     /// follow as a `user` message -- and the tool message must stay a plain
     /// string, because that is the part the format is strict about. Getting
-    /// either half wrong is an opaque 400 that costs the King a whole turn, so
+    /// either half wrong is an opaque 400 that costs the user a whole turn, so
     /// both are asserted rather than just "the image is in there somewhere".
     #[test]
     fn a_picture_follows_its_tool_result_as_a_user_message() {
-        let messages = messages(&brief_with_deed(a_picture()), true);
+        let messages = messages(&brief_with_tool_call(a_picture()), true);
 
         let tool = messages
             .iter()
@@ -751,18 +751,18 @@ mod tests {
     /// Two independent guards, because each fails silently on its own.
     ///
     /// A model with no vision must never be sent an image -- that is a rejected
-    /// request, not a degraded one. And a call that produced no picture must not
-    /// grow a stray empty `user` turn, which would put words in the King's mouth
-    /// for every ordinary `bash` call in the transcript.
+    /// request, not a degraded one. And a call that produced no picture must
+    /// not grow a stray empty `user` turn, which would put words in the user's
+    /// mouth for every ordinary `bash` call in the transcript.
     #[test]
     fn nothing_is_shown_to_a_model_that_cannot_see_or_for_a_call_with_no_picture() {
-        let blind = messages(&brief_with_deed(a_picture()), false);
+        let blind = messages(&brief_with_tool_call(a_picture()), false);
         assert!(
             !blind.iter().any(|m| m["role"] == "user"),
             "a model without vision must not be sent the image at all: {blind:?}"
         );
 
-        let textual = messages(&brief_with_deed(Vec::new()), true);
+        let textual = messages(&brief_with_tool_call(Vec::new()), true);
         assert!(
             !textual.iter().any(|m| m["role"] == "user"),
             "an ordinary tool result must not invent a turn the King never took"
@@ -777,7 +777,7 @@ mod tests {
     /// Worth pinning because both failure directions are silent: read the wrong
     /// key and every model looks blind, so `read_image` is quietly never
     /// offered and the feature simply does not exist. Guess the other way and
-    /// the King's turn dies on a gateway rejection.
+    /// the user's turn dies on a gateway rejection.
     #[test]
     fn vision_is_recognised_wherever_the_catalogue_declares_it() {
         let seeing = |model: serde_json::Value| parse_one(&model).expect("a usable model").can_see;
@@ -813,7 +813,7 @@ mod tests {
 
     /// The `/models` shape is not ours and cannot fail at compile time, so the
     /// filters that keep unusable models out of the picker are pinned here.
-    /// Each dropped case below costs the King a wasted decree if it leaks
+    /// Each dropped case below costs the user a wasted prompt if it leaks
     /// through: a non-chat model, a Responses-only model, and one whose context
     /// window we would otherwise have to invent.
     #[test]

@@ -1,20 +1,20 @@
 //! Searching the workspace for a pattern.
 //!
-//! The court's way of finding something it cannot yet name a path for. It walks
+//! The model's way of finding something it cannot yet name a path for. It walks
 //! the plan's workspace honouring `.gitignore`, which is the whole reason this
 //! is a tool and not a `grep` command: an unfiltered walk of a real project
 //! returns `target/` and `node_modules/` first and fills the model's context
 //! with build output, so the useful matches never arrive.
 //!
-//! The walk is rooted at [`Workshop::resolve`]'s answer, never at a raw path
+//! The walk is rooted at [`Sandbox::resolve`]'s answer, never at a raw path
 //! from the model. A search is a read of every file it touches, so an
 //! unresolved `path` here leaks a neighbouring city one line at a time -- the
 //! quietest possible version of crossing the boundary.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -32,13 +32,13 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 ///
 /// A ten-megabyte file that survived the ignore rules is a lockfile, a fixture
 /// or a bundle. Scanning it costs seconds and its matches are never the ones
-/// the court wanted.
+/// the model wanted.
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// A ceiling on directory entries visited, so a search cannot become a hang.
 ///
 /// A worktree with a stray `~/Downloads` symlink or a vendored monorepo will
-/// walk for minutes, and the King is sitting watching a plan that looks stuck.
+/// walk for minutes, and the user is sitting watching a plan that looks stuck.
 /// Stopping and *saying so* turns that into one more turn.
 const MAX_ENTRIES_VISITED: usize = 100_000;
 
@@ -47,7 +47,7 @@ const MAX_ENTRIES_VISITED: usize = 100_000;
 /// Belt and braces over `.gitignore`: these are ignored in most projects but
 /// not all, and a repository that happens to commit its `vendor/` is not a
 /// reason to bury every search under it. `.git` is here because hidden entries
-/// are deliberately *not* filtered -- the court has honest business in
+/// are deliberately *not* filtered -- the model has honest business in
 /// `.github/` and dotfiles.
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -119,7 +119,7 @@ impl Tool for Search {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
             return Refusal::BadArguments {
                 tool: "search".to_string(),
@@ -180,7 +180,7 @@ impl Tool for Search {
         // would block a worker thread for as long as the tree takes, stalling
         // every other plan's model call on the same executor.
         match tokio::task::spawn_blocking(move || hunt.run()).await {
-            Ok(output) => DeedOutcome::done(output),
+            Ok(output) => ToolOutcome::done(output),
             Err(e) => Refusal::Refused(format!("the search did not finish: {e}")).into(),
         }
     }
@@ -300,7 +300,7 @@ impl Hunt {
     /// Turns matches into the answer the model sees.
     ///
     /// A search that found nothing is still a search that *ran*, so it is
-    /// [`DeedOutcome::Done`] with "no matches" -- reporting it as a refusal
+    /// [`ToolOutcome::Done`] with "no matches" -- reporting it as a refusal
     /// would tell the model to fix its call when the honest finding is that the
     /// thing it looked for is not there.
     fn report(&self, results: &[String], walk_truncated: bool) -> String {
@@ -387,10 +387,10 @@ mod tests {
     use kingdom_core::Workspace;
 
     async fn search(root: &Path, input: Value) -> String {
-        let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(root.to_str().unwrap()));
         match Search.run(input, &shop).await {
-            DeedOutcome::Done { output, .. } => output,
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => output,
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -447,7 +447,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "needle\n").unwrap();
 
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
         let outcome = Search
             .run(
                 json!({"pattern": "needle", "path": outside.path().to_str().unwrap()}),
@@ -456,7 +456,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(outcome, DeedOutcome::Refused { .. }),
+            matches!(outcome, ToolOutcome::Refused { .. }),
             "searching outside the workspace must be refused: {outcome:?}"
         );
     }

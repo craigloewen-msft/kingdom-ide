@@ -3,16 +3,16 @@
 //! The tool that makes `browser_take_screenshot` worth calling. A screenshot
 //! that a model cannot look at is a file nobody opens; this is the other half
 //! of that feature, and it is deliberately general -- a diagram or a mockup the
-//! King left in the workspace is just as readable as a capture.
+//! user left in the workspace is just as readable as a capture.
 //!
 //! Unlike every other tool here, the result of this one is not words. See
-//! [`kingdom_core::DeedOutcome::seen`] for why images travel beside the text
+//! [`kingdom_core::ToolOutcome::seen`] for why images travel beside the text
 //! rather than inside it, and `llm/copilot.rs` for how they reach a model that
 //! can actually see.
 
-use super::{Refusal, Tool, Workshop};
+use super::{Refusal, Tool, Sandbox};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use kingdom_core::{DeedImage, DeedOutcome};
+use kingdom_core::{ToolImage, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -78,7 +78,7 @@ impl Tool for ReadImage {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let input: ReadImageInput = match serde_json::from_value(input) {
             Ok(input) => input,
             Err(error) => {
@@ -133,12 +133,12 @@ impl Tool for ReadImage {
             }
         };
 
-        // The text is not a duplicate of the picture -- it is what the chamber
-        // renders, what the plan's record keeps, and what a model without
-        // vision is left with. The bytes ride the separate channel.
-        DeedOutcome::seen(
+        // The text is not a duplicate of the picture -- it is what the
+        // conversation renders, what the plan's record keeps, and what a model
+        // without vision is left with. The bytes ride the separate channel.
+        ToolOutcome::seen(
             format!("Looked at {} ({} bytes).", path.display(), bytes.len()),
-            vec![DeedImage {
+            vec![ToolImage {
                 media_type: media.to_string(),
                 data: BASE64.encode(&bytes),
             }],
@@ -163,17 +163,17 @@ mod tests {
 
     /// The whole point of the tool: bytes arrive on the image channel, and the
     /// text stays human-sized. If the payload ever leaks into `output` it would
-    /// work in a test that only checked success, while making the chamber
+    /// work in a test that only checked success, while making the conversation
     /// unreadable and the prompt enormous -- so both halves are asserted.
     #[tokio::test]
     async fn a_picture_travels_beside_the_words_not_inside_them() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shot.png"), A_REAL_PNG).unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_string_lossy()));
 
         let outcome = ReadImage.run(json!({ "path": "shot.png" }), &shop).await;
 
-        let DeedOutcome::Done { output, images } = outcome else {
+        let ToolOutcome::Done { output, images } = outcome else {
             panic!("reading a real png should succeed: {outcome:?}");
         };
         assert_eq!(images.len(), 1);
@@ -195,14 +195,14 @@ mod tests {
     #[tokio::test]
     async fn a_picture_outside_the_workspace_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_string_lossy()));
 
         let outcome = ReadImage
             .run(json!({ "path": "../elsewhere.png" }), &shop)
             .await;
 
         assert!(
-            matches!(outcome, DeedOutcome::Refused { .. }),
+            matches!(outcome, ToolOutcome::Refused { .. }),
             "a path leaving the workspace must be refused: {outcome:?}"
         );
     }
@@ -214,11 +214,11 @@ mod tests {
     async fn something_that_is_not_an_image_is_refused_with_the_list() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"not a picture").unwrap();
-        let shop = Workshop::new(Workspace::in_place(dir.path().to_string_lossy()));
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_string_lossy()));
 
         let outcome = ReadImage.run(json!({ "path": "notes.txt" }), &shop).await;
 
-        let DeedOutcome::Refused { reason } = outcome else {
+        let ToolOutcome::Refused { reason } = outcome else {
             panic!("a text file is not readable as an image: {outcome:?}");
         };
         assert!(
