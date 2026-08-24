@@ -6,11 +6,10 @@
 //! sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
-use crate::api::{begin_plan, list_branches, list_models, model_status};
+use crate::api::{begin_plan, list_branches, list_models};
 use crate::app::KingdomState;
 use kingdom_core::{
-    City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, ModelStatus,
-    WorkspaceMode,
+    City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, WorkspaceMode,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -21,11 +20,9 @@ pub fn DecreeBar() -> impl IntoView {
     let navigate = use_navigate();
 
     let (draft, set_draft) = signal(String::new());
-    let (showing_setup, set_showing_setup) = signal(false);
     let (showing_models, set_showing_models) = signal(false);
     let (showing_workspace, set_showing_workspace) = signal(false);
 
-    let status = Resource::new(|| (), |_| model_status());
     let catalogue = Resource::new(|| (), |_| list_models());
 
     // The decree targets whichever city is selected, so choosing on the map and
@@ -128,11 +125,13 @@ pub fn DecreeBar() -> impl IntoView {
 
                 // Which model the next plan opens with. The choice is recorded
                 // on the plan, so it is settled here rather than mid-draft.
+                // This chip is the only answer to "what will draft this?" --
+                // there is no separate provider badge, because the mock is a
+                // model in the list like any other.
                 <button
                     class="model-chip"
                     title="Choose the model and how hard it thinks"
                     on:click=move |_| {
-                        set_showing_setup.set(false);
                         set_showing_workspace.set(false);
                         set_showing_models.update(|s| *s = !*s);
                     }
@@ -152,38 +151,12 @@ pub fn DecreeBar() -> impl IntoView {
                     class:isolated={move || state.workspace.get() != WorkspaceMode::InPlace}
                     title="Choose where this work happens"
                     on:click=move |_| {
-                        set_showing_setup.set(false);
                         set_showing_models.set(false);
                         set_showing_workspace.update(|s| *s = !*s);
                     }
                 >
                     {move || state.workspace.get().label()}
                     <span class="chip-chevron">"\u{2304}"</span>
-                </button>
-
-                // The badge answers "will a decree actually reach a model?"
-                // before the King spends a decree finding out.
-                <button
-                    class="model-badge"
-                    class:broken={move || {
-                        matches!(status.get(), Some(Ok(ref s)) if !s.is_ready())
-                    }}
-                    title="How plans get drafted"
-                    on:click=move |_| {
-                        set_showing_models.set(false);
-                        set_showing_workspace.set(false);
-                        set_showing_setup.update(|s| *s = !*s);
-                    }
-                >
-                    {move || match status.get() {
-                        Some(Ok(s)) => format!(
-                            "{} {}",
-                            s.provider.label(),
-                            if s.is_ready() { "\u{2713}" } else { "\u{2717}" },
-                        ),
-                        Some(Err(_)) => "model ?".to_string(),
-                        None => "\u{2026}".to_string(),
-                    }}
                 </button>
             </div>
 
@@ -199,10 +172,6 @@ pub fn DecreeBar() -> impl IntoView {
                 <WorkspacePicker on_close=move || set_showing_workspace.set(false)/>
             </Show>
 
-            <Show when={move || showing_setup.get()}>
-                <ModelSetup status=status/>
-            </Show>
-
             <Show when={move || state.error.get().is_some()}>
                 <p class="decree-error">{move || state.error.get().unwrap_or_default()}</p>
             </Show>
@@ -215,6 +184,10 @@ pub fn DecreeBar() -> impl IntoView {
 /// Recommended models first, the rest behind a toggle -- the full Copilot
 /// catalogue runs to dozens of entries, most of which the King will never pick,
 /// and a wall of them costs more attention than it saves.
+///
+/// This is also where a broken credential surfaces. There is no separate status
+/// badge: a thin list and the reason it is thin belong in the same place, at the
+/// moment the King notices the models he expected are missing.
 #[component]
 fn ModelPicker(
     catalogue: Resource<Result<ModelCatalogue, ServerFnError>>,
@@ -224,21 +197,51 @@ fn ModelPicker(
     let state = expect_context::<KingdomState>();
     let (show_all, set_show_all) = signal(false);
 
+    /// Named so a King who cannot see the model he wants knows exactly what to
+    /// set, rather than reading the source to find out.
+    const EXAMPLE: &str = "# .kingdom.env \u{2014} either credential path works
+
+# 1. a token you already hold
+KINGDOM_API_KEY=gho_\u{2026}
+
+# 2. or a command that prints one (the default)
+KINGDOM_API_KEY_HELPER=agency auth github
+
+# optional: which model the picker opens on
+KINGDOM_MODEL=copilot/claude-opus-5";
+
+    // Shown only when something is actually wrong, so a healthy court does not
+    // spend the King's attention on setup instructions he does not need.
+    let needs_help = Memo::new(
+        move |_| matches!(catalogue.get(), Some(Ok(c)) if c.credential != CredentialState::Ready),
+    );
+
     let options = Memo::new(move |_| match catalogue.get() {
         Some(Ok(c)) => c.options,
         _ => Vec::new(),
     });
 
+    // Recommended only, until the King asks for everything -- except when
+    // nothing is recommended at all. That happens exactly when no credential
+    // works and the offline mock is the only model left: filtering it out would
+    // leave the King staring at an empty picker with no way to draft.
     let visible = Memo::new(move |_| {
         let all = show_all.get();
+        let options = options.get();
+        let any_recommended = options.iter().any(|o| o.recommended);
         options
-            .get()
             .into_iter()
-            .filter(|o| all || o.recommended)
+            .filter(|o| all || !any_recommended || o.recommended)
             .collect::<Vec<_>>()
     });
 
-    let hidden_count = Memo::new(move |_| options.get().iter().filter(|o| !o.recommended).count());
+    let hidden_count = Memo::new(move |_| {
+        let options = options.get();
+        match options.iter().any(|o| o.recommended) {
+            true => options.iter().filter(|o| !o.recommended).count(),
+            false => 0,
+        }
+    });
 
     // The effort row belongs to the chosen model: offering a level it does not
     // declare would earn an opaque 400 rather than a harder answer.
@@ -279,6 +282,10 @@ fn ModelPicker(
                     None => "Asking the court what it can think with\u{2026}".to_string(),
                 }}
             </p>
+
+            <Show when={move || needs_help.get()}>
+                <pre class="setup-code">{EXAMPLE}</pre>
+            </Show>
 
             <ul class="model-list">
                 <For each={move || visible.get()} key=|o: &ModelOption| o.id.clone() let:option>
@@ -487,45 +494,6 @@ fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
                     </button>
                 </li>
             </ul>
-        </div>
-    }
-}
-
-/// The setup panel: names the exact variable to set, rather than leaving the
-/// King to read the source to find out why nothing is drafting.
-#[component]
-fn ModelSetup(status: Resource<Result<ModelStatus, ServerFnError>>) -> impl IntoView {
-    const EXAMPLE: &str = "# .kingdom.env \u{2014} either path works
-KINGDOM_MODEL_PROVIDER=copilot
-
-# 1. a token you already hold
-KINGDOM_API_KEY=gho_\u{2026}
-
-# 2. or a command that prints one (the default)
-KINGDOM_API_KEY_HELPER=agency auth github";
-
-    view! {
-        <div class="model-setup">
-            {move || match status.get() {
-                Some(Ok(s)) => {
-                    let needs_help = s.credential != CredentialState::Ready;
-                    view! {
-                        <div>
-                            <p class="setup-line">
-                                <strong>{s.provider.label()}</strong>
-                                " \u{2014} "
-                                {s.model.clone()}
-                            </p>
-                            <p class="setup-detail">{s.detail.clone()}</p>
-                            <Show when={move || needs_help}>
-                                <pre class="setup-code">{EXAMPLE}</pre>
-                            </Show>
-                        </div>
-                    }
-                    .into_any()
-                }
-                _ => view! { <p class="setup-detail">"Asking the court\u{2026}"</p> }.into_any(),
-            }}
         </div>
     }
 }

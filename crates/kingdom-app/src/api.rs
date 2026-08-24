@@ -6,9 +6,7 @@
 //! no schema to keep in sync, and a domain type change breaks the build rather
 //! than failing at runtime.
 
-use kingdom_core::{
-    Disposition, Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan, WorkspaceMode,
-};
+use kingdom_core::{Disposition, Kingdom, ModelCatalogue, ModelChoice, Plan, WorkspaceMode};
 #[cfg(feature = "ssr")]
 use kingdom_core::{NoteKind, PlanId};
 use leptos::prelude::*;
@@ -492,7 +490,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // it is cleared, leaving a plan permanently Drafting that no later decree
     // could restart. A detached task loses only the reply, never the clearing.
     let handle = tokio::spawn(async move {
-        let outcome = match crate::llm::configured(&choice).await {
+        let outcome = match crate::llm::open(&choice).await {
             Ok(model) => {
                 model
                     .draft(&Brief {
@@ -534,7 +532,6 @@ fn settle(
             Ok(draft) => {
                 plan.title = draft.title.clone();
                 plan.summary = draft.summary.clone();
-                plan.touches = draft.touches.clone();
                 plan.status = PlanStatus::AwaitingReview;
                 plan.say(Speaker::Court, draft.body.clone());
             }
@@ -621,19 +618,12 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
 }
 
-/// How plans will be drafted: provider, model, and whether a credential works.
-///
-/// Resolves the credential rather than merely checking it is configured, since
-/// "set" and "works" are different questions and only the second one matters.
-#[server(GetModelStatus, "/api")]
-pub async fn model_status() -> Result<ModelStatus, ServerFnError> {
-    Ok(crate::llm::status().await)
-}
-
 /// Every model the King can choose between, and what each will accept.
 ///
-/// Read live from the provider rather than hard-coded, so the picker cannot
-/// offer a model that has been withdrawn or hide one that has just landed.
+/// Read live from each provider rather than hard-coded, so the picker cannot
+/// offer a model that has been withdrawn or hide one that has just landed. It
+/// also carries the credential state, which is why there is no separate status
+/// call: "what can draft this?" and "will it work?" are one question.
 #[server(ListModels, "/api")]
 pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
     Ok(crate::llm::catalogue::catalogue().await)

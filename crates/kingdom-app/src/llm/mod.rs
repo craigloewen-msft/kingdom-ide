@@ -10,9 +10,7 @@ pub mod copilot;
 pub mod credential;
 pub mod mock;
 
-use kingdom_core::{
-    City, CredentialState, ModelChoice, ModelProvider, ModelStatus, Utterance, Workspace,
-};
+use kingdom_core::{City, CredentialState, ModelChoice, ModelOption, Utterance, Workspace};
 
 /// Everything a model is told about the work.
 ///
@@ -97,8 +95,6 @@ pub struct Draft {
     pub title: String,
     /// One or two lines, shown on hover.
     pub summary: String,
-    /// Paths the plan proposes to touch, which light up on the map.
-    pub touches: Vec<String>,
     /// The full reply, shown in the dock.
     pub body: String,
 }
@@ -117,102 +113,89 @@ pub enum ModelError {
 pub trait Model: Send + Sync {
     async fn draft(&self, brief: &Brief) -> Result<Draft, ModelError>;
 
-    /// The model's name, recorded on the plan so the King can see what drew it.
-    fn name(&self) -> &str;
+    /// The namespaced id, recorded on the plan so the King can see exactly what
+    /// drew it. Namespaced rather than bare because that is what routes the
+    /// *next* turn back to the same backend.
+    fn id(&self) -> &str;
 }
 
-/// Which provider the environment names as the opening default. The King's own
-/// choice, once made, is carried on the plan and overrides this entirely.
-pub fn provider() -> ModelProvider {
-    match std::env::var("KINGDOM_MODEL_PROVIDER")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "copilot" => ModelProvider::Copilot,
-        _ => ModelProvider::Mock,
-    }
-}
-
-/// The namespaced model id the picker opens on before the King has chosen.
+/// A backend that serves models.
 ///
-/// Defaults to the offline mock so a fresh clone drafts with no credential and
-/// no network, exactly as before this became a choice.
-pub fn default_model_id() -> String {
-    match provider() {
-        ModelProvider::Mock => mock::MODEL_NAME.to_string(),
-        ModelProvider::Copilot => {
-            let name = std::env::var("KINGDOM_MODEL")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| copilot::DEFAULT_MODEL.to_string());
-            format!("copilot/{name}")
-        }
-    }
+/// One implementation per backend, and no backend is privileged: the offline
+/// mock is a provider that happens to serve exactly one model and need no
+/// credential. That is the whole point -- "mock" is a model you can choose, not
+/// a mode the application is in.
+#[async_trait::async_trait]
+pub trait Provider: Send + Sync {
+    /// The id namespace this provider owns: `"mock"`, `"copilot"`. Every model
+    /// it serves has an id in this namespace, which is how a choice finds its
+    /// way home.
+    fn namespace(&self) -> &'static str;
+
+    /// Every model this provider will actually serve *right now*, and why the
+    /// list might be shorter than expected.
+    ///
+    /// Deliberately not a `Result`: a provider that cannot reach its gateway
+    /// reports that in its own `detail` and yields nothing, so one broken
+    /// backend leaves the picker thinner rather than empty.
+    async fn catalogue(&self) -> ProviderCatalogue;
+
+    /// Builds the model a choice names. The choice is already known to be in
+    /// this provider's namespace.
+    async fn open(&self, choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError>;
 }
 
-/// Builds the model a choice names.
-///
-/// The provider comes off the choice's own id rather than the environment, so
-/// the model that drafts is always the one the plan says drafted it.
-pub async fn configured(choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
-    match choice.provider() {
-        ModelProvider::Mock => Ok(Box::new(mock::MockModel)),
-        ModelProvider::Copilot => {
-            let cred = credential::resolve(Some(credential::DEFAULT_COPILOT_HELPER)).await?;
-            Ok(Box::new(copilot::CopilotModel::new(
-                cred.token,
-                choice.api_name(),
-                choice.effort,
-            )))
-        }
-    }
+/// One provider reporting on itself: what it can serve, and what state its
+/// credential is in.
+#[derive(Debug, Clone)]
+pub struct ProviderCatalogue {
+    pub options: Vec<ModelOption>,
+    pub credential: CredentialState,
+    /// Plain-language detail: where the credential came from, or what to set to
+    /// fix it. Safe to display; never the credential itself.
+    pub detail: String,
 }
 
-/// Reports how plans will be drafted, for the dock's provider badge.
+/// Every backend Kingdom knows how to draft with.
 ///
-/// Resolves the credential to answer honestly, because "configured" and
-/// "actually works" are different questions and only the second one matters to
-/// the King. Returns a description only -- never the credential itself.
-pub async fn status() -> ModelStatus {
-    let provider = provider();
+/// A plain list rather than a registry with registration macros: two providers
+/// do not need a plugin system, and a literal is the version of this a reader
+/// can take in at a glance. Order decides the picker's order within equal
+/// recommendation, so the mock sits last.
+pub fn providers() -> Vec<Box<dyn Provider>> {
+    vec![
+        Box::new(copilot::CopilotProvider),
+        Box::new(mock::MockProvider),
+    ]
+}
 
-    match provider {
-        ModelProvider::Mock => ModelStatus {
-            provider,
-            model: mock::MODEL_NAME.to_string(),
-            credential: CredentialState::Ready,
-            detail: "Offline mock. Choose a Copilot model in the picker, or set \
-                     KINGDOM_MODEL_PROVIDER=copilot to open on one."
-                .to_string(),
-        },
-        ModelProvider::Copilot => {
-            let model = default_model_id();
-            match credential::resolve(Some(credential::DEFAULT_COPILOT_HELPER)).await {
-                Ok(cred) => ModelStatus {
-                    provider,
-                    model,
-                    credential: CredentialState::Ready,
-                    detail: format!("Credential from {}.", cred.source.describe()),
-                },
-                Err(credential::CredentialError::NotConfigured) => ModelStatus {
-                    provider,
-                    model,
-                    credential: CredentialState::Missing,
-                    detail: "Set KINGDOM_API_KEY to a token, or KINGDOM_API_KEY_HELPER to a \
-                             command that prints one."
-                        .to_string(),
-                },
-                Err(e) => ModelStatus {
-                    provider,
-                    model,
-                    credential: CredentialState::Failed,
-                    detail: e.to_string(),
-                },
-            }
-        }
+/// The namespaced model id the picker opens on before the King has chosen,
+/// when the environment names one.
+///
+/// `None` means "take the best the catalogue offers" -- resolved in
+/// [`catalogue`], which is the only place the available options are known.
+pub fn preferred_model_id() -> Option<String> {
+    std::env::var("KINGDOM_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Builds the model a choice names, by handing it to the provider that owns its
+/// namespace.
+///
+/// An unknown namespace is an error rather than a quiet fall back to the mock:
+/// a typo'd id that silently drafts fake work is the one failure worth being
+/// loud about, because the reply *looks* like an answer.
+pub async fn open(choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
+    let namespace = choice.namespace();
+
+    match providers().into_iter().find(|p| p.namespace() == namespace) {
+        Some(provider) => provider.open(choice).await,
+        None => Err(ModelError::Refused(format!(
+            "No provider serves \"{}\": nothing here answers to \"{namespace}\".",
+            choice.model
+        ))),
     }
 }
 

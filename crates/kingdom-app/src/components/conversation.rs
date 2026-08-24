@@ -7,7 +7,7 @@
 
 use crate::api::{draft_plan, finish_plan, get_kingdom, say};
 use crate::app::KingdomState;
-use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker};
+use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker, Timestamp};
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
@@ -41,6 +41,15 @@ pub fn Conversation() -> impl IntoView {
         if let Some(p) = plan.get() {
             state.selected.set(Some(p.city));
         }
+    });
+
+    // `state.error` is shared with the opening screen and the decree bar, so
+    // whatever sits in it on arrival belongs to a screen the King has already
+    // left. Clearing it on entry stops another view's complaint from being
+    // shown against this plan.
+    Effect::new(move |_| {
+        let _ = plan_id.get();
+        state.error.set(None);
     });
 
     let drafting = Memo::new(move |_| {
@@ -162,10 +171,6 @@ fn ChamberBody(
 
     let id = StoredValue::new(plan.id.clone());
     let status = plan.status;
-    let touches = plan.touches.clone();
-    let summary = plan.summary.clone();
-    let has_summary = !summary.is_empty();
-    let has_touches = !touches.is_empty();
     let workspace_label = plan.workspace.mode.label();
     let workspace_path = plan.workspace.path.clone();
     let workspace_isolated = plan.workspace.is_isolated();
@@ -180,6 +185,15 @@ fn ChamberBody(
     );
     let settled = status.is_settled();
     let outcome = plan.outcome.clone();
+
+    // Keeps the newest line in view. A conversation longer than the viewport
+    // otherwise leaves the reply the King is waiting for below the fold.
+    let log_ref = NodeRef::<leptos::html::Div>::new();
+    let entry_count = plan.transcript.len();
+    stick_to_bottom(
+        log_ref,
+        Signal::derive(move || (entry_count, drafting.get())),
+    );
 
     // `StoredValue` rather than a captured `PlanId`: a closure holding an owned
     // non-Copy value is `FnOnce` and cannot be used by both handlers below.
@@ -224,42 +238,30 @@ fn ChamberBody(
             </span>
         </header>
 
-        <div class="chamber-log">
-            <Show when={move || has_summary}>
-                <p class="chamber-summary">{summary.clone()}</p>
-            </Show>
-
-            // What the plan proposes to touch. On the map these are gilded
-            // roofs; here they are the list the King actually reviews.
-            <Show when={move || has_touches}>
-                <div class="chamber-touches">
-                    <span class="touches-label">"Would touch"</span>
-                    <ul>
-                        {touches.iter().map(|p| view! {
-                            <li class="touch-path">{p.clone()}</li>
-                        }).collect_view()}
-                    </ul>
-                </div>
-            </Show>
-
+        // Everything the King and the court have exchanged, oldest first, and
+        // nothing else. Plan *state* -- the summary, the status -- lives in the
+        // header or the rail; mixing it into this column put blocks derived
+        // from the newest reply above the decree that opened the plan.
+        <div class="chamber-log" node_ref=log_ref>
             <Transcript plan=plan.clone()/>
 
             <Show when={move || drafting.get()}>
                 <div class="chat-msg drafting">
+                    <span class="msg-at"></span>
                     <span class="msg-who">"Court"</span>
                     <span class="msg-body">"Drawing up the plan\u{2026}"</span>
                 </div>
             </Show>
-
-            <Show when={move || state.error.get().is_some()}>
-                <div class="chat-msg failed">
-                    <span class="msg-who">"Court"</span>
-                    <span class="msg-body">
-                        {move || state.error.get().unwrap_or_default()}
-                    </span>
-                </div>
-            </Show>
         </div>
+
+        // Outside the log, because an error is not something anybody said. A
+        // drafting failure is already recorded in the transcript as a note, in
+        // its proper place in time; this strip is for what just went wrong.
+        <Show when={move || state.error.get().is_some()}>
+            <div class="chamber-error">
+                {move || state.error.get().unwrap_or_default()}
+            </div>
+        </Show>
 
         // A settled plan is a record, not a place to type. The composer goes
         // and the outcome takes its place, so the chamber says what became of
@@ -377,6 +379,7 @@ fn Transcript(plan: Plan) -> impl IntoView {
                         let royal = u.speaker == Speaker::King;
                         view! {
                             <div class="chat-msg" class:royal=royal>
+                                <span class="msg-at">{clock(u.at)}</span>
                                 <span class="msg-who">
                                     {if royal { "You" } else { "Court" }}
                                 </span>
@@ -389,6 +392,7 @@ fn Transcript(plan: Plan) -> impl IntoView {
                     // notice as counsel would misrepresent who is speaking.
                     Entry::Note(n) => view! {
                         <div class=format!("chat-note note-{}", n.kind.css_suffix())>
+                            <span class="note-at">{clock(n.at)}</span>
                             {n.body.clone()}
                         </div>
                     }
@@ -396,6 +400,48 @@ fn Transcript(plan: Plan) -> impl IntoView {
                 }
             }
         </For>
+    }
+}
+
+/// A log entry's time as a bare `HH:MM` in the King's own timezone.
+///
+/// Browser-only, and that is not a limitation: the stamp is UTC milliseconds and
+/// only the browser knows what the King's clock reads. Under SSR this is the
+/// empty string, which never reaches him -- the whole app is gated behind a
+/// kingdom being open, and that only becomes true on the client.
+fn clock(at: Option<Timestamp>) -> String {
+    #[cfg(feature = "hydrate")]
+    {
+        let Some(Timestamp(ms)) = at else {
+            return String::new();
+        };
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+        format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = at;
+        String::new()
+    }
+}
+
+/// Scrolls the log to the bottom whenever `watch` changes.
+///
+/// Browser-only: under SSR there is nothing laid out to scroll.
+fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bool)>) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        // Tracked so a new line or a draft starting re-runs this.
+        let _ = watch.get();
+        if let Some(el) = element.get() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = (element, watch);
     }
 }
 

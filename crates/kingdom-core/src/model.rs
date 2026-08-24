@@ -93,8 +93,8 @@ pub struct City {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Building {
     pub name: String,
-    /// Path relative to the city root. This is the join key that lets a
-    /// [`Plan`]'s `touches` list light up an exact building on the map.
+    /// Path relative to the city root, which is what identifies this exact
+    /// building on the map.
     pub path: String,
     pub ward: Ward,
     /// Size in bytes, which drives the building's height.
@@ -399,9 +399,6 @@ pub struct Plan {
     pub city: CityId,
     pub title: String,
     pub summary: String,
-    /// Files the plan proposes to touch. This is the join key that lights up
-    /// exact buildings on the map.
-    pub touches: Vec<String>,
     /// The decree that opened this plan, verbatim.
     pub prompt: String,
     /// Which model is drafting it, e.g. `"mock"` or `"copilot/claude-opus-5"`.
@@ -446,11 +443,7 @@ impl Plan {
             city,
             title: title_from_prompt(&prompt),
             summary: String::new(),
-            touches: Vec::new(),
-            transcript: vec![Entry::Said(Utterance {
-                speaker: Speaker::King,
-                body: prompt.clone(),
-            })],
+            transcript: vec![Entry::Said(Utterance::new(Speaker::King, prompt.clone()))],
             prompt,
             model: choice.model.clone(),
             effort: choice.effort,
@@ -496,18 +489,13 @@ impl Plan {
     /// Records words a participant produced. These, and only these, are ever
     /// sent to a model.
     pub fn say(&mut self, speaker: Speaker, body: impl Into<String>) {
-        self.transcript.push(Entry::Said(Utterance {
-            speaker,
-            body: body.into(),
-        }));
+        self.transcript
+            .push(Entry::Said(Utterance::new(speaker, body)));
     }
 
     /// Records something Kingdom itself reports. Never leaves the machine.
     pub fn note(&mut self, kind: NoteKind, body: impl Into<String>) {
-        self.transcript.push(Entry::Note(Note {
-            kind,
-            body: body.into(),
-        }));
+        self.transcript.push(Entry::Note(Note::new(kind, body)));
     }
 
     /// Just the utterances, in order.
@@ -562,6 +550,22 @@ pub enum Entry {
 pub struct Utterance {
     pub speaker: Speaker,
     pub body: String,
+    /// When these words entered the log. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
+impl Utterance {
+    /// Records words as said *now*, which is the only way a caller should make
+    /// one: an utterance whose time is chosen by hand is an utterance that can
+    /// disagree with its own position in the log.
+    pub fn new(speaker: Speaker, body: impl Into<String>) -> Self {
+        Self {
+            speaker,
+            body: body.into(),
+            at: Timestamp::now(),
+        }
+    }
 }
 
 /// Something that happened, reported by Kingdom itself.
@@ -569,6 +573,53 @@ pub struct Utterance {
 pub struct Note {
     pub kind: NoteKind,
     pub body: String,
+    /// When this happened. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
+impl Note {
+    /// Records something as having happened *now*, for the same reason as
+    /// [`Utterance::new`].
+    pub fn new(kind: NoteKind, body: impl Into<String>) -> Self {
+        Self {
+            kind,
+            body: body.into(),
+            at: Timestamp::now(),
+        }
+    }
+}
+
+/// When something entered a plan's log: milliseconds since the Unix epoch, UTC.
+///
+/// A bare integer rather than a date type, because this crate compiles to wasm
+/// and every calendar crate wants a clock the browser does not hand out the
+/// same way. Turning this into a local wall-clock time is the browser's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Timestamp(pub i64);
+
+impl Timestamp {
+    /// The current time, where there is a clock to read.
+    ///
+    /// `None` on wasm, and that absence is deliberately not papered over with a
+    /// zero: **the browser never authors a log entry**. Every utterance and note
+    /// is made server-side, so the wasm arm is unreachable in practice, and a
+    /// `0` sentinel would render an impossible line as "01:00, 1 Jan 1970"
+    /// rather than as the missing thing it actually is.
+    pub fn now() -> Option<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| Timestamp(d.as_millis() as i64))
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -745,25 +796,6 @@ fn short_sha(sha: &str) -> &str {
 // Model access -- what the King can see about how plans get drafted
 // ---------------------------------------------------------------------------
 
-/// Which backend drafts plans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelProvider {
-    /// Deterministic, offline, no credential. The default, so a fresh clone
-    /// works with no setup.
-    Mock,
-    /// GitHub Copilot's chat completions API.
-    Copilot,
-}
-
-impl ModelProvider {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ModelProvider::Mock => "mock",
-            ModelProvider::Copilot => "copilot",
-        }
-    }
-}
-
 /// Whether a credential could be obtained.
 ///
 /// This is a *description* of the credential's state, never the credential
@@ -777,24 +809,6 @@ pub enum CredentialState {
     Missing,
     /// Something was configured, and it failed.
     Failed,
-}
-
-/// What the dock's provider badge renders, and what its panel explains.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelStatus {
-    pub provider: ModelProvider,
-    /// The model plans will be drafted with, e.g. `"claude-sonnet-4.6"`.
-    pub model: String,
-    pub credential: CredentialState,
-    /// Plain-language detail: where the credential came from, or what to set to
-    /// fix it. Safe to display.
-    pub detail: String,
-}
-
-impl ModelStatus {
-    pub fn is_ready(&self) -> bool {
-        self.credential == CredentialState::Ready
-    }
 }
 
 /// How hard a model is asked to think.
@@ -869,12 +883,17 @@ impl ModelChoice {
         }
     }
 
-    /// Which backend this choice routes to. Derived from the id rather than
-    /// held separately, so provider and model cannot disagree.
-    pub fn provider(&self) -> ModelProvider {
+    /// Which backend serves this model. Derived from the id rather than held
+    /// separately, so the backend and the model can never disagree -- a plan
+    /// drawn by Copilot cannot be re-drafted by the mock because some other
+    /// setting drifted.
+    ///
+    /// The segment before the `/`, or the whole id when there is none:
+    /// `copilot/claude-opus-5` is served by `copilot`, `mock` by `mock`.
+    pub fn namespace(&self) -> &str {
         match self.model.split_once('/') {
-            Some(("copilot", _)) => ModelProvider::Copilot,
-            _ => ModelProvider::Mock,
+            Some((namespace, _)) => namespace,
+            None => &self.model,
         }
     }
 
@@ -986,10 +1005,10 @@ mod tests {
             options: vec![
                 ModelOption {
                     id: "mock".into(),
-                    label: "Mock".into(),
+                    label: "Mock (offline)".into(),
                     vendor: "Offline".into(),
-                    context_window: 8_000,
-                    recommended: true,
+                    context_window: 0,
+                    recommended: false,
                     efforts: Vec::new(),
                 },
                 ModelOption {
@@ -1001,7 +1020,7 @@ mod tests {
                     efforts: vec![ModelEffort::Low, ModelEffort::High],
                 },
             ],
-            default_id: "mock".into(),
+            default_id: "copilot/claude-opus-5".into(),
             credential: CredentialState::Ready,
             detail: String::new(),
         }
@@ -1011,6 +1030,11 @@ mod tests {
     /// lives. A withdrawn model or an effort a model no longer declares must
     /// degrade quietly -- if either could error, last week's localStorage would
     /// wedge today's dock, and sending an undeclared effort earns an opaque 400.
+    ///
+    /// The invariant is precisely: *the resolved choice never carries an effort
+    /// the resolved model does not declare.* Not "a fallback drops the effort" --
+    /// that was only ever true by accident, back when the fallback was the mock
+    /// and the mock declares no efforts at all.
     #[test]
     fn a_stale_remembered_choice_degrades_rather_than_erroring() {
         let catalogue = catalogue();
@@ -1018,8 +1042,9 @@ mod tests {
         let withdrawn = ModelChoice::new("copilot/gone-last-year", Some(ModelEffort::High));
         assert_eq!(
             catalogue.resolve(Some(&withdrawn)),
-            ModelChoice::new("mock", None),
-            "an unknown model falls back to the default, and takes no effort with it"
+            ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::High)),
+            "an unknown model falls back to the default, keeping an effort that \
+             default also declares"
         );
 
         let undeclared = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Max));
@@ -1029,22 +1054,37 @@ mod tests {
             "an effort the model does not declare falls back to the model's own default"
         );
 
+        // The two degradations compounding: an unknown model *and* an effort the
+        // fallback does not declare. This is the case that would reach the wire
+        // as a 400 if `resolve` checked the effort against the remembered model
+        // rather than the resolved one.
+        let doubly_stale = ModelChoice::new("copilot/gone-last-year", Some(ModelEffort::Max));
+        assert_eq!(
+            catalogue.resolve(Some(&doubly_stale)),
+            ModelChoice::new("copilot/claude-opus-5", None)
+        );
+
         let good = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Low));
         assert_eq!(catalogue.resolve(Some(&good)), good);
-        assert_eq!(catalogue.resolve(None), ModelChoice::new("mock", None));
+        assert_eq!(
+            catalogue.resolve(None),
+            ModelChoice::new("copilot/claude-opus-5", None)
+        );
     }
 
-    /// The provider is read off the id so the two cannot disagree; a plan drawn
+    /// The backend is read off the id so the two cannot disagree; a plan drawn
     /// by Copilot must never be re-drafted by the mock because a separate
-    /// provider setting drifted.
+    /// setting drifted.
     #[test]
     fn a_choice_routes_by_its_own_id() {
         let copilot = ModelChoice::new("copilot/claude-opus-5", None);
-        assert_eq!(copilot.provider(), ModelProvider::Copilot);
+        assert_eq!(copilot.namespace(), "copilot");
         assert_eq!(copilot.api_name(), "claude-opus-5");
 
+        // The mock is not special-cased: a bare id is its own namespace, which
+        // is what lets it be listed and chosen like any other model.
         let mock = ModelChoice::new("mock", None);
-        assert_eq!(mock.provider(), ModelProvider::Mock);
+        assert_eq!(mock.namespace(), "mock");
         assert_eq!(mock.api_name(), "mock");
     }
 }
