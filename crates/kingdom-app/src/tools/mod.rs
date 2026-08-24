@@ -21,6 +21,7 @@
 
 pub mod ask_user_question;
 pub mod bash;
+pub mod patch;
 pub mod read_file;
 pub mod search;
 pub mod think;
@@ -41,6 +42,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(read_file::ReadFile),
         Box::new(search::Search),
         Box::new(bash::Bash),
+        Box::new(patch::Patch),
         Box::new(ask_user_question::AskUserQuestion),
     ]
 }
