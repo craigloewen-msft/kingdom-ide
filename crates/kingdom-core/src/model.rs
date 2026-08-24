@@ -760,13 +760,21 @@ pub enum Outcome {
     /// landed on.
     Merged { commit: String, into: String },
     /// The work was set aside but kept. Everything needed to bring it back is
-    /// here: the branch still exists at `tip`, and a patch of `base..tip` is on
-    /// disk at `patch` for the day the branch is pruned or the repo re-cloned.
+    /// here: a patch of `base..tip` on disk at `patch`, and `base_commit` --
+    /// the sha it was cut from, which `base` (a branch *name*) will have
+    /// wandered away from by the time anyone restores.
+    ///
+    /// `pruned` says whether the branch was reclaimed along with the checkout.
+    /// It is only ever true when a patch was actually written, so the work is
+    /// recoverable either way -- but the King must not be told to check out a
+    /// branch that is no longer there.
     Archived {
         branch: String,
         tip: String,
         base: String,
+        base_commit: String,
         patch: Option<String>,
+        pruned: bool,
     },
 }
 
@@ -777,8 +785,14 @@ impl Outcome {
             Outcome::Merged { commit, into } => {
                 format!("Merged into {into} as {}.", short_sha(commit))
             }
-            Outcome::Archived { branch, tip, .. } => {
-                format!("Archived on {branch}, at {}.", short_sha(tip))
+            Outcome::Archived {
+                branch, tip, pruned, ..
+            } => {
+                if *pruned {
+                    format!("Archived at {}, kept as a patch.", short_sha(tip))
+                } else {
+                    format!("Archived on {branch}, at {}.", short_sha(tip))
+                }
             }
         }
     }

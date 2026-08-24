@@ -192,7 +192,9 @@ mod tests {
             branch: "kingdom/abc".into(),
             tip: "deadbeef".into(),
             base: "main".into(),
+            base_commit: "cafebabe".into(),
             patch: Some("/dev/testburg/.kingdom/archive/plan-9.patch".into()),
+            pruned: true,
         });
         let scripted = plan("plan-ramparts");
 
