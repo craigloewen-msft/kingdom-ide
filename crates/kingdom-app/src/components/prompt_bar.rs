@@ -81,6 +81,17 @@ pub fn PromptBar() -> impl IntoView {
 
     let ready = Memo::new(move |_| target_name.get().is_some() && !start.pending().get());
 
+    // The composer grows with what is typed into it, and shrinks back when the
+    // decree is spent. Driven off the draft rather than off `input` so that
+    // clearing it on submit resets the height too.
+    let composer = NodeRef::<leptos::html::Textarea>::new();
+    Effect::new(move |_| {
+        draft.track();
+        if let Some(el) = composer.get() {
+            autogrow(&el);
+        }
+    });
+
     let submit = move || {
         let text = draft.get().trim().to_string();
         if text.is_empty() || !ready.get_untracked() {
@@ -100,9 +111,12 @@ pub fn PromptBar() -> impl IntoView {
                     }}
                 </span>
 
-                <input
+                // A textarea, so a decree can have more than one line: Enter
+                // sends, Shift+Enter is left to the browser and makes a line.
+                <textarea
                     class="decree-input"
-                    r#type="text"
+                    node_ref=composer
+                    rows="1"
                     placeholder=move || match target_name.get() {
                         Some(name) => format!("Describe the work for {name}\u{2026}"),
                         None => "Choose a city on the map first\u{2026}".to_string(),
@@ -111,7 +125,12 @@ pub fn PromptBar() -> impl IntoView {
                     disabled={move || !ready.get()}
                     on:input=move |ev| set_draft.set(event_target_value(&ev))
                     on:keydown=move |ev| {
-                        if ev.key() == "Enter" { submit(); }
+                        if ev.key() == "Enter" && !ev.shift_key() {
+                            // Otherwise the newline lands in the box we are
+                            // about to clear.
+                            ev.prevent_default();
+                            submit();
+                        }
                     }
                 />
 
@@ -177,6 +196,31 @@ pub fn PromptBar() -> impl IntoView {
             </Show>
         </section>
     }
+}
+
+/// Size a composer to its own contents, up to a cap.
+///
+/// Capped because the composer shares the screen with the thing being decided
+/// on -- the map here, the chamber log there -- and a pasted essay must not
+/// swallow it. Past the cap the box scrolls instead.
+pub(crate) fn autogrow(el: &web_sys::HtmlTextAreaElement) {
+    const MAX_PX: i32 = 160;
+
+    // Fully qualified: leptos's own `style()` extension trait is in scope here
+    // and shadows web-sys's.
+    let style = web_sys::HtmlElement::style(el);
+    // Measured from `auto`: scroll_height never shrinks below the height
+    // already set, so without this the box could only ever grow.
+    let _ = style.set_property("height", "auto");
+    let wanted = el.scroll_height();
+    let _ = style.set_property("height", &format!("{}px", wanted.min(MAX_PX)));
+    let _ = style.set_property(
+        "overflow-y",
+        match wanted > MAX_PX {
+            true => "auto",
+            false => "hidden",
+        },
+    );
 }
 
 /// The picker: which model, and how hard it thinks.
