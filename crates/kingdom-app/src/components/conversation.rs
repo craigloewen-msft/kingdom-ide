@@ -128,6 +128,7 @@ pub fn Conversation() -> impl IntoView {
                 Some(p) => view! {
                     <ChamberBody
                         plan=p
+                        live=plan
                         city=city_name
                         drafting=drafting
                         on_say=speak
@@ -149,7 +150,20 @@ pub fn Conversation() -> impl IntoView {
 
 #[component]
 fn ChamberBody(
+    /// The plan as it stood when this chamber was built.
+    ///
+    /// Read only for the parts of a plan that *cannot* change while it is open:
+    /// its id, its city, the model drawing it, and the workspace it was cut in.
+    /// Those are settled when the plan opens and never touched again.
     plan: Plan,
+    /// The same plan, as the server currently has it.
+    ///
+    /// Everything that moves during a turn -- status, title, outcome -- must be
+    /// read through here rather than off `plan`. A snapshot taken at
+    /// construction renders once and then lies: the badge sat on "Drafting"
+    /// after the court had already answered, because the status it was built
+    /// from was a value and not a signal.
+    live: Memo<Option<Plan>>,
     city: Memo<Option<String>>,
     drafting: Memo<bool>,
     on_say: Callback<(PlanId, String)>,
@@ -160,7 +174,6 @@ fn ChamberBody(
     let (showing_done, set_showing_done) = signal(false);
 
     let id = StoredValue::new(plan.id.clone());
-    let status = plan.status;
     let workspace_label = plan.workspace.mode.label();
     let workspace_path = plan.workspace.path.clone();
     let workspace_isolated = plan.workspace.is_isolated();
@@ -173,16 +186,28 @@ fn ChamberBody(
             .clone()
             .unwrap_or_else(|| "the project".to_string()),
     );
-    let settled = status.is_settled();
-    let outcome = plan.outcome.clone();
+
+    let status = Memo::new(move |_| live.get().map(|p| p.status).unwrap_or(PlanStatus::Drafting));
+    let settled = Memo::new(move |_| status.get().is_settled());
+    let title = Memo::new(move |_| live.get().map(|p| p.title).unwrap_or_default());
+    let outcome = Memo::new(move |_| {
+        live.get()
+            .and_then(|p| p.outcome)
+            .map(|o| o.summary())
+            .unwrap_or_else(|| "This plan is closed.".to_string())
+    });
 
     // Keeps the newest line in view. A conversation longer than the viewport
     // otherwise leaves the reply the King is waiting for below the fold.
     let log_ref = NodeRef::<leptos::html::Div>::new();
-    let entry_count = plan.transcript.len();
     stick_to_bottom(
         log_ref,
-        Signal::derive(move || (entry_count, drafting.get())),
+        Signal::derive(move || {
+            (
+                live.get().map(|p| p.transcript.len()).unwrap_or(0),
+                drafting.get(),
+            )
+        }),
     );
 
     // `StoredValue` rather than a captured `PlanId`: a closure holding an owned
@@ -205,7 +230,7 @@ fn ChamberBody(
         <header class="chamber-header">
             <a class="back-link" href="/" title="Back to the realm">"\u{2190}"</a>
             <div class="chamber-id">
-                <h1 class="chamber-title">{plan.title.clone()}</h1>
+                <h1 class="chamber-title">{move || title.get()}</h1>
                 <div class="chamber-meta">
                     <span class="chamber-city">
                         {move || city.get().unwrap_or_else(|| "unknown city".into())}
@@ -223,8 +248,8 @@ fn ChamberBody(
                     </span>
                 </div>
             </div>
-            <span class=format!("plan-badge plan-{}", status.css_suffix())>
-                {status.label()}
+            <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
+                {move || status.get().label()}
             </span>
         </header>
 
@@ -233,7 +258,7 @@ fn ChamberBody(
         // header or the rail; mixing it into this column put blocks derived
         // from the newest reply above the decree that opened the plan.
         <div class="chamber-log" node_ref=log_ref>
-            <Transcript plan=plan.clone()/>
+            <Transcript live=live/>
 
             <Show when={move || drafting.get()}>
                 <div class="chat-msg drafting">
@@ -257,19 +282,13 @@ fn ChamberBody(
         // and the outcome takes its place, so the chamber says what became of
         // the work rather than inviting more of it.
         <Show
-            when={move || !settled}
-            fallback={
-                let stated = outcome
-                    .as_ref()
-                    .map(|o| o.summary())
-                    .unwrap_or_else(|| "This plan is closed.".to_string());
-                move || view! {
-                    <div class="chamber-outcome">
-                        <span class="outcome-mark">"\u{2713}"</span>
-                        <span class="outcome-text">{stated.clone()}</span>
-                    </div>
-                }
-            }
+            when={move || !settled.get()}
+            fallback={move || view! {
+                <div class="chamber-outcome">
+                    <span class="outcome-mark">"\u{2713}"</span>
+                    <span class="outcome-text">{move || outcome.get()}</span>
+                </div>
+            }}
         >
             <div class="chamber-composer">
                 <input
@@ -352,14 +371,30 @@ fn ChamberBody(
     }
 }
 
-/// One plan's log, oldest first: what was said, and what happened.
+/// One plan's log, oldest first: what was said, what was done, and what
+/// happened.
+///
+/// Reads the plan live rather than taking a copy, because the whole point of
+/// the push socket is that lines arrive *during* a turn. A snapshot would show
+/// the transcript as it was when the King walked in.
 #[component]
-fn Transcript(plan: Plan) -> impl IntoView {
-    let lines = plan.transcript.clone();
+fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     view! {
         <For
-            each={move || lines.clone().into_iter().enumerate().collect::<Vec<_>>()}
-            key=|(i, _)| *i
+            each={move || {
+                live.get()
+                    .map(|p| p.transcript)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            }}
+            // Keyed by position *and* by what the entry is, so a deed settling
+            // in place re-renders. Keying on the index alone would leave a
+            // running command showing "working..." forever -- the list is the
+            // same length when a result arrives as it was when the call was
+            // recorded.
+            key=|(i, entry)| (*i, entry_version(entry))
             let:entry
         >
             {
@@ -395,6 +430,19 @@ fn Transcript(plan: Plan) -> impl IntoView {
                 }
             }
         </For>
+    }
+}
+
+/// Distinguishes an entry from a later version of *itself*.
+///
+/// Only deeds have a later version: an utterance and a note are written once
+/// and never touched, but a deed is recorded in flight and settled afterwards.
+/// This is what tells the keyed list those are two different things to render.
+fn entry_version(entry: &Entry) -> u8 {
+    match entry {
+        Entry::Did(d) if d.in_flight() => 1,
+        Entry::Did(_) => 2,
+        _ => 0,
     }
 }
 
