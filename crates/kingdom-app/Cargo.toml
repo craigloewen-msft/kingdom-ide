@@ -46,6 +46,16 @@ thiserror = { version = "2", optional = true }
 # unguessable-ish, not sortable.
 uuid = { version = "1", features = ["v4"], optional = true }
 
+# Gitignore-aware walking + glob/regex matching, for the `search` tool. Optional
+# so they never reach the wasm bundle.
+ignore = { version = "0.4", optional = true }
+globset = { version = "0.4", optional = true }
+regex = { version = "1", optional = true }
+
+# Process groups and signals for the `bash` tool: a command's children must die
+# with it, which needs setpgid/kill on a negated pgid.
+libc = { version = "0.2", optional = true }
+
 # Client-only.
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -92,6 +102,10 @@ ssr = [
     "dep:dotenvy",
     "dep:thiserror",
     "dep:uuid",
+    "dep:ignore",
+    "dep:globset",
+    "dep:regex",
+    "dep:libc",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",

@@ -19,6 +19,9 @@
 //! and [`Workshop::root`] before adding one that spawns a process -- the
 //! guarantee is real for the first and deliberately weaker for the second.
 
+pub mod bash;
+pub mod read_file;
+pub mod search;
 pub mod think;
 
 use kingdom_core::{DeedOutcome, Workspace};
@@ -32,7 +35,12 @@ use std::path::{Component, Path, PathBuf};
 /// take in at a glance, and a tool that is not in this list does not exist.
 /// Order is the order the model is shown them in.
 pub fn all() -> Vec<Box<dyn Tool>> {
-    vec![Box::new(think::Think)]
+    vec![
+        Box::new(think::Think),
+        Box::new(read_file::ReadFile),
+        Box::new(search::Search),
+        Box::new(bash::Bash),
+    ]
 }
 
 /// Runs one tool call by name, inside the workspace's bounds.
