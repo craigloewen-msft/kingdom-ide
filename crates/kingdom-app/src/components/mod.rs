@@ -3,6 +3,7 @@
 mod conversation;
 mod prompt_bar;
 mod map;
+mod resizer;
 mod sidebar;
 mod browser_view;
 
