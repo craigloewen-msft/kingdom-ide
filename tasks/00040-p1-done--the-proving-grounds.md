@@ -451,3 +451,20 @@ button renders".
 - **`mockdata.rs`'s own module docs** — how to add a realm, in the file where
   someone adding one is already looking. This replaces a separate format
   reference: the types *are* the schema.
+
+---
+
+## Addendum: superseded by the lease removal
+
+After this task shipped, `Lease`/`Resource`/`LeaseMode` were removed — they never
+arbitrated anything (see `AGENTS.md` §3). Three details above are therefore no
+longer accurate, and the code is the source of truth:
+
+- **`CourtFn` is `fn(&[City]) -> Vec<Plan>`**, not `-> (Vec<Plan>, Vec<Resource>)`.
+- **The `contended` realm and `three_way_contention` are gone.** They existed
+  only to stage red threads on the map, and the map no longer draws them. Three
+  realms ship: `kingdom-mirror`, `crowded`, `monorepo`.
+- **The dangling-`PlanId` audit is gone** with the `waiting` list it checked.
+
+Everything else — the mockdata protocol, the seeder, the marker file, the
+sandbox, and all four tests — is unchanged and still stands.

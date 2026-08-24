@@ -78,7 +78,6 @@ $approved:    colour("approved");
 $statuses: (
   "drafting": $working,
   "review":   $review,
-  "blocked":  $blocked,
   "failed":   $failed,
   "approved": $approved,
   "rejected": $idle,

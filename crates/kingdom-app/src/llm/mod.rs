@@ -5,7 +5,6 @@
 //! metaphor is carried by [`kingdom_core::Plan`], and inventing a second name
 //! for the plumbing would only obscure where the HTTP call lives.
 
-pub mod broker;
 pub mod catalogue;
 pub mod copilot;
 pub mod credential;

@@ -140,7 +140,7 @@ fn assemble(
     // Cities are real -- scanned from disk, fake folder or not. The starting
     // court is still fabricated; see `kingdom_core::sample`.
     let court = court.unwrap_or(kingdom_core::sample::populate_court);
-    let (plans, resources) = court(&cities);
+    let plans = court(&cities);
 
     let kingdom = Kingdom {
         name: root
@@ -151,7 +151,6 @@ fn assemble(
         root: root.to_string_lossy().to_string(),
         cities,
         plans,
-        resources,
         sandbox: crate::mock::is_proving_ground(root),
     };
 
@@ -300,15 +299,14 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
-/// Draws up the plan: claims the city's files, calls the model, settles.
+/// Draws up the plan: marks it busy, calls the model, settles.
 ///
-/// This is the half that costs something, so it is the half that takes a lease.
-/// The whole turn still happens inside the request because there is no push
-/// channel yet -- the browser has nowhere to receive progress. When the
-/// WebSocket layer lands this becomes spawn-and-notify.
+/// The whole turn happens inside the request because there is no push channel
+/// yet -- the browser has nowhere to receive progress. When the WebSocket layer
+/// lands this becomes spawn-and-notify.
 #[server(DraftPlan, "/api")]
 pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
-    use crate::llm::{broker, Brief, CityBrief};
+    use crate::llm::{Brief, CityBrief};
     use kingdom_core::{PlanStatus, Speaker};
 
     let plan_id = PlanId::new(plan);
@@ -320,12 +318,11 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             return Err(ServerFnError::new("That plan is no longer in the records."));
         };
 
-        // A lease already held by this plan means a draft is in flight: the
-        // conversation view kicks drafting off on mount, so a reload or a second
-        // tab would otherwise start a second one. The lease is already the
-        // answer to "is someone working on this right now?", so it is used here
-        // rather than inventing a flag that could disagree with it.
-        if !existing.leases.is_empty() {
+        // A plan already busy means a draft is in flight: the conversation view
+        // kicks drafting off on mount, so a reload or a second tab would
+        // otherwise start a second one -- a duplicate model call, and a
+        // duplicate bill.
+        if existing.is_busy() {
             return Ok(existing);
         }
 
@@ -348,24 +345,10 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             None => (Vec::new(), existing.prompt.clone()),
         };
 
-        match broker::acquire_city_read(&mut kingdom, &plan_id, &existing.city) {
-            Ok(lease) => {
-                update(&mut kingdom, &plan_id, |p| {
-                    p.status = PlanStatus::Drafting;
-                    p.leases = vec![lease];
-                });
-            }
-            Err(refusal) => {
-                // Refused work is not silently dropped: it is parked where the
-                // King can see it, on the map and in the rail.
-                let plan = update(&mut kingdom, &plan_id, |p| {
-                    p.status = PlanStatus::Blocked;
-                    p.summary = refusal.reason.clone();
-                    p.say(Speaker::Court, refusal.reason.clone());
-                });
-                return plan.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."));
-            }
-        }
+        update(&mut kingdom, &plan_id, |p| {
+            p.status = PlanStatus::Drafting;
+            p.working_on = Some(format!("Reading {} to draft a plan", city.name));
+        });
 
         // Drafting keeps whatever the plan is already being drawn by: switching
         // model silently mid-conversation would make the transcript a record of
@@ -373,12 +356,11 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         (brief, transcript, prompt, existing.choice())
     };
 
-    // Spawned rather than awaited inline, because the lease is already held.
-    // If the browser navigates away mid-draft, Axum drops this request's
-    // future -- which would cancel the model call *after* the claim and
-    // *before* the release, leaving the city held by a plan that is
-    // permanently Drafting and blocking every later decree with no way to
-    // clear it. A detached task loses only the reply, never the release.
+    // Spawned rather than awaited inline, because the plan is already marked
+    // busy. If the browser navigates away mid-draft, Axum drops this request's
+    // future -- which would cancel the model call *after* the mark and *before*
+    // it is cleared, leaving a plan permanently Drafting that no later decree
+    // could restart. A detached task loses only the reply, never the clearing.
     let handle = tokio::spawn(async move {
         let outcome = match crate::llm::configured(&choice).await {
             Ok(model) => {
@@ -403,34 +385,35 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("drafting task failed: {e}")))?
 }
 
-/// Records a drafting outcome on the plan and hands back every lease it held.
+/// Records a drafting outcome on the plan and marks it no longer busy.
 ///
-/// Shared by both entry points so the release path cannot drift between them --
-/// a plan left holding a city's files would block every later decree for it.
+/// The clearing must happen on the failure path too: a plan left marked busy
+/// could never be retried, because `draft_plan` would keep short-circuiting.
 #[cfg(feature = "ssr")]
 fn settle(
     plan_id: PlanId,
     outcome: Result<crate::llm::Draft, crate::llm::ModelError>,
 ) -> Result<Plan, ServerFnError> {
-    use crate::llm::broker;
     use kingdom_core::{PlanStatus, Speaker};
 
     let mut kingdom = lock()?;
-    broker::release_all(&mut kingdom, &plan_id);
 
-    let updated = update(&mut kingdom, &plan_id, |plan| match &outcome {
-        Ok(draft) => {
-            plan.title = draft.title.clone();
-            plan.summary = draft.summary.clone();
-            plan.touches = draft.touches.clone();
-            plan.status = PlanStatus::AwaitingReview;
-            plan.say(Speaker::Court, draft.body.clone());
-        }
-        Err(e) => {
-            let message = e.to_string();
-            plan.status = PlanStatus::Failed;
-            plan.summary = message.clone();
-            plan.say(Speaker::Court, message);
+    let updated = update(&mut kingdom, &plan_id, |plan| {
+        plan.working_on = None;
+        match &outcome {
+            Ok(draft) => {
+                plan.title = draft.title.clone();
+                plan.summary = draft.summary.clone();
+                plan.touches = draft.touches.clone();
+                plan.status = PlanStatus::AwaitingReview;
+                plan.say(Speaker::Court, draft.body.clone());
+            }
+            Err(e) => {
+                let message = e.to_string();
+                plan.status = PlanStatus::Failed;
+                plan.summary = message.clone();
+                plan.say(Speaker::Court, message);
+            }
         }
     });
 

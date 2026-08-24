@@ -359,7 +359,6 @@ pub fn KingdomMap() -> impl IntoView {
                     <Land bands=bands/>
                     <Roads realm=realm/>
                     <Throne realm=realm/>
-                    <ContentionThreads realm=realm/>
                     <Cities realm=realm detail=detail visit=visit/>
                 </g>
             </svg>
@@ -575,90 +574,6 @@ fn Throne(realm: Memo<Realm>) -> impl IntoView {
             <circle r="34" class="throne-ring"/>
             <text class="throne-glyph" text-anchor="middle" dy="12">"♚"</text>
             <text class="throne-label" text-anchor="middle" dy="58">"THRONE"</text>
-        </g>
-    }
-}
-
-/// Red threads between cities whose plans are contending for the same crown
-/// resource. This is the map's most important signal.
-///
-/// The thread follows the **road** between the two cities rather than cutting
-/// across country, so contention reads as traffic on a real network. That the
-/// two are always joined is guaranteed by the spanning tree in `layout`.
-#[component]
-fn ContentionThreads(realm: Memo<Realm>) -> impl IntoView {
-    let state = expect_context::<KingdomState>();
-
-    let threads = Memo::new(move |_| {
-        let kingdom = state.kingdom.get();
-        let r = realm.get();
-        let mut paths: Vec<String> = Vec::new();
-
-        // Index of city -> placement, by plan. A plan knows its own city, so
-        // this is one lookup rather than the two the old architect layer needed.
-        let city_index = |id: &CityId| kingdom.cities.iter().position(|c| &c.id == id);
-        let plan_city = |pid: &kingdom_core::PlanId| {
-            kingdom
-                .plans
-                .iter()
-                .find(|p| &p.id == pid)
-                .and_then(|p| city_index(&p.city))
-        };
-
-        for resource in kingdom.contended_resources() {
-            for holder in &resource.holders {
-                for waiter in &resource.waiting {
-                    let (Some(h), Some(w)) = (plan_city(&holder.holder), plan_city(waiter)) else {
-                        continue;
-                    };
-                    if h == w {
-                        continue;
-                    }
-                    let (Some(a), Some(b)) = (r.placements.get(h), r.placements.get(w)) else {
-                        continue;
-                    };
-
-                    // Follow the road if these two are directly linked; a
-                    // straight hop is the honest fallback when they are not
-                    // neighbours, since inventing a route would imply a road
-                    // that does not exist.
-                    let bend = r
-                        .roads
-                        .iter()
-                        .find(|rd| (rd.from == h && rd.to == w) || (rd.from == w && rd.to == h))
-                        .map(|rd| if rd.from == h { rd.bend } else { -rd.bend })
-                        .unwrap_or(0.0);
-
-                    let (dx, dy) = (b.x - a.x, b.y - a.y);
-                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
-                    let (nx, ny) = (-dy / len, dx / len);
-                    let mx = (a.x + b.x) / 2.0 + nx * bend;
-                    let my = (a.y + b.y) / 2.0 + ny * bend;
-
-                    let (ax, ay) = iso(a.x, a.y, a.elevation);
-                    let (bx, by) = iso(b.x, b.y, b.elevation);
-                    let (cx, cy) = iso(mx, my, (a.elevation + b.elevation) / 2.0);
-
-                    paths.push(format!("M{ax:.1} {ay:.1} Q{cx:.1} {cy:.1} {bx:.1} {by:.1}"));
-                }
-            }
-        }
-
-        paths
-    });
-
-    view! {
-        <g class="contention-threads">
-            <For
-                each={move || threads.get().into_iter().enumerate().collect::<Vec<_>>()}
-                key=|(i, _)| *i
-                let:entry
-            >
-                {
-                    let (_, d) = entry;
-                    view! { <path class="contention-thread" d=d/> }
-                }
-            </For>
         </g>
     }
 }

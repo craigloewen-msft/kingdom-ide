@@ -47,7 +47,7 @@ pub mod build;
 pub mod court;
 pub mod realms;
 
-use crate::model::{City, CityKind, Plan, Resource, Ward};
+use crate::model::{City, CityKind, Plan, Ward};
 use std::ops::Range;
 
 pub use build::{docs_city, file, fill, node_city, python_city, rust_city, text};
@@ -56,10 +56,10 @@ pub use realms::{realm, realm_names, realms, DEFAULT_REALM};
 /// How a realm's opening court is fabricated.
 ///
 /// A plain `fn` pointer over the signature `sample::populate_court` already
-/// has, rather than a new data format: a court is a handful of interlinked
-/// plans, leases and waiters, and expressing that as data would need a
-/// cross-referencing validator to say what the type system already says.
-pub type CourtFn = fn(&[City]) -> (Vec<Plan>, Vec<Resource>);
+/// has, rather than a new data format: a court is a handful of plans, and
+/// expressing that as data would need a validator to say what the type system
+/// already says.
+pub type CourtFn = fn(&[City]) -> Vec<Plan>;
 
 /// A whole synthetic dev folder.
 #[derive(Debug, Clone)]

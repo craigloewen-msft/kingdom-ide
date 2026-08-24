@@ -61,19 +61,19 @@ pub fn Conversation() -> impl IntoView {
                 Err(e) => state.error.set(Some(e.to_string())),
             }
             // Refetch rather than patching the local copy: drafting also moved
-            // leases and resources, which the rail and map render.
+            // the plan's status and busy mark, which the rail and map render.
             if let Ok(k) = get_kingdom().await {
                 state.kingdom.set(k);
             }
         }
     });
 
-    // A plan that is Drafting, holds nothing and has heard nothing back is one
-    // nobody has started yet: exactly the state `begin_plan` leaves behind.
+    // A plan that is Drafting, busy with nothing and has heard nothing back is
+    // one nobody has started yet: exactly the state `begin_plan` leaves behind.
     Effect::new(move |_| {
         let Some(p) = plan.get() else { return };
         let unstarted = p.status == PlanStatus::Drafting
-            && p.leases.is_empty()
+            && !p.is_busy()
             && !p.transcript.iter().any(|u| u.speaker == Speaker::Court);
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());

@@ -395,7 +395,8 @@ mod tests {
         let precious = temp.0.join("NOT_A_FIXTURE.txt");
         std::fs::write(&precious, "a user's real work").unwrap();
 
-        let realm = kingdom_core::mockdata::realm("contended").expect("bundled realm");
+        // Any bundled realm will do; which one is not what is under test here.
+        let realm = kingdom_core::mockdata::realm("kingdom-mirror").expect("bundled realm");
 
         let refused = seed(&realm, &temp.0);
         assert!(

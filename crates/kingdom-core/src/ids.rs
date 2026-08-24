@@ -45,7 +45,3 @@ id_type!(
     /// Identifies an architectural plan: the unit of work and of review.
     PlanId
 );
-id_type!(
-    /// Identifies a contended machine resource.
-    ResourceId
-);

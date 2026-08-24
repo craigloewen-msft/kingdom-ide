@@ -48,9 +48,10 @@ about the **stance** the user takes toward their agents.
 | **Kingdom** | `Kingdom` | the dev folder you opened |
 | **City** | `City` | one project directory inside it |
 | **Architectural Plan** | `Plan` | a proposal, drafted by a model, awaiting your review |
-| **Crown Resource** | `Resource` | a contended machine resource |
-| **Lease** | `Lease` | a granted claim on one |
 | **The King** | the user | the only one who approves anything |
+
+There was a **Crown Resource** / **Lease** pair here, for arbitrating contended
+machine resources. It was removed — see §3 for why, and for when it comes back.
 
 There is deliberately **no agent noun**. An earlier design had an `Architect`
 entity that owned plans, which meant two state machines to keep in sync for no
@@ -70,42 +71,51 @@ needing a glossary.
 
 ---
 
-## 3. Crown Resources — the actual core
+## 3. Coordinating agents — the goal, and what is actually built
 
-**If you only read one section, read this one.**
+The premise of this product is that many agents on one machine collide: two bind
+port 3000, two run `cargo build` against the same target dir, one rewrites a file
+another is reading. Making that visible and arbitrable is the point.
 
-Everything else is a shell around resource arbitration. The map, the sidebar,
-the chat — all of it exists to make lease state legible.
+**Almost none of it is built yet, and it is important not to believe otherwise.**
 
-A `Resource` is anything two agents can fight over:
+This section used to describe `Resource`, `Lease`, `LeaseMode` and a lease
+compatibility matrix as "the actual core". Those types existed and were tested,
+but they never arbitrated anything:
 
-- a **port** (`Port(3000)`)
-- a **database** or stateful service
-- the **GPU**
-- a **git worktree** or branch
-- a **build lock** (`~/.cargo`, `node_modules`, a shared `target/`)
-- a **path** on disk
+- exactly one code path ever took a lease — drafting, to read a city;
+- it only ever asked for `Shared`, and shared always composes with shared;
+- so a refusal required an `Exclusive` holder that **no runtime code ever
+  created**.
 
-A `Lease` is a granted claim, held either `Exclusive` or `Shared`. The
-compatibility rule lives in `Resource::can_grant` and is pinned by a test:
+Every blocked plan and every red thread on the map came from fabricated sample
+data. The mechanism was unreachable, which is worse than absent: it invited
+building on a guarantee nothing enforced. It was removed. See the note where it
+used to live in `model.rs`.
 
-| Currently held | `Shared` request | `Exclusive` request |
-|---|---|---|
-| nothing | granted | granted |
-| shared only | granted | **refused** |
-| exclusive | **refused** | **refused** |
+### What exists today
 
-### Rules for anyone extending this
+A plan records **what it is busy with** while it works — `Plan::working_on`, a
+plain description that is `Some` for the duration of a turn. That is the whole
+of what leases actually did: it answers *"is someone working on this right
+now?"*, which is what stops a reload or a second tab starting a duplicate model
+call. It is not a lock, and it prevents no other plan from working.
 
-1. **Every new agent capability that touches something shared must acquire a
-   lease first.** Running a command, starting a server, writing a file. No
-   exceptions — an unleased side effect is invisible to the King, which defeats
-   the entire product.
-2. **Contention must be visible, never silently resolved.** When an agent waits,
-   the King must be able to see that it is waiting and why. Auto-resolving a
+### When arbitration comes back
+
+**When plans get hands** (§8) — running a command, binding a port, writing a
+file. That is the first moment two plans can genuinely collide, and the design
+should be rebuilt then, against a real collision, by someone who can watch it
+fail. The old shape is a reasonable starting point and the git history has it.
+
+Two principles from the original design are worth keeping when that day comes,
+because they are about *product stance* rather than mechanism:
+
+1. **A side effect the King cannot see defeats the product.** Whatever form
+   arbitration takes, the fact that an agent is holding or waiting for something
+   must reach the screen.
+2. **Contention must be surfaced, never silently resolved.** Auto-resolving a
    conflict quietly is a bug even when the resolution is correct.
-3. **Leases belong in `kingdom-core`.** The arbitration logic is pure, so it
-   stays testable and shared with the browser.
 
 ---
 
@@ -117,8 +127,8 @@ Rust end to end. Axum server, Leptos (WASM) browser UI, one shared domain crate.
 crates/
   kingdom-core/     Domain model. No I/O, no framework deps. Compiles to
                     BOTH native and wasm32 — keep it that way.
-    ids.rs          Newtyped IDs (CityId, PlanId, ResourceId)
-    model.rs        Kingdom, City, Plan, Resource, Lease,
+    ids.rs          Newtyped IDs (CityId, PlanId)
+    model.rs        Kingdom, City, Plan,
                     District/Building/Ward (a project's shape on disk)
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
@@ -136,8 +146,7 @@ crates/
     mock.rs         Seeding a realm onto disk (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
-                    catalogue.rs (live /models list), credential.rs,
-                    broker.rs (leases)
+                    catalogue.rs (live /models list), credential.rs
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, decree.rs, conversation.rs,
                     map/ (mod.rs + city.rs)
@@ -203,12 +212,11 @@ build on top of a placeholder believing it is real.
   summary and touched files. The rail links to both, and every plan has a URL
   that survives a reload.
 - **Drafting a plan with a real model.** A decree *opens* a plan instantly
-  (`begin_plan`: no lease, no model call) and the chamber then asks for the
-  draft (`draft_plan`), which takes a `Shared` lease on the city's path, calls
-  the model with that project's real scan data, and settles the plan at
-  `AwaitingReview` (or `Blocked`/`Failed`), releasing the lease on every path —
-  including when the browser walks away mid-draft. Two providers: an offline
-  deterministic `mock` (the default) and GitHub Copilot.
+  (`begin_plan`: no model call) and the chamber then asks for the draft
+  (`draft_plan`), which marks the plan busy, calls the model with that project's
+  real scan data, and settles it at `AwaitingReview` (or `Failed`), clearing the
+  busy mark on every path — including when the browser walks away mid-draft. Two
+  providers: an offline deterministic `mock` (the default) and GitHub Copilot.
 - **Choosing a model and an effort, per plan.** The catalogue is read live from
   Copilot's `/models` after the credential helper runs, so the picker offers
   only models that will actually serve, and only the reasoning efforts each one
@@ -224,9 +232,8 @@ build on top of a placeholder believing it is real.
   fixture exercises `scan.rs` for real rather than faking a `Vec<City>` above
   it. Expansion is deterministic (per-file seeding, so an edit changes only what
   it names) and files above 64 KB are sparse, which is what lets a realm hold a
-  40 MB asset for kilobytes. Four realms ship: `kingdom-mirror` (the everyday
-  one), `crowded` (40 cities), `monorepo` (every cap in `scan.rs`) and
-  `contended` (a three-way resource fight).
+  40 MB asset for kilobytes. Three realms ship: `kingdom-mirror` (the everyday
+  one), `crowded` (40 cities) and `monorepo` (every cap in `scan.rs`).
 - **A sandbox that is enforced, not remembered.** Three layers: a `.kingdom-mock`
   marker without which the seeder refuses to write into or clear any non-empty
   directory (no flag overrides this); `KINGDOM_SANDBOX=1`, under which
@@ -242,19 +249,19 @@ hands (§8 item 3), whatever folder is open is what an agent will be running
 commands against.
 
 **Faked — `kingdom_core::sample::populate_court`:**
-- The *opening* court: the plans and resources a kingdom starts with, before the
-  King has issued any decree. Plans he opens himself are entirely real.
+- The *opening* court: the plans a kingdom starts with, before the King has
+  issued any decree. Plans he opens himself are entirely real.
 
 **Not built at all:**
 - Agents that *do* anything beyond replying: no tool use, no commands, no edits
 - Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
 - Persistence (state is in memory; a restart empties the kingdom)
 - Plan approval/rejection actually doing anything
-- A lease *queue* — refusal is surfaced, never resolved
+- **Any resource arbitration at all** — see §3
 
-The placeholder court deliberately includes a **blocked plan** and a **contended
-resource**, because those are the states the UI exists to show. Do not "clean
-up" the sample data into a tidy all-quiet court — it would make the most
+The placeholder court deliberately includes a **failed plan** and a plan **mid
+draft**, because those are states the UI exists to show. Do not "clean up" the
+sample data into a court of tidy approved plans — it would make the most
 important visual states unreachable during development. A test pins this.
 
 ### Configuring model access
@@ -291,7 +298,6 @@ Test **invariants and behaviour a caller depends on**, not implementation
 detail. The existing tests are the model:
 - cities never overlap on the map (breaks legibility at scale)
 - layout is deterministic (breaks the King's spatial memory)
-- the lease compatibility matrix (breaks correctness of coordination)
 - buildings stay inside their city and never overlap (breaks legibility, and is
   what extends the city non-overlap guarantee down to buildings)
 - the skyline is deterministic and independent of directory read order
@@ -352,12 +358,10 @@ Roughly in order of value:
    view falls back to polling once a second to notice one that landed elsewhere.
    That poll (`components/conversation.rs`) is a deliberate stopgap: delete it
    when push lands rather than growing it into a general polling layer.
-2. **A lease queue.** `acquire`/`release` are real; what is missing is what
-   happens *after* a refusal. Today a blocked plan sits visible but inert.
-3. **Give a plan hands.** Tool use: run a command, read a file, propose a diff —
-   each taking its own lease first. This is where the lease model stops being
-   theory.
-4. **Plan review UI.** Diff view, approve/reject that does something. This is the
+2. **Give a plan hands.** Tool use: run a command, read a file, propose a diff.
+   This is the biggest single step, and it is also what makes resource
+   arbitration real for the first time — see §3 before rebuilding it.
+3. **Plan review UI.** Diff view, approve/reject that does something. This is the
    King's core loop and it is still a stub.
-5. **Persistence.** SQLite behind `api.rs`. Deliberately deferred — the schema
+4. **Persistence.** SQLite behind `api.rs`. Deliberately deferred — the schema
    should follow a settled domain model, not lead it.

@@ -16,7 +16,6 @@ pub struct Kingdom {
     pub root: String,
     pub cities: Vec<City>,
     pub plans: Vec<Plan>,
-    pub resources: Vec<Resource>,
     /// True when this kingdom is a seeded proving ground rather than real work.
     ///
     /// The UI renders this loudly. A synthetic realm is *designed* to be
@@ -36,7 +35,6 @@ impl Kingdom {
             root: String::new(),
             cities: Vec::new(),
             plans: Vec::new(),
-            resources: Vec::new(),
             sandbox: false,
         }
     }
@@ -63,14 +61,6 @@ impl Kingdom {
         self.plans
             .iter()
             .filter(|p| p.status == PlanStatus::AwaitingReview)
-    }
-
-    /// Every resource that more than one plan is currently contending for.
-    ///
-    /// This is the signal the map draws in red: it is the moment two agents are
-    /// about to trip over each other.
-    pub fn contended_resources(&self) -> impl Iterator<Item = &Resource> {
-        self.resources.iter().filter(|r| r.is_contended())
     }
 }
 
@@ -344,8 +334,16 @@ pub struct Plan {
     /// The conversation so far, King and court alternating.
     pub transcript: Vec<Utterance>,
     pub status: PlanStatus,
-    /// Crown resources this plan holds while drafting.
-    pub leases: Vec<Lease>,
+    /// What this plan is busy with right now, in plain language, or `None`
+    /// when nothing is in flight.
+    ///
+    /// This is the whole of what the old lease machinery actually did: it
+    /// answers "is someone working on this right now?", which is what stops a
+    /// reload or a second tab starting a duplicate model call. It is a
+    /// description rather than a lock -- nothing is arbitrated, and no other
+    /// plan is prevented from working.
+    #[serde(default)]
+    pub working_on: Option<String>,
 }
 
 impl Plan {
@@ -371,8 +369,13 @@ impl Plan {
             model: choice.model.clone(),
             effort: choice.effort,
             status: PlanStatus::Drafting,
-            leases: Vec::new(),
+            working_on: None,
         }
+    }
+
+    /// True while a turn is in flight, so a second one is not started over it.
+    pub fn is_busy(&self) -> bool {
+        self.working_on.is_some()
     }
 
     /// What this plan is being drafted with, for re-use on the next turn.
@@ -429,16 +432,19 @@ pub enum Speaker {
 /// Where a plan stands.
 ///
 /// This absorbs what a separate architect status used to carry: `Drafting` is
-/// an agent working, `Blocked` is an agent that could not get a lease. They were
-/// always two views of one state machine.
+/// an agent working, `Failed` is one that could not finish. They were always
+/// two views of one state machine.
+///
+/// There was a `Blocked` variant, for a plan that could not get a lease. It
+/// went when lease arbitration did -- nothing could produce it any more, and an
+/// unreachable state is a trap for whoever matches on it next. It comes back if
+/// and when plans can genuinely block each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlanStatus {
     /// A model is drafting it right now.
     Drafting,
     /// Drafted, and waiting on the King.
     AwaitingReview,
-    /// Cannot proceed: wants a crown resource another plan holds.
-    Blocked,
     /// The model could not be reached, or refused.
     Failed,
     Approved,
@@ -448,10 +454,9 @@ pub enum PlanStatus {
 impl PlanStatus {
     /// Every state, in the order the map legend lists them: live states first,
     /// then settled history.
-    pub const ALL: [PlanStatus; 6] = [
+    pub const ALL: [PlanStatus; 5] = [
         PlanStatus::Drafting,
         PlanStatus::AwaitingReview,
-        PlanStatus::Blocked,
         PlanStatus::Failed,
         PlanStatus::Approved,
         PlanStatus::Rejected,
@@ -461,7 +466,6 @@ impl PlanStatus {
         match self {
             PlanStatus::Drafting => "Drafting",
             PlanStatus::AwaitingReview => "Awaiting review",
-            PlanStatus::Blocked => "Blocked",
             PlanStatus::Failed => "Failed",
             PlanStatus::Approved => "Approved",
             PlanStatus::Rejected => "Rejected",
@@ -472,7 +476,6 @@ impl PlanStatus {
         match self {
             PlanStatus::Drafting => "#22c55e",
             PlanStatus::AwaitingReview => "#eab308",
-            PlanStatus::Blocked => "#ef4444",
             PlanStatus::Failed => "#f97316",
             PlanStatus::Approved => "#38bdf8",
             PlanStatus::Rejected => "#64748b",
@@ -484,7 +487,6 @@ impl PlanStatus {
         match self {
             PlanStatus::Drafting => "drafting",
             PlanStatus::AwaitingReview => "review",
-            PlanStatus::Blocked => "blocked",
             PlanStatus::Failed => "failed",
             PlanStatus::Approved => "approved",
             PlanStatus::Rejected => "rejected",
@@ -706,160 +708,32 @@ impl ModelCatalogue {
 }
 
 // ---------------------------------------------------------------------------
-// Crown Resources & Leases -- the coordination core
+// Crown Resources & Leases -- removed, deliberately
 // ---------------------------------------------------------------------------
-
-/// A shared machine resource that agents must coordinate over.
-///
-/// This is the heart of Kingdom IDE. Two agents running `cargo test` in the
-/// same worktree, or both binding port 3000, is the failure mode the whole
-/// product exists to make visible and then to prevent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Resource {
-    pub id: ResourceId,
-    pub name: String,
-    pub kind: ResourceKind,
-    /// Leases currently granted over this resource.
-    pub holders: Vec<Lease>,
-    /// Plans queued for it, in request order.
-    pub waiting: Vec<PlanId>,
-}
-
-impl Resource {
-    /// True when somebody is waiting behind a current holder.
-    pub fn is_contended(&self) -> bool {
-        !self.waiting.is_empty()
-    }
-
-    pub fn is_held(&self) -> bool {
-        !self.holders.is_empty()
-    }
-
-    /// Whether a new lease in `mode` could be granted right now.
-    ///
-    /// Exclusive access requires an empty field; shared access composes with
-    /// other shared holders but never with an exclusive one.
-    pub fn can_grant(&self, mode: LeaseMode) -> bool {
-        match mode {
-            LeaseMode::Exclusive => self.holders.is_empty(),
-            LeaseMode::Shared => self.holders.iter().all(|l| l.mode == LeaseMode::Shared),
-        }
-    }
-}
-
-/// The category of a crown resource.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ResourceKind {
-    /// A TCP port, e.g. a dev server on 3000.
-    Port(u16),
-    /// A database or other stateful service.
-    Database,
-    /// The GPU.
-    Gpu,
-    /// A git worktree or branch.
-    Worktree,
-    /// A filesystem path.
-    Path,
-    /// A build or package-manager lock, e.g. `~/.cargo`.
-    BuildLock,
-}
-
-impl ResourceKind {
-    pub fn label(&self) -> String {
-        match self {
-            ResourceKind::Port(p) => format!("Port {p}"),
-            ResourceKind::Database => "Database".into(),
-            ResourceKind::Gpu => "GPU".into(),
-            ResourceKind::Worktree => "Worktree".into(),
-            ResourceKind::Path => "Path".into(),
-            ResourceKind::BuildLock => "Build lock".into(),
-        }
-    }
-
-    /// Glyph shown beside the resource in the sidebar.
-    pub fn glyph(&self) -> &'static str {
-        match self {
-            ResourceKind::Port(_) => "⚓",
-            ResourceKind::Database => "🗄",
-            ResourceKind::Gpu => "⚙",
-            ResourceKind::Worktree => "🌿",
-            ResourceKind::Path => "📁",
-            ResourceKind::BuildLock => "🔒",
-        }
-    }
-}
-
-/// A granted claim on a crown resource.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Lease {
-    pub resource: ResourceId,
-    pub holder: PlanId,
-    pub mode: LeaseMode,
-    /// Why the plan needs it, in plain language.
-    pub reason: String,
-}
-
-/// Exclusive or shared access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LeaseMode {
-    /// Sole access. Nobody else, in any mode.
-    Exclusive,
-    /// Concurrent read-style access, compatible with other shared holders.
-    Shared,
-}
-
-impl LeaseMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            LeaseMode::Exclusive => "exclusive",
-            LeaseMode::Shared => "shared",
-        }
-    }
-}
+//
+// This file used to carry `Resource`, `ResourceKind`, `Lease`, `LeaseMode` and
+// a lease compatibility matrix, on the theory that arbitrating shared machine
+// resources was the core of the product.
+//
+// They were removed because they never arbitrated anything. Exactly one code
+// path ever took a lease (drafting, to read a city), it only ever asked for
+// `Shared`, and shared always composes with shared -- so a refusal required an
+// `Exclusive` holder that no runtime code ever created. Every blocked plan and
+// every red thread on the map came from fabricated sample data. A mechanism
+// nobody can reach is worse than no mechanism: it invites building on a
+// guarantee that was never enforced.
+//
+// What survives is the half that was real: a plan records what it is busy with
+// while it works. See `Plan::working_on`.
+//
+// Arbitration earns its place back the moment plans get hands -- running a
+// command, binding a port, writing a file. That is when two plans can genuinely
+// collide, and it should be rebuilt then, against a real collision, rather than
+// kept warm for a caller that does not exist yet.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn resource_held_by(modes: &[LeaseMode]) -> Resource {
-        Resource {
-            id: ResourceId::new("r"),
-            name: "test".into(),
-            kind: ResourceKind::Port(3000),
-            holders: modes
-                .iter()
-                .enumerate()
-                .map(|(i, m)| Lease {
-                    resource: ResourceId::new("r"),
-                    holder: PlanId::new(format!("p{i}")),
-                    mode: *m,
-                    reason: String::new(),
-                })
-                .collect(),
-            waiting: Vec::new(),
-        }
-    }
-
-    /// The compatibility matrix is the one rule that keeps two agents from
-    /// silently colliding, so it is worth pinning precisely.
-    #[test]
-    fn lease_compatibility_matrix() {
-        let free = resource_held_by(&[]);
-        assert!(free.can_grant(LeaseMode::Exclusive));
-        assert!(free.can_grant(LeaseMode::Shared));
-
-        let shared = resource_held_by(&[LeaseMode::Shared, LeaseMode::Shared]);
-        assert!(shared.can_grant(LeaseMode::Shared));
-        assert!(
-            !shared.can_grant(LeaseMode::Exclusive),
-            "exclusive access must wait for shared readers to drain"
-        );
-
-        let exclusive = resource_held_by(&[LeaseMode::Exclusive]);
-        assert!(!exclusive.can_grant(LeaseMode::Shared));
-        assert!(!exclusive.can_grant(LeaseMode::Exclusive));
-    }
-
     fn catalogue() -> ModelCatalogue {
         ModelCatalogue {
             options: vec![

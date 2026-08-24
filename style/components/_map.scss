@@ -101,21 +101,6 @@
   letter-spacing: 0.28em;
 }
 
-// A pulsing red thread drawn between two cities fighting over one resource.
-// Now a curved path following the road between them, so it must not be filled.
-.contention-thread {
-  fill: none;
-  stroke: t.$blocked;
-  stroke-width: 2;
-  stroke-dasharray: 6 8;
-  opacity: 0.55;
-  animation: thread-crawl 1s linear infinite;
-}
-
-@keyframes thread-crawl {
-  to { stroke-dashoffset: -14; }
-}
-
 // --- Cities ----------------------------------------------------------------
 
 .city {

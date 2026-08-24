@@ -1,78 +1,64 @@
 //! Placeholder data for the throne room.
 //!
 //! Cities are **real** and come from scanning the chosen folder. Plans opened
-//! from the chat dock are **real** too, and drafted by an actual model. What
+//! from the decree bar are **real** too, and drafted by an actual model. What
 //! this module fabricates is a *starting* court, so a freshly opened kingdom
 //! has something to show before the King has issued a single decree.
 //!
-//! It deliberately seeds a **blocked plan** and a **contended resource**. Those
-//! are the states the whole product exists to make visible, so they have to be
-//! reachable on day one -- tidying this into an all-quiet court would make the
-//! most important visuals unreachable during development.
+//! It deliberately seeds a **failed plan** alongside ones awaiting review. A
+//! court that opens all-quiet makes the states worth noticing unreachable
+//! during development, which is exactly when a refactor would quietly lose
+//! them. A test pins this.
 
 use crate::ids::*;
 use crate::model::*;
 
-/// Fabricates a court of plans and crown resources for the given cities, so the
-/// map has something to show on first run.
-pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
+/// Fabricates a court of plans for the given cities, so the map has something
+/// to show on first run.
+pub fn populate_court(cities: &[City]) -> Vec<Plan> {
     if cities.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
 
-    let port = ResourceId::new("res-port-3000");
-    let cargo = ResourceId::new("res-cargo-lock");
-    let gpu = ResourceId::new("res-gpu");
-
-    // Each scripted plan: (id, decree, status, the leases it holds).
+    // Each scripted plan: (id, decree, status).
     let scripted = [
         (
             "plan-ramparts",
             "Refactor the auth module",
             PlanStatus::Drafting,
-            vec![(port.clone(), LeaseMode::Exclusive, "Running the dev server")],
         ),
         (
             "plan-aqueduct",
             "Run the integration tests end to end",
-            PlanStatus::Blocked,
-            vec![],
+            PlanStatus::Failed,
         ),
         (
             "plan-foundations",
             "Design a new storage layer",
             PlanStatus::AwaitingReview,
-            vec![(cargo.clone(), LeaseMode::Shared, "Building dependencies")],
         ),
     ];
 
     let mock = ModelChoice::new("mock", None);
     let mut plans = Vec::new();
-    for (i, (id, prompt, status, leases)) in scripted.into_iter().enumerate() {
+    for (i, (id, prompt, status)) in scripted.into_iter().enumerate() {
         let city = &cities[i % cities.len()];
         let id = PlanId::new(id);
 
         let mut plan = Plan::opened(id.clone(), city.id.clone(), prompt, &mock);
         plan.title = format!("{} of {}", plan_title(i), city.name);
         plan.summary = match status {
-            PlanStatus::Blocked => format!(
-                "Waiting on the dev server port before it can test {}.",
-                city.name
-            ),
+            PlanStatus::Failed => format!("The court could not reach a model for {}.", city.name),
             _ => format!("Proposes structural changes to {}.", city.name),
         };
         plan.status = status;
         plan.touches = notable_files(city, 3);
         plan.say(Speaker::Court, plan.summary.clone());
-        plan.leases = leases
-            .into_iter()
-            .map(|(resource, mode, reason)| Lease {
-                resource,
-                holder: id.clone(),
-                mode,
-                reason: reason.to_string(),
-            })
-            .collect();
+        // A plan mid-draft is the one state that carries a `working_on`, and it
+        // is what puts a crane over the city on the map.
+        if status == PlanStatus::Drafting {
+            plan.working_on = Some(format!("Reading {} to draft a plan", city.name));
+        }
 
         plans.push(plan);
     }
@@ -105,42 +91,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
     rejected.touches = vec!["src/scan.rs".into()];
     plans.push(rejected);
 
-    let holders_of = |id: &ResourceId| -> Vec<Lease> {
-        plans
-            .iter()
-            .flat_map(|p| p.leases.iter())
-            .filter(|l| &l.resource == id)
-            .cloned()
-            .collect()
-    };
-
-    let resources = vec![
-        Resource {
-            id: port.clone(),
-            name: "Dev server :3000".into(),
-            kind: ResourceKind::Port(3000),
-            holders: holders_of(&port),
-            // The aqueduct plan is queued behind the ramparts plan: this is the
-            // contention the map renders as a red thread between two cities.
-            waiting: vec![PlanId::new("plan-aqueduct")],
-        },
-        Resource {
-            id: cargo.clone(),
-            name: "Cargo build lock".into(),
-            kind: ResourceKind::BuildLock,
-            holders: holders_of(&cargo),
-            waiting: vec![],
-        },
-        Resource {
-            id: gpu.clone(),
-            name: "GPU 0".into(),
-            kind: ResourceKind::Gpu,
-            holders: vec![],
-            waiting: vec![],
-        },
-    ];
-
-    (plans, resources)
+    plans
 }
 
 fn plan_title(i: usize) -> &'static str {
@@ -215,36 +166,30 @@ mod tests {
         }
     }
 
-    /// The court must open showing trouble, not calm.
+    /// The court must open showing something worth the King's attention.
     ///
-    /// A blocked plan and a contended resource are the states the whole product
-    /// exists to make visible. If the sample data ever settles into a tidy
-    /// all-quiet court, the most important visuals become unreachable during
-    /// development -- and a refactor is exactly when that would happen quietly.
+    /// A court of nothing but tidy approved plans makes the states the UI exists
+    /// to render unreachable during development -- and a refactor is exactly
+    /// when that would happen quietly. It used to be a blocked plan and a
+    /// contended resource; with lease arbitration gone, a *failed* plan is the
+    /// honest equivalent, because it is a state the running product can
+    /// genuinely produce.
     #[test]
-    fn the_opening_court_always_shows_a_blockage_and_a_contention() {
+    fn the_opening_court_always_shows_trouble_and_history() {
         let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
-        let (plans, resources) = populate_court(&cities);
+        let plans = populate_court(&cities);
 
         assert!(
-            plans.iter().any(|p| p.status == PlanStatus::Blocked),
-            "a blocked plan must be visible on first run"
+            plans.iter().any(|p| p.status == PlanStatus::Failed),
+            "a plan in trouble must be visible on first run"
         );
         assert!(
-            resources.iter().any(|r| r.is_contended()),
-            "a contended resource must be visible on first run"
+            plans.iter().any(|p| p.status == PlanStatus::Drafting),
+            "a plan mid-flight must be visible, so the map draws a crane"
         );
-
-        // Contention is only drawable if the waiting plan actually exists: a
-        // dangling PlanId would silently drop the red thread from the map.
-        for resource in &resources {
-            for waiter in &resource.waiting {
-                assert!(
-                    plans.iter().any(|p| &p.id == waiter),
-                    "resource {} waits on unknown plan {waiter}",
-                    resource.id
-                );
-            }
-        }
+        assert!(
+            plans.iter().any(|p| !p.is_live()),
+            "settled history must exist, or the rail's All filter looks broken"
+        );
     }
 }

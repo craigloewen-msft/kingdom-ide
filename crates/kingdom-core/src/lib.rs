@@ -12,7 +12,6 @@
 //! | Kingdom             | [`Kingdom`] | the dev folder you opened                  |
 //! | City                | [`City`]    | one project directory inside it            |
 //! | Architectural Plan  | [`Plan`]    | a proposal, drafted by a model, awaiting review |
-//! | Crown Resource      | [`Resource`] / [`Lease`] | contended machine resources   |
 //!
 //! A plan is deliberately both the unit of work and the unit of review. There
 //! is no separate agent entity: the King reviews proposals, not agents, and

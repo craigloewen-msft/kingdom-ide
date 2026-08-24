@@ -89,7 +89,9 @@ pub fn CityGlyph(
     };
 
     let astir = move || plans.get().iter().any(|p| p.status == PlanStatus::Drafting);
-    let troubled = move || plans.get().iter().any(|p| p.status == PlanStatus::Blocked);
+    // Was `Blocked` (a plan refused a lease); with arbitration gone, a failed
+    // draft is what genuinely marks a city as needing the King's eye.
+    let troubled = move || plans.get().iter().any(|p| p.status == PlanStatus::Failed);
 
     // Paths a pending plan proposes to touch: these buildings get gilded, which
     // is what makes "what am I being asked to approve?" a place on the map.

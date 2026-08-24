@@ -12,6 +12,9 @@ The point is not editing code. The point is answering three questions at a glanc
 2. What shared resources are they holding, and who is blocked behind whom?
 3. What are they proposing that I need to decide on?
 
+Question 2 is the goal, not the state of play: resource arbitration is **not
+built yet**. See `AGENTS.md` §3 for what exists and what does not.
+
 ## Running it
 
 ```bash
@@ -52,8 +55,8 @@ style/main.scss       styling
 ## Status
 
 Early. Project scanning, the map, and the client/server round trip are real.
-So is drafting: a decree opens a plan, takes a lease on the city's files, and
-calls a model with that project's real scan data.
+So is drafting: a decree opens a plan and calls a model with that project's real
+scan data.
 
 Out of the box an offline **mock** model drafts every plan, so a fresh clone
 works with no credential and no network. To use a real model, copy

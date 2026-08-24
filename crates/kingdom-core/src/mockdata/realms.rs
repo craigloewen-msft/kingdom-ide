@@ -14,7 +14,7 @@
 //!   the others do not. They are fixtures, not a gallery.
 
 use super::build::*;
-use super::{court, CitySpec, RealmSpec};
+use super::{CitySpec, RealmSpec};
 use crate::model::Ward;
 
 /// The realm the "Enter the Proving Grounds" button opens.
@@ -26,11 +26,10 @@ pub const DEFAULT_REALM: &str = "kingdom-mirror";
 const MIRROR_SEED: u64 = 0x_D1FF_0001;
 const CROWDED_SEED: u64 = 0x_C0FF_0002;
 const MONOREPO_SEED: u64 = 0x_BEEF_0003;
-const CONTENDED_SEED: u64 = 0x_C0DE_0004;
 
 /// Every realm the seeder can build. **Add yours here.**
 pub fn realms() -> Vec<RealmSpec> {
-    vec![kingdom_mirror(), crowded(), monorepo(), contended()]
+    vec![kingdom_mirror(), crowded(), monorepo()]
 }
 
 /// Looks up a realm by name.
@@ -211,22 +210,4 @@ fn monorepo() -> RealmSpec {
             )
             .dirty(12),
     )
-}
-
-/// Small cities, but a court with a three-way fight over one port.
-///
-/// The realm for looking at contention. Everything else about it is
-/// deliberately boring so the red threads are the only thing to notice.
-fn contended() -> RealmSpec {
-    RealmSpec::new(
-        "contended",
-        "Small cities, maximum contention -- the map's red threads at their worst.",
-        CONTENDED_SEED,
-    )
-    .court(court::three_way_contention)
-    .cities([
-        rust_city("anvil").dir("src", [fill("mod_{i}.rs", 10, 600..6_000, Ward::Rust)]),
-        rust_city("bellow").dir("src", [fill("mod_{i}.rs", 8, 600..6_000, Ward::Rust)]),
-        node_city("crucible").dir("src", [fill("view_{i}.ts", 12, 400..5_000, Ward::Web)]),
-    ])
 }

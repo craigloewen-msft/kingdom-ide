@@ -61,7 +61,7 @@ pub fn DecreeBar() -> impl IntoView {
 
         async move {
             match begin_plan(prompt, city, chosen).await {
-                // Opening is instant -- no lease, no model call -- so the King
+                // Opening is instant -- no model call -- so the King
                 // lands in the conversation while the court is still thinking.
                 // The chamber itself kicks off the drafting.
                 Ok(plan) => {
