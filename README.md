@@ -36,7 +36,14 @@ cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror
 
 Set `KINGDOM_SANDBOX=1` and the server will refuse to open anything outside the
 proving grounds — worth doing whenever you use Kingdom IDE to work on Kingdom
-IDE. The fake data is plain Rust in `crates/kingdom-core/src/mockdata/realms.rs`;
+IDE. Set `KINGDOM_REALM=kingdom-mirror` as well and the server opens that realm
+at startup rather than the folder picker, which is the rehearsal loop:
+
+```bash
+KINGDOM_REALM=kingdom-mirror KINGDOM_SANDBOX=1 cargo leptos watch
+```
+
+The fake data is plain Rust in `crates/kingdom-core/src/mockdata/fixtures.rs`;
 edit it and re-seed with `--force`.
 
 ## Stack
