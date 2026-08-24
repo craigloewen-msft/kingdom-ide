@@ -52,7 +52,13 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         let city = &cities[i % cities.len()];
         let id = PlanId::new(id);
 
-        let mut plan = Plan::opened(id.clone(), city.id.clone(), prompt, &mock);
+        let mut plan = Plan::opened(
+            id.clone(),
+            city.id.clone(),
+            prompt,
+            &mock,
+            Workspace::in_place(&city.path),
+        );
         plan.title = format!("{} of {}", plan_title(i), city.name);
         plan.summary = match status {
             PlanStatus::Blocked => format!(
@@ -63,7 +69,11 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         };
         plan.status = status;
         plan.touches = notable_files(city, 3);
-        plan.say(Speaker::Court, plan.summary.clone());
+        // A blockage is something that *happened*, not counsel a model gave.
+        match status {
+            PlanStatus::Blocked => plan.note(NoteKind::Blocked, plan.summary.clone()),
+            _ => plan.say(Speaker::Court, plan.summary.clone()),
+        }
         plan.leases = leases
             .into_iter()
             .map(|(resource, mode, reason)| Lease {
@@ -86,6 +96,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         first.id.clone(),
         "Harden the error paths",
         &mock,
+        Workspace::in_place(&first.path),
     );
     approved.title = format!("The Old Ramparts of {}", first.name);
     approved.summary = "Hardened the error paths. Approved and built.".into();
@@ -98,6 +109,7 @@ pub fn populate_court(cities: &[City]) -> (Vec<Plan>, Vec<Resource>) {
         first.id.clone(),
         "Rewrite the scanner from scratch",
         &mock,
+        Workspace::in_place(&first.path),
     );
     rejected.title = format!("The Folly of {}", first.name);
     rejected.summary = "Proposed rewriting the scanner. Refused.".into();

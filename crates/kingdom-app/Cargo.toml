@@ -37,6 +37,9 @@ serde_json = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 dotenvy = { version = "0.15", optional = true }
 thiserror = { version = "2", optional = true }
+# Names an isolated worktree's folder. v4 only -- the id needs to be unique and
+# unguessable-ish, not sortable.
+uuid = { version = "1", features = ["v4"], optional = true }
 
 # Client-only.
 console_error_panic_hook = { version = "0.1", optional = true }
@@ -55,6 +58,12 @@ web-sys = { version = "0.3", features = [
     "Window",
 ] }
 
+[dev-dependencies]
+# A throwaway git repository for the worktree tests. Nothing in the product
+# needs it: preparing a workspace is only meaningfully testable against a real
+# repo on a real disk.
+tempfile = "3"
+
 [features]
 default = ["ssr"]
 hydrate = [
@@ -71,6 +80,7 @@ ssr = [
     "dep:async-trait",
     "dep:dotenvy",
     "dep:thiserror",
+    "dep:uuid",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",

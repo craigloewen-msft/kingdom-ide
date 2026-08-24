@@ -129,6 +129,7 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
+    worktree.rs     Preparing a plan's workspace via git (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
                     catalogue.rs (live /models list), credential.rs,
@@ -213,6 +214,21 @@ build on top of a placeholder believing it is real.
   withdrawn degrades to the default rather than failing the decree.
 - **Credential resolution** from `KINGDOM_API_KEY` or a helper command
   (`agency auth github` by default), with the contract tested.
+- **A workspace per plan.** Every decree chooses where its work happens before
+  the plan exists: a **fresh worktree** (a GUID'd checkout under the city's
+  `.kingdom/`, on a branch of its own), **a named branch** checked out into its
+  own worktree, or **the folder itself** with no isolation. The choice is settled
+  when the plan opens, recorded on it, shown in the chamber header, and is what
+  the model is briefed with. Cutting a worktree takes an `Exclusive` lease on the
+  city's git metadata for the length of the one git command, and read leases are
+  keyed on the *workspace* rather than the city -- so two plans in two worktrees
+  of one repo genuinely do not contend. A city with no `.git` refuses isolation
+  loudly rather than silently downgrading to working in place.
+- **A clean prompt.** Nothing of the metaphor reaches a model. The system prompt
+  is plain, and Kingdom's own notices (a refused lease, a failed call, a workspace
+  cut) are `Entry::Note`s rather than utterances, so they are structurally
+  incapable of being replayed to a model as its own prior words. `Plan::said()`
+  is the only door between a log and a provider, and it yields `Utterance`.
 
 **Faked — `kingdom_core::sample::populate_court`:**
 - The *opening* court: the plans and resources a kingdom starts with, before the
@@ -220,6 +236,10 @@ build on top of a placeholder believing it is real.
 
 **Not built at all:**
 - Agents that *do* anything beyond replying: no tool use, no commands, no edits
+  (a plan now has a workspace to do them *in*, but still only talks)
+- Removing worktrees. They persist under `.kingdom/` so the King can inspect or
+  merge them; deciding when one is disposable is its own question, and guessing
+  would throw away real work.
 - Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
 - Persistence (state is in memory; a restart empties the kingdom)
 - Plan approval/rejection actually doing anything

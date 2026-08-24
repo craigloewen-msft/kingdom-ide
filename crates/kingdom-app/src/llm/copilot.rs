@@ -129,12 +129,18 @@ impl Model for CopilotModel {
     }
 }
 
+/// The system prompt.
+///
+/// Deliberately plain. Kingdom's metaphor -- kings, courts, decrees -- exists to
+/// give the *user* a stance toward his agents; it is not information about the
+/// work, and sending it only nudges the model into answering in costume instead
+/// of answering the question.
 fn system_prompt(brief: &Brief) -> String {
     format!(
-        "You are an architect in Kingdom IDE, advising the King on one project.\n\n\
+        "You are a senior software engineer helping with one project.\n\n\
          {}\n\
          Answer concisely and concretely, referring to real files above where relevant. \
-         You cannot run commands or edit files: you are drawing up a proposal for review. \
+         You cannot run commands or edit files: you are writing a proposal for review. \
          Do not invent files that are not listed.",
         brief.city.render()
     )

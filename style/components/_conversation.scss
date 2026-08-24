@@ -71,6 +71,18 @@
   color: t.$ink-faint;
 }
 
+// Where this plan works. Isolation the King cannot see is isolation he cannot
+// trust, so an isolated plan is tinted; a plan editing the folder itself is
+// deliberately left plain rather than reassuringly gilded.
+.chamber-workspace {
+  flex-shrink: 0;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  color: t.$ink-faint;
+
+  &.isolated { color: t.$gold-dim; }
+}
+
 // --- Log -------------------------------------------------------------------
 
 .chamber-log {
@@ -149,6 +161,27 @@
   font-size: 11px;
   color: t.$ink-faint;
   padding-top: 2px;
+}
+
+// Something that *happened*, not something anybody said — so deliberately not a
+// chat bubble. No speaker column, centred, quieter than the prose around it: a
+// refused lease is not counsel and must not be dressed as counsel.
+.chat-note {
+  align-self: center;
+  max-width: 80%;
+  padding: 5px 12px;
+  border: 1px solid t.$edge;
+  border-radius: 999px;
+  background: t.$panel;
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+
+  &.note-blocked { color: t.$blocked; border-color: rgba(t.$blocked, 0.4); }
+  &.note-failed { color: t.$failed; border-color: rgba(t.$failed, 0.4); }
+  // Where the work is fenced in is reassurance, not an alarm.
+  &.note-workspace { font-family: t.$font-mono; }
 }
 
 .msg-body {
