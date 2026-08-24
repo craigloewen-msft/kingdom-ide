@@ -211,6 +211,17 @@ fn ChamberBody(
         Some((parent.id.clone(), parent.title.clone()))
     });
     let task = StoredValue::new(plan.prompt.clone());
+
+    // Where the arrow goes. For an errand that is the plan that sent it; for
+    // anything else, the realm. A parent this browser has not loaded falls back
+    // to the realm rather than to a link that would lead nowhere.
+    let back = Memo::new(move |_| match parent.get() {
+        Some((id, _)) => (
+            format!("/plan/{id}"),
+            "Back to the plan that sent this errand".to_string(),
+        ),
+        None => ("/".to_string(), "Back to the realm".to_string()),
+    });
     let outcome = Memo::new(move |_| {
         live.get()
             .and_then(|p| p.outcome)
@@ -248,41 +259,45 @@ fn ChamberBody(
     };
 
     view! {
-        // The King is somewhere he did not decree, looking at a conversation the
-        // court is having with itself. Saying so is the whole point of this
-        // strip: without it an errand's chamber is indistinguishable from a
-        // plan's, and the way back to the work it belongs to is the browser's
-        // back button.
-        <Show when=move || is_errand>
-            <div class="errand-banner">
-                <span class="errand-banner-mark">"\u{26b1}"</span>
-                <div class="errand-banner-text">
-                    <span class="errand-banner-who">
-                        "An errand of "
+        <header class="chamber-header" class:errand=is_errand>
+            // For an errand, "back" is the plan that sent it rather than the
+            // realm: that is where the King came from, and where he has to go
+            // to steer the work. Retargeting the arrow he already knows beats
+            // adding a second one beside it.
+            <a
+                class="back-link"
+                href=move || back.get().0
+                title=move || back.get().1
+            >"\u{2190}"</a>
+            <div class="chamber-id">
+                // Where he is, above what he is reading -- the ordinary
+                // breadcrumb shape. Present only for an errand, because for a
+                // plan the King decreed there is no "above" to name.
+                <Show when=move || is_errand>
+                    <div class="chamber-crumb">
+                        <span class="crumb-mark">"\u{26b1}"</span>
+                        "Errand of "
                         {move || match parent.get() {
                             Some((id, title)) => view! {
-                                <a class="errand-parent" href=format!("/plan/{id}")>{title}</a>
+                                <a class="crumb-parent" href=format!("/plan/{id}")>{title}</a>
                             }
                             .into_any(),
                             // The parent is not in the kingdom this browser has
                             // loaded -- a deep link, most likely. Still say what
-                            // this is; the alternative reads as a plan.
+                            // this is; the alternative reads as an ordinary plan.
                             None => view! {
-                                <span class="errand-parent">"another plan"</span>
+                                <span class="crumb-parent">"another plan"</span>
                             }
                             .into_any(),
                         }}
-                    </span>
-                    <span class="errand-banner-task">{move || task.get_value()}</span>
-                </div>
-                <span class="errand-banner-note">"Reads only \u{b7} you cannot reply here"</span>
-            </div>
-        </Show>
-
-        <header class="chamber-header">
-            <a class="back-link" href="/" title="Back to the realm">"\u{2190}"</a>
-            <div class="chamber-id">
-                <h1 class="chamber-title">{move || title.get()}</h1>
+                    </div>
+                </Show>
+                // An errand's title is cut from its task, so the full wording
+                // goes on hover rather than onto a line of its own.
+                <h1
+                    class="chamber-title"
+                    title=move || if is_errand { task.get_value() } else { String::new() }
+                >{move || title.get()}</h1>
                 <div class="chamber-meta">
                     <span class="chamber-city">
                         {move || city.get().unwrap_or_else(|| "unknown city".into())}
