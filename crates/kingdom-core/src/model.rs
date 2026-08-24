@@ -65,17 +65,17 @@ impl Kingdom {
     ///
     /// This is the *only* way the parent's chamber finds its errands, and the
     /// direction is deliberate: the link is a field on the errand rather than a
-    /// list on the [`Deed`], so there is one place it can be wrong. A list on
+    /// list on the [`ToolCall`], so there is one place it can be wrong. A list on
     /// the deed would have to be kept in step with the plans themselves, and the
     /// failure -- a named errand that does not exist, or an errand no call
     /// admits to -- would be silent.
     pub fn errands_of<'a>(
         &'a self,
         parent: &'a PlanId,
-        deed: &'a str,
+        tool_call: &'a str,
     ) -> impl Iterator<Item = &'a Plan> + 'a {
         self.plans.iter().filter(move |p| match &p.errand_for {
-            Some(errand) => &errand.parent == parent && errand.deed == deed,
+            Some(errand) => &errand.parent == parent && errand.tool_call == tool_call,
             None => false,
         })
     }
@@ -502,8 +502,8 @@ pub struct Plan {
 pub struct Errand {
     /// The plan that sent this one.
     pub parent: PlanId,
-    /// The [`Deed::id`] of the call that sent it.
-    pub deed: String,
+    /// The [`ToolCall::id`] of the call that sent it.
+    pub tool_call: String,
 }
 
 impl Plan {
@@ -562,7 +562,7 @@ impl Plan {
     /// repair pass, the chamber -- to buy nothing but a label. The label is
     /// fixed where labels belong: the chamber renders an errand's King turns as
     /// "Commission".
-    pub fn sent(id: PlanId, parent: &Plan, deed: &str, task: impl Into<String>) -> Self {
+    pub fn sent(id: PlanId, parent: &Plan, tool_call: &str, task: impl Into<String>) -> Self {
         let task = task.into();
         Self {
             id,
@@ -580,7 +580,7 @@ impl Plan {
             working_on: None,
             errand_for: Some(Errand {
                 parent: parent.id.clone(),
-                deed: deed.to_string(),
+                tool_call: tool_call.to_string(),
             }),
         }
     }
@@ -647,7 +647,7 @@ impl Plan {
     pub fn said(&self) -> impl Iterator<Item = &Utterance> {
         self.transcript.iter().filter_map(|e| match e {
             Entry::Said(u) => Some(u),
-            Entry::Note(_) | Entry::Did(_) => None,
+            Entry::Note(_) | Entry::Tool(_) => None,
         })
     }
 
@@ -666,7 +666,7 @@ impl Plan {
     pub fn turns(&self) -> impl Iterator<Item = Turn> + '_ {
         self.transcript.iter().filter_map(|e| match e {
             Entry::Said(u) => Some(Turn::Said(u.clone())),
-            Entry::Did(d) => Some(Turn::Did(d.clone())),
+            Entry::Tool(d) => Some(Turn::Tool(d.clone())),
             Entry::Note(_) => None,
         })
     }
@@ -678,8 +678,8 @@ impl Plan {
     /// completion would make a five-minute build look like five minutes of an
     /// agent doing nothing at all, which is the exact question this product
     /// exists to answer.
-    pub fn begin_deed(&mut self, deed: Deed) {
-        self.transcript.push(Entry::Did(deed));
+    pub fn begin_tool_call(&mut self, tool_call: ToolCall) {
+        self.transcript.push(Entry::Tool(tool_call));
     }
 
     /// Settles a tool call that was begun earlier.
@@ -688,11 +688,11 @@ impl Plan {
     /// should treat as a bug rather than ignore: it means a result arrived for
     /// something never recorded as started, and the log the King reads is
     /// missing an event the model believes happened.
-    pub fn settle_deed(&mut self, id: &str, outcome: DeedOutcome) -> bool {
+    pub fn settle_tool_call(&mut self, id: &str, outcome: ToolOutcome) -> bool {
         for entry in self.transcript.iter_mut().rev() {
-            if let Entry::Did(deed) = entry {
-                if deed.id == id && deed.in_flight() {
-                    deed.outcome = Some(outcome);
+            if let Entry::Tool(tool_call) = entry {
+                if tool_call.id == id && tool_call.in_flight() {
+                    tool_call.outcome = Some(outcome);
                     return true;
                 }
             }
@@ -736,7 +736,7 @@ fn title_from_prompt(prompt: &str) -> String {
 /// forgot would feed Kingdom's own plumbing back to a model as its own prior
 /// words. Splitting it out one level up makes that mistake unrepresentable.
 ///
-/// A [`Deed`] is not a speaker either, for the first half of the same reason:
+/// A [`ToolCall`] is not a speaker either, for the first half of the same reason:
 /// nobody said it. But it parts company with a note on the second half -- a
 /// deed **does** go back to the model, because a tool result the model is never
 /// shown is a tool call it will immediately make again. So the log now holds
@@ -750,7 +750,7 @@ pub enum Entry {
     /// Never sent anywhere.
     Note(Note),
     /// Something the court did with its own hands, and what came back.
-    Did(Deed),
+    Tool(ToolCall),
 }
 
 /// A tool call the court made, and its result.
@@ -760,7 +760,7 @@ pub enum Entry {
 /// failed" -- and splitting them would let the log hold a result with no call,
 /// or two results for one call, neither of which is a thing that can happen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Deed {
+pub struct ToolCall {
     /// The provider's own correlation id for this call.
     ///
     /// Not ours to invent: it is what the next request must quote back so the
@@ -780,16 +780,16 @@ pub struct Deed {
     /// What came back. `None` while the call is still running, which is a state
     /// the chamber renders -- it is how the King sees what an agent is doing
     /// *right now* rather than only what it did.
-    pub outcome: Option<DeedOutcome>,
+    pub outcome: Option<ToolOutcome>,
     /// When the call was made. See [`Timestamp`].
     #[serde(default)]
     pub at: Option<Timestamp>,
 }
 
-impl Deed {
+impl ToolCall {
     /// Records a call as made *now* and still in flight, for the same reason as
     /// [`Utterance::new`].
-    pub fn begun(
+    pub fn started(
         id: impl Into<String>,
         tool: impl Into<String>,
         input: serde_json::Value,
@@ -816,8 +816,8 @@ impl Deed {
     /// having been told only silence.
     pub fn report(&self) -> &str {
         match &self.outcome {
-            Some(DeedOutcome::Done { output, .. }) => output,
-            Some(DeedOutcome::Refused { reason }) => reason,
+            Some(ToolOutcome::Done { output, .. }) => output,
+            Some(ToolOutcome::Refused { reason }) => reason,
             None => "",
         }
     }
@@ -826,10 +826,10 @@ impl Deed {
     ///
     /// Empty for all but a handful of tools, and empty for every call still in
     /// flight. A provider that cannot carry an image ignores this and sends
-    /// [`Deed::report`] alone, which is why the two are separate accessors.
-    pub fn shown(&self) -> &[DeedImage] {
+    /// [`ToolCall::report`] alone, which is why the two are separate accessors.
+    pub fn shown(&self) -> &[ToolImage] {
         match &self.outcome {
-            Some(DeedOutcome::Done { images, .. }) => images,
+            Some(ToolOutcome::Done { images, .. }) => images,
             _ => &[],
         }
     }
@@ -843,7 +843,7 @@ impl Deed {
 /// avoid. No `data:` prefix -- the media type is a field, and gluing the two
 /// together is the wire format's job, not the domain's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DeedImage {
+pub struct ToolImage {
     /// `image/png`, `image/jpeg`, and so on.
     pub media_type: String,
     /// The image, base64-encoded.
@@ -852,7 +852,7 @@ pub struct DeedImage {
 
 /// How a tool call ended.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum DeedOutcome {
+pub enum ToolOutcome {
     /// The tool ran. Note that a command exiting non-zero is still `Done` --
     /// a failing test suite is a successful tool call with bad news in it, and
     /// conflating the two would have the chamber cry error over exactly the
@@ -872,21 +872,21 @@ pub enum DeedOutcome {
         /// a document written before this field existed still loads, and one
         /// written after is not littered with `"images": []`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        images: Vec<DeedImage>,
+        images: Vec<ToolImage>,
     },
     /// The tool would not run: unknown name, unparseable arguments, or a path
     /// outside the workspace.
     Refused { reason: String },
 }
 
-impl DeedOutcome {
+impl ToolOutcome {
     /// A tool that ran and produced words.
     ///
     /// The constructor exists so that the next field added to `Done` is one
     /// line of change rather than forty. Nearly every tool wants this; the two
-    /// that have pictures to show reach for [`DeedOutcome::seen`] instead.
+    /// that have pictures to show reach for [`ToolOutcome::seen`] instead.
     pub fn done(output: impl Into<String>) -> Self {
-        DeedOutcome::Done {
+        ToolOutcome::Done {
             output: output.into(),
             images: Vec::new(),
         }
@@ -896,8 +896,8 @@ impl DeedOutcome {
     ///
     /// The words are still required: they are what the chamber shows, what the
     /// store keeps, and what a model that cannot see is given instead.
-    pub fn seen(output: impl Into<String>, images: Vec<DeedImage>) -> Self {
-        DeedOutcome::Done {
+    pub fn seen(output: impl Into<String>, images: Vec<ToolImage>) -> Self {
+        ToolOutcome::Done {
             output: output.into(),
             images,
         }
@@ -906,8 +906,8 @@ impl DeedOutcome {
     /// Suffix for the CSS class the chamber styles a settled deed with.
     pub fn css_suffix(&self) -> &'static str {
         match self {
-            DeedOutcome::Done { .. } => "done",
-            DeedOutcome::Refused { .. } => "refused",
+            ToolOutcome::Done { .. } => "done",
+            ToolOutcome::Refused { .. } => "refused",
         }
     }
 
@@ -917,7 +917,7 @@ impl DeedOutcome {
     /// image, not the image. See the note in `store.rs`.
     pub fn without_images(self) -> Self {
         match self {
-            DeedOutcome::Done { output, .. } => DeedOutcome::done(output),
+            ToolOutcome::Done { output, .. } => ToolOutcome::done(output),
             refused => refused,
         }
     }
@@ -938,7 +938,7 @@ impl DeedOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Turn {
     Said(Utterance),
-    Did(Deed),
+    Tool(ToolCall),
 }
 
 /// Something a participant said.
@@ -1590,20 +1590,20 @@ mod transcript_tests {
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
         );
-        plan.begin_deed(Deed::begun(
+        plan.begin_tool_call(ToolCall::started(
             "call-1",
             "bash",
             serde_json::json!({ "cmd": "cargo test" }),
         ));
         plan.note(NoteKind::Failed, "The disk filled up.");
-        assert!(plan.settle_deed("call-1", DeedOutcome::done("ok")));
+        assert!(plan.settle_tool_call("call-1", ToolOutcome::done("ok")));
         plan.say(Speaker::Court, "The tests pass.");
 
         let turns: Vec<_> = plan
             .turns()
             .map(|t| match t {
                 Turn::Said(u) => format!("said:{}", u.body),
-                Turn::Did(d) => format!("did:{}:{}", d.tool, d.report()),
+                Turn::Tool(d) => format!("did:{}:{}", d.tool, d.report()),
             })
             .collect();
 

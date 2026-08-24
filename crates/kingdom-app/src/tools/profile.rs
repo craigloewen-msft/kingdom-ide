@@ -24,7 +24,7 @@
 
 use super::{Refusal, Tool, Workshop};
 use kingdom_browser::{profile, BrowserError, PerfReading};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -194,7 +194,7 @@ impl Sample {
     }
 }
 
-fn bad(detail: impl Into<String>) -> DeedOutcome {
+fn bad(detail: impl Into<String>) -> ToolOutcome {
     Refusal::BadArguments {
         tool: "browser_profile".to_string(),
         detail: detail.into(),
@@ -202,10 +202,10 @@ fn bad(detail: impl Into<String>) -> DeedOutcome {
     .into()
 }
 
-fn failed(error: BrowserError) -> DeedOutcome {
+fn failed(error: BrowserError) -> ToolOutcome {
     match error {
         BrowserError::ChromeUnavailable(reason) => Refusal::Refused(reason).into(),
-        other => DeedOutcome::done(other.to_string()),
+        other => ToolOutcome::done(other.to_string()),
     }
 }
 
@@ -264,7 +264,7 @@ impl Tool for BrowserProfile {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let input: ProfileInput = match serde_json::from_value(input) {
             Ok(input) => input,
             Err(error) => return bad(error.to_string()),
@@ -273,7 +273,7 @@ impl Tool for BrowserProfile {
         // `help` needs no browser. Answered before anything is launched, so a
         // model can read the reference without starting a Chrome to do it.
         if input.action == "help" {
-            return DeedOutcome::done(help());
+            return ToolOutcome::done(help());
         }
 
         let plan = shop.plan().to_string();
@@ -293,7 +293,7 @@ impl Tool for BrowserProfile {
                 .profiling(&plan, |page, _| Box::pin(profile::metrics(page)))
                 .await
             {
-                Ok(metrics) => DeedOutcome::done(
+                Ok(metrics) => ToolOutcome::done(
                     serde_json::to_string_pretty(&metrics).unwrap_or_else(|_| "{}".into()),
                 ),
                 Err(error) => failed(error),
@@ -321,9 +321,9 @@ impl Tool for BrowserProfile {
                     .await
                 {
                     Ok(()) if rate > 1.0 => {
-                        DeedOutcome::done(format!("CPU throttled to {rate}x slowdown."))
+                        ToolOutcome::done(format!("CPU throttled to {rate}x slowdown."))
                     }
-                    Ok(()) => DeedOutcome::done("CPU throttling cleared."),
+                    Ok(()) => ToolOutcome::done("CPU throttling cleared."),
                     Err(error) => failed(error),
                 }
             }
@@ -333,9 +333,9 @@ impl Tool for BrowserProfile {
                 .await
             {
                 Ok(Some(used)) => {
-                    DeedOutcome::done(format!("Forced GC. JSHeapUsedSize = {used} bytes."))
+                    ToolOutcome::done(format!("Forced GC. JSHeapUsedSize = {used} bytes."))
                 }
-                Ok(None) => DeedOutcome::done("Forced GC, but the heap size was not reported."),
+                Ok(None) => ToolOutcome::done("Forced GC, but the heap size was not reported."),
                 Err(error) => failed(error),
             },
 
@@ -351,16 +351,16 @@ impl Tool for BrowserProfile {
                 .await
             {
                 Ok(snapshot) if snapshot.is_empty() => {
-                    DeedOutcome::done("The heap snapshot came back empty.")
+                    ToolOutcome::done("The heap snapshot came back empty.")
                 }
                 Ok(snapshot) => {
                     let path = artifact(shop, "heap", "heapsnapshot");
                     match tokio::fs::write(&path, snapshot).await {
-                        Ok(()) => DeedOutcome::done(format!(
+                        Ok(()) => ToolOutcome::done(format!(
                             "Heap snapshot saved to {}. Open it in Chrome DevTools \u{2192} Memory.",
                             path.display()
                         )),
-                        Err(error) => DeedOutcome::done(format!("Could not save it: {error}")),
+                        Err(error) => ToolOutcome::done(format!("Could not save it: {error}")),
                     }
                 }
                 Err(error) => failed(error),
@@ -372,10 +372,10 @@ impl Tool for BrowserProfile {
                 }))
                 .await
             {
-                Ok(Some(found)) => DeedOutcome::done(
+                Ok(Some(found)) => ToolOutcome::done(
                     serde_json::to_string_pretty(&found).unwrap_or_else(|_| "{}".into()),
                 ),
-                Ok(None) => DeedOutcome::done(
+                Ok(None) => ToolOutcome::done(
                     "Nothing to report: this page has no React, or nothing has re-rendered yet. \
                      Interact with it or run a scenario first.",
                 ),
@@ -400,7 +400,7 @@ enum Machine {
 /// Already-started is a success no-op rather than a restart: restarting would
 /// throw away the profile the caller believes it is collecting, and it would
 /// do so silently.
-async fn gated_start(plan: &str, machine: Machine) -> DeedOutcome {
+async fn gated_start(plan: &str, machine: Machine) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, move |page, state| {
             Box::pin(async move {
@@ -434,13 +434,13 @@ async fn gated_start(plan: &str, machine: Machine) -> DeedOutcome {
         Machine::Coverage => "Coverage collection",
     };
     match result {
-        Ok(true) => DeedOutcome::done(format!("{what} was already running.")),
-        Ok(false) => DeedOutcome::done(format!("{what} started.")),
+        Ok(true) => ToolOutcome::done(format!("{what} was already running.")),
+        Ok(false) => ToolOutcome::done(format!("{what} started.")),
         Err(error) => failed(error),
     }
 }
 
-async fn cpu_stop(plan: &str, shop: &Workshop) -> DeedOutcome {
+async fn cpu_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, |page, state| {
             Box::pin(async move {
@@ -468,18 +468,18 @@ async fn cpu_stop(plan: &str, shop: &Workshop) -> DeedOutcome {
             let path = artifact(shop, "cpu-profile", "cpuprofile");
             let body = serde_json::to_string(&profile).unwrap_or_else(|_| "{}".into());
             match tokio::fs::write(&path, body).await {
-                Ok(()) => DeedOutcome::done(format!(
+                Ok(()) => ToolOutcome::done(format!(
                     "CPU profile saved to {}. Open it in Chrome DevTools \u{2192} Performance.",
                     path.display()
                 )),
-                Err(error) => DeedOutcome::done(format!("Could not save it: {error}")),
+                Err(error) => ToolOutcome::done(format!("Could not save it: {error}")),
             }
         }
         Err(error) => failed(error),
     }
 }
 
-async fn coverage_stop(plan: &str, shop: &Workshop) -> DeedOutcome {
+async fn coverage_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, |page, state| {
             Box::pin(async move {
@@ -505,18 +505,18 @@ async fn coverage_stop(plan: &str, shop: &Workshop) -> DeedOutcome {
             let path = artifact(shop, "coverage", "json");
             let body = serde_json::to_string(&coverage).unwrap_or_else(|_| "[]".into());
             match tokio::fs::write(&path, body).await {
-                Ok(()) => DeedOutcome::done(format!(
+                Ok(()) => ToolOutcome::done(format!(
                     "Coverage for {scripts} script(s) saved to {}.",
                     path.display()
                 )),
-                Err(error) => DeedOutcome::done(format!("Could not save it: {error}")),
+                Err(error) => ToolOutcome::done(format!("Could not save it: {error}")),
             }
         }
         Err(error) => failed(error),
     }
 }
 
-async fn trace_start(plan: &str, categories: Option<&str>) -> DeedOutcome {
+async fn trace_start(plan: &str, categories: Option<&str>) -> ToolOutcome {
     let categories = categories.map(str::to_string);
     let result = browsers()
         .profiling(plan, move |page, state| {
@@ -537,13 +537,13 @@ async fn trace_start(plan: &str, categories: Option<&str>) -> DeedOutcome {
         .await;
 
     match result {
-        Ok(true) => DeedOutcome::done("Tracing was already running."),
-        Ok(false) => DeedOutcome::done("Tracing started."),
+        Ok(true) => ToolOutcome::done("Tracing was already running."),
+        Ok(false) => ToolOutcome::done("Tracing started."),
         Err(error) => failed(error),
     }
 }
 
-async fn trace_stop(plan: &str, shop: &Workshop) -> DeedOutcome {
+async fn trace_stop(plan: &str, shop: &Workshop) -> ToolOutcome {
     let result = browsers()
         .profiling(plan, |page, state| {
             Box::pin(async move {
@@ -572,13 +572,13 @@ async fn trace_stop(plan: &str, shop: &Workshop) -> DeedOutcome {
             let path = artifact(shop, "trace", "json");
             let body = serde_json::to_string(&events).unwrap_or_else(|_| "[]".into());
             match tokio::fs::write(&path, body).await {
-                Ok(()) => DeedOutcome::done(format!(
+                Ok(()) => ToolOutcome::done(format!(
                     "Trace with {} event(s) saved to {}. Open it in Chrome DevTools \u{2192} \
                      Performance.",
                     events.len(),
                     path.display()
                 )),
-                Err(error) => DeedOutcome::done(format!("Could not save it: {error}")),
+                Err(error) => ToolOutcome::done(format!("Could not save it: {error}")),
             }
         }
         Err(error) => failed(error),
@@ -602,7 +602,7 @@ async fn scenario(
     input: &ProfileInput,
     plan: &str,
     shop: &Workshop,
-) -> Result<DeedOutcome, DeedOutcome> {
+) -> Result<ToolOutcome, ToolOutcome> {
     let steps = input.steps.clone().unwrap_or_default();
     if steps.is_empty() {
         return Err(bad("run_scenario needs a non-empty `steps` array"));
@@ -684,11 +684,11 @@ async fn scenario(
     if body.len() > LARGE_OUTPUT {
         let path = artifact(shop, "scenario", "json");
         return Ok(match tokio::fs::write(&path, &body).await {
-            Ok(()) => DeedOutcome::done(format!("Scenario samples saved to {}.", path.display())),
-            Err(error) => DeedOutcome::done(format!("Could not save them: {error}")),
+            Ok(()) => ToolOutcome::done(format!("Scenario samples saved to {}.", path.display())),
+            Err(error) => ToolOutcome::done(format!("Could not save them: {error}")),
         });
     }
-    Ok(DeedOutcome::done(body))
+    Ok(ToolOutcome::done(body))
 }
 
 /// One run: reset, untimed setup, measured steps, then the reading.
@@ -900,7 +900,7 @@ mod tests {
             ),
         ] {
             let outcome = BrowserProfile.run(args, &workshop()).await;
-            let DeedOutcome::Refused { reason } = outcome else {
+            let ToolOutcome::Refused { reason } = outcome else {
                 panic!("a malformed scenario must be refused: {outcome:?}");
             };
             assert!(
@@ -930,7 +930,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(outcome, DeedOutcome::Refused { .. }),
+            matches!(outcome, ToolOutcome::Refused { .. }),
             "navigate is not a step: {outcome:?}"
         );
     }
@@ -945,7 +945,7 @@ mod tests {
             .run(json!({ "action": "help" }), &workshop())
             .await;
 
-        let DeedOutcome::Done { output, .. } = outcome else {
+        let ToolOutcome::Done { output, .. } = outcome else {
             panic!("help must not need a browser: {outcome:?}");
         };
         for action in ACTIONS {

@@ -14,7 +14,7 @@
 use super::{Refusal, Tool, Workshop};
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -119,7 +119,7 @@ impl Tool for Search {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
             return Refusal::BadArguments {
                 tool: "search".to_string(),
@@ -180,7 +180,7 @@ impl Tool for Search {
         // would block a worker thread for as long as the tree takes, stalling
         // every other plan's model call on the same executor.
         match tokio::task::spawn_blocking(move || hunt.run()).await {
-            Ok(output) => DeedOutcome::done(output),
+            Ok(output) => ToolOutcome::done(output),
             Err(e) => Refusal::Refused(format!("the search did not finish: {e}")).into(),
         }
     }
@@ -300,7 +300,7 @@ impl Hunt {
     /// Turns matches into the answer the model sees.
     ///
     /// A search that found nothing is still a search that *ran*, so it is
-    /// [`DeedOutcome::Done`] with "no matches" -- reporting it as a refusal
+    /// [`ToolOutcome::Done`] with "no matches" -- reporting it as a refusal
     /// would tell the model to fix its call when the honest finding is that the
     /// thing it looked for is not there.
     fn report(&self, results: &[String], walk_truncated: bool) -> String {
@@ -389,8 +389,8 @@ mod tests {
     async fn search(root: &Path, input: Value) -> String {
         let shop = Workshop::new(Workspace::in_place(root.to_str().unwrap()));
         match Search.run(input, &shop).await {
-            DeedOutcome::Done { output, .. } => output,
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => output,
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -456,7 +456,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(outcome, DeedOutcome::Refused { .. }),
+            matches!(outcome, ToolOutcome::Refused { .. }),
             "searching outside the workspace must be refused: {outcome:?}"
         );
     }

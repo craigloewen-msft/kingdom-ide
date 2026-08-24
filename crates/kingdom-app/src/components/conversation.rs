@@ -545,16 +545,16 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     // A question still waiting on him is the exception: that is
                     // not something to watch, it is something to do, so it is
                     // rendered as the thing to do.
-                    Entry::Did(d) if is_open_question(&d) => {
-                        view! { <Question deed=d plan=plan_id/> }.into_any()
+                    Entry::Tool(d) if is_open_question(&d) => {
+                        view! { <Question tool_call=d plan=plan_id/> }.into_any()
                     }
                     // Errands are not a line of output either: the call's own
                     // text result is a summary, and the thing the King wants is
                     // the list of agents it sent and a way into each one.
-                    Entry::Did(d) if d.tool == "spawn_agents" => {
-                        view! { <Errands deed=d plan=plan_id/> }.into_any()
+                    Entry::Tool(d) if d.tool == "spawn_agents" => {
+                        view! { <Errands tool_call=d plan=plan_id/> }.into_any()
                     }
-                    Entry::Did(d) => view! { <DeedLine deed=d/> }.into_any(),
+                    Entry::Tool(d) => view! { <DeedLine tool_call=d/> }.into_any(),
                 }
             }
         </For>
@@ -573,10 +573,10 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
 /// chamber has not seen before. So these come from the same signal everything
 /// else reads, with no separate subscription.
 #[component]
-fn Errands(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoView {
+fn Errands(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
-    let deed_id = StoredValue::new(deed.id.clone());
-    let running = deed.in_flight();
+    let tool_call_id = StoredValue::new(tool_call.id.clone());
+    let running = tool_call.in_flight();
 
     let errands = Memo::new(move |_| {
         let Some(parent) = plan.get() else {
@@ -585,7 +585,7 @@ fn Errands(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoVie
         state
             .kingdom
             .get()
-            .errands_of(&parent, &deed_id.get_value())
+            .errands_of(&parent, &tool_call_id.get_value())
             .cloned()
             .collect::<Vec<_>>()
     });
@@ -595,7 +595,7 @@ fn Errands(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoVie
     // created there is a moment with nothing to list, and an empty box there
     // would read as a call that sent nobody.
     let asked = StoredValue::new(
-        deed.input
+        tool_call.input
             .get("tasks")
             .and_then(|t| t.as_array())
             .map(Vec::as_slice)
@@ -703,10 +703,10 @@ fn errand_status(status: PlanStatus) -> &'static str {
 /// the context he needs. Here the reasoning and the commands that led to the
 /// question are right above it, and he can scroll.
 #[component]
-fn Question(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoView {
+fn Question(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
-    let deed_id = StoredValue::new(deed.id.clone());
-    let questions = StoredValue::new(parse_questions(&deed.input));
+    let tool_call_id = StoredValue::new(tool_call.id.clone());
+    let questions = StoredValue::new(parse_questions(&tool_call.input));
     let (sent, set_sent) = signal(false);
 
     let reply = move |answer: String| {
@@ -717,9 +717,9 @@ fn Question(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoVi
         // the second would find nothing waiting and report a confusing failure
         // for an answer that in fact landed.
         set_sent.set(true);
-        let deed = deed_id.get_value();
+        let tool_call = tool_call_id.get_value();
         leptos::task::spawn_local(async move {
-            if let Err(e) = crate::api::answer_question(plan_id.to_string(), deed, answer).await {
+            if let Err(e) = crate::api::answer_question(plan_id.to_string(), tool_call, answer).await {
                 state.error.set(Some(e.to_string()));
                 set_sent.set(false);
             }
@@ -866,7 +866,7 @@ fn parse_questions(input: &serde_json::Value) -> Vec<Asked> {
 ///
 /// Once answered it is ordinary history and renders as any other deed, which is
 /// what stops him answering the same question twice.
-fn is_open_question(entry: &kingdom_core::Deed) -> bool {
+fn is_open_question(entry: &kingdom_core::ToolCall) -> bool {
     entry.tool == "ask_user_question" && entry.in_flight()
 }
 
@@ -877,8 +877,8 @@ fn is_open_question(entry: &kingdom_core::Deed) -> bool {
 /// This is what tells the keyed list those are two different things to render.
 fn entry_version(entry: &Entry) -> u8 {
     match entry {
-        Entry::Did(d) if d.in_flight() => 1,
-        Entry::Did(_) => 2,
+        Entry::Tool(d) if d.in_flight() => 1,
+        Entry::Tool(_) => 2,
         _ => 0,
     }
 }
@@ -892,13 +892,13 @@ fn entry_version(entry: &Entry) -> u8 {
 /// build log buries that. The summary line is the answer; the detail is one
 /// click away for when it is not.
 #[component]
-fn DeedLine(deed: kingdom_core::Deed) -> impl IntoView {
-    use kingdom_core::DeedOutcome;
+fn DeedLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
+    use kingdom_core::ToolOutcome;
 
     let (open, set_open) = signal(false);
 
-    let running = deed.in_flight();
-    let state = match &deed.outcome {
+    let running = tool_call.in_flight();
+    let state = match &tool_call.outcome {
         Some(o) => o.css_suffix(),
         None => "running",
     };
@@ -907,19 +907,19 @@ fn DeedLine(deed: kingdom_core::Deed) -> impl IntoView {
         "refused" => "\u{2715}",
         _ => "\u{25cf}",
     };
-    let at = clock(deed.at);
-    let tool = deed.tool.clone();
+    let at = clock(tool_call.at);
+    let tool = tool_call.tool.clone();
 
     // The arguments matter more than the tool's name -- "bash" tells the King
     // nothing, `cargo test` tells him everything -- so the most telling
     // argument is promoted onto the collapsed line.
-    let gist = telling_argument(&deed.input);
+    let gist = telling_argument(&tool_call.input);
     // `StoredValue` because these sit inside `Show` bodies, which must be `Fn`:
     // a closure that moves an owned String is `FnOnce` and can only render once.
-    let input = StoredValue::new(pretty(&deed.input));
-    let output = StoredValue::new(match &deed.outcome {
-        Some(DeedOutcome::Done { output, .. }) => output.clone(),
-        Some(DeedOutcome::Refused { reason }) => reason.clone(),
+    let input = StoredValue::new(pretty(&tool_call.input));
+    let output = StoredValue::new(match &tool_call.outcome {
+        Some(ToolOutcome::Done { output, .. }) => output.clone(),
+        Some(ToolOutcome::Refused { reason }) => reason.clone(),
         None => String::new(),
     });
     let has_output = !output.read_value().is_empty();

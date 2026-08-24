@@ -35,7 +35,7 @@
 //! OS-level sandbox, a deliberate later decision.
 
 use super::{Refusal, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -137,7 +137,7 @@ impl Tool for TmuxRun {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         if let Err(refusal) = tmux_is_installed() {
             return refusal.into();
         }
@@ -198,7 +198,7 @@ impl Tool for TmuxRun {
             Err(reason) => return Refusal::Refused(reason).into(),
         };
         if !started.status.success() {
-            return DeedOutcome::done(format!(
+            return ToolOutcome::done(format!(
                 "tmux would not open a window for `{cmd}`:\n{}",
                 text(&started.stderr)
             ));
@@ -223,7 +223,7 @@ impl Tool for TmuxRun {
             None => None,
         };
 
-        DeedOutcome::done(report(&socket, &window, &name, cmd, readiness.as_ref(), seen).await)
+        ToolOutcome::done(report(&socket, &window, &name, cmd, readiness.as_ref(), seen).await)
     }
 }
 
@@ -262,7 +262,7 @@ impl Tool for Tmux {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         if let Err(refusal) = tmux_is_installed() {
             return refusal.into();
         }
@@ -278,7 +278,7 @@ impl Tool for Tmux {
             // A tmux that ran and complained has told the court something it
             // needs -- "can't find window @7" is how it learns the window is
             // gone. Only a call that never ran is a refusal.
-            Ok(out) => DeedOutcome::done(joined(&out)),
+            Ok(out) => ToolOutcome::done(joined(&out)),
         }
     }
 }
@@ -735,10 +735,10 @@ mod tests {
             .for_plan(PlanId::new(plan.to_string()))
     }
 
-    fn done(outcome: DeedOutcome) -> String {
+    fn done(outcome: ToolOutcome) -> String {
         match outcome {
-            DeedOutcome::Done { output, .. } => output,
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => output,
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -786,7 +786,7 @@ mod tests {
             json!({"args": ["-S", "/tmp/other.sock", "kill-server"]}),
         ] {
             assert!(
-                matches!(Tmux.run(escape.clone(), &shop).await, DeedOutcome::Refused { .. }),
+                matches!(Tmux.run(escape.clone(), &shop).await, ToolOutcome::Refused { .. }),
                 "{escape} must not be allowed to choose a server"
             );
         }

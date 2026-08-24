@@ -183,7 +183,7 @@ pub enum Reply {
 #[derive(Debug, Clone)]
 pub struct Act {
     /// The provider's correlation id, quoted back with the result. See
-    /// [`kingdom_core::Deed::id`].
+    /// [`kingdom_core::ToolCall::id`].
     pub id: String,
     pub tool: String,
     /// The arguments as the model sent them. Already parsed where it sent valid

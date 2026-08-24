@@ -11,7 +11,7 @@
 //! anything it drives.
 
 use super::{Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 
 pub struct Think;
@@ -48,7 +48,7 @@ impl Tool for Think {
     /// Not a no-op return: the model's own reasoning has to reappear in the
     /// next request or the turn after this one is built from a conversation in
     /// which it never thought anything. The echo *is* the mechanism.
-    async fn run(&self, input: Value, _shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, _shop: &Workshop) -> ToolOutcome {
         let thoughts = input
             .get("thoughts")
             .and_then(Value::as_str)
@@ -63,6 +63,6 @@ impl Tool for Think {
             .into();
         }
 
-        DeedOutcome::done(thoughts)
+        ToolOutcome::done(thoughts)
     }
 }

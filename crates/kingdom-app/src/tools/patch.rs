@@ -24,7 +24,7 @@
 //! for a reason unrelated to anything the court believes it did.
 
 use super::{Refusal, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -233,7 +233,7 @@ Everything is literal: no newline is added or trimmed for you."#
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
             Err(e) => {
@@ -292,7 +292,7 @@ Everything is literal: no newline is added or trimmed for you."#
 
         store_clipboards(shop.plan().as_str(), clipboards);
 
-        DeedOutcome::done(format!("Patched {}.\n\n{}", input.path, bounded(&diff)))
+        ToolOutcome::done(format!("Patched {}.\n\n{}", input.path, bounded(&diff)))
     }
 }
 
@@ -898,7 +898,7 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(outcome, DeedOutcome::Refused { .. }), "{outcome:?}");
+        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched\n");
     }
 
@@ -922,8 +922,8 @@ mod tests {
             .await;
 
         match outcome {
-            DeedOutcome::Done { output, .. } => assert!(output.contains("+// end"), "{output}"),
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => assert!(output.contains("+// end"), "{output}"),
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
         assert_eq!(
             std::fs::read_to_string(dir.path().join("f.rs")).unwrap(),

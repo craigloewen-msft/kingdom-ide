@@ -17,7 +17,7 @@
 
 use super::{Refusal, Tool, Workshop};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
@@ -60,21 +60,21 @@ fn duration(value: Option<&str>, default: Duration) -> Result<Duration, String> 
         .ok_or_else(|| format!("`{value}` is not a duration; use values such as 500ms, 15s or 1m"))
 }
 
-fn bad(tool: &str, detail: impl Into<String>) -> DeedOutcome {
+fn bad(tool: &str, detail: impl Into<String>) -> ToolOutcome {
     Refusal::BadArguments {
         tool: tool.to_string(),
         detail: detail.into(),
     }
     .into()
 }
-fn outcome(result: Result<String, BrowserError>) -> DeedOutcome {
+fn outcome(result: Result<String, BrowserError>) -> ToolOutcome {
     match result {
-        Ok(output) => DeedOutcome::done(output),
+        Ok(output) => ToolOutcome::done(output),
         Err(BrowserError::ChromeUnavailable(reason)) => Refusal::Refused(reason).into(),
-        Err(error) => DeedOutcome::done(error.to_string()),
+        Err(error) => ToolOutcome::done(error.to_string()),
     }
 }
-fn parse<T: for<'de> Deserialize<'de>>(tool: &str, input: Value) -> Result<T, DeedOutcome> {
+fn parse<T: for<'de> Deserialize<'de>>(tool: &str, input: Value) -> Result<T, ToolOutcome> {
     serde_json::from_value(input).map_err(|error| bad(tool, error.to_string()))
 }
 fn artifact(shop: &Workshop, stem: &str, extension: &str) -> PathBuf {
@@ -108,7 +108,7 @@ impl Tool for BrowserNavigate {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["url"],"properties":{"url":{"type":"string"},"timeout":{"type":"string","description":"Default 15s; examples: 500ms, 15s, 1m."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let input: NavigateInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -148,7 +148,7 @@ impl Tool for BrowserEval {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["expression"],"properties":{"expression":{"type":"string"},"timeout":{"type":"string"},"await":{"type":"boolean","description":"Await promises; default true."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let input: EvalInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -193,7 +193,7 @@ impl Tool for BrowserTakeScreenshot {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"selector":{"type":"string"},"timeout":{"type":"string"}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let input: ScreenshotInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -237,7 +237,7 @@ impl Tool for BrowserResize {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["width","height"],"properties":{"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1},"timeout":{"type":"string"}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let i: ResizeInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -277,7 +277,7 @@ impl Tool for BrowserWaitForSelector {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["selector"],"properties":{"selector":{"type":"string"},"timeout":{"type":"string","description":"Default 30s."},"visible":{"type":"boolean"}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let i: WaitInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -320,7 +320,7 @@ impl Tool for BrowserClick {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["selector"],"properties":{"selector":{"type":"string"},"wait":{"type":"boolean"},"timeout":{"type":"string","description":"Default 30s."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let i: ClickInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -358,7 +358,7 @@ impl Tool for BrowserType {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["selector","text"],"properties":{"selector":{"type":"string"},"text":{"type":"string"},"clear":{"type":"boolean"},"timeout":{"type":"string","description":"Default 30s."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let i: TypeInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -402,7 +402,7 @@ impl Tool for BrowserKeyPress {
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["key"],"properties":{"key":{"type":"string"},"modifiers":{"type":"array","items":{"type":"string","enum":["ctrl","shift","alt","meta"]}},"method":{"type":"string","enum":["cdp","js"]}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let i: KeyInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -442,7 +442,7 @@ impl Tool for BrowserRecentConsoleLogs {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"description":"Default 100."}}})
     }
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let i: LogsInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
@@ -469,7 +469,7 @@ impl Tool for BrowserRecentConsoleLogs {
                     .map(|_| format!("Console logs saved to {}.", path.display())),
             )
         } else {
-            DeedOutcome::done(value)
+            ToolOutcome::done(value)
         }
     }
 }
@@ -486,7 +486,7 @@ impl Tool for BrowserClearConsoleLogs {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
     }
-    async fn run(&self, _: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, _: Value, shop: &Workshop) -> ToolOutcome {
         outcome(
             browsers()
                 .clear_console_logs(&plan(shop))

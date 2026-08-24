@@ -30,7 +30,7 @@
 //!    instead, which is the only place that can know.
 
 use super::{Refusal, Tool, Workshop};
-use kingdom_core::{DeedOutcome, PlanId};
+use kingdom_core::{ToolOutcome, PlanId};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -65,11 +65,11 @@ fn pending() -> &'static Mutex<HashMap<(PlanId, String), oneshot::Sender<String>
 /// another tab, or one whose server has restarted since. The caller reports
 /// that to the King rather than pretending it landed, because an answer that
 /// vanishes silently is one he will sit waiting on.
-pub fn answer(plan: &PlanId, deed: &str, answer: String) -> bool {
+pub fn answer(plan: &PlanId, tool_call: &str, answer: String) -> bool {
     let Ok(mut pending) = pending().lock() else {
         return false;
     };
-    match pending.remove(&(plan.clone(), deed.to_string())) {
+    match pending.remove(&(plan.clone(), tool_call.to_string())) {
         Some(tx) => tx.send(answer).is_ok(),
         None => false,
     }
@@ -142,7 +142,7 @@ impl Tool for AskUserQuestion {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let questions = input.get("questions").and_then(Value::as_array);
         if questions.is_none_or(|q| q.is_empty()) {
             return Refusal::BadArguments {
@@ -154,7 +154,7 @@ impl Tool for AskUserQuestion {
 
         // Outside a turn there is no deed for an answer to name, so there is no
         // way for one to come back. Refusing beats parking forever.
-        let Some(deed) = shop.deed() else {
+        let Some(tool_call) = shop.tool_call() else {
             return Refusal::Refused(
                 "A question can only be asked during a turn, and this call is not part of one."
                     .to_string(),
@@ -163,7 +163,7 @@ impl Tool for AskUserQuestion {
         };
 
         let (tx, rx) = oneshot::channel();
-        let key = (shop.plan().clone(), deed.to_string());
+        let key = (shop.plan().clone(), tool_call.to_string());
 
         // Registered before the wait, so an answer arriving the instant the
         // chamber renders the question cannot find nothing listening.
@@ -180,7 +180,7 @@ impl Tool for AskUserQuestion {
         }
 
         match tokio::time::timeout(PATIENCE, rx).await {
-            Ok(Ok(answer)) => DeedOutcome::done(answer),
+            Ok(Ok(answer)) => ToolOutcome::done(answer),
 
             // Timed out, or the waiting half was dropped. Either way nothing is
             // going to answer, so the entry is cleaned up rather than left to
@@ -209,7 +209,7 @@ mod tests {
     fn shop() -> Workshop {
         Workshop::new(Workspace::in_place("/dev/city"))
             .for_plan(PlanId::new("plan-1"))
-            .for_deed("call-1")
+            .for_tool_call("call-1")
     }
 
     fn one_question() -> Value {
@@ -242,7 +242,7 @@ mod tests {
 
         assert_eq!(
             asking.await.unwrap(),
-            DeedOutcome::done("Left"),
+            ToolOutcome::done("Left"),
         );
     }
 

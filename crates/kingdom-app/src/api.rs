@@ -587,7 +587,7 @@ pub(crate) async fn converse(
 ) -> Result<Plan, ServerFnError> {
     use crate::llm::{Brief, Reply, ToolSpec};
     use crate::tools::Workshop;
-    use kingdom_core::{Deed, NoteKind};
+    use kingdom_core::{ToolCall, NoteKind};
 
     let model = match crate::llm::open(&choice).await {
         Ok(model) => model,
@@ -642,7 +642,7 @@ pub(crate) async fn converse(
                         let mut kingdom = lock()?;
                         update(&mut kingdom, &plan_id, |p| {
                             p.working_on = Some(describe(&act.tool, &act.input));
-                            p.begin_deed(Deed::begun(
+                            p.begin_tool_call(ToolCall::started(
                                 act.id.clone(),
                                 act.tool.clone(),
                                 act.input.clone(),
@@ -659,11 +659,11 @@ pub(crate) async fn converse(
                     // to the King has something the browser can name when it
                     // answers.
                     let outcome =
-                        crate::tools::invoke(&act.tool, act.input, &shop.for_deed(&act.id)).await;
+                        crate::tools::invoke(&act.tool, act.input, &shop.for_tool_call(&act.id)).await;
 
                     let mut kingdom = lock()?;
                     update(&mut kingdom, &plan_id, |p| {
-                        if !p.settle_deed(&act.id, outcome.clone()) {
+                        if !p.settle_tool_call(&act.id, outcome.clone()) {
                             // Cannot happen -- the deed was recorded a moment
                             // ago under the same id -- but a silently dropped
                             // result would leave the model waiting forever for
@@ -724,7 +724,7 @@ pub(crate) async fn converse(
 #[cfg(feature = "ssr")]
 pub(crate) async fn send_errands(
     parent_id: &PlanId,
-    deed: &str,
+    tool_call: &str,
     tasks: Vec<String>,
     patience: std::time::Duration,
 ) -> Result<String, String> {
@@ -750,7 +750,7 @@ pub(crate) async fn send_errands(
         let mut errands = Vec::new();
         for task in tasks {
             let id = PlanId::new(format!("plan-{}", next_plan_number()));
-            let mut errand = Plan::sent(id.clone(), &parent, deed, task.clone());
+            let mut errand = Plan::sent(id.clone(), &parent, tool_call, task.clone());
             let root = std::path::PathBuf::from(&kingdom.root);
             remember(&root, &mut errand);
             // Pushed as well as recorded, so the parent's chamber can draw the
@@ -940,12 +940,12 @@ fn settle(
 #[server(AnswerQuestion, "/api")]
 pub async fn answer_question(
     plan: String,
-    deed: String,
+    tool_call: String,
     answer: String,
 ) -> Result<Plan, ServerFnError> {
     let plan_id = PlanId::new(plan);
 
-    if !crate::tools::ask_user_question::answer(&plan_id, &deed, answer) {
+    if !crate::tools::ask_user_question::answer(&plan_id, &tool_call, answer) {
         return Err(ServerFnError::new(
             "Nothing is waiting on that answer. It may have been answered in \
              another tab, or the server may have restarted since it was asked.",

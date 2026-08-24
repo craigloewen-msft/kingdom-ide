@@ -359,7 +359,7 @@ fn latest_decree(brief: &Brief) -> String {
 /// The result of a tool call already made, if there is one.
 fn done_already(brief: &Brief) -> Option<String> {
     brief.turns.iter().rev().find_map(|t| match t {
-        Turn::Did(d) if !d.in_flight() => Some(d.report().to_string()),
+        Turn::Tool(d) if !d.in_flight() => Some(d.report().to_string()),
         _ => None,
     })
 }
@@ -446,13 +446,13 @@ mod tests {
 
         // Exactly what the loop does between passes: record the call, settle it
         // with a result, ask again.
-        let mut deed = kingdom_core::Deed::begun(
+        let mut tool_call = kingdom_core::ToolCall::started(
             acts[0].id.clone(),
             acts[0].tool.clone(),
             acts[0].input.clone(),
         );
-        deed.outcome = Some(kingdom_core::DeedOutcome::done("a conclusion was reached"));
-        brief.turns.push(Turn::Did(deed));
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::done("a conclusion was reached"));
+        brief.turns.push(Turn::Tool(tool_call));
 
         let draft = spoken(model.take_turn(&brief).await.unwrap());
         assert!(

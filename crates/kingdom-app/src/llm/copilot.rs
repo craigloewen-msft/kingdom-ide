@@ -415,30 +415,30 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                 },
                 "content": u.body,
             })),
-            Turn::Did(deed) => {
+            Turn::Tool(tool_call) => {
                 out.push(json!({
                     "role": "assistant",
                     "content": Value::Null,
                     "tool_calls": [{
-                        "id": deed.id,
+                        "id": tool_call.id,
                         "type": "function",
                         "function": {
-                            "name": deed.tool,
-                            "arguments": deed.input.to_string(),
+                            "name": tool_call.tool,
+                            "arguments": tool_call.input.to_string(),
                         }
                     }],
                 }));
                 out.push(json!({
                     "role": "tool",
-                    "tool_call_id": deed.id,
+                    "tool_call_id": tool_call.id,
                     // A call still in flight cannot happen here -- the loop
                     // settles every deed before asking again -- but saying so
                     // beats sending an empty result, which the model would read
                     // as a command that printed nothing.
-                    "content": if deed.in_flight() {
+                    "content": if tool_call.in_flight() {
                         "(still running)"
                     } else {
-                        deed.report()
+                        tool_call.report()
                     },
                 }));
                 // Belt as well as braces: `ToolSpec::for_model` already keeps
@@ -447,7 +447,7 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                 // branch and avoids failing a whole turn if that filter is ever
                 // bypassed.
                 if can_see {
-                    if let Some(message) = shown(deed) {
+                    if let Some(message) = shown(tool_call) {
                         out.push(message);
                     }
                 }
@@ -467,7 +467,7 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 /// images outright (`phoenix-llm/src/openai.rs`); a shown picture is worth a
 /// synthetic turn.
 ///
-/// **Why this is safe.** The message is built here, from a [`Deed`], and exists
+/// **Why this is safe.** The message is built here, from a [`ToolCall`], and exists
 /// only inside this request body. It is never a `Turn::Said`, never an
 /// `Utterance`, never in the transcript. That containment is the whole defence:
 /// the doc on [`kingdom_core::Turn`] argues that Kingdom's plumbing must not be
@@ -479,8 +479,8 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 /// on a `FunctionCallOutput`, with no invented turn. That is the correct wire
 /// format and the eventual answer here; it is a rewrite of this module's
 /// request and response shapes, which is why this shim exists in the meantime.
-fn shown(deed: &kingdom_core::Deed) -> Option<Value> {
-    let images = deed.shown();
+fn shown(tool_call: &kingdom_core::ToolCall) -> Option<Value> {
+    let images = tool_call.shown();
     if images.is_empty() {
         return None;
     }
@@ -489,7 +489,7 @@ fn shown(deed: &kingdom_core::Deed) -> Option<Value> {
     // model to guess why it is suddenly looking at something.
     let mut parts = vec![json!({
         "type": "text",
-        "text": format!("The image from the {} call above:", deed.tool),
+        "text": format!("The image from the {} call above:", tool_call.tool),
     })];
     parts.extend(images.iter().map(|image| {
         json!({
@@ -695,13 +695,13 @@ mod tests {
     use super::*;
 
     /// A brief holding one settled tool call, optionally with a picture.
-    fn brief_with_deed(images: Vec<kingdom_core::DeedImage>) -> Brief {
-        let mut deed = kingdom_core::Deed::begun(
+    fn brief_with_tool_call(images: Vec<kingdom_core::ToolImage>) -> Brief {
+        let mut tool_call = kingdom_core::ToolCall::started(
             "call-1",
             "read_image",
             serde_json::json!({ "path": "shot.png" }),
         );
-        deed.outcome = Some(kingdom_core::DeedOutcome::seen("Looked at shot.png.", images));
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::seen("Looked at shot.png.", images));
 
         Brief {
             city: crate::llm::CityBrief {
@@ -713,13 +713,13 @@ mod tests {
                 dirty_files: 0,
                 notable_paths: Vec::new(),
             },
-            turns: vec![Turn::Did(deed)],
+            turns: vec![Turn::Tool(tool_call)],
             tools: Vec::new(),
         }
     }
 
-    fn a_picture() -> Vec<kingdom_core::DeedImage> {
-        vec![kingdom_core::DeedImage {
+    fn a_picture() -> Vec<kingdom_core::ToolImage> {
+        vec![kingdom_core::ToolImage {
             media_type: "image/png".into(),
             data: "QUJD".into(),
         }]
@@ -735,7 +735,7 @@ mod tests {
     /// both are asserted rather than just "the image is in there somewhere".
     #[test]
     fn a_picture_follows_its_tool_result_as_a_user_message() {
-        let messages = messages(&brief_with_deed(a_picture()), true);
+        let messages = messages(&brief_with_tool_call(a_picture()), true);
 
         let tool = messages
             .iter()
@@ -772,13 +772,13 @@ mod tests {
     /// for every ordinary `bash` call in the transcript.
     #[test]
     fn nothing_is_shown_to_a_model_that_cannot_see_or_for_a_call_with_no_picture() {
-        let blind = messages(&brief_with_deed(a_picture()), false);
+        let blind = messages(&brief_with_tool_call(a_picture()), false);
         assert!(
             !blind.iter().any(|m| m["role"] == "user"),
             "a model without vision must not be sent the image at all: {blind:?}"
         );
 
-        let textual = messages(&brief_with_deed(Vec::new()), true);
+        let textual = messages(&brief_with_tool_call(Vec::new()), true);
         assert!(
             !textual.iter().any(|m| m["role"] == "user"),
             "an ordinary tool result must not invent a turn the King never took"

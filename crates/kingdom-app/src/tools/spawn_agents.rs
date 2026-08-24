@@ -23,7 +23,7 @@
 //! lease before it needs anything else.
 
 use super::{Refusal, Remit, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 
 /// The most errands one call may send.
@@ -92,7 +92,7 @@ impl Tool for SpawnAgents {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let tasks: Vec<String> = input
             .get("tasks")
             .and_then(Value::as_array)
@@ -116,7 +116,7 @@ impl Tool for SpawnAgents {
         // Outside a turn there is no call for an errand to belong to, and
         // `errands_of` is keyed by it -- an errand recorded against no deed
         // would be invisible in every chamber. Refusing beats orphaning it.
-        let Some(deed) = shop.deed() else {
+        let Some(tool_call) = shop.tool_call() else {
             return Refusal::Refused(
                 "Errands can only be sent during a turn, and this call is not part of one."
                     .to_string(),
@@ -124,8 +124,8 @@ impl Tool for SpawnAgents {
             .into();
         };
 
-        match crate::api::send_errands(shop.plan(), deed, tasks, PATIENCE).await {
-            Ok(reports) => DeedOutcome::done(reports),
+        match crate::api::send_errands(shop.plan(), tool_call, tasks, PATIENCE).await {
+            Ok(reports) => ToolOutcome::done(reports),
             Err(why) => Refusal::Refused(why).into(),
         }
     }

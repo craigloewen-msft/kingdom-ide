@@ -14,7 +14,7 @@
 //! wanders into another city's checkout makes the boundary a fiction.
 
 use super::{Refusal, Tool, Workshop};
-use kingdom_core::DeedOutcome;
+use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 
@@ -68,7 +68,7 @@ impl Tool for ReadFile {
         })
     }
 
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome {
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome {
         let Some(path) = input.get("path").and_then(Value::as_str) else {
             return Refusal::BadArguments {
                 tool: "read_file".to_string(),
@@ -120,7 +120,7 @@ impl Tool for ReadFile {
             .and_then(Value::as_u64)
             .map_or(DEFAULT_LIMIT, |n| n as usize);
 
-        DeedOutcome::done(window(&text, offset, limit))
+        ToolOutcome::done(window(&text, offset, limit))
     }
 }
 
@@ -179,8 +179,8 @@ mod tests {
 
     async fn read(root: &Path, input: Value) -> String {
         match ReadFile.run(input, &shop(root)).await {
-            DeedOutcome::Done { output, .. } => output,
-            DeedOutcome::Refused { reason } => panic!("refused: {reason}"),
+            ToolOutcome::Done { output, .. } => output,
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
         }
     }
 
@@ -233,8 +233,8 @@ mod tests {
             .await;
 
         match outcome {
-            DeedOutcome::Refused { reason } => assert!(reason.contains("outside"), "{reason}"),
-            DeedOutcome::Done { output, .. } => panic!("read a file outside the workspace: {output}"),
+            ToolOutcome::Refused { reason } => assert!(reason.contains("outside"), "{reason}"),
+            ToolOutcome::Done { output, .. } => panic!("read a file outside the workspace: {output}"),
         }
     }
 }

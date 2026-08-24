@@ -1,7 +1,7 @@
 //! Tools: what the court can do with its own hands.
 //!
 //! Server-only, for the same reason `llm/` is. Named for what it is rather than
-//! given a metaphor noun -- the metaphor is carried by [`kingdom_core::Deed`],
+//! given a metaphor noun -- the metaphor is carried by [`kingdom_core::ToolCall`],
 //! and inventing a second name for the plumbing would only obscure where the
 //! subprocess is spawned. The precedent is set at the top of `llm/mod.rs`.
 //!
@@ -31,7 +31,7 @@ pub mod spawn_agents;
 pub mod think;
 pub mod tmux;
 
-use kingdom_core::{DeedOutcome, Workspace};
+use kingdom_core::{ToolOutcome, Workspace};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -120,7 +120,7 @@ pub fn all(remit: Remit) -> Vec<Box<dyn Tool>> {
 /// A tool outside the remit gets that same answer, deliberately. It *is* the
 /// truth from where the model is standing -- it was never shown the tool -- and
 /// it is a refusal that reads as recoverable rather than as a wall.
-pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> DeedOutcome {
+pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> ToolOutcome {
     match all(shop.remit()).into_iter().find(|t| t.name() == tool) {
         Some(t) => t.run(input, shop).await,
         None => Refusal::NoSuchTool(tool.to_string()).into(),
@@ -146,7 +146,7 @@ pub struct Workshop {
     plan: kingdom_core::PlanId,
     /// The deed this call is recorded as, once it is running. `None` outside a
     /// turn, which is the case tests construct.
-    deed: Option<String>,
+    tool_call: Option<String>,
     /// How much of the world this plan may touch. See [`Remit`].
     remit: Remit,
 }
@@ -173,9 +173,9 @@ pub enum Refusal {
     Refused(String),
 }
 
-impl From<Refusal> for DeedOutcome {
+impl From<Refusal> for ToolOutcome {
     fn from(refusal: Refusal) -> Self {
-        DeedOutcome::Refused {
+        ToolOutcome::Refused {
             reason: refusal.to_string(),
         }
     }
@@ -188,7 +188,7 @@ impl Workshop {
         Self {
             workspace,
             plan: kingdom_core::PlanId::new(String::new()),
-            deed: None,
+            tool_call: None,
             remit: Remit::Full,
         }
     }
@@ -215,9 +215,9 @@ impl Workshop {
     /// Cloned per call rather than mutated, so a tool cannot see the id of a
     /// call that is not its own -- which is what would let one tool answer
     /// another's question.
-    pub fn for_deed(&self, deed: impl Into<String>) -> Self {
+    pub fn for_tool_call(&self, tool_call: impl Into<String>) -> Self {
         Self {
-            deed: Some(deed.into()),
+            tool_call: Some(tool_call.into()),
             ..self.clone()
         }
     }
@@ -228,8 +228,8 @@ impl Workshop {
     }
 
     /// The deed this call is recorded as.
-    pub fn deed(&self) -> Option<&str> {
-        self.deed.as_deref()
+    pub fn tool_call(&self) -> Option<&str> {
+        self.tool_call.as_deref()
     }
 
     /// The directory everything this plan does happens under.
@@ -333,11 +333,11 @@ pub trait Tool: Send + Sync {
 
     /// Runs the tool.
     ///
-    /// Returns a [`DeedOutcome`] rather than a `Result` because both endings are
+    /// Returns a [`ToolOutcome`] rather than a `Result` because both endings are
     /// results the model must be *told*: a refusal it never hears about is a
     /// call it makes again immediately. Errors that are not the model's business
     /// -- a poisoned lock, a vanished plan -- belong to the caller, not here.
-    async fn run(&self, input: Value, shop: &Workshop) -> DeedOutcome;
+    async fn run(&self, input: Value, shop: &Workshop) -> ToolOutcome;
 }
 
 #[cfg(test)]
@@ -432,7 +432,7 @@ mod tests {
             assert!(
                 matches!(
                     invoke(forbidden, serde_json::json!({}), &surveying).await,
-                    DeedOutcome::Refused { .. }
+                    ToolOutcome::Refused { .. }
                 ),
                 "{forbidden} must be refused even when a survey asks for it by name"
             );

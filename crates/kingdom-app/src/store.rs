@@ -110,7 +110,7 @@ pub fn load(root: &Path) -> Vec<Plan> {
 /// This matters far more than it used to. A turn was one HTTP call and the
 /// window was a second or two; a turn is now a loop that can run for minutes.
 fn reconcile(mut plan: Plan) -> Plan {
-    use kingdom_core::{DeedOutcome, Entry, NoteKind, PlanStatus, Speaker};
+    use kingdom_core::{ToolOutcome, Entry, NoteKind, PlanStatus, Speaker};
 
     if plan.status != PlanStatus::Drafting {
         return plan;
@@ -137,14 +137,14 @@ fn reconcile(mut plan: Plan) -> Plan {
         .transcript
         .iter()
         .filter_map(|e| match e {
-            Entry::Did(d) if d.in_flight() => Some(d.id.clone()),
+            Entry::Tool(d) if d.in_flight() => Some(d.id.clone()),
             _ => None,
         })
         .collect();
     for id in orphans {
-        plan.settle_deed(
+        plan.settle_tool_call(
             &id,
-            DeedOutcome::Refused {
+            ToolOutcome::Refused {
                 reason: "The server stopped while this was running. Whether it \
                          finished is unknown."
                     .to_string(),
@@ -204,8 +204,8 @@ fn without_images(plan: &Plan) -> Plan {
 
     let mut plan = plan.clone();
     for entry in &mut plan.transcript {
-        if let Entry::Did(deed) = entry {
-            deed.outcome = deed.outcome.take().map(kingdom_core::DeedOutcome::without_images);
+        if let Entry::Tool(tool_call) = entry {
+            tool_call.outcome = tool_call.outcome.take().map(kingdom_core::ToolOutcome::without_images);
         }
     }
     plan
@@ -339,7 +339,7 @@ mod tests {
     /// would break every plan the King opens just before a restart.
     #[test]
     fn an_interrupted_turn_is_repaired_but_an_unstarted_one_is_left_alone() {
-        use kingdom_core::{Deed, NoteKind, PlanStatus};
+        use kingdom_core::{ToolCall, NoteKind, PlanStatus};
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -350,7 +350,7 @@ mod tests {
         // Mid-turn: the court had spoken and a tool call was still running.
         let mut interrupted = plan("plan-2");
         interrupted.say(Speaker::Court, "I will look into it.");
-        interrupted.begin_deed(Deed::begun("call-1", "bash", serde_json::json!({})));
+        interrupted.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
         interrupted.working_on = Some("bash: cargo test".into());
 
         save_all(root, &[unstarted, interrupted]).unwrap();
@@ -375,7 +375,7 @@ mod tests {
             "the King must be told why, not just find a plan that failed silently"
         );
         assert!(
-            repaired.turns().all(|t| !matches!(t, kingdom_core::Turn::Did(d) if d.in_flight())),
+            repaired.turns().all(|t| !matches!(t, kingdom_core::Turn::Tool(d) if d.in_flight())),
             "a call left in flight would be replayed to the model as still running, forever"
         );
     }
@@ -395,16 +395,16 @@ mod tests {
 
         let mut seen = plan("plan-1");
         seen.status = kingdom_core::PlanStatus::AwaitingReview;
-        seen.begin_deed(kingdom_core::Deed::begun(
+        seen.begin_tool_call(kingdom_core::ToolCall::started(
             "call-1",
             "read_image",
             serde_json::json!({ "path": "shot.png" }),
         ));
-        seen.settle_deed(
+        seen.settle_tool_call(
             "call-1",
-            kingdom_core::DeedOutcome::seen(
+            kingdom_core::ToolOutcome::seen(
                 "Looked at shot.png (3 bytes).",
-                vec![kingdom_core::DeedImage {
+                vec![kingdom_core::ToolImage {
                     media_type: "image/png".into(),
                     data: "QUJD".repeat(1000),
                 }],
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(
             seen.turns()
                 .filter_map(|t| match t {
-                    kingdom_core::Turn::Did(d) => Some(d.shown().len()),
+                    kingdom_core::Turn::Tool(d) => Some(d.shown().len()),
                     _ => None,
                 })
                 .sum::<usize>(),
@@ -437,15 +437,15 @@ mod tests {
         );
 
         let reloaded = load(root);
-        let deed = reloaded[0]
+        let tool_call = reloaded[0]
             .turns()
             .find_map(|t| match t {
-                kingdom_core::Turn::Did(d) => Some(d.clone()),
+                kingdom_core::Turn::Tool(d) => Some(d.clone()),
                 _ => None,
             })
             .expect("the deed itself is still recorded");
-        assert!(deed.shown().is_empty());
-        assert_eq!(deed.report(), "Looked at shot.png (3 bytes).");
+        assert!(tool_call.shown().is_empty());
+        assert_eq!(tool_call.report(), "Looked at shot.png (3 bytes).");
     }
 
     /// A plan document written before deeds could carry images -- no `images`
@@ -468,7 +468,7 @@ mod tests {
             "model": "mock",
             "effort": null,
             "transcript": [
-                { "Did": {
+                { "Tool": {
                     "id": "call-1",
                     "tool": "bash",
                     "input": { "cmd": "cargo test" },
@@ -491,15 +491,15 @@ mod tests {
 
         let loaded = load(root);
         assert_eq!(loaded.len(), 1, "an older document must not be skipped");
-        let deed = loaded[0]
+        let tool_call = loaded[0]
             .turns()
             .find_map(|t| match t {
-                kingdom_core::Turn::Did(d) => Some(d.clone()),
+                kingdom_core::Turn::Tool(d) => Some(d.clone()),
                 _ => None,
             })
             .expect("its deed must survive the upgrade");
-        assert_eq!(deed.report(), "ok");
-        assert!(deed.shown().is_empty(), "absent means no pictures, not a parse failure");
+        assert_eq!(tool_call.report(), "ok");
+        assert!(tool_call.shown().is_empty(), "absent means no pictures, not a parse failure");
     }
 }
 
