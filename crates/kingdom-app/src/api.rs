@@ -649,7 +649,14 @@ pub(crate) async fn converse(
             Err(e) => return settle(plan_id, Err(e)),
 
             Ok(Reply::Acts(acts)) => {
-                for act in acts {
+                // One id for everything this reply asked for, so the calls can
+                // be replayed as the single decision they were rather than as a
+                // sequence the model deliberated through. See
+                // `kingdom_core::ToolCall::batch`.
+                let batch = format!("{}-{round}", plan_id.as_str());
+                let mut first = true;
+
+                for act in acts.calls {
                     // Recorded *before* it runs, and published by `update`, so
                     // the conversation shows the command while it is still
                     // going. This is the answer to "what is this agent doing
@@ -657,13 +664,25 @@ pub(crate) async fn converse(
                     // written down first.
                     {
                         let mut kingdom = lock()?;
+                        // The thinking rides on the first call of the batch and
+                        // nowhere else: one reply produced one piece of
+                        // reasoning, however many things it asked for, and
+                        // copying it onto each would replay it several times
+                        // over as though the model had thought it repeatedly.
+                        let reasoning = first.then(|| acts.reasoning.clone()).flatten();
+                        let narration = first.then(|| acts.narration.clone()).flatten();
+                        first = false;
+
                         update(&mut kingdom, &plan_id, |p| {
                             p.working_on = Some(describe(&act.tool, &act.input));
-                            p.begin_tool_call(ToolCall::started(
-                                act.id.clone(),
-                                act.tool.clone(),
-                                act.input.clone(),
-                            ));
+                            p.begin_tool_call(
+                                ToolCall::started(
+                                    act.id.clone(),
+                                    act.tool.clone(),
+                                    act.input.clone(),
+                                )
+                                .in_reply(batch.clone(), reasoning.clone(), narration.clone()),
+                            );
                         });
                     }
 
@@ -733,7 +752,6 @@ pub(crate) async fn converse(
                 }
 
                 // Back round to ask again, now with the results in the log.
-                let _ = round;
             }
         }
     }

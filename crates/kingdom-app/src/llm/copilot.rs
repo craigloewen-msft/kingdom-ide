@@ -10,7 +10,8 @@
 //! nowhere to go.
 
 use super::{
-    credential, Act, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply, ToolSpec,
+    credential, Act, Acts, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply,
+    ToolSpec,
 };
 use kingdom_core::{CredentialState, ModelChoice, ModelEffort, ModelOption, Speaker, Turn};
 use serde_json::{json, Value};
@@ -156,6 +157,10 @@ impl Provider for CopilotProvider {
             .find(|o| o.id == choice.model);
         let can_act = entry.as_ref().is_some_and(|o| o.can_act);
         let can_see = entry.as_ref().is_some_and(|o| o.can_see);
+        // Same road as `can_act`, and for the same reason: a fact about the
+        // model, read from the model, rather than a constant that is wrong for
+        // everything except whatever it was tuned against.
+        let max_output_tokens = entry.as_ref().and_then(|o| o.max_output_tokens);
 
         Ok(Box::new(CopilotModel::new(
             cred.token,
@@ -163,6 +168,7 @@ impl Provider for CopilotProvider {
             choice.effort,
             can_act,
             can_see,
+            max_output_tokens,
         )))
     }
 }
@@ -281,6 +287,13 @@ fn parse_one(model: &Value) -> Option<ModelOption> {
             .or_else(|| capabilities["vision"].as_bool())
             .or_else(|| model["vision"].as_bool())
             .unwrap_or(false),
+        // Several spellings, for the same reason `can_see` reads three: the
+        // catalogue is not ours. Absent is a usable state here rather than
+        // grounds to drop the model -- see the field's own doc.
+        max_output_tokens: ["max_output_tokens", "max_completion_tokens"]
+            .iter()
+            .find_map(|key| capabilities["limits"][*key].as_u64())
+            .map(|n| n as usize),
     })
 }
 
@@ -321,8 +334,20 @@ pub struct CopilotModel {
     can_act: bool,
     /// Whether this model can be shown an image, as its catalogue declared.
     can_see: bool,
+    /// The model's declared output budget, or `None` to fall back. See
+    /// [`kingdom_core::ModelOption::max_output_tokens`] and [`FALLBACK_OUTPUT_TOKENS`].
+    max_output_tokens: Option<usize>,
     http: reqwest::Client,
 }
+
+/// The output budget for a model whose catalogue entry declares none.
+///
+/// Generous on purpose. The number this replaced was 4096, which a reasoning
+/// model at high effort can spend entirely on thinking -- returning empty
+/// content that surfaced as "Copilot returned an empty reply" and failed the
+/// plan outright. The failure mode of too small is a dead plan; of too large,
+/// nothing at all, since this caps a reply rather than reserving anything.
+const FALLBACK_OUTPUT_TOKENS: usize = 32_768;
 
 impl CopilotModel {
     pub fn new(
@@ -331,6 +356,7 @@ impl CopilotModel {
         effort: Option<ModelEffort>,
         can_act: bool,
         can_see: bool,
+        max_output_tokens: Option<usize>,
     ) -> Self {
         Self {
             token,
@@ -338,6 +364,7 @@ impl CopilotModel {
             effort,
             can_act,
             can_see,
+            max_output_tokens,
             http: reqwest::Client::new(),
         }
     }
@@ -363,11 +390,12 @@ fn request_body(
     effort: Option<ModelEffort>,
     messages: Vec<Value>,
     tools: &[ToolSpec],
+    max_output_tokens: Option<usize>,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "max_tokens": 4096,
+        "max_tokens": max_output_tokens.unwrap_or(FALLBACK_OUTPUT_TOKENS),
     });
     if let Some(effort) = effort {
         body["reasoning_effort"] = json!(effort.wire_name());
@@ -398,7 +426,19 @@ fn request_body(
 /// preceding call is rejected by the gateway, and a call with no result leaves
 /// the model believing it is still waiting.
 ///
-/// A call that produced a *picture* becomes three, and the third is a lie told
+/// **Calls from one reply are replayed as one reply.** A model that asked for
+/// three files in a single message made one decision, and emitting three
+/// separate assistant turns would replay it as three -- teaching the model that
+/// it deliberated between reads it actually made together. Consecutive calls
+/// sharing a [`kingdom_core::ToolCall::batch`] are grouped back into the one
+/// assistant message they arrived as, followed by their results in order.
+///
+/// **The model's own thinking rides along.** Its reasoning and whatever it said
+/// while asking are put back on the assistant message, so a reasoning model
+/// sees why it did what it did rather than a bare list of results. Dropping
+/// this is what made long investigations wander and repeat themselves.
+///
+/// A call that produced a *picture* adds one more, and it is a lie told
 /// carefully. See [`shown`].
 fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
     let mut out = vec![json!({
@@ -406,7 +446,8 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
         "content": system_prompt(brief),
     })];
 
-    for turn in &brief.turns {
+    let mut turns = brief.turns.iter().peekable();
+    while let Some(turn) = turns.next() {
         match turn {
             Turn::Message(u) => out.push(json!({
                 "role": match u.speaker {
@@ -415,40 +456,87 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                 },
                 "content": u.body,
             })),
-            Turn::Tool(tool_call) => {
-                out.push(json!({
+            Turn::Tool(first) => {
+                // Everything that arrived in the same reply as `first`. A call
+                // with no batch stands alone, which is what a record written
+                // before batches existed gets.
+                let mut batch = vec![first];
+                while let Some(Turn::Tool(next)) = turns.peek() {
+                    if !next.same_reply_as(first) {
+                        break;
+                    }
+                    batch.push(next);
+                    turns.next();
+                }
+
+                let mut assistant = json!({
                     "role": "assistant",
-                    "content": Value::Null,
-                    "tool_calls": [{
+                    // The narration the model wrote while asking, where it
+                    // wrote any. Null rather than an empty string when it did
+                    // not: an empty content beside tool calls is the shape the
+                    // gateway expects, while "" reads as it having said nothing
+                    // on purpose.
+                    "content": match first.narration.as_deref() {
+                        Some(said) => json!(said),
+                        None => Value::Null,
+                    },
+                    "tool_calls": batch.iter().map(|tool_call| json!({
                         "id": tool_call.id,
                         "type": "function",
                         "function": {
                             "name": tool_call.tool,
                             "arguments": tool_call.input.to_string(),
                         }
-                    }],
-                }));
-                out.push(json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    // A call still in flight cannot happen here -- the loop
-                    // settles every tool call before asking again -- but saying
-                    // so beats sending an empty result, which the model would
-                    // read as a command that printed nothing.
-                    "content": if tool_call.in_flight() {
-                        "(still running)"
-                    } else {
-                        tool_call.report()
-                    },
-                }));
-                // Belt as well as braces: `ToolSpec::for_model` already keeps
-                // `read_image` away from a model with no vision, so a tool call
-                // with pictures should be unreachable here. Checking anyway
-                // costs a branch and avoids failing a whole turn if that filter
-                // is ever bypassed.
-                if can_see {
-                    if let Some(message) = shown(tool_call) {
-                        out.push(message);
+                    })).collect::<Vec<_>>(),
+                });
+
+                // The reasoning is written back under the key it was read from
+                // where we know it, and the opaque half verbatim. Merged rather
+                // than replacing the message, so a signed blob that arrived as
+                // several fields goes back as several fields.
+                if let Some(reasoning) = &first.reasoning {
+                    if let Some(text) = &reasoning.text {
+                        assistant["reasoning_content"] = json!(text);
+                    }
+                    match &reasoning.opaque {
+                        Some(Value::Object(fields)) => {
+                            for (key, value) in fields {
+                                assistant[key] = value.clone();
+                            }
+                        }
+                        Some(other) => assistant["reasoning_opaque"] = other.clone(),
+                        None => {}
+                    }
+                }
+
+                out.push(assistant);
+
+                // Results follow the whole batch, in the order the calls were
+                // made. The gateway matches them by id, but a reader of this
+                // request should see them in the order they happened.
+                for tool_call in batch {
+                    out.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        // A call still in flight cannot happen here -- the loop
+                        // settles every tool call before asking again -- but saying
+                        // so beats sending an empty result, which the model would
+                        // read as a command that printed nothing.
+                        "content": if tool_call.in_flight() {
+                            "(still running)".to_string()
+                        } else {
+                            replayed(tool_call.report())
+                        },
+                    }));
+                    // Belt as well as braces: `ToolSpec::for_model` already keeps
+                    // `read_image` away from a model with no vision, so a tool call
+                    // with pictures should be unreachable here. Checking anyway
+                    // costs a branch and avoids failing a whole turn if that filter
+                    // is ever bypassed.
+                    if can_see {
+                        if let Some(message) = shown(tool_call) {
+                            out.push(message);
+                        }
                     }
                 }
             }
@@ -456,6 +544,68 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
     }
 
     out
+}
+
+/// How much of one tool result is worth replaying.
+///
+/// The transcript on disk keeps every byte -- this bounds only what goes back
+/// on the wire, and it goes back on *every* round. A 90 KB file read costs its
+/// 90 KB once as an answer and then again on each of the rounds that follow, so
+/// an unbounded result is a bill that grows with the square of the
+/// conversation. `MOST_ROUNDS` is 500.
+///
+/// Head and tail rather than head alone because the two ends are where the
+/// information is: a command's first lines say what it did and its last say how
+/// it went, while the middle of a long build log is the part nobody reads.
+const MOST_REPLAYED: usize = 12 * 1024;
+
+/// Head and tail of one, with an honest marker of what was dropped.
+///
+/// The marker matters more than the saving. A silently truncated result would
+/// have the model draw conclusions from a file it believes it read in full;
+/// being told the middle is missing, and how much, it can go back for the part
+/// it needs with `offset` and `limit`.
+fn replayed(report: &str) -> String {
+    if report.len() <= MOST_REPLAYED {
+        return report.to_string();
+    }
+
+    // Two thirds from the front: the head of a result is usually the answer,
+    // and the tail is usually the verdict.
+    let head_budget = MOST_REPLAYED / 3 * 2;
+    let tail_budget = MOST_REPLAYED - head_budget;
+
+    // Cut on character boundaries -- `report` is a `str`, and slicing mid-UTF-8
+    // would panic on a file with any non-ASCII in it.
+    let head_end = floor_boundary(report, head_budget);
+    let tail_start = ceil_boundary(report, report.len() - tail_budget);
+    let dropped = tail_start - head_end;
+
+    format!(
+        "{}\n\n[... {dropped} bytes of this result were not replayed. The full text is in \
+         the conversation; read the file directly with `offset`/`limit`, or narrow with \
+         `search`, if you need the part that is missing. ...]\n\n{}",
+        &report[..head_end],
+        &report[tail_start..],
+    )
+}
+
+/// The largest character boundary at or below `at`.
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// The smallest character boundary at or above `at`.
+fn ceil_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at < text.len() && !text.is_char_boundary(at) {
+        at += 1;
+    }
+    at
 }
 
 /// The pictures from a tool result, as a message a model will actually look at.
@@ -517,6 +667,7 @@ impl Model for CopilotModel {
                 self.effort,
                 messages(brief, self.can_see),
                 &brief.tools,
+                self.max_output_tokens,
             ))
             .send()
             .await
@@ -542,19 +693,39 @@ impl Model for CopilotModel {
             .map_err(|e| ModelError::Transport(format!("unreadable response: {e}")))?;
 
         let message = &parsed["choices"][0]["message"];
+        let finish = parsed["choices"][0]["finish_reason"].as_str().unwrap_or_default();
 
         // Tool calls take precedence over any prose alongside them. A model
         // often narrates what it is about to do in the same message; treating
         // that narration as the finished answer would settle the plan while the
-        // model still had work it wanted to do.
-        let acts = parse_acts(&message["tool_calls"]);
-        if !acts.is_empty() {
-            return Ok(Reply::Acts(acts));
-        }
-
+        // model still had work it wanted to do. It is no longer *discarded*
+        // either -- it rides along as `narration`, because "here is what I am
+        // about to do and why" is exactly the thread the next round needs.
+        let calls = parse_acts(&message["tool_calls"]);
         let text = message["content"].as_str().unwrap_or_default().trim().to_string();
 
+        if !calls.is_empty() {
+            return Ok(Reply::Acts(Acts {
+                calls,
+                reasoning: parse_reasoning(message),
+                narration: (!text.is_empty()).then_some(text),
+            }));
+        }
+
         if text.is_empty() {
+            // An empty reply after a `length` finish is not the model declining
+            // to answer -- it is the model spending its entire output budget on
+            // reasoning and having nothing left to say with. Those are different
+            // problems with different fixes, and reporting both as "empty reply"
+            // sends the reader looking in the wrong place. This is how the 4096
+            // token budget hid for as long as it did.
+            if finish == "length" {
+                return Err(ModelError::Refused(
+                    "The model used its entire output budget before answering. This usually \
+                     means a high reasoning effort on a long conversation."
+                        .to_string(),
+                ));
+            }
             return Err(ModelError::Refused(
                 "Copilot returned an empty reply.".to_string(),
             ));
@@ -578,6 +749,42 @@ impl Model for CopilotModel {
     fn can_see(&self) -> bool {
         self.can_see
     }
+}
+
+/// Reads whatever thinking the gateway returned alongside a reply.
+///
+/// Spelled several ways because the catalogue is not ours and this is a young
+/// part of the API: Copilot has used `reasoning_content` and `reasoning`, and
+/// signed variants arrive under their own keys. Reading the plausible spellings
+/// costs a few branches; guessing one and being wrong costs the model its train
+/// of thought on every round, silently -- which is the failure this whole
+/// change exists to fix, and it left no error behind while it was happening.
+///
+/// The opaque half is copied verbatim and never inspected -- see
+/// [`kingdom_core::Reasoning::opaque`].
+fn parse_reasoning(message: &Value) -> Option<kingdom_core::Reasoning> {
+    let text = ["reasoning_content", "reasoning_text"]
+        .iter()
+        .find_map(|key| message[*key].as_str())
+        .or_else(|| message["reasoning"].as_str())
+        .or_else(|| message["reasoning"]["content"].as_str())
+        .map(str::to_string);
+
+    let opaque = ["reasoning_opaque", "encrypted_content", "signature"]
+        .iter()
+        .find_map(|key| {
+            let found = &message[*key];
+            (!found.is_null()).then(|| found.clone())
+        })
+        .or_else(|| {
+            // Where reasoning came as an object rather than a string, anything
+            // beyond the prose we already read may need echoing back.
+            let found = &message["reasoning"];
+            found.is_object().then(|| found.clone())
+        });
+
+    let reasoning = kingdom_core::Reasoning { text, opaque };
+    (!reasoning.is_empty()).then_some(reasoning)
 }
 
 /// Reads the `tool_calls` array into calls we can actually make.
@@ -707,6 +914,176 @@ mod tests {
             media_type: "image/png".into(),
             data: "QUJD".into(),
         }]
+    }
+
+    /// A settled call, optionally tied to a reply and carrying its thinking.
+    fn call(id: &str, batch: Option<&str>, reasoning: Option<&str>) -> kingdom_core::ToolCall {
+        let mut tool_call = kingdom_core::ToolCall::started(
+            id,
+            "read_file",
+            serde_json::json!({ "path": format!("{id}.rs") }),
+        );
+        if let Some(batch) = batch {
+            tool_call = tool_call.in_reply(
+                batch,
+                reasoning.map(|text| kingdom_core::Reasoning {
+                    text: Some(text.to_string()),
+                    opaque: None,
+                }),
+                None,
+            );
+        }
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::done(format!("contents of {id}")));
+        tool_call
+    }
+
+    fn brief_with(turns: Vec<Turn>) -> Brief {
+        Brief {
+            system_prompt: crate::llm::SystemPrompt::default(),
+            turns,
+            tools: Vec::new(),
+        }
+    }
+
+    /// The regression this whole change exists for.
+    ///
+    /// A reasoning model that is not handed back its own thinking loses the
+    /// thread of its investigation between rounds: it sees N tool results and
+    /// no record of why it asked for any of them, so it re-derives a strategy
+    /// from raw output and re-reads what it has already read. That failure is
+    /// invisible at the type level -- the request is well-formed and the
+    /// gateway accepts it happily -- and shows up only as an agent that wanders
+    /// for 24 rounds and proposes nothing. Nothing but an assertion catches it.
+    #[test]
+    fn a_models_own_reasoning_is_handed_back_to_it() {
+        let messages = messages(
+            &brief_with(vec![Turn::Tool(call(
+                "call-1",
+                Some("reply-1"),
+                Some("The title is read in sidebar.rs, so that is where to look."),
+            ))]),
+            false,
+        );
+
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("the call must still be replayed");
+
+        assert_eq!(
+            assistant["reasoning_content"],
+            "The title is read in sidebar.rs, so that is where to look.",
+            "the model's thinking must survive the round trip: {assistant:#?}"
+        );
+    }
+
+    /// Calls from one reply are one decision, and must be replayed as one.
+    ///
+    /// A model that asked for three files in a single message did not
+    /// deliberate between them. Emitting three assistant turns would teach it
+    /// that it had -- and, worse, would imply a reasoning step before each read
+    /// that never happened.
+    #[test]
+    fn calls_from_one_reply_are_replayed_as_one_assistant_turn() {
+        let messages = messages(
+            &brief_with(vec![
+                Turn::Tool(call("call-1", Some("reply-1"), Some("read both"))),
+                Turn::Tool(call("call-2", Some("reply-1"), None)),
+                // A separate reply: must not be folded in with the two above.
+                Turn::Tool(call("call-3", Some("reply-2"), None)),
+            ]),
+            false,
+        );
+
+        let assistants: Vec<_> = messages.iter().filter(|m| m["role"] == "assistant").collect();
+        assert_eq!(
+            assistants.len(),
+            2,
+            "two replies asked for three calls, so there are two assistant turns: {assistants:#?}"
+        );
+        assert_eq!(
+            assistants[0]["tool_calls"].as_array().map(Vec::len),
+            Some(2),
+            "the first reply's two calls belong to one turn"
+        );
+        assert_eq!(assistants[1]["tool_calls"].as_array().map(Vec::len), Some(1));
+
+        // Every call still gets its result, whatever the grouping did.
+        assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 3);
+    }
+
+    /// A record written before batches existed must still replay correctly.
+    ///
+    /// Those calls have no batch, and grouping them on the strength of two
+    /// `None`s being equal would invent a joint decision that may never have
+    /// happened. They stand alone, which is the behaviour they already had.
+    #[test]
+    fn calls_from_before_batches_existed_each_stand_alone() {
+        let messages = messages(
+            &brief_with(vec![
+                Turn::Tool(call("call-1", None, None)),
+                Turn::Tool(call("call-2", None, None)),
+            ]),
+            false,
+        );
+
+        assert_eq!(
+            messages.iter().filter(|m| m["role"] == "assistant").count(),
+            2,
+            "unbatched calls must not be grouped on the strength of both being None"
+        );
+    }
+
+    /// The budget must come from the model, not from a constant.
+    ///
+    /// A fixed 4096 here is what let a high-effort model spend its whole output
+    /// allowance on reasoning and return nothing, failing the plan. The wiring
+    /// from catalogue to request is several hops long and every one of them is
+    /// silent when it breaks.
+    #[test]
+    fn the_output_budget_comes_from_the_models_own_catalogue_entry() {
+        let declared = request_body("m", None, Vec::new(), &[], Some(64_000));
+        assert_eq!(declared["max_tokens"], 64_000);
+
+        // A model that declares no limit is still usable, and gets a budget
+        // well clear of what reasoning costs -- see `FALLBACK_OUTPUT_TOKENS`.
+        let silent = request_body("m", None, Vec::new(), &[], None);
+        assert_eq!(silent["max_tokens"], FALLBACK_OUTPUT_TOKENS);
+        assert!(
+            silent["max_tokens"].as_u64().unwrap() > 4096,
+            "the fallback must not reinstate the budget that caused this bug"
+        );
+    }
+
+    /// A long result is bounded on the wire but never silently.
+    ///
+    /// Every tool result is resent on every round, so an unbounded one is a
+    /// bill that grows with the square of the conversation. The marker is the
+    /// half that matters: a model told the middle is missing can go back for
+    /// it, while one that is not will reason about a file it believes it read
+    /// in full.
+    #[test]
+    fn a_long_tool_result_is_bounded_and_says_so() {
+        let long = "x".repeat(MOST_REPLAYED * 2);
+        let out = replayed(&long);
+
+        assert!(out.len() < long.len(), "a long result must be bounded");
+        assert!(
+            out.contains("were not replayed"),
+            "truncation must be visible to the model, not silent: {out:.200}"
+        );
+        // Short results are untouched -- the common case must not grow a note.
+        assert_eq!(replayed("a short result"), "a short result");
+    }
+
+    /// Multi-byte text must not be cut mid-character.
+    ///
+    /// Slicing a `str` off a byte boundary panics, and a panic here would take
+    /// down a turn over a source file that merely contained an em dash.
+    #[test]
+    fn bounding_a_result_does_not_split_a_character() {
+        let out = replayed(&"€".repeat(MOST_REPLAYED));
+        assert!(out.contains("were not replayed"));
     }
 
     /// The shape chat-completions demands, which nothing but the live gateway
@@ -902,16 +1279,16 @@ mod tests {
     /// body is where that distinction has to survive.
     #[test]
     fn effort_reaches_the_wire_only_when_the_king_chose_one() {
-        let native = request_body("claude-opus-5", None, Vec::new(), &[]);
+        let native = request_body("claude-opus-5", None, Vec::new(), &[], None);
         assert!(
             native.get("reasoning_effort").is_none(),
             "no chosen effort must send no field, not a fabricated default"
         );
 
-        let chosen = request_body("claude-opus-5", Some(ModelEffort::Xhigh), Vec::new(), &[]);
+        let chosen = request_body("claude-opus-5", Some(ModelEffort::Xhigh), Vec::new(), &[], None);
         assert_eq!(chosen["reasoning_effort"], "xhigh");
 
-        let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new(), &[]);
+        let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new(), &[], None);
         assert_eq!(
             explicit_none["reasoning_effort"], "none",
             "an explicit `none` is a level in its own right, not the absent case"
@@ -923,7 +1300,7 @@ mod tests {
     /// sending `copilot/claude-opus-5` as the model name earns a 404.
     #[test]
     fn the_recorded_id_is_namespaced_and_the_wire_name_is_not() {
-        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true, true);
+        let model = CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true, true, None);
         assert_eq!(model.id(), "copilot/claude-opus-5");
         assert_eq!(model.api_name(), "claude-opus-5");
     }

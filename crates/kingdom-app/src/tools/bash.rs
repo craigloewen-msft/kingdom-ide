@@ -105,12 +105,17 @@ impl Tool for Bash {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["op"],
+            // Nothing is required at this level, because what is needed depends
+            // on the op: `run` wants `cmd`, the other three want `handle`. JSON
+            // Schema can express that with `oneOf`, but gateways vary in how
+            // much of the vocabulary they honour, and a schema a provider
+            // silently mis-reads is worse than one that under-specifies. Each
+            // op checks its own arguments and refuses with a specific reason.
             "properties": {
                 "op": {
                     "type": "string",
                     "enum": ["run", "peek", "wait", "kill"],
-                    "description": "What to do."
+                    "description": "What to do. Defaults to run, so a plain command needs only `cmd`."
                 },
                 "cmd": {
                     "type": "string",
@@ -161,18 +166,27 @@ enum Op {
     Kill,
 }
 
+/// Which operation was asked for, defaulting to the overwhelmingly common one.
+///
+/// **Absent means `run`.** It used to be a refusal, which cost a whole round
+/// every time: the model would send a command with no `op`, be told off, and
+/// re-send the identical command with `"op": "run"` added. Nothing was
+/// prevented and a turn was spent. Running is the only op that makes sense
+/// without a `handle`, so there is no ambiguity to protect against -- and a
+/// `run` with no `cmd` still refuses, which is the argument that was actually
+/// missing.
+///
+/// An *unrecognised* op is still a refusal. That is a real mistake with no
+/// obvious intent behind it, and guessing at one would be worse than saying so.
 fn op(input: &Value) -> Result<Op, Refusal> {
     match input.get("op").and_then(Value::as_str) {
-        Some("run") => Ok(Op::Run),
+        Some("run") | None => Ok(Op::Run),
         Some("peek") => Ok(Op::Peek),
         Some("wait") => Ok(Op::Wait),
         Some("kill") => Ok(Op::Kill),
-        other => Err(Refusal::BadArguments {
+        Some(other) => Err(Refusal::BadArguments {
             tool: "bash".to_string(),
-            detail: match other {
-                Some(op) => format!("`{op}` is not an op; use run, peek, wait or kill"),
-                None => "no `op` was given; use run, peek, wait or kill".to_string(),
-            },
+            detail: format!("`{other}` is not an op; use run, peek, wait or kill"),
         }),
     }
 }
@@ -727,6 +741,43 @@ mod tests {
 
         let outcome = Bash
             .run(json!({"op": "peek", "handle": "b-nosuch"}), &shop)
+            .await;
+
+        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
+    }
+
+    /// A command with no `op` runs, rather than costing a round to be told off.
+    ///
+    /// This used to refuse. The model would send a command, be told ``no `op`
+    /// was given``, and re-send the identical command with `"op": "run"`
+    /// added -- one wasted round each time, preventing nothing. `run` is the
+    /// only op that means anything without a `handle`, so there was never any
+    /// ambiguity to protect against.
+    #[tokio::test]
+    async fn a_command_with_no_op_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+
+        let outcome = Bash.run(json!({"cmd": "echo hello"}), &shop).await;
+
+        match outcome {
+            ToolOutcome::Done { output, .. } => {
+                assert!(output.contains("hello"), "the command must run: {output}")
+            }
+            other => panic!("a bare command must run, not refuse: {other:?}"),
+        }
+    }
+
+    /// An op nobody recognises is still a refusal. Absent has an obvious
+    /// meaning; misspelt does not, and guessing at one would be worse than
+    /// saying so.
+    #[tokio::test]
+    async fn an_unrecognised_op_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+
+        let outcome = Bash
+            .run(json!({"op": "exec", "cmd": "echo hello"}), &shop)
             .await;
 
         assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");

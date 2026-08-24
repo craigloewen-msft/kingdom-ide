@@ -13,7 +13,7 @@
 //! end-to-end flows authorable: a test can demand the blocked case rather than
 //! hoping for it.
 
-use super::{Act, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply};
+use super::{Act, Acts, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue, Reply};
 use kingdom_core::{CredentialState, ModelChoice, ModelOption, Speaker, Turn};
 
 /// The namespaced id, which for a single-model provider is just its namespace.
@@ -55,6 +55,10 @@ impl Provider for MockProvider {
                 // shown -- it has no eyes -- but the tool runs and the picture
                 // travels, which is the part worth testing offline.
                 can_see: true,
+                // No wire, so no budget to declare. `None` exercises the
+                // fallback path, which is the one every model that declines to
+                // publish a limit takes.
+                max_output_tokens: None,
             }],
             credential: CredentialState::Ready,
             detail: "The offline mock needs no credential.".to_string(),
@@ -186,7 +190,7 @@ impl Model for MockModel {
             ))),
 
             Scenario::Ask => Ok(match done_already(brief) {
-                None => Reply::Acts(vec![Act {
+                None => Reply::Acts(Acts::plain(vec![Act {
                     id: "mock-question-1".to_string(),
                     tool: "ask_user_question".to_string(),
                     input: serde_json::json!({
@@ -210,7 +214,7 @@ impl Model for MockModel {
                             ]
                         }]
                     }),
-                }]),
+                }])),
                 Some(chosen) => Reply::Spoke(Draft {
                     title: format!("Counsel on {}", city.name),
                     summary: format!("Asked the King, and he chose: {}", chosen.trim()),
@@ -228,7 +232,7 @@ impl Model for MockModel {
             // the model is asked afresh each time, so a mock that remembered
             // would be rehearsing something the real loop does not do.
             Scenario::Work => Ok(match done_already(brief) {
-                None => Reply::Acts(vec![Act {
+                None => Reply::Acts(Acts::plain(vec![Act {
                     id: "mock-call-1".to_string(),
                     tool: "think".to_string(),
                     input: serde_json::json!({
@@ -238,7 +242,7 @@ impl Model for MockModel {
                             city.name, city.stack, city.file_count
                         )
                     }),
-                }]),
+                }])),
                 Some(result) => Reply::Spoke(Draft {
                     title: format!("Works upon {}", city.name),
                     summary: format!("Used a tool, then reported on {}.", city.name),
@@ -259,7 +263,7 @@ impl Model for MockModel {
             // task text hashes to an ordinary speaking scenario, which is
             // exactly the behaviour being rehearsed.
             Scenario::Subagents => Ok(match done_already(brief) {
-                None => Reply::Acts(vec![Act {
+                None => Reply::Acts(Acts::plain(vec![Act {
                     id: "mock-errand-1".to_string(),
                     tool: "spawn_agents".to_string(),
                     input: serde_json::json!({
@@ -280,7 +284,7 @@ impl Model for MockModel {
                             }
                         ]
                     }),
-                }]),
+                }])),
                 Some(reports) => Reply::Spoke(Draft {
                     title: format!("Errands upon {}", city.name),
                     summary: format!("Sent two errands into {} and read them back.", city.name),
@@ -340,7 +344,7 @@ impl Model for MockModel {
                 // feedback was actually read rather than a fresh plan appearing
                 // that happens to look the same.
                 let revising = revision_note(brief);
-                Ok(Reply::Acts(vec![Act {
+                Ok(Reply::Acts(Acts::plain(vec![Act {
                     id: format!("mock-proposal-{}", proposals_so_far(brief) + 1),
                     tool: "propose_plan".to_string(),
                     input: serde_json::json!({
@@ -363,13 +367,13 @@ impl Model for MockModel {
                             city.file_count
                         )
                     }),
-                }]))
+                }])))
             }
 
             Scenario::Propose => Ok(match done_since_approval(brief) {
                 // Approved, and nothing done since: the model now has tools it
                 // did not have a moment ago, so it uses one.
-                None => Reply::Acts(vec![Act {
+                None => Reply::Acts(Acts::plain(vec![Act {
                     id: "mock-approved-1".to_string(),
                     tool: "think".to_string(),
                     input: serde_json::json!({
@@ -379,7 +383,7 @@ impl Model for MockModel {
                             city.name
                         )
                     }),
-                }]),
+                }])),
                 Some(result) => Reply::Spoke(Draft {
                     title: format!("Works upon {}", city.name),
                     summary: format!("Carried out the approved plan for {}.", city.name),
@@ -605,14 +609,14 @@ mod tests {
             panic!("the first pass must ask to act, not speak");
         };
         assert_eq!(acts.len(), 1);
-        assert_eq!(acts[0].tool, "think");
+        assert_eq!(acts.calls[0].tool, "think");
 
         // Exactly what the loop does between passes: record the call, settle it
         // with a result, ask again.
         let mut tool_call = kingdom_core::ToolCall::started(
-            acts[0].id.clone(),
-            acts[0].tool.clone(),
-            acts[0].input.clone(),
+            acts.calls[0].id.clone(),
+            acts.calls[0].tool.clone(),
+            acts.calls[0].input.clone(),
         );
         tool_call.outcome = Some(kingdom_core::ToolOutcome::done("a conclusion was reached"));
         brief.turns.push(Turn::Tool(tool_call));

@@ -948,6 +948,69 @@ pub struct ToolCall {
     /// When the call was made. See [`Timestamp`].
     #[serde(default)]
     pub at: Option<Timestamp>,
+    /// Which reply this call arrived in, if the provider told us.
+    ///
+    /// A model routinely asks for several things at once -- read these three
+    /// files -- and those calls are one decision, not three. Without a marker
+    /// there is no way to tell "three calls in one reply" from "three replies
+    /// with one call each" when the log is read back, and replaying the second
+    /// shape teaches the model it deliberated between reads it actually made
+    /// together.
+    ///
+    /// `None` on a record written before this field existed, which is read as
+    /// "stands alone" -- the behaviour those records already had.
+    #[serde(default)]
+    pub batch: Option<String>,
+    /// The model's own thinking, as it arrived with this call.
+    ///
+    /// Carried on the *first* call of a [`ToolCall::batch`] and `None` on the
+    /// rest, because one reply produced one piece of reasoning however many
+    /// calls it asked for. See [`Reasoning`] for why this is kept at all.
+    #[serde(default)]
+    pub reasoning: Option<Reasoning>,
+    /// What the model said in words alongside asking for this call.
+    ///
+    /// A model often narrates the move it is about to make -- "I'll check how
+    /// the sidebar reads its title" -- in the same reply as the call. That is
+    /// its statement of intent, and dropping it leaves the next round with the
+    /// action and no reason for it. Carried on the first call of a batch, for
+    /// the same reason as [`ToolCall::reasoning`].
+    #[serde(default)]
+    pub narration: Option<String>,
+}
+
+/// A model's own reasoning, kept so it can be handed back to it.
+///
+/// **Why this is in the domain at all.** It looks like provider bookkeeping,
+/// and half of it is. But a reasoning model that is not shown its own prior
+/// thinking loses the thread of its investigation between rounds: on round N it
+/// sees N tool results and no record of why it asked for any of them, so it
+/// re-derives a strategy from raw output and re-reads what it has already read.
+/// The thinking is part of the exchange, so it lives with the exchange.
+///
+/// **Why two fields.** Some providers return reasoning as text; some return an
+/// additionally signed or encrypted blob that must be echoed back *unmodified*
+/// or the next request is rejected. We can read the first and must not touch
+/// the second, and a shape that conflated them would invite something to
+/// normalise a value whose whole purpose is to survive unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Reasoning {
+    /// The thinking as prose, where the provider gave us prose.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Provider-opaque fields that must be quoted back exactly as they came --
+    /// a signature, an encrypted trace. Never parsed, never rewritten: it is
+    /// carried, not understood.
+    #[serde(default)]
+    pub opaque: Option<serde_json::Value>,
+}
+
+impl Reasoning {
+    /// True when there is nothing here worth sending, so a caller can skip it
+    /// rather than emit an empty object a gateway may reject.
+    pub fn is_empty(&self) -> bool {
+        self.text.as_ref().is_none_or(|t| t.trim().is_empty()) && self.opaque.is_none()
+    }
 }
 
 impl ToolCall {
@@ -964,6 +1027,43 @@ impl ToolCall {
             input,
             outcome: None,
             at: Timestamp::now(),
+            batch: None,
+            reasoning: None,
+            narration: None,
+        }
+    }
+
+    /// Marks this call as part of one reply, optionally with the thinking and
+    /// narration that came with it.
+    ///
+    /// Builder rather than more parameters on [`ToolCall::started`]: every
+    /// caller records a call, and only the one driving a provider has any of
+    /// this to say.
+    pub fn in_reply(
+        mut self,
+        batch: impl Into<String>,
+        reasoning: Option<Reasoning>,
+        narration: Option<String>,
+    ) -> Self {
+        self.batch = Some(batch.into());
+        // An empty reasoning is dropped rather than stored: it would serialise
+        // into every plan document for no gain and read as "the model thought
+        // nothing" rather than "the provider sent nothing".
+        self.reasoning = reasoning.filter(|r| !r.is_empty());
+        self.narration = narration.filter(|n| !n.trim().is_empty());
+        self
+    }
+
+    /// True when this call and `other` came from the same reply.
+    ///
+    /// Two calls with no batch are never grouped, even though they are equal as
+    /// `None`: a record written before batches existed says nothing about how
+    /// its calls arrived, and guessing they were together would invent a
+    /// deliberation that may not have happened.
+    pub fn same_reply_as(&self, other: &ToolCall) -> bool {
+        match (&self.batch, &other.batch) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
         }
     }
 
@@ -1533,6 +1633,25 @@ pub struct ModelOption {
     /// symmetric, so absent is taken as "no".
     #[serde(default)]
     pub can_see: bool,
+    /// The most output tokens this model will produce in one reply, as its
+    /// catalogue entry declared.
+    ///
+    /// Reasoning is billed against this budget, so it is not merely "how long
+    /// an answer can be": a model at high effort can spend the whole of a small
+    /// budget thinking and return empty content, which reads as a refusal and
+    /// fails the plan. A fixed constant here was wrong in both directions --
+    /// too small for a reasoning model, wasteful for a small one -- and went
+    /// stale as the catalogue moved.
+    ///
+    /// **Absent means fall back, not drop.** [`ModelOption::context_window`]
+    /// treats a missing value as grounds to omit the model entirely, reasoning
+    /// that a guess is something the user acts on. That does not apply here:
+    /// this number is never shown to anyone, it only sizes a request, and
+    /// hiding a working model over a field its provider declined to declare
+    /// would be the worse outcome. So `None` is a usable state and the caller
+    /// picks a generous default.
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
 }
 
 /// Everything the picker needs, plus why it might be shorter than expected.
@@ -1614,6 +1733,7 @@ mod tests {
                     efforts: Vec::new(),
                     can_act: true,
                     can_see: false,
+                    max_output_tokens: None,
                 },
                 ModelOption {
                     id: "copilot/claude-opus-5".into(),
@@ -1624,6 +1744,7 @@ mod tests {
                     efforts: vec![ModelEffort::Low, ModelEffort::High],
                     can_act: true,
                     can_see: true,
+                    max_output_tokens: Some(64_000),
                 },
             ],
             default_id: "copilot/claude-opus-5".into(),
