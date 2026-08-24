@@ -22,7 +22,7 @@
 //! # View-only
 //!
 //! Nothing here accepts input, and that is deliberate rather than unfinished --
-//! see the note on the same subject in `kingdom-app`'s `spyglass` module. This
+//! see the note on the same subject in `kingdom-app`'s `screencast` module. This
 //! is a one-way relay from Chrome to a socket.
 
 use base64::Engine;

@@ -11,7 +11,7 @@
 //! isolation boundary as the tmux tool.
 //!
 //! The same per-plan session is what the King's spyglass attaches to; see
-//! `crate::spyglass`. An earlier note here called the screencast deliberately
+//! `crate::screencast`. An earlier note here called the screencast deliberately
 //! absent because it served a Phoenix UI feature Kingdom lacked -- that has
 //! since been built, and the reasoning no longer holds.
 
@@ -28,7 +28,7 @@ const LARGE_OUTPUT: usize = 4 * 1024;
 static BROWSERS: OnceLock<BrowserSessionManager> = OnceLock::new();
 /// The one browser session manager, shared by the tools and by the spyglass.
 ///
-/// Public so `crate::spyglass` can attach a viewer to a session the tools
+/// Public so `crate::screencast` can attach a viewer to a session the tools
 /// created. It deliberately does *not* create one -- see
 /// [`BrowserSessionManager::watch`].
 pub(crate) fn browsers() -> &'static BrowserSessionManager {

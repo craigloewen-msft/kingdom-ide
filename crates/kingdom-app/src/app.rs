@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, DecreeBar, KingdomMap, Sidebar};
+use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar};
 use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -279,7 +279,7 @@ fn Realm() -> impl IntoView {
             <div class="map-region">
                 <KingdomMap/>
             </div>
-            <DecreeBar/>
+            <PromptBar/>
         </div>
     }
 }

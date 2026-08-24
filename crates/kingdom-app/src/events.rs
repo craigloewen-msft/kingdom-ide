@@ -86,7 +86,7 @@ fn registry() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
 /// An errand is announced twice: once to its own chamber, and once to the
 /// chamber of the plan that sent it, which is where the King watches it work.
 /// See the module docs for why that costs nothing.
-pub fn proclaim(plan: &Plan) {
+pub fn publish(plan: &Plan) {
     let Ok(channels) = registry().lock() else {
         return;
     };
@@ -108,7 +108,7 @@ pub fn proclaim(plan: &Plan) {
 ///
 /// The channel is created on first listen rather than when a plan is opened, so
 /// plans nobody is watching hold no machinery at all.
-pub fn listen(id: &PlanId) -> broadcast::Receiver<Plan> {
+pub fn subscribe(id: &PlanId) -> broadcast::Receiver<Plan> {
     let mut channels = match registry().lock() {
         Ok(c) => c,
         // A poisoned registry means a previous holder panicked mid-update. The
@@ -165,10 +165,10 @@ mod tests {
     #[tokio::test]
     async fn a_watcher_hears_what_it_is_watching_and_nothing_else() {
         let watched = PlanId::new("watched");
-        let mut rx = listen(&watched);
+        let mut rx = subscribe(&watched);
 
-        proclaim(&a_plan("elsewhere"));
-        proclaim(&a_plan("watched"));
+        publish(&a_plan("elsewhere"));
+        publish(&a_plan("watched"));
 
         let heard = rx.recv().await.expect("the watched plan should arrive");
         assert_eq!(
@@ -182,7 +182,7 @@ mod tests {
     #[tokio::test]
     async fn a_plan_nobody_watches_costs_nothing() {
         let id = PlanId::new("transient");
-        let rx = listen(&id);
+        let rx = subscribe(&id);
         drop(rx);
         forget_if_unwatched(&id);
 
@@ -203,17 +203,17 @@ mod tests {
     #[tokio::test]
     async fn a_parent_hears_its_subagents_and_no_others() {
         let parent = a_plan("parent");
-        let mut watching_parent = listen(&parent.id);
+        let mut watching_parent = subscribe(&parent.id);
 
         // Somebody else's errand first: if the second channel were a broadcast
         // rather than the sender's own parent, this is what would leak.
-        proclaim(&Plan::spawned(
+        publish(&Plan::spawned(
             PlanId::new("stranger"),
             &a_plan("elsewhere"),
             "call-1",
             "Not ours",
         ));
-        proclaim(&Plan::spawned(
+        publish(&Plan::spawned(
             PlanId::new("errand"),
             &parent,
             "call-1",

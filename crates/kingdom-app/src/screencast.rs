@@ -7,7 +7,7 @@
 //! # The wire
 //!
 //! Binary frames, tagged by their first byte. Deliberately trivial, so this
-//! module and `components/spyglass.rs` can be read side by side and checked
+//! module and `components/screencast.rs` can be read side by side and checked
 //! against each other by eye:
 //!
 //! ```text

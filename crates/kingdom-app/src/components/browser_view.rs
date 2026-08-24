@@ -1,6 +1,6 @@
 //! The spyglass panel: watching a plan's browser from its chamber.
 //!
-//! The client half of `crate::spyglass`. Reads the binary frames that module
+//! The client half of `crate::screencast`. Reads the binary frames that module
 //! documents and paints them onto a canvas.
 //!
 //! **View-only.** The canvas is `pointer-events: none`, so a King who clicks it
@@ -26,7 +26,7 @@ use leptos::prelude::*;
 /// rather than forgotten.
 #[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Sight {
+enum ConnectionState {
     Opening,
     /// The plan has no browser. Not an error -- the usual case, for a plan that
     /// has never been asked to look at a page.
@@ -35,22 +35,22 @@ enum Sight {
     Ended,
 }
 
-impl Sight {
+impl ConnectionState {
     fn tell(self) -> &'static str {
         match self {
-            Sight::Opening => "Raising the spyglass\u{2026}",
-            Sight::NoSession => "This plan has not opened a browser.",
-            Sight::Live => "",
-            Sight::Ended => "The court's browser has closed.",
+            ConnectionState::Opening => "Raising the spyglass\u{2026}",
+            ConnectionState::NoSession => "This plan has not opened a browser.",
+            ConnectionState::Live => "",
+            ConnectionState::Ended => "The court's browser has closed.",
         }
     }
 }
 
 /// A live view of one plan's browser.
 #[component]
-pub fn Spyglass(plan: kingdom_core::PlanId) -> impl IntoView {
+pub fn BrowserView(plan: kingdom_core::PlanId) -> impl IntoView {
     let canvas = NodeRef::<leptos::html::Canvas>::new();
-    let (sight, set_sight) = signal(Sight::Opening);
+    let (sight, set_sight) = signal(ConnectionState::Opening);
     let (url, set_url) = signal(String::new());
 
     watch_browser(plan, canvas, set_sight, set_url);
@@ -66,7 +66,7 @@ pub fn Spyglass(plan: kingdom_core::PlanId) -> impl IntoView {
             </div>
             <div class="spyglass-stage">
                 <canvas class="spyglass-canvas" node_ref=canvas></canvas>
-                <Show when=move || sight.get() != Sight::Live>
+                <Show when=move || sight.get() != ConnectionState::Live>
                     <p class="spyglass-empty">{move || sight.get().tell()}</p>
                 </Show>
             </div>
@@ -83,7 +83,7 @@ pub fn Spyglass(plan: kingdom_core::PlanId) -> impl IntoView {
 fn watch_browser(
     plan: kingdom_core::PlanId,
     canvas: NodeRef<leptos::html::Canvas>,
-    set_sight: WriteSignal<Sight>,
+    set_sight: WriteSignal<ConnectionState>,
     set_url: WriteSignal<String>,
 ) {
     // Owned by the effect, so leaving the chamber closes the socket -- which is
@@ -99,7 +99,7 @@ fn watch_browser(
 fn watch_browser(
     _plan: kingdom_core::PlanId,
     _canvas: NodeRef<leptos::html::Canvas>,
-    _set_sight: WriteSignal<Sight>,
+    _set_sight: WriteSignal<ConnectionState>,
     _set_url: WriteSignal<String>,
 ) {
 }
@@ -119,7 +119,7 @@ impl Watch {
     fn open(
         plan: &kingdom_core::PlanId,
         canvas: NodeRef<leptos::html::Canvas>,
-        set_sight: WriteSignal<Sight>,
+        set_sight: WriteSignal<ConnectionState>,
         set_url: WriteSignal<String>,
     ) -> Self {
         use wasm_bindgen::closure::Closure;
@@ -148,14 +148,14 @@ impl Watch {
                         // message for us, so it is the server's own check rather
                         // than something this end needs to parse.
                         if rest.len() > 4 {
-                            set_sight.set(Sight::Live);
+                            set_sight.set(ConnectionState::Live);
                             paint(canvas, &rest[4..]);
                         }
                     }
                     TAG_URL => set_url.set(String::from_utf8_lossy(rest).into_owned()),
                     TAG_STATUS => match String::from_utf8_lossy(rest).as_ref() {
-                        "no-session" => set_sight.set(Sight::NoSession),
-                        "ended" => set_sight.set(Sight::Ended),
+                        "no-session" => set_sight.set(ConnectionState::NoSession),
+                        "ended" => set_sight.set(ConnectionState::Ended),
                         // "started" is not yet "live": the screencast is running
                         // but nothing has been painted, and claiming otherwise
                         // would show the King an empty canvas labelled as a

@@ -53,7 +53,7 @@ fn next_plan_number() -> u64 {
 /// The single funnel for plan mutations, which is why both persistence and push
 /// hang off it: a caller cannot change a plan and forget to write it, and
 /// equally cannot change a plan and forget to tell the chamber watching it.
-/// See [`crate::herald`] for why that second one had to live here rather than
+/// See [`crate::events`] for why that second one had to live here rather than
 /// at each call site.
 #[cfg(feature = "ssr")]
 fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) -> Option<Plan> {
@@ -64,7 +64,7 @@ fn update(kingdom: &mut Kingdom, id: &PlanId, change: impl FnOnce(&mut Plan)) ->
     // After `remember`, not before: a failed write appends a note to the plan,
     // and the chamber should be told the thing that was actually stored rather
     // than an optimistic version of it.
-    crate::herald::proclaim(plan);
+    crate::events::publish(plan);
     Some(plan.clone())
 }
 
@@ -755,7 +755,7 @@ pub(crate) async fn spawn_subagents(
             remember(&root, &mut subagent);
             // Pushed as well as recorded, so the parent's chamber can draw the
             // errand the instant it exists rather than when it first speaks.
-            crate::herald::proclaim(&subagent);
+            crate::events::publish(&subagent);
             kingdom.plans.push(subagent);
             subagents.push((id, task));
         }

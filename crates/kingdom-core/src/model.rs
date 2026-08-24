@@ -84,7 +84,7 @@ impl Kingdom {
     ///
     /// The receiving half of push: the server proclaims a whole plan and the
     /// browser absorbs it. Replacing rather than merging is the point -- see
-    /// `herald.rs` for why the wire carries whole plans rather than deltas.
+    /// `events.rs` for why the wire carries whole plans rather than deltas.
     ///
     /// An unknown id is appended rather than dropped, so a plan opened in one
     /// tab appears in another without a full refetch.

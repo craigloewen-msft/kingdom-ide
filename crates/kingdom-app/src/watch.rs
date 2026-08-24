@@ -1,6 +1,6 @@
 //! The `/watch/plan/{id}` socket: one chamber, watching one plan.
 //!
-//! The transport. [`crate::herald`] decides *what* is proclaimed and why;
+//! The transport. [`crate::events`] decides *what* is proclaimed and why;
 //! this decides how it reaches a browser.
 //!
 //! Deliberately one-way. The King's half of the conversation still goes through
@@ -28,14 +28,14 @@ async fn watch(mut socket: WebSocket, id: PlanId) {
     // window in which the chamber renders a stale plan and is never told
     // otherwise -- rare, silent, and exactly the failure a socket is supposed
     // to remove.
-    let mut proclamations = crate::herald::listen(&id);
+    let mut proclamations = crate::events::subscribe(&id);
 
     // The opening snapshot is what makes reconnection free: a chamber that has
     // been offline is handed current truth as its first message, with nothing
     // to replay and no sequence to reconcile.
     if let Some(plan) = crate::api::snapshot(&id) {
         if send(&mut socket, &plan).await.is_err() {
-            crate::herald::forget_if_unwatched(&id);
+            crate::events::forget_if_unwatched(&id);
             return;
         }
     }
@@ -67,7 +67,7 @@ async fn watch(mut socket: WebSocket, id: PlanId) {
         }
     }
 
-    crate::herald::forget_if_unwatched(&id);
+    crate::events::forget_if_unwatched(&id);
 }
 
 async fn send(socket: &mut WebSocket, plan: &kingdom_core::Plan) -> Result<(), ()> {

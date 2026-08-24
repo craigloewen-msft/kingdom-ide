@@ -7,7 +7,7 @@
 
 use crate::api::{draft_plan, finish_plan, get_kingdom, say};
 use crate::app::KingdomState;
-use crate::components::Spyglass;
+use crate::components::BrowserView;
 use kingdom_core::{Disposition, Entry, Plan, PlanId, PlanStatus, Speaker, Timestamp};
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
@@ -348,7 +348,7 @@ fn ChamberBody(
         </header>
 
         <Show when=move || watching.get()>
-            <Spyglass plan=id.get_value()/>
+            <BrowserView plan=id.get_value()/>
         </Show>
 
         // Everything the King and the court have exchanged, oldest first, and
@@ -568,7 +568,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
 /// each was asked, and how each is getting on -- and to be able to go and read
 /// one. None of that survives being flattened into a paragraph.
 ///
-/// The rows are live for free: `herald::proclaim` announces an errand on its
+/// The rows are live for free: `events::publish` announces an errand on its
 /// parent's channel as well as its own, and `Kingdom::absorb` files a plan the
 /// chamber has not seen before. So these come from the same signal everything
 /// else reads, with no separate subscription.
@@ -1041,7 +1041,7 @@ fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bo
 /// restarting, and the honest response is to keep trying until it is back. The
 /// reconnect costs nothing to get right because the socket's opening message is
 /// the whole plan -- there is no cursor to resume from and nothing that can be
-/// missed while it was down. See `herald.rs`.
+/// missed while it was down. See `events.rs`.
 fn watch_plan(plan_id: Memo<Option<PlanId>>, absorb: impl Fn(Plan) + Clone + 'static) {
     #[cfg(feature = "hydrate")]
     Effect::new(move |previous: Option<Option<PlanWatch>>| {

@@ -72,7 +72,7 @@ const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 /// Process-global rather than per-[`Sandbox`] because a handle must survive
 /// the call that minted it: the whole contract is that the court comes back for
 /// it in a *later* deed, with a fresh workshop. Follows the registry pattern in
-/// `herald.rs`.
+/// `events.rs`.
 static JOBS: OnceLock<Mutex<HashMap<String, Arc<Job>>>> = OnceLock::new();
 
 fn jobs() -> &'static Mutex<HashMap<String, Arc<Job>>> {

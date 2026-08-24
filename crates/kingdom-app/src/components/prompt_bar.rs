@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 
 #[component]
-pub fn DecreeBar() -> impl IntoView {
+pub fn PromptBar() -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let navigate = use_navigate();
 
