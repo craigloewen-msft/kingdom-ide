@@ -144,7 +144,7 @@ impl Model for MockModel {
     }
 
     async fn take_turn(&self, brief: &Brief) -> Result<Reply, ModelError> {
-        let prompt = latest_decree(brief);
+        let prompt = latest_prompt(brief);
         let scenario = Scenario::for_prompt(&prompt);
 
         if scenario == Scenario::Slow {
@@ -344,7 +344,7 @@ impl Model for MockModel {
 /// a tool call the most recent turn is a deed, not a decree -- and the scenario
 /// must stay the one the King asked for across every pass of the loop, or the
 /// mock would change its mind halfway through its own rehearsal.
-fn latest_decree(brief: &Brief) -> String {
+fn latest_prompt(brief: &Brief) -> String {
     brief
         .turns
         .iter()

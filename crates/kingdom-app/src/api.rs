@@ -359,10 +359,10 @@ pub async fn begin_plan(
     };
 
     // The branch is named after the plan, so the name has to be settled before
-    // the workspace is cut. `slug_for_decree` is the same derivation
+    // the workspace is cut. `slug_for_prompt` is the same derivation
     // `Plan::opened` uses below, so the plan's `slug` and its branch agree.
     let workspace =
-        crate::worktree::prepare(&city_root, &mode, &kingdom_core::slug_for_decree(&prompt))
+        crate::worktree::prepare(&city_root, &mode, &kingdom_core::slug_for_prompt(&prompt))
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -716,7 +716,7 @@ pub(crate) async fn converse(
 ///
 /// Each errand is a real plan: recorded, watched and pushed like any other,
 /// which is what lets the King open one and read it while it works. They run
-/// concurrently, which is only safe because [`crate::tools::spawn_agents::ERRAND_REMIT`]
+/// concurrently, which is only safe because [`crate::tools::spawn_agents::SUBAGENT_PERMISSIONS`]
 /// forbids them from writing -- see that module.
 ///
 /// Returns the reports as one block of text for the model, or `Err` with a
@@ -728,7 +728,7 @@ pub(crate) async fn spawn_subagents(
     tasks: Vec<String>,
     patience: std::time::Duration,
 ) -> Result<String, String> {
-    use crate::tools::spawn_agents::{ERRAND_REMIT, MOST_ERRAND_ROUNDS};
+    use crate::tools::spawn_agents::{SUBAGENT_PERMISSIONS, MOST_SUBAGENT_ROUNDS};
 
     // Everything the errands need is read once, under one lock: the parent they
     // are cut from, and the city they work in. Holding it across the model
@@ -784,8 +784,8 @@ pub(crate) async fn spawn_subagents(
                     workspace,
                     city_name,
                     choice,
-                    ERRAND_REMIT,
-                    MOST_ERRAND_ROUNDS,
+                    SUBAGENT_PERMISSIONS,
+                    MOST_SUBAGENT_ROUNDS,
                 )
                 .await
             })
@@ -1138,7 +1138,7 @@ mod tests {
     /// exists to give a new kingdom something to show, and a kingdom with
     /// records is not new.
     #[test]
-    fn a_court_is_seated_only_over_an_empty_store() {
+    fn starter_plans_are_seeded_only_over_an_empty_store() {
         use kingdom_core::{CityId, ModelChoice, PlanId, Workspace};
 
         fn starter_plans(_: &[kingdom_core::City]) -> Vec<Plan> {

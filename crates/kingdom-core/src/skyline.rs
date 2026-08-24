@@ -791,7 +791,7 @@ fn collapse(folder: &Folder, depth_left: usize) -> Trimmed {
 
     if depth_left == 0 {
         for child in &folder.children {
-            absorb(child, &mut out);
+            insert(child, &mut out);
         }
     } else {
         for child in &folder.children {
@@ -807,12 +807,12 @@ fn collapse(folder: &Folder, depth_left: usize) -> Trimmed {
 }
 
 /// Folds an entire subtree's files into one district's own building list.
-fn absorb(folder: &Folder, into: &mut Trimmed) {
+fn insert(folder: &Folder, into: &mut Trimmed) {
     into.source_files.extend(folder.source_files.iter().cloned());
     into.extra_files += folder.extra_files;
     into.extra_bytes += folder.extra_bytes;
     for child in &folder.children {
-        absorb(child, into);
+        insert(child, into);
     }
 }
 

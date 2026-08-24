@@ -147,7 +147,7 @@ mod tests {
     /// honest equivalent, because it is a state the running product can
     /// genuinely produce.
     #[test]
-    fn the_opening_court_always_shows_trouble_and_history() {
+    fn the_starter_plans_always_show_trouble_and_history() {
         let cities = vec![city("c1", "Alpha"), city("c2", "Beta")];
         let plans = starter_plans(&cities);
 

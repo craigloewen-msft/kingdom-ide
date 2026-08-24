@@ -133,7 +133,7 @@ mod tests {
     /// The everyday case, pinned so the slug stays something a human recognises
     /// as their own decree rather than merely something git tolerates.
     #[test]
-    fn slugify_reads_like_the_decree_it_came_from() {
+    fn slugify_reads_like_the_prompt_it_came_from() {
         assert_eq!(slugify("Tidy the sidebar"), "tidy-the-sidebar");
         assert_eq!(
             slugify("Fix the parser's off-by-one"),

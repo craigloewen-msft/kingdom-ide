@@ -88,7 +88,7 @@ impl Kingdom {
     ///
     /// An unknown id is appended rather than dropped, so a plan opened in one
     /// tab appears in another without a full refetch.
-    pub fn absorb(&mut self, plan: Plan) {
+    pub fn insert(&mut self, plan: Plan) {
         match self.plans.iter_mut().find(|p| p.id == plan.id) {
             Some(existing) => *existing = plan,
             None => self.plans.push(plan),
@@ -523,7 +523,7 @@ impl Plan {
             // Derived here, beside the title, so the two cannot drift: a plan
             // whose branch does not match its rail label is exactly the
             // confusion this field exists to prevent.
-            slug: slug_for_decree(&prompt),
+            slug: slug_for_prompt(&prompt),
             title,
             summary: String::new(),
             transcript: vec![Entry::Message(Message::new(Speaker::User, prompt.clone()))],
@@ -707,7 +707,7 @@ impl Plan {
 /// plan cannot be built until its workspace -- and therefore its branch --
 /// exists. Rather than let the caller derive the name its own way and hope it
 /// matches, both it and [`Plan::opened`] go through here.
-pub fn slug_for_decree(prompt: &str) -> String {
+pub fn slug_for_prompt(prompt: &str) -> String {
     crate::naming::slugify(&title_from_prompt(prompt))
 }
 
@@ -1582,7 +1582,7 @@ mod transcript_tests {
     /// order they happened -- a provider that sees a result before its call is
     /// rebuilding a conversation that never took place.
     #[test]
-    fn deeds_reach_the_model_in_order_and_notes_still_do_not() {
+    fn tool_calls_reach_the_model_in_order_and_notes_still_do_not() {
         let mut plan = Plan::opened(
             PlanId::new("plan-1"),
             CityId::new("c1"),
@@ -1624,8 +1624,8 @@ mod transcript_tests {
     /// different claims, and the cost of being wrong is a kingdom that will not
     /// open.
     #[test]
-    fn a_plan_recorded_before_the_court_had_hands_still_loads() {
-        let before_deeds = r#"{
+    fn a_plan_recorded_before_the_model_had_hands_still_loads() {
+        let before_tool_calls = r#"{
             "id": "plan-old",
             "city": "c1",
             "title": "An older plan",
@@ -1648,7 +1648,7 @@ mod transcript_tests {
         }"#;
 
         let plan: Plan =
-            serde_json::from_str(before_deeds).expect("an older plan record must still load");
+            serde_json::from_str(before_tool_calls).expect("an older plan record must still load");
 
         assert_eq!(plan.transcript.len(), 2);
         assert_eq!(

@@ -767,7 +767,7 @@ mod tests {
     /// named is working on *his* branch, which almost certainly has a life
     /// beyond this plan. Tidying up after ourselves must never reach that far.
     #[tokio::test]
-    async fn archiving_never_deletes_a_branch_the_king_named() {
+    async fn archiving_never_deletes_a_branch_the_user_named() {
         let dir = repo().await;
         let root = dir.path();
 

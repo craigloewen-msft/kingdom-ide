@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 ///
 /// Lower than Phoenix's ten: these are concurrent calls to one gateway, and six
 /// is already the point where rate limits start answering instead of models.
-const MOST_ERRANDS: usize = 6;
+const MOST_SUBAGENTS: usize = 6;
 
 /// How long the whole call may take before it reports what it has.
 ///
@@ -70,7 +70,7 @@ impl Tool for SpawnAgents {
                 "tasks": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": MOST_ERRANDS,
+                    "maxItems": MOST_SUBAGENTS,
                     "description": "What to send each sub-agent to find out. They \
                                     run at the same time and cannot see each \
                                     other, so each task must stand alone.",
@@ -102,7 +102,7 @@ impl Tool for SpawnAgents {
             .filter_map(|t| t.get("task").and_then(Value::as_str))
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
-            .take(MOST_ERRANDS)
+            .take(MOST_SUBAGENTS)
             .collect();
 
         if tasks.is_empty() {
@@ -133,7 +133,7 @@ impl Tool for SpawnAgents {
 
 /// The remit an errand works under. Named here rather than at the call site so
 /// the reason travels with the tool that depends on it.
-pub const ERRAND_REMIT: Permissions = Permissions::ReadOnly;
+pub const SUBAGENT_PERMISSIONS: Permissions = Permissions::ReadOnly;
 
 /// How many rounds an errand may take before it is stopped.
 ///
@@ -142,4 +142,4 @@ pub const ERRAND_REMIT: Permissions = Permissions::ReadOnly;
 /// looping, not thinking. It bounds the same failure the parent's cap does --
 /// an agent burning a paid model quietly -- multiplied by however many errands
 /// are in flight.
-pub const MOST_ERRAND_ROUNDS: usize = 12;
+pub const MOST_SUBAGENT_ROUNDS: usize = 12;

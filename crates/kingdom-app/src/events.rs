@@ -41,7 +41,7 @@
 //! An errand is proclaimed on its own channel *and* on the channel of the plan
 //! that sent it. That is the whole of the live-errand-status feature, and it is
 //! four lines, because the decision above pays off a second time: the wire
-//! carries whole plans, and [`kingdom_core::Kingdom::absorb`] files a plan it
+//! carries whole plans, and [`kingdom_core::Kingdom::insert`] files a plan it
 //! has not seen before rather than dropping it. So a chamber watching a parent
 //! accumulates that parent's errands as they work, with no new message type, no
 //! second socket, and nothing to keep in step.

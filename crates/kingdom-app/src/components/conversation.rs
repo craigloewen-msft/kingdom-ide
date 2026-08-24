@@ -93,7 +93,7 @@ pub fn Conversation() -> impl IntoView {
     // the same, because the chamber is watching the plan rather than awaiting
     // its own request.
     watch_plan(plan_id, move |updated| {
-        state.kingdom.update(|k| k.absorb(updated));
+        state.kingdom.update(|k| k.insert(updated));
     });
 
     // The King's words land first, then the court is asked -- so his half of
@@ -133,7 +133,7 @@ pub fn Conversation() -> impl IntoView {
         <div class="chamber">
             {move || match plan.get() {
                 Some(p) => view! {
-                    <ChamberBody
+                    <ConversationBody
                         plan=p
                         live=plan
                         city=city_name
@@ -156,7 +156,7 @@ pub fn Conversation() -> impl IntoView {
 }
 
 #[component]
-fn ChamberBody(
+fn ConversationBody(
     /// The plan as it stood when this chamber was built.
     ///
     /// Read only for the parts of a plan that *cannot* change while it is open:
@@ -516,12 +516,12 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                 let (_, line) = entry;
                 match line {
                     Entry::Message(u) => {
-                        let royal = u.speaker == Speaker::User;
+                        let is_user = u.speaker == Speaker::User;
                         view! {
-                            <div class="chat-msg" class:royal=royal>
+                            <div class="chat-msg" class:is_user=is_user>
                                 <span class="msg-at">{clock(u.at)}</span>
                                 <span class="msg-who">
-                                    {if royal { "You" } else { "Court" }}
+                                    {if is_user { "You" } else { "Court" }}
                                 </span>
                                 <span class="msg-body">{u.body.clone()}</span>
                             </div>
@@ -554,7 +554,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Tool(d) if d.tool == "spawn_agents" => {
                         view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
                     }
-                    Entry::Tool(d) => view! { <DeedLine tool_call=d/> }.into_any(),
+                    Entry::Tool(d) => view! { <ToolCallLine tool_call=d/> }.into_any(),
                 }
             }
         </For>
@@ -569,7 +569,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
 /// one. None of that survives being flattened into a paragraph.
 ///
 /// The rows are live for free: `events::publish` announces an errand on its
-/// parent's channel as well as its own, and `Kingdom::absorb` files a plan the
+/// parent's channel as well as its own, and `Kingdom::insert` files a plan the
 /// chamber has not seen before. So these come from the same signal everything
 /// else reads, with no separate subscription.
 #[component]
@@ -892,7 +892,7 @@ fn entry_version(entry: &Entry) -> u8 {
 /// build log buries that. The summary line is the answer; the detail is one
 /// click away for when it is not.
 #[component]
-fn DeedLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
+fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
     use kingdom_core::ToolOutcome;
 
     let (open, set_open) = signal(false);
@@ -1031,7 +1031,7 @@ fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bo
     }
 }
 
-/// Watches one plan over the push socket, handing each proclamation to `absorb`.
+/// Watches one plan over the push socket, handing each proclamation to `insert`.
 ///
 /// Browser-only: under SSR there is no socket and the first render is served
 /// from server state directly.
@@ -1042,7 +1042,7 @@ fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bo
 /// reconnect costs nothing to get right because the socket's opening message is
 /// the whole plan -- there is no cursor to resume from and nothing that can be
 /// missed while it was down. See `events.rs`.
-fn watch_plan(plan_id: Memo<Option<PlanId>>, absorb: impl Fn(Plan) + Clone + 'static) {
+fn watch_plan(plan_id: Memo<Option<PlanId>>, insert: impl Fn(Plan) + Clone + 'static) {
     #[cfg(feature = "hydrate")]
     Effect::new(move |previous: Option<Option<PlanWatch>>| {
         // Close the previous socket before opening another, so moving between
@@ -1051,12 +1051,12 @@ fn watch_plan(plan_id: Memo<Option<PlanId>>, absorb: impl Fn(Plan) + Clone + 'st
         drop(previous);
 
         let id = plan_id.get()?;
-        Some(PlanWatch::open(&id, absorb.clone()))
+        Some(PlanWatch::open(&id, insert.clone()))
     });
 
     #[cfg(not(feature = "hydrate"))]
     {
-        let _ = (plan_id, absorb);
+        let _ = (plan_id, insert);
     }
 }
 
@@ -1078,7 +1078,7 @@ impl PlanWatch {
     /// How long to wait before reopening a dropped socket.
     const RETRY_MS: i32 = 1000;
 
-    fn open(id: &PlanId, absorb: impl Fn(Plan) + Clone + 'static) -> Self {
+    fn open(id: &PlanId, insert: impl Fn(Plan) + Clone + 'static) -> Self {
         use wasm_bindgen::closure::Closure;
         use wasm_bindgen::JsCast;
 
@@ -1086,7 +1086,7 @@ impl PlanWatch {
             .expect("the chamber's watch socket should be constructible");
 
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new({
-            let absorb = absorb.clone();
+            let insert = insert.clone();
             move |event: web_sys::MessageEvent| {
                 let Some(text) = event.data().as_string() else {
                     return;
@@ -1096,7 +1096,7 @@ impl PlanWatch {
                 // most likely. Dropping it leaves the chamber showing the last
                 // good state, which is better than tearing it down.
                 if let Ok(plan) = serde_json::from_str::<Plan>(&text) {
-                    absorb(plan);
+                    insert(plan);
                 }
             }
         });
@@ -1112,7 +1112,7 @@ impl PlanWatch {
                 };
                 let reopen = Closure::once_into_js({
                     let id = id.clone();
-                    let absorb = absorb.clone();
+                    let insert = insert.clone();
                     let retry = retry.clone();
                     move || {
                         retry.set(None);
@@ -1126,7 +1126,7 @@ impl PlanWatch {
                         // by the number of disconnects in one chamber visit,
                         // and the socket it holds is closed by the browser when
                         // the page goes.
-                        std::mem::forget(PlanWatch::open(&id, absorb));
+                        std::mem::forget(PlanWatch::open(&id, insert));
                     }
                 });
                 if let Ok(handle) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
