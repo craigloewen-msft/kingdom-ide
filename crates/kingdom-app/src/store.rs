@@ -124,7 +124,7 @@ fn reconcile(mut plan: Plan) -> Plan {
     let had_begun = plan
         .transcript
         .iter()
-        .any(|e| !matches!(e, Entry::Said(u) if u.speaker == Speaker::King));
+        .any(|e| !matches!(e, Entry::Message(u) if u.speaker == Speaker::User));
 
     if !had_begun {
         return plan;
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(next_number(&[]), 1, "the first plan of a kingdom is plan-1");
 
         let mut first = plan("plan-1");
-        first.say(Speaker::Court, "Here is what I propose.");
+        first.say(Speaker::Assistant, "Here is what I propose.");
         // Settled out of Drafting, as it would be once the court had replied.
         // Left mid-turn it would be *repaired* on load rather than returned
         // verbatim, which is the neighbouring test's business, not this one's.
@@ -349,7 +349,7 @@ mod tests {
 
         // Mid-turn: the court had spoken and a tool call was still running.
         let mut interrupted = plan("plan-2");
-        interrupted.say(Speaker::Court, "I will look into it.");
+        interrupted.say(Speaker::Assistant, "I will look into it.");
         interrupted.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
         interrupted.working_on = Some("bash: cargo test".into());
 

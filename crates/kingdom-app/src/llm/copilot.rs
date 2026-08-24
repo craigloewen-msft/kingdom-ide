@@ -408,10 +408,10 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 
     for turn in &brief.turns {
         match turn {
-            Turn::Said(u) => out.push(json!({
+            Turn::Message(u) => out.push(json!({
                 "role": match u.speaker {
-                    Speaker::King => "user",
-                    Speaker::Court => "assistant",
+                    Speaker::User => "user",
+                    Speaker::Assistant => "assistant",
                 },
                 "content": u.body,
             })),
@@ -468,8 +468,8 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 /// synthetic turn.
 ///
 /// **Why this is safe.** The message is built here, from a [`ToolCall`], and exists
-/// only inside this request body. It is never a `Turn::Said`, never an
-/// `Utterance`, never in the transcript. That containment is the whole defence:
+/// only inside this request body. It is never a `Turn::Message`, never an
+/// `Message`, never in the transcript. That containment is the whole defence:
 /// the doc on [`kingdom_core::Turn`] argues that Kingdom's plumbing must not be
 /// replayed to a model in the King's voice, and a `user` message the King never
 /// said is exactly that hazard -- so it is never allowed to exist as a domain

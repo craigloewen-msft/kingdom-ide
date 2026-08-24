@@ -60,7 +60,7 @@ pub fn populate_court(cities: &[City]) -> Vec<Plan> {
         plan.status = status;
         match status {
             PlanStatus::Failed => plan.note(NoteKind::Failed, plan.summary.clone()),
-            _ => plan.say(Speaker::Court, plan.summary.clone()),
+            _ => plan.say(Speaker::Assistant, plan.summary.clone()),
         }
         // A plan mid-draft is the one state that carries a `working_on`, and it
         // is what puts a crane over the city on the map.

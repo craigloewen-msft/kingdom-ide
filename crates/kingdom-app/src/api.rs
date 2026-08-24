@@ -452,7 +452,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 
     update(&mut kingdom, &plan_id, |p| {
         p.status = PlanStatus::Drafting;
-        p.say(Speaker::King, prompt);
+        p.say(Speaker::User, prompt);
     })
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
@@ -838,15 +838,15 @@ fn report(errands: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
             .or_else(|| snapshot(id));
 
         // The last thing the *court* said is the errand's answer. Read with a
-        // fold rather than `next_back` because `said()` yields a plain forward
+        // fold rather than `next_back` because `messages()` yields a plain forward
         // iterator; taking the last match is the whole intent.
-        let said = plan.as_ref().and_then(|p| {
-            p.said()
-                .filter(|u| u.speaker == Speaker::Court)
+        let messages = plan.as_ref().and_then(|p| {
+            p.messages()
+                .filter(|u| u.speaker == Speaker::Assistant)
                 .last()
                 .map(|u| u.body.clone())
         });
-        match said {
+        match messages {
             Some(body) => out.push_str(&body),
             None => out.push_str(
                 "This errand did not report back. It may have run out of rope or \
@@ -908,7 +908,7 @@ fn settle(
                 plan.title = draft.title.clone();
                 plan.summary = draft.summary.clone();
                 plan.status = PlanStatus::AwaitingReview;
-                plan.say(Speaker::Court, draft.body.clone());
+                plan.say(Speaker::Assistant, draft.body.clone());
             }
             Err(e) => {
                 // A failure is Kingdom reporting, not the model speaking -- so

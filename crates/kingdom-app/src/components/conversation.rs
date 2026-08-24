@@ -82,7 +82,7 @@ pub fn Conversation() -> impl IntoView {
         let unstarted = p.status == PlanStatus::Drafting
             && !p.is_busy()
             && !p.is_errand()
-            && !p.said().any(|u| u.speaker == Speaker::Court);
+            && !p.messages().any(|u| u.speaker == Speaker::Assistant);
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());
         }
@@ -515,8 +515,8 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
             {
                 let (_, line) = entry;
                 match line {
-                    Entry::Said(u) => {
-                        let royal = u.speaker == Speaker::King;
+                    Entry::Message(u) => {
+                        let royal = u.speaker == Speaker::User;
                         view! {
                             <div class="chat-msg" class:royal=royal>
                                 <span class="msg-at">{clock(u.at)}</span>

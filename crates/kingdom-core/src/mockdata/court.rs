@@ -42,7 +42,7 @@ pub fn quiet_court(cities: &[City]) -> Vec<Plan> {
     plan.title = format!("The Quiet Works of {}", city.name);
     plan.summary = "Nothing in flight. All is well.".into();
     plan.status = PlanStatus::AwaitingReview;
-    plan.say(Speaker::Court, plan.summary.clone());
+    plan.say(Speaker::Assistant, plan.summary.clone());
 
     vec![plan]
 }

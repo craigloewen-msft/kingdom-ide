@@ -350,7 +350,7 @@ fn latest_decree(brief: &Brief) -> String {
         .iter()
         .rev()
         .find_map(|t| match t {
-            Turn::Said(u) if u.speaker == Speaker::King => Some(u.body.clone()),
+            Turn::Message(u) if u.speaker == Speaker::User => Some(u.body.clone()),
             _ => None,
         })
         .unwrap_or_default()
@@ -380,8 +380,8 @@ mod tests {
                 dirty_files: 2,
                 notable_paths: vec!["src/lib.rs".into(), "src/main.rs".into()],
             },
-            turns: vec![Turn::Said(kingdom_core::Utterance::new(
-                Speaker::King,
+            turns: vec![Turn::Message(kingdom_core::Message::new(
+                Speaker::User,
                 prompt,
             ))],
             tools: Vec::new(),

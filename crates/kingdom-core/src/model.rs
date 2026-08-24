@@ -526,7 +526,7 @@ impl Plan {
             slug: slug_for_decree(&prompt),
             title,
             summary: String::new(),
-            transcript: vec![Entry::Said(Utterance::new(Speaker::King, prompt.clone()))],
+            transcript: vec![Entry::Message(Message::new(Speaker::User, prompt.clone()))],
             prompt,
             model: choice.model.clone(),
             effort: choice.effort,
@@ -570,7 +570,7 @@ impl Plan {
             slug: crate::naming::slugify(&title_from_prompt(&task)),
             title: title_from_prompt(&task),
             summary: String::new(),
-            transcript: vec![Entry::Said(Utterance::new(Speaker::King, task.clone()))],
+            transcript: vec![Entry::Message(Message::new(Speaker::User, task.clone()))],
             prompt: task,
             model: parent.model.clone(),
             effort: parent.effort,
@@ -630,7 +630,7 @@ impl Plan {
     /// sent to a model.
     pub fn say(&mut self, speaker: Speaker, body: impl Into<String>) {
         self.transcript
-            .push(Entry::Said(Utterance::new(speaker, body)));
+            .push(Entry::Message(Message::new(speaker, body)));
     }
 
     /// Records something Kingdom itself reports. Never leaves the machine.
@@ -644,9 +644,9 @@ impl Plan {
     /// notices both left out. Useful for questions about the conversation --
     /// "has the court replied yet?" -- rather than for building a request.
     /// [`Plan::turns`] is what a model is handed.
-    pub fn said(&self) -> impl Iterator<Item = &Utterance> {
+    pub fn messages(&self) -> impl Iterator<Item = &Message> {
         self.transcript.iter().filter_map(|e| match e {
-            Entry::Said(u) => Some(u),
+            Entry::Message(u) => Some(u),
             Entry::Note(_) | Entry::Tool(_) => None,
         })
     }
@@ -665,7 +665,7 @@ impl Plan {
     /// handed a history that never happened.
     pub fn turns(&self) -> impl Iterator<Item = Turn> + '_ {
         self.transcript.iter().filter_map(|e| match e {
-            Entry::Said(u) => Some(Turn::Said(u.clone())),
+            Entry::Message(u) => Some(Turn::Message(u.clone())),
             Entry::Tool(d) => Some(Turn::Tool(d.clone())),
             Entry::Note(_) => None,
         })
@@ -745,7 +745,7 @@ fn title_from_prompt(prompt: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Entry {
     /// Words a participant produced.
-    Said(Utterance),
+    Message(Message),
     /// Something Kingdom itself reports: a failed call or a workspace cut.
     /// Never sent anywhere.
     Note(Note),
@@ -788,7 +788,7 @@ pub struct ToolCall {
 
 impl ToolCall {
     /// Records a call as made *now* and still in flight, for the same reason as
-    /// [`Utterance::new`].
+    /// [`Message::new`].
     pub fn started(
         id: impl Into<String>,
         tool: impl Into<String>,
@@ -937,13 +937,13 @@ impl ToolOutcome {
 /// to a language model, which is not a cost worth a lifetime parameter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Turn {
-    Said(Utterance),
+    Message(Message),
     Tool(ToolCall),
 }
 
 /// Something a participant said.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Utterance {
+pub struct Message {
     pub speaker: Speaker,
     pub body: String,
     /// When these words entered the log. See [`Timestamp`].
@@ -951,7 +951,7 @@ pub struct Utterance {
     pub at: Option<Timestamp>,
 }
 
-impl Utterance {
+impl Message {
     /// Records words as said *now*, which is the only way a caller should make
     /// one: an utterance whose time is chosen by hand is an utterance that can
     /// disagree with its own position in the log.
@@ -976,7 +976,7 @@ pub struct Note {
 
 impl Note {
     /// Records something as having happened *now*, for the same reason as
-    /// [`Utterance::new`].
+    /// [`Message::new`].
     pub fn new(kind: NoteKind, body: impl Into<String>) -> Self {
         Self {
             kind,
@@ -1043,9 +1043,9 @@ impl NoteKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Speaker {
     /// The user.
-    King,
+    User,
     /// The model drafting the plan.
-    Court,
+    Assistant,
 }
 
 /// Where a plan stands.
@@ -1540,7 +1540,7 @@ mod transcript_tests {
     /// When every log line was an utterance, app notices and failed calls were
     /// stored as things the *model* had said, and the next turn replayed them to
     /// it as its own prior words -- teaching it to answer in the voice of the
-    /// plumbing. `said()` is the only door between a plan's log and a model,
+    /// plumbing. `messages()` is the only door between a plan's log and a model,
     /// so it is the thing worth pinning: notes never come through it, ordering
     /// survives, and the last King turn is still findable as the live prompt.
     #[test]
@@ -1556,24 +1556,24 @@ mod transcript_tests {
             NoteKind::Workspace,
             "Working in /dev/testburg/.kingdom/abc.",
         );
-        plan.say(Speaker::Court, "First answer");
+        plan.say(Speaker::Assistant, "First answer");
         plan.note(NoteKind::Failed, "The first request failed.");
-        plan.say(Speaker::King, "Second question");
+        plan.say(Speaker::User, "Second question");
 
-        let said: Vec<_> = plan.said().cloned().collect();
+        let messages: Vec<_> = plan.messages().cloned().collect();
         assert_eq!(
-            said.iter().map(|u| u.body.as_str()).collect::<Vec<_>>(),
+            messages.iter().map(|u| u.body.as_str()).collect::<Vec<_>>(),
             vec!["First question", "First answer", "Second question"],
             "only utterances pass, and they keep their order"
         );
 
         // The prompt is the last thing the King said, even though a note landed
         // between the turns.
-        let i = said
+        let i = messages
             .iter()
-            .rposition(|u| u.speaker == Speaker::King)
+            .rposition(|u| u.speaker == Speaker::User)
             .expect("the King has spoken");
-        assert_eq!(said[i].body, "Second question");
+        assert_eq!(messages[i].body, "Second question");
     }
 
     /// The same exclusion, now that the log holds a third kind of thing. A deed
@@ -1597,12 +1597,12 @@ mod transcript_tests {
         ));
         plan.note(NoteKind::Failed, "The disk filled up.");
         assert!(plan.settle_tool_call("call-1", ToolOutcome::done("ok")));
-        plan.say(Speaker::Court, "The tests pass.");
+        plan.say(Speaker::Assistant, "The tests pass.");
 
         let turns: Vec<_> = plan
             .turns()
             .map(|t| match t {
-                Turn::Said(u) => format!("said:{}", u.body),
+                Turn::Message(u) => format!("said:{}", u.body),
                 Turn::Tool(d) => format!("did:{}:{}", d.tool, d.report()),
             })
             .collect();
@@ -1634,7 +1634,7 @@ mod transcript_tests {
             "model": "mock",
             "effort": null,
             "transcript": [
-                { "Said": { "speaker": "King", "body": "Do the thing", "at": 1 } },
+                { "Message": { "speaker": "User", "body": "Do the thing", "at": 1 } },
                 { "Note": { "kind": "Workspace", "body": "Working in /tmp", "at": 2 } }
             ],
             "status": "AwaitingReview",
@@ -1730,7 +1730,7 @@ mod transcript_tests {
             "model": "mock",
             "effort": null,
             "transcript": [
-                { "Said": { "speaker": "King", "body": "Do the thing", "at": 1 } }
+                { "Message": { "speaker": "User", "body": "Do the thing", "at": 1 } }
             ],
             "status": "AwaitingReview",
             "workspace": {
