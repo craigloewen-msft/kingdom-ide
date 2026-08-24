@@ -339,9 +339,13 @@ pub async fn begin_plan(
         std::path::Path::new(&kingdom.root).join(&city.path)
     };
 
-    let workspace = crate::worktree::prepare(&city_root, &mode)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    // The branch is named after the plan, so the name has to be settled before
+    // the workspace is cut. `slug_for_decree` is the same derivation
+    // `Plan::opened` uses below, so the plan's `slug` and its branch agree.
+    let workspace =
+        crate::worktree::prepare(&city_root, &mode, &kingdom_core::slug_for_decree(&prompt))
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut plan = Plan::opened(plan_id, city_id, &prompt, &choice, workspace.clone());
     // Where an agent is fenced in is not something it said, it is something that

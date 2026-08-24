@@ -23,6 +23,7 @@ pub mod ids;
 pub mod layout;
 pub mod mockdata;
 pub mod model;
+pub mod naming;
 pub mod sample;
 pub mod skyline;
 pub mod terrain;

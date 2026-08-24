@@ -398,6 +398,14 @@ pub struct Plan {
     /// The city this plan is drawn up for.
     pub city: CityId,
     pub title: String,
+    /// The title as a git-safe slug. The plan's branch is cut from this, so the
+    /// name the King reads in the rail and the name he reads in `git branch`
+    /// are the same name.
+    ///
+    /// `#[serde(default)]` because plan records written before plans had slugs
+    /// are still on disk, and their branch already exists under its old name.
+    #[serde(default)]
+    pub slug: String,
     pub summary: String,
     /// The decree that opened this plan, verbatim.
     pub prompt: String,
@@ -438,10 +446,15 @@ impl Plan {
         workspace: Workspace,
     ) -> Self {
         let prompt = prompt.into();
+        let title = title_from_prompt(&prompt);
         Self {
             id,
             city,
-            title: title_from_prompt(&prompt),
+            // Derived here, beside the title, so the two cannot drift: a plan
+            // whose branch does not match its rail label is exactly the
+            // confusion this field exists to prevent.
+            slug: slug_for_decree(&prompt),
+            title,
             summary: String::new(),
             transcript: vec![Entry::Said(Utterance::new(Speaker::King, prompt.clone()))],
             prompt,
@@ -510,6 +523,16 @@ impl Plan {
             Entry::Note(_) => None,
         })
     }
+}
+
+/// The slug a decree will produce, before there is a [`Plan`] to ask.
+///
+/// Exists because of an ordering knot: the branch is named from the slug, but a
+/// plan cannot be built until its workspace -- and therefore its branch --
+/// exists. Rather than let the caller derive the name its own way and hope it
+/// matches, both it and [`Plan::opened`] go through here.
+pub fn slug_for_decree(prompt: &str) -> String {
+    crate::naming::slugify(&title_from_prompt(prompt))
 }
 
 /// A first-line title for a freshly opened plan, before the model has proposed
@@ -786,7 +809,10 @@ impl Outcome {
                 format!("Merged into {into} as {}.", short_sha(commit))
             }
             Outcome::Archived {
-                branch, tip, pruned, ..
+                branch,
+                tip,
+                pruned,
+                ..
             } => {
                 if *pruned {
                     format!("Archived at {}, kept as a patch.", short_sha(tip))

@@ -150,6 +150,11 @@ flowchart TB
   the button yet, and guessing at that UI is how the lease machinery happened.
 - Live updates (no WebSocket yet — the chamber polls while a draft is in flight)
 - **Any resource arbitration at all** — see §3
+- Naming a plan with a model. A plan's branch is cut from its title today —
+  `kingdom/<slug>`, via `kingdom_core::naming::slugify`, with `-2`, `-3` walked
+  past on collision — but that title is still just the first clause of the
+  decree. Having a cheap model propose a real name is task 00070; when it lands
+  it changes the title, and the branch follows for free.
 
 The placeholder court deliberately includes a **failed plan** and a plan **mid
 draft**, because those are states the UI exists to show. Do not "clean up" the
