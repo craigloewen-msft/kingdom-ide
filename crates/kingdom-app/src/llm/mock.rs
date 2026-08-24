@@ -73,6 +73,12 @@ pub enum Scenario {
     Slow,
     /// Fails, so the failure path is reachable on demand.
     Error,
+    /// Asks the King a question, then answers from what he chose.
+    ///
+    /// The offline rehearsal for the one thing request/response could never do:
+    /// the server speaking first, and a tool call that parks until a person
+    /// replies.
+    Ask,
     /// Uses a tool, then answers from its result.
     ///
     /// The offline rehearsal for the whole turn loop: a first call that asks to
@@ -110,6 +116,7 @@ impl Scenario {
             "slow" => Some(Scenario::Slow),
             "error" => Some(Scenario::Error),
             "work" | "tools" => Some(Scenario::Work),
+            "ask" => Some(Scenario::Ask),
             _ => None,
         }
     }
@@ -139,6 +146,44 @@ impl Model for MockModel {
                  (scenario: refuse).",
                 city.name
             ))),
+
+            Scenario::Ask => Ok(match done_already(brief) {
+                None => Reply::Acts(vec![Act {
+                    id: "mock-question-1".to_string(),
+                    tool: "ask_user_question".to_string(),
+                    input: serde_json::json!({
+                        "questions": [{
+                            "question": format!(
+                                "There are two ways to go about {}. Which do you want?",
+                                city.name
+                            ),
+                            "header": "Approach",
+                            "options": [
+                                {
+                                    "label": "The careful way",
+                                    "description": "Read everything first, change one thing, \
+                                                    and check it before going further."
+                                },
+                                {
+                                    "label": "The quick way",
+                                    "description": "Make the obvious change and see whether \
+                                                    it builds."
+                                }
+                            ]
+                        }]
+                    }),
+                }]),
+                Some(chosen) => Reply::Spoke(Draft {
+                    title: format!("Counsel on {}", city.name),
+                    summary: format!("Asked the King, and he chose: {}", chosen.trim()),
+                    body: format!(
+                        "You chose \"{}\", so that is how I would proceed on {}.\n\n\
+                         (Drafted by the mock model \u{2014} no real work was done.)",
+                        chosen.trim(),
+                        city.name
+                    ),
+                }),
+            }),
 
             // Act on the first pass, speak on the second. Which pass this is
             // comes from the transcript rather than from any state held here:

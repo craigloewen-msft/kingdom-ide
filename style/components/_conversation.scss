@@ -311,6 +311,107 @@
   color: t.$ink-dim;
 }
 
+// --- A question the court has stopped to ask ---------------------------------
+//
+// Not a deed line, though it is recorded as one. A deed is something to watch;
+// an unanswered question is something to *do*, and the King's attention is the
+// scarce resource this whole product is about spending well. So it is the one
+// thing in the log that is allowed to be loud.
+//
+// Inline rather than a modal on purpose — a modal would hide the work that
+// prompted the question behind the question itself, so he would answer without
+// the context he needs.
+.chat-question {
+  align-self: stretch;
+  flex-shrink: 0;
+  padding: 14px;
+  border: 1px solid rgba(t.$gold, 0.5);
+  border-radius: t.$radius;
+  background: rgba(t.$gold, 0.05);
+
+  // Answered and waiting on the server. Not hidden — he should still see what
+  // he chose — but visibly no longer his to act on.
+  &.answered {
+    opacity: 0.55;
+    border-color: t.$edge;
+    background: t.$panel;
+  }
+}
+
+.question-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: t.$gold;
+  font-size: 11px;
+}
+
+.question-mark { opacity: 0.8; }
+
+.question-block + .question-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid t.$edge;
+}
+
+.question-text {
+  margin: 0 0 10px;
+  color: t.$ink;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+// Stacked and full width rather than side by side: an option carries a line of
+// explanation, and the King is choosing between meanings, not clicking Yes/No.
+.question-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$panel;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: rgba(t.$gold, 0.6);
+    background: rgba(t.$gold, 0.08);
+  }
+
+  &:disabled { cursor: default; }
+}
+
+.option-label {
+  color: t.$ink;
+  font-size: 13px;
+}
+
+.option-detail {
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+// The options are the court's guesses. The King is the one deciding, so he must
+// be able to say something that was not on the list.
+.question-own-words {
+  margin-top: 12px;
+
+  .decree-input { width: 100%; }
+}
+
 // --- Something went wrong just now -----------------------------------------
 //
 // Outside the log on purpose. An error is not something anybody said, and a

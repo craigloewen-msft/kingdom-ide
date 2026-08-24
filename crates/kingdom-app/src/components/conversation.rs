@@ -379,6 +379,7 @@ fn ChamberBody(
 /// the transcript as it was when the King walked in.
 #[component]
 fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
+    let plan_id = Memo::new(move |_| live.get().map(|p| p.id));
     view! {
         <For
             each={move || {
@@ -426,11 +427,193 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     // reason -- but a deed is the court *working*, which is the
                     // thing the King most wants to watch, so it gets its own
                     // shape rather than a note's.
+                    //
+                    // A question still waiting on him is the exception: that is
+                    // not something to watch, it is something to do, so it is
+                    // rendered as the thing to do.
+                    Entry::Did(d) if is_open_question(&d) => {
+                        view! { <Question deed=d plan=plan_id/> }.into_any()
+                    }
                     Entry::Did(d) => view! { <DeedLine deed=d/> }.into_any(),
                 }
             }
         </For>
     }
+}
+
+/// A question the court has stopped to ask, rendered where it was asked.
+///
+/// Inline in the transcript rather than as a modal. A modal would be the
+/// obvious choice and is the wrong one: it puts the question in front of the
+/// King with the work that prompted it hidden behind it, so he answers without
+/// the context he needs. Here the reasoning and the commands that led to the
+/// question are right above it, and he can scroll.
+#[component]
+fn Question(deed: kingdom_core::Deed, plan: Memo<Option<PlanId>>) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let deed_id = StoredValue::new(deed.id.clone());
+    let questions = StoredValue::new(parse_questions(&deed.input));
+    let (sent, set_sent) = signal(false);
+
+    let reply = move |answer: String| {
+        let Some(plan_id) = plan.get_untracked() else {
+            return;
+        };
+        // Locked as soon as he answers, so a double-click cannot send twice --
+        // the second would find nothing waiting and report a confusing failure
+        // for an answer that in fact landed.
+        set_sent.set(true);
+        let deed = deed_id.get_value();
+        leptos::task::spawn_local(async move {
+            if let Err(e) = crate::api::answer_question(plan_id.to_string(), deed, answer).await {
+                state.error.set(Some(e.to_string()));
+                set_sent.set(false);
+            }
+        });
+    };
+
+    view! {
+        <div class="chat-question" class:answered=move || sent.get()>
+            <div class="question-head">
+                <span class="question-mark">"\u{2637}"</span>
+                <span class="question-who">"The court asks"</span>
+            </div>
+
+            {move || {
+                questions
+                    .get_value()
+                    .into_iter()
+                    .map(|q| {
+                        let options = q
+                            .options
+                            .into_iter()
+                            .map(|opt| {
+                                let chosen = opt.label.clone();
+                                let detail = opt.description.clone();
+                                let has_detail = !detail.is_empty();
+                                view! {
+                                    <li>
+                                        <button
+                                            class="question-option"
+                                            disabled=move || sent.get()
+                                            on:click=move |_| reply(chosen.clone())
+                                        >
+                                            <span class="option-label">{opt.label}</span>
+                                            <Show when=move || has_detail>
+                                                <span class="option-detail">
+                                                    {detail.clone()}
+                                                </span>
+                                            </Show>
+                                        </button>
+                                    </li>
+                                }
+                            })
+                            .collect_view();
+
+                        view! {
+                            <div class="question-block">
+                                <p class="question-text">{q.question}</p>
+                                <ul class="question-options">{options}</ul>
+                            </div>
+                        }
+                    })
+                    .collect_view()
+            }}
+
+            // The listed options are the court's guesses at what the King might
+            // want. He is the one deciding, so he must be able to say something
+            // that was not on the list.
+            <QuestionFreeText sent=sent on_answer=Callback::new(reply)/>
+        </div>
+    }
+}
+
+/// The "something else" line under a question's options.
+#[component]
+fn QuestionFreeText(sent: ReadSignal<bool>, on_answer: Callback<String>) -> impl IntoView {
+    let (text, set_text) = signal(String::new());
+
+    let send = move || {
+        let words = text.get_untracked().trim().to_string();
+        if words.is_empty() || sent.get_untracked() {
+            return;
+        }
+        set_text.set(String::new());
+        on_answer.run(words);
+    };
+
+    view! {
+        <div class="question-own-words">
+            <input
+                class="decree-input"
+                r#type="text"
+                placeholder="Or say what you want in your own words\u{2026}"
+                prop:value=move || text.get()
+                disabled=move || sent.get()
+                on:input=move |ev| set_text.set(event_target_value(&ev))
+                on:keydown=move |ev| { if ev.key() == "Enter" { send(); } }
+            />
+        </div>
+    }
+}
+
+/// One thing the court wants decided.
+#[derive(Clone)]
+struct Asked {
+    question: String,
+    options: Vec<AskedOption>,
+}
+
+#[derive(Clone)]
+struct AskedOption {
+    label: String,
+    description: String,
+}
+
+/// Reads the questions out of a call's arguments.
+///
+/// Tolerant on purpose: these are a model's JSON, not a shape we declared, and
+/// a missing `description` or a malformed option must not cost the King the
+/// whole question. A question that renders with one option missing is still
+/// answerable; one that fails to render at all leaves the court parked with
+/// nothing on screen to unpark it.
+fn parse_questions(input: &serde_json::Value) -> Vec<Asked> {
+    input
+        .get("questions")
+        .and_then(|q| q.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|q| {
+            let question = q.get("question")?.as_str()?.to_string();
+            let options = q
+                .get("options")
+                .and_then(|o| o.as_array())
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|o| {
+                    Some(AskedOption {
+                        label: o.get("label")?.as_str()?.to_string(),
+                        description: o
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                })
+                .collect();
+            Some(Asked { question, options })
+        })
+        .collect()
+}
+
+/// True for a question the King has not answered yet.
+///
+/// Once answered it is ordinary history and renders as any other deed, which is
+/// what stops him answering the same question twice.
+fn is_open_question(entry: &kingdom_core::Deed) -> bool {
+    entry.tool == "ask_user_question" && entry.in_flight()
 }
 
 /// Distinguishes an entry from a later version of *itself*.

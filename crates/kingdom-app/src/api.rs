@@ -561,7 +561,7 @@ async fn converse(
     } else {
         Vec::new()
     };
-    let shop = Workshop::new(workspace);
+    let shop = Workshop::new(workspace).for_plan(plan_id.clone());
 
     for round in 0..MOST_ROUNDS {
         // The conversation is rebuilt from the plan each pass rather than
@@ -607,9 +607,15 @@ async fn converse(
                     }
 
                     // The lock is deliberately not held across this. A tool can
-                    // take minutes, and a held lock would freeze every other
-                    // plan and every chamber in the kingdom behind it.
-                    let outcome = crate::tools::invoke(&act.tool, act.input, &shop).await;
+                    // take minutes -- and `ask_user_question` waits on a person
+                    // -- so a held lock would freeze every other plan and every
+                    // chamber in the kingdom behind it.
+                    //
+                    // Bound to this deed, so a tool that has to reach back out
+                    // to the King has something the browser can name when it
+                    // answers.
+                    let outcome =
+                        crate::tools::invoke(&act.tool, act.input, &shop.for_deed(&act.id)).await;
 
                     let mut kingdom = lock()?;
                     update(&mut kingdom, &plan_id, |p| {
@@ -664,6 +670,14 @@ async fn converse(
 /// so it is what gets shown.
 #[cfg(feature = "ssr")]
 fn describe(tool: &str, input: &serde_json::Value) -> String {
+    // Waiting on a person is not the same kind of busy as running a command,
+    // and "who is blocked behind whom" is one of the three questions this
+    // product exists to answer. It gets said in those words rather than being
+    // rendered as another tool name.
+    if tool == "ask_user_question" {
+        return "Waiting on the King".to_string();
+    }
+
     let subject = ["cmd", "path", "pattern", "url", "selector", "query"]
         .iter()
         .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
@@ -713,6 +727,37 @@ fn settle(
     });
 
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
+}
+
+/// Carries the King's answer to a question the court is waiting on.
+///
+/// Deliberately a `#[server]` function rather than a message on the watch
+/// socket. The socket exists for what HTTP cannot do -- let the server speak
+/// first -- and this direction is an ordinary request the browser initiates.
+/// Sending it over the socket would mean hand-rolling a request/response
+/// protocol with no type checking across it, throwing away the main reason this
+/// project is Rust on both ends.
+///
+/// Returns the plan, so the caller sees the same state everything else does.
+/// The deed is settled by the turn loop when the parked call resumes, not here:
+/// this only unblocks it. Recording the outcome in two places is how a
+/// transcript ends up disagreeing with itself.
+#[server(AnswerQuestion, "/api")]
+pub async fn answer_question(
+    plan: String,
+    deed: String,
+    answer: String,
+) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+
+    if !crate::tools::ask_user_question::answer(&plan_id, &deed, answer) {
+        return Err(ServerFnError::new(
+            "Nothing is waiting on that answer. It may have been answered in \
+             another tab, or the server may have restarted since it was asked.",
+        ));
+    }
+
+    snapshot(&plan_id).ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
 /// Closes a plan: lands its work, or sets it aside.

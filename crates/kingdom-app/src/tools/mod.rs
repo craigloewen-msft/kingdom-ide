@@ -19,6 +19,7 @@
 //! and [`Workshop::root`] before adding one that spawns a process -- the
 //! guarantee is real for the first and deliberately weaker for the second.
 
+pub mod ask_user_question;
 pub mod bash;
 pub mod read_file;
 pub mod search;
@@ -40,6 +41,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(read_file::ReadFile),
         Box::new(search::Search),
         Box::new(bash::Bash),
+        Box::new(ask_user_question::AskUserQuestion),
     ]
 }
 
@@ -62,9 +64,20 @@ pub async fn invoke(tool: &str, input: Value, shop: &Workshop) -> DeedOutcome {
 /// can tell an isolated plan from one working directly in the city -- the
 /// guarantee it is operating under differs between them, and a tool that cannot
 /// tell cannot say so.
+///
+/// It also carries *which call this is*. Most tools never look: a command does
+/// not care which plan asked for it. But a tool that has to reach back out --
+/// to put a question in front of the King and wait for his answer -- needs
+/// something the browser can name when it answers, and the deed it is already
+/// being rendered as is exactly that. Minting a second identifier would mean
+/// keeping two in step for no gain.
 #[derive(Debug, Clone)]
 pub struct Workshop {
     workspace: Workspace,
+    plan: kingdom_core::PlanId,
+    /// The deed this call is recorded as, once it is running. `None` outside a
+    /// turn, which is the case tests construct.
+    deed: Option<String>,
 }
 
 /// A refusal: the tool would not run, and why.
@@ -99,7 +112,39 @@ impl From<Refusal> for DeedOutcome {
 
 impl Workshop {
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            plan: kingdom_core::PlanId::new(String::new()),
+            deed: None,
+        }
+    }
+
+    /// Names the plan these tools work for.
+    pub fn for_plan(mut self, plan: kingdom_core::PlanId) -> Self {
+        self.plan = plan;
+        self
+    }
+
+    /// A copy of this workshop bound to one recorded call.
+    ///
+    /// Cloned per call rather than mutated, so a tool cannot see the id of a
+    /// call that is not its own -- which is what would let one tool answer
+    /// another's question.
+    pub fn for_deed(&self, deed: impl Into<String>) -> Self {
+        Self {
+            deed: Some(deed.into()),
+            ..self.clone()
+        }
+    }
+
+    /// Which plan this call belongs to.
+    pub fn plan(&self) -> &kingdom_core::PlanId {
+        &self.plan
+    }
+
+    /// The deed this call is recorded as.
+    pub fn deed(&self) -> Option<&str> {
+        self.deed.as_deref()
     }
 
     /// The directory everything this plan does happens under.
