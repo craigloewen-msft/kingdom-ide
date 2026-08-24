@@ -185,7 +185,44 @@ pub enum Reply {
     /// Words. The turn is over.
     Spoke(Draft),
     /// Tool calls to make before the model will answer. Never empty.
-    Acts(Vec<Act>),
+    ///
+    /// Carries what the model produced *alongside* the calls, because a reply
+    /// is one decision even when it asks for six things. Dropping the thinking
+    /// and the narration here is what left a model re-deriving its strategy
+    /// from raw tool output every round; see [`kingdom_core::Reasoning`].
+    Acts(Acts),
+}
+
+/// One reply's worth of tool calls, and the thinking that produced them.
+#[derive(Debug, Clone, Default)]
+pub struct Acts {
+    /// What to do. Never empty -- a reply with no calls is [`Reply::Spoke`].
+    pub calls: Vec<Act>,
+    /// The model's own reasoning, to be handed back to it next round.
+    pub reasoning: Option<kingdom_core::Reasoning>,
+    /// Prose the model wrote in the same reply as the calls, usually saying
+    /// what it is about to do and why.
+    pub narration: Option<String>,
+}
+
+impl Acts {
+    /// A reply that asked for these calls and said nothing about them. The
+    /// shape a provider with no reasoning to report produces.
+    pub fn plain(calls: Vec<Act>) -> Self {
+        Self {
+            calls,
+            reasoning: None,
+            narration: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.calls.len()
+    }
 }
 
 /// One tool call a model has asked for.

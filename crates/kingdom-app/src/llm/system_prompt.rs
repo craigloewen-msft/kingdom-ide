@@ -75,9 +75,10 @@ impl SystemPrompt {
 
     /// The prompt as one system prompt.
     ///
-    /// Order carries reasoning and is not arbitrary. The remit comes before the
-    /// testing directive, which comes before project guidance: a project's own
-    /// rules are the most specific thing here, so they arrive last and win any
+    /// Order carries reasoning and is not arbitrary. The remit comes first,
+    /// then the standing advice -- how to look things up, and how to think
+    /// about tests -- and project guidance comes last: a project's own rules
+    /// are the most specific thing here, so they arrive last and win any
     /// disagreement with the generic advice above them.
     pub fn render(&self) -> String {
         let mut out = String::from(PREAMBLE);
@@ -92,6 +93,9 @@ impl SystemPrompt {
 
         out.push('\n');
         out.push_str(&self.permissions);
+
+        out.push_str("\n\n");
+        out.push_str(ECONOMY);
 
         out.push_str("\n\n");
         out.push_str(TESTING);
@@ -195,6 +199,23 @@ const PROPOSE: &str = "\nYou are drawing up a plan, not carrying it out. Read, s
      changes, and you cannot edit anything until they do.\n\n\
      If they ask you to change something directly, explain that you must put a plan to them \
      first.";
+
+/// Counters the model's instinct to keep looking.
+///
+/// Every tool result is resent on every round, so an investigation's cost grows
+/// with the square of its length -- and a model that has lost the thread of its
+/// own plan re-reads what it has already read rather than concluding. The
+/// observed failure was 24 rounds of reading with no proposal at the end of it.
+///
+/// Applies to any remit that can look around, which is every one of them.
+const ECONOMY: &str = "On looking things up. Everything you read stays in front of you for the \
+     rest of the conversation, so reading is not free and re-reading is pure cost. Prefer \
+     `search` to find where something lives, then `read_file` to read just that part -- a \
+     whole large file is rarely what you need. Before opening something, check whether it is \
+     already above: if you have read it, you still have it.\n\n\
+     Stop when you know enough to be useful, not when you have run out of things to look at. \
+     A plan that names what it did not check is worth more than one that checked everything \
+     and arrived too late. State your assumptions instead of eliminating them.";
 
 const FULL: &str = "\nYou have tools and are working in the directory above. Use them: read \
      before you change, and check your work by running it rather than by assuming. The file \
