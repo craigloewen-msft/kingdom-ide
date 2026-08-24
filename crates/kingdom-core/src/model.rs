@@ -326,8 +326,11 @@ pub struct Plan {
     pub touches: Vec<String>,
     /// The decree that opened this plan, verbatim.
     pub prompt: String,
-    /// Which model is drafting it, e.g. `"mock"` or `"claude-sonnet-4.6"`.
+    /// Which model is drafting it, e.g. `"mock"` or `"copilot/claude-opus-5"`.
     pub model: String,
+    /// How hard that model was asked to think. `None` is its own default,
+    /// which is a different request from any explicit level.
+    pub effort: Option<ModelEffort>,
     /// The conversation so far, King and court alternating.
     pub transcript: Vec<Utterance>,
     pub status: PlanStatus,
@@ -341,7 +344,7 @@ impl Plan {
         id: PlanId,
         city: CityId,
         prompt: impl Into<String>,
-        model: impl Into<String>,
+        choice: &ModelChoice,
     ) -> Self {
         let prompt = prompt.into();
         Self {
@@ -355,9 +358,18 @@ impl Plan {
                 body: prompt.clone(),
             }],
             prompt,
-            model: model.into(),
+            model: choice.model.clone(),
+            effort: choice.effort,
             status: PlanStatus::Drafting,
             leases: Vec::new(),
+        }
+    }
+
+    /// What this plan is being drafted with, for re-use on the next turn.
+    pub fn choice(&self) -> ModelChoice {
+        ModelChoice {
+            model: self.model.clone(),
+            effort: self.effort,
         }
     }
 
@@ -526,6 +538,163 @@ impl ModelStatus {
     }
 }
 
+/// How hard a model is asked to think.
+///
+/// Deliberately *not* a number: providers name discrete levels and accept only
+/// the ones a given model declares, so an ordering with arbitrary intermediate
+/// values would invent requests no gateway would accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ModelEffort {
+    /// Every level, weakest first. Used to keep the picker's row in a stable,
+    /// meaningful order regardless of what order a provider lists them in.
+    pub const ALL: [ModelEffort; 7] = [
+        ModelEffort::None,
+        ModelEffort::Minimal,
+        ModelEffort::Low,
+        ModelEffort::Medium,
+        ModelEffort::High,
+        ModelEffort::Xhigh,
+        ModelEffort::Max,
+    ];
+
+    /// The name the provider expects on the wire.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ModelEffort::None => "none",
+            ModelEffort::Minimal => "minimal",
+            ModelEffort::Low => "low",
+            ModelEffort::Medium => "medium",
+            ModelEffort::High => "high",
+            ModelEffort::Xhigh => "xhigh",
+            ModelEffort::Max => "max",
+        }
+    }
+
+    /// Parses a level as a provider spells it. Unknown levels are dropped
+    /// rather than guessed at: sending an invented one earns an opaque 400.
+    pub fn from_wire(name: &str) -> Option<ModelEffort> {
+        ModelEffort::ALL
+            .into_iter()
+            .find(|e| e.wire_name().eq_ignore_ascii_case(name.trim()))
+    }
+}
+
+/// What a decree is drafted with.
+///
+/// `effort: None` means *the model's own default*, which is a different request
+/// from any explicit level -- the field is omitted entirely rather than sent as
+/// `"none"`, which is itself a level some models accept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// Namespaced model id, e.g. `"copilot/claude-opus-5"` or `"mock"`.
+    pub model: String,
+    pub effort: Option<ModelEffort>,
+}
+
+impl ModelChoice {
+    pub fn new(model: impl Into<String>, effort: Option<ModelEffort>) -> Self {
+        Self {
+            model: model.into(),
+            effort,
+        }
+    }
+
+    /// Which backend this choice routes to. Derived from the id rather than
+    /// held separately, so provider and model cannot disagree.
+    pub fn provider(&self) -> ModelProvider {
+        match self.model.split_once('/') {
+            Some(("copilot", _)) => ModelProvider::Copilot,
+            _ => ModelProvider::Mock,
+        }
+    }
+
+    /// The name the provider knows this model by, with the namespace stripped.
+    pub fn api_name(&self) -> &str {
+        match self.model.split_once('/') {
+            Some((_, name)) => name,
+            None => &self.model,
+        }
+    }
+
+    /// How the choice reads in the rail and on the map, e.g.
+    /// `claude-opus-5 · high`.
+    pub fn label(&self) -> String {
+        match self.effort {
+            Some(effort) => format!("{} \u{b7} {}", self.api_name(), effort.wire_name()),
+            None => self.api_name().to_string(),
+        }
+    }
+}
+
+/// One selectable model, as the picker renders it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    /// Namespaced id, matching [`ModelChoice::model`].
+    pub id: String,
+    /// Human name, e.g. `"Claude Opus 5"`.
+    pub label: String,
+    /// Who makes it, for grouping: `"Anthropic"`, `"OpenAI"`, `"Offline"`.
+    pub vendor: String,
+    pub context_window: usize,
+    /// Surfaced above the fold, before the King expands the full list.
+    pub recommended: bool,
+    /// The effort levels this model declares. Empty means it has no effort
+    /// control at all, and the picker hides the row rather than offering
+    /// levels that would be refused.
+    pub efforts: Vec<ModelEffort>,
+}
+
+/// Everything the picker needs, plus why it might be shorter than expected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogue {
+    pub options: Vec<ModelOption>,
+    /// What a King who has never chosen gets.
+    pub default_id: String,
+    pub credential: CredentialState,
+    /// Plain-language detail: where the catalogue came from, or why it is thin.
+    pub detail: String,
+}
+
+impl ModelCatalogue {
+    pub fn option(&self, id: &str) -> Option<&ModelOption> {
+        self.options.iter().find(|o| o.id == id)
+    }
+
+    /// Resolves a remembered choice against what is actually available now.
+    ///
+    /// A model that has left the catalogue, or an effort it no longer declares,
+    /// degrades to the nearest valid thing instead of erroring. The King's
+    /// browser storage outlives any given catalogue, so a stale value there must
+    /// never be able to wedge the dock.
+    pub fn resolve(&self, wanted: Option<&ModelChoice>) -> ModelChoice {
+        let id = wanted
+            .map(|c| c.model.as_str())
+            .filter(|id| self.option(id).is_some())
+            .unwrap_or(&self.default_id)
+            .to_string();
+
+        // Only keep an effort the chosen model actually offers -- an effort
+        // carried over from a different model is exactly how you earn a 400.
+        let effort = wanted.and_then(|c| c.effort).filter(|e| {
+            self.option(&id)
+                .is_some_and(|option| option.efforts.contains(e))
+        });
+
+        ModelChoice { model: id, effort }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Crown Resources & Leases -- the coordination core
 // ---------------------------------------------------------------------------
@@ -679,5 +848,72 @@ mod tests {
         let exclusive = resource_held_by(&[LeaseMode::Exclusive]);
         assert!(!exclusive.can_grant(LeaseMode::Shared));
         assert!(!exclusive.can_grant(LeaseMode::Exclusive));
+    }
+
+    fn catalogue() -> ModelCatalogue {
+        ModelCatalogue {
+            options: vec![
+                ModelOption {
+                    id: "mock".into(),
+                    label: "Mock".into(),
+                    vendor: "Offline".into(),
+                    context_window: 8_000,
+                    recommended: true,
+                    efforts: Vec::new(),
+                },
+                ModelOption {
+                    id: "copilot/claude-opus-5".into(),
+                    label: "Claude Opus 5".into(),
+                    vendor: "Anthropic".into(),
+                    context_window: 1_000_000,
+                    recommended: true,
+                    efforts: vec![ModelEffort::Low, ModelEffort::High],
+                },
+            ],
+            default_id: "mock".into(),
+            credential: CredentialState::Ready,
+            detail: String::new(),
+        }
+    }
+
+    /// The King's browser remembers a choice for longer than any catalogue
+    /// lives. A withdrawn model or an effort a model no longer declares must
+    /// degrade quietly -- if either could error, last week's localStorage would
+    /// wedge today's dock, and sending an undeclared effort earns an opaque 400.
+    #[test]
+    fn a_stale_remembered_choice_degrades_rather_than_erroring() {
+        let catalogue = catalogue();
+
+        let withdrawn = ModelChoice::new("copilot/gone-last-year", Some(ModelEffort::High));
+        assert_eq!(
+            catalogue.resolve(Some(&withdrawn)),
+            ModelChoice::new("mock", None),
+            "an unknown model falls back to the default, and takes no effort with it"
+        );
+
+        let undeclared = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Max));
+        assert_eq!(
+            catalogue.resolve(Some(&undeclared)),
+            ModelChoice::new("copilot/claude-opus-5", None),
+            "an effort the model does not declare falls back to the model's own default"
+        );
+
+        let good = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Low));
+        assert_eq!(catalogue.resolve(Some(&good)), good);
+        assert_eq!(catalogue.resolve(None), ModelChoice::new("mock", None));
+    }
+
+    /// The provider is read off the id so the two cannot disagree; a plan drawn
+    /// by Copilot must never be re-drafted by the mock because a separate
+    /// provider setting drifted.
+    #[test]
+    fn a_choice_routes_by_its_own_id() {
+        let copilot = ModelChoice::new("copilot/claude-opus-5", None);
+        assert_eq!(copilot.provider(), ModelProvider::Copilot);
+        assert_eq!(copilot.api_name(), "claude-opus-5");
+
+        let mock = ModelChoice::new("mock", None);
+        assert_eq!(mock.provider(), ModelProvider::Mock);
+        assert_eq!(mock.api_name(), "mock");
     }
 }

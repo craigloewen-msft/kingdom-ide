@@ -5,9 +5,12 @@
 //! refresh does not lose it and the rail, the map and the dock all read the
 //! same plan.
 
-use crate::api::{continue_plan, get_kingdom, model_status, open_plan};
+use crate::api::{continue_plan, get_kingdom, list_models, model_status, open_plan};
 use crate::app::KingdomState;
-use kingdom_core::{City, CredentialState, ModelStatus, Plan, PlanStatus, Speaker};
+use kingdom_core::{
+    City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, ModelStatus,
+    Plan, PlanStatus, Speaker,
+};
 use leptos::prelude::*;
 
 #[component]
@@ -17,8 +20,10 @@ pub fn ChatDock() -> impl IntoView {
     let (draft, set_draft) = signal(String::new());
     let (expanded, set_expanded) = signal(false);
     let (showing_setup, set_showing_setup) = signal(false);
+    let (showing_models, set_showing_models) = signal(false);
 
     let status = Resource::new(|| (), |_| model_status());
+    let catalogue = Resource::new(|| (), |_| list_models());
 
     // The decree targets whichever city is selected, so choosing on the map
     // and typing here are one continuous gesture.
@@ -42,9 +47,34 @@ pub fn ChatDock() -> impl IntoView {
             .cloned()
     });
 
+    // What the chip shows, and what the next decree will carry: the King's own
+    // choice if he has made one, otherwise whatever is already drafting this
+    // plan, otherwise the catalogue's default. In that order, so opening an
+    // existing conversation shows what is actually drawing it.
+    //
+    // Everything is passed through the catalogue before it is shown, because
+    // the server resolves the same way before drafting -- a chip advertising a
+    // model that has left the catalogue would be a promise the decree cannot
+    // keep.
+    let choice = Memo::new(move |_| {
+        let wanted = state
+            .choice
+            .get()
+            .or_else(|| current.get().map(|plan| plan.choice()));
+        match catalogue.get() {
+            Some(Ok(c)) => Some(c.resolve(wanted.as_ref())),
+            // Before the catalogue lands there is nothing to check against, so
+            // show the King's own choice rather than a placeholder.
+            _ => wanted,
+        }
+    });
+
     let send = Action::new(move |prompt: &String| {
         let prompt = prompt.clone();
         let city = state.selected.get_untracked().map(|c| c.to_string());
+        // Send what the chip promised, not the raw stored value: they differ
+        // exactly when a remembered model has left the catalogue.
+        let chosen = choice.get_untracked();
         // Carry on the plan already in play; otherwise open a new one.
         let existing = current
             .get_untracked()
@@ -52,8 +82,8 @@ pub fn ChatDock() -> impl IntoView {
 
         async move {
             let outcome = match existing {
-                Some(plan) => continue_plan(plan.id.to_string(), prompt).await,
-                None => open_plan(prompt, city).await,
+                Some(plan) => continue_plan(plan.id.to_string(), prompt, chosen).await,
+                None => open_plan(prompt, city, chosen).await,
             };
 
             match outcome {
@@ -109,12 +139,30 @@ pub fn ChatDock() -> impl IntoView {
                 // The badge answers "will a decree actually reach a model?"
                 // before the King spends a decree finding out.
                 <button
+                    class="model-chip"
+                    title="Choose the model and how hard it thinks"
+                    on:click=move |_| {
+                        set_showing_setup.set(false);
+                        set_showing_models.update(|s| *s = !*s);
+                    }
+                >
+                    {move || match choice.get() {
+                        Some(c) => c.label(),
+                        None => "\u{2026}".to_string(),
+                    }}
+                    <span class="chip-chevron">"\u{2304}"</span>
+                </button>
+
+                <button
                     class="model-badge"
                     class:broken={move || {
                         matches!(status.get(), Some(Ok(ref s)) if !s.is_ready())
                     }}
                     title="How plans get drafted"
-                    on:click=move |_| set_showing_setup.update(|s| *s = !*s)
+                    on:click=move |_| {
+                        set_showing_models.set(false);
+                        set_showing_setup.update(|s| *s = !*s);
+                    }
                 >
                     {move || match status.get() {
                         Some(Ok(s)) => format!(
@@ -127,6 +175,14 @@ pub fn ChatDock() -> impl IntoView {
                     }}
                 </button>
             </div>
+
+            <Show when={move || showing_models.get()}>
+                <ModelPicker
+                    catalogue=catalogue
+                    chosen={Signal::derive(move || choice.get())}
+                    on_close=move || set_showing_models.set(false)
+                />
+            </Show>
 
             <Show when={move || showing_setup.get()}>
                 <ModelSetup status=status/>
@@ -212,6 +268,153 @@ fn Transcript(plan: Plan) -> impl IntoView {
                 }
             }
         </For>
+    }
+}
+
+/// The picker: which model, and how hard it thinks.
+///
+/// Recommended models first, the rest behind a toggle -- the full Copilot
+/// catalogue runs to dozens of entries, most of which the King will never pick,
+/// and a wall of them costs more attention than it saves.
+#[component]
+fn ModelPicker(
+    catalogue: Resource<Result<ModelCatalogue, ServerFnError>>,
+    chosen: Signal<Option<ModelChoice>>,
+    on_close: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let (show_all, set_show_all) = signal(false);
+
+    let options = Memo::new(move |_| match catalogue.get() {
+        Some(Ok(c)) => c.options,
+        _ => Vec::new(),
+    });
+
+    let visible = Memo::new(move |_| {
+        let all = show_all.get();
+        options
+            .get()
+            .into_iter()
+            .filter(|o| all || o.recommended)
+            .collect::<Vec<_>>()
+    });
+
+    let hidden_count = Memo::new(move |_| options.get().iter().filter(|o| !o.recommended).count());
+
+    // The effort row belongs to the chosen model: offering a level it does not
+    // declare would earn an opaque 400 rather than a harder answer.
+    let efforts = Memo::new(move |_| {
+        let id = chosen.get()?.model;
+        options
+            .get()
+            .into_iter()
+            .find(|o| o.id == id)
+            .map(|o| o.efforts)
+    });
+
+    let pick_model = move |option: &ModelOption| {
+        let keep = chosen
+            .get_untracked()
+            .and_then(|c| c.effort)
+            .filter(|e| option.efforts.contains(e));
+        state.choose_model(ModelChoice::new(option.id.clone(), keep));
+    };
+
+    let pick_effort = move |effort: Option<ModelEffort>| {
+        if let Some(current) = chosen.get_untracked() {
+            state.choose_model(ModelChoice::new(current.model, effort));
+        }
+    };
+
+    view! {
+        <div class="model-picker">
+            <div class="picker-head">
+                <span class="picker-title">"Draft with"</span>
+                <button class="picker-close" on:click=move |_| on_close()>"\u{2715}"</button>
+            </div>
+
+            <p class="setup-detail">
+                {move || match catalogue.get() {
+                    Some(Ok(c)) => c.detail,
+                    Some(Err(e)) => e.to_string(),
+                    None => "Asking the court what it can think with\u{2026}".to_string(),
+                }}
+            </p>
+
+            <ul class="model-list">
+                <For each={move || visible.get()} key=|o: &ModelOption| o.id.clone() let:option>
+                    {
+                        let id = option.id.clone();
+                        let is_chosen = Memo::new(move |_| {
+                            chosen.get().is_some_and(|c| c.model == id)
+                        });
+                        let picked = option.clone();
+                        view! {
+                            <li>
+                                <button
+                                    class="model-row"
+                                    class:chosen={move || is_chosen.get()}
+                                    on:click=move |_| pick_model(&picked)
+                                >
+                                    <span class="model-name">{option.label.clone()}</span>
+                                    // Copilot ships dated aliases that share a
+                                    // display name (three distinct "GPT-4o"s),
+                                    // so the api name -- which is what the chip
+                                    // and the plan record -- is what tells them
+                                    // apart.
+                                    <span class="model-api-name">
+                                        {option.id.rsplit('/').next().unwrap_or(&option.id).to_string()}
+                                    </span>
+                                    <span class="model-vendor">{option.vendor.clone()}</span>
+                                    <span class="model-window">
+                                        {match option.context_window {
+                                            0 => String::new(),
+                                            w => format!("{}K", w / 1000),
+                                        }}
+                                    </span>
+                                </button>
+                            </li>
+                        }
+                    }
+                </For>
+            </ul>
+
+            <Show when={move || hidden_count.get() > 0 && !show_all.get()}>
+                <button class="picker-more" on:click=move |_| set_show_all.set(true)>
+                    {move || format!("Show all {} models", options.get().len())}
+                </button>
+            </Show>
+
+            <Show when={move || efforts.get().is_some_and(|e| !e.is_empty())}>
+                <div class="effort-row">
+                    <span class="effort-label">"Effort"</span>
+                    // "Default" is not a level: it sends no field at all, which
+                    // is a different request from any named effort.
+                    <button
+                        class="effort-btn"
+                        class:chosen={move || chosen.get().is_some_and(|c| c.effort.is_none())}
+                        on:click=move |_| pick_effort(None)
+                    >
+                        "default"
+                    </button>
+                    <For
+                        each={move || efforts.get().unwrap_or_default()}
+                        key=|e: &ModelEffort| *e
+                        let:effort
+                    >
+                        <button
+                            class="effort-btn"
+                            class:chosen={move || {
+                                chosen.get().is_some_and(|c| c.effort == Some(effort))
+                            }}
+                            on:click=move |_| pick_effort(Some(effort))
+                        >
+                            {effort.wire_name()}
+                        </button>
+                    </For>
+                </div>
+            </Show>
+        </div>
     }
 }
 

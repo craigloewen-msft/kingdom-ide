@@ -6,11 +6,12 @@
 //! for the plumbing would only obscure where the HTTP call lives.
 
 pub mod broker;
+pub mod catalogue;
 pub mod copilot;
 pub mod credential;
 pub mod mock;
 
-use kingdom_core::{City, CredentialState, ModelProvider, ModelStatus, Utterance};
+use kingdom_core::{City, CredentialState, ModelChoice, ModelProvider, ModelStatus, Utterance};
 
 /// Everything a model is told about the work.
 ///
@@ -109,8 +110,8 @@ pub trait Model: Send + Sync {
     fn name(&self) -> &str;
 }
 
-/// Which provider is configured. Defaults to the mock, so a fresh clone drafts
-/// plans offline with no setup at all.
+/// Which provider the environment names as the opening default. The King's own
+/// choice, once made, is carried on the plan and overrides this entirely.
 pub fn provider() -> ModelProvider {
     match std::env::var("KINGDOM_MODEL_PROVIDER")
         .unwrap_or_default()
@@ -123,13 +124,38 @@ pub fn provider() -> ModelProvider {
     }
 }
 
-/// Builds the configured model.
-pub async fn configured() -> Result<Box<dyn Model>, ModelError> {
+/// The namespaced model id the picker opens on before the King has chosen.
+///
+/// Defaults to the offline mock so a fresh clone drafts with no credential and
+/// no network, exactly as before this became a choice.
+pub fn default_model_id() -> String {
     match provider() {
+        ModelProvider::Mock => mock::MODEL_NAME.to_string(),
+        ModelProvider::Copilot => {
+            let name = std::env::var("KINGDOM_MODEL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| copilot::DEFAULT_MODEL.to_string());
+            format!("copilot/{name}")
+        }
+    }
+}
+
+/// Builds the model a choice names.
+///
+/// The provider comes off the choice's own id rather than the environment, so
+/// the model that drafts is always the one the plan says drafted it.
+pub async fn configured(choice: &ModelChoice) -> Result<Box<dyn Model>, ModelError> {
+    match choice.provider() {
         ModelProvider::Mock => Ok(Box::new(mock::MockModel)),
         ModelProvider::Copilot => {
             let cred = credential::resolve(Some(credential::DEFAULT_COPILOT_HELPER)).await?;
-            Ok(Box::new(copilot::CopilotModel::new(cred.token)))
+            Ok(Box::new(copilot::CopilotModel::new(
+                cred.token,
+                choice.api_name(),
+                choice.effort,
+            )))
         }
     }
 }
@@ -147,11 +173,12 @@ pub async fn status() -> ModelStatus {
             provider,
             model: mock::MODEL_NAME.to_string(),
             credential: CredentialState::Ready,
-            detail: "Offline mock. Set KINGDOM_MODEL_PROVIDER=copilot to draft with a real model."
+            detail: "Offline mock. Choose a Copilot model in the picker, or set \
+                     KINGDOM_MODEL_PROVIDER=copilot to open on one."
                 .to_string(),
         },
         ModelProvider::Copilot => {
-            let model = copilot::model_name();
+            let model = default_model_id();
             match credential::resolve(Some(credential::DEFAULT_COPILOT_HELPER)).await {
                 Ok(cred) => ModelStatus {
                     provider,

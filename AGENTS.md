@@ -131,7 +131,8 @@ crates/
     scan.rs         Filesystem scanning  (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model trait, Brief), mock.rs, copilot.rs,
-                    credential.rs, broker.rs (leases)
+                    catalogue.rs (live /models list), credential.rs,
+                    broker.rs (leases)
     app.rs          Shell, routing, shared UI state
     components/     sidebar.rs, chat.rs, map/ (mod.rs + city.rs)
 
@@ -196,6 +197,12 @@ build on top of a placeholder believing it is real.
   and settles the plan at `AwaitingReview` (or `Blocked`/`Failed`), releasing the
   lease on every path. Two providers: an offline deterministic `mock` (the
   default) and GitHub Copilot.
+- **Choosing a model and an effort, per plan.** The catalogue is read live from
+  Copilot's `/models` after the credential helper runs, so the picker offers
+  only models that will actually serve, and only the reasoning efforts each one
+  declares. The choice is recorded on the `Plan` and the last one used is
+  remembered in the browser; a remembered model that has since been withdrawn
+  degrades to the default rather than failing the decree.
 - **Credential resolution** from `KINGDOM_API_KEY` or a helper command
   (`agency auth github` by default), with the contract tested.
 
@@ -219,8 +226,11 @@ important visual states unreachable during development. A test pins this.
 
 Copy `.kingdom.env.example` to `.kingdom.env` (gitignored). With nothing set,
 the offline mock drafts every plan, so a fresh clone works with no credential
-and no network. The dock's provider badge reports whether a credential actually
-resolves, not merely whether one is configured.
+and no network. `KINGDOM_MODEL_PROVIDER` and `KINGDOM_MODEL` now only decide
+which model the picker *opens on* — the King changes it per plan from the dock,
+and a Copilot credential unlocks the live catalogue. The dock's provider badge
+reports whether a credential actually resolves, not merely whether one is
+configured.
 
 ---
 

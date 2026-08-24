@@ -8,7 +8,7 @@
 
 #[cfg(feature = "ssr")]
 use kingdom_core::PlanId;
-use kingdom_core::{Kingdom, ModelStatus, Plan};
+use kingdom_core::{Kingdom, ModelCatalogue, ModelChoice, ModelStatus, Plan};
 use leptos::prelude::*;
 
 /// In-memory kingdom state.
@@ -107,7 +107,11 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 /// the WebSocket layer lands this becomes spawn-and-notify; until then, awaiting
 /// the reply is honest about what the King is actually waiting for.
 #[server(OpenPlan, "/api")]
-pub async fn open_plan(prompt: String, city: Option<String>) -> Result<Plan, ServerFnError> {
+pub async fn open_plan(
+    prompt: String,
+    city: Option<String>,
+    choice: Option<ModelChoice>,
+) -> Result<Plan, ServerFnError> {
     use crate::llm::{broker, Brief, CityBrief};
     use kingdom_core::{CityId, PlanStatus, Speaker};
 
@@ -120,14 +124,21 @@ pub async fn open_plan(prompt: String, city: Option<String>) -> Result<Plan, Ser
         city.ok_or_else(|| ServerFnError::new("Choose a city before issuing a decree."))?,
     );
 
+    // Resolve against the live catalogue, so a model the King's browser
+    // remembers but Copilot no longer serves degrades to the default rather
+    // than failing the decree outright.
+    let choice = crate::llm::catalogue::catalogue()
+        .await
+        .resolve(choice.as_ref());
+
     // Build the model first: with no credential there is nothing to draft with,
     // and taking a lease we cannot use would leave the city looking busy.
-    let model = crate::llm::configured()
+    let model = crate::llm::configured(&choice)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let plan_id = PlanId::new(format!("plan-{}", next_plan_number()));
-    let mut plan = Plan::opened(plan_id.clone(), city_id.clone(), &prompt, model.name());
+    let mut plan = Plan::opened(plan_id.clone(), city_id.clone(), &prompt, &choice);
 
     // Register the plan and claim the city's files in one critical section, so
     // two decrees racing for the same city cannot both see it free.
@@ -170,7 +181,11 @@ pub async fn open_plan(prompt: String, city: Option<String>) -> Result<Plan, Ser
 /// Another turn on an existing plan, so the dock is a conversation rather than
 /// a series of unrelated one-shots.
 #[server(ContinuePlan, "/api")]
-pub async fn continue_plan(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
+pub async fn continue_plan(
+    plan: String,
+    prompt: String,
+    choice: Option<ModelChoice>,
+) -> Result<Plan, ServerFnError> {
     use crate::llm::{broker, Brief, CityBrief};
     use kingdom_core::{PlanStatus, Speaker};
 
@@ -180,7 +195,15 @@ pub async fn continue_plan(plan: String, prompt: String) -> Result<Plan, ServerF
     }
     let plan_id = PlanId::new(plan);
 
-    let model = crate::llm::configured()
+    // A follow-up with no explicit choice keeps drafting with whatever the plan
+    // is already being drawn by: switching model silently mid-conversation
+    // would make the transcript a record of nothing in particular.
+    let existing_choice = lock()?.plan(&plan_id).map(|p| p.choice());
+    let choice = crate::llm::catalogue::catalogue()
+        .await
+        .resolve(choice.or(existing_choice).as_ref());
+
+    let model = crate::llm::configured(&choice)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -209,7 +232,8 @@ pub async fn continue_plan(plan: String, prompt: String) -> Result<Plan, ServerF
 
         update(&mut kingdom, &plan_id, |p| {
             p.status = PlanStatus::Drafting;
-            p.model = model.name().to_string();
+            p.model = choice.model.clone();
+            p.effort = choice.effort;
             p.leases = vec![lease.clone()];
             p.say(Speaker::King, prompt.clone());
         });
@@ -269,6 +293,15 @@ fn settle(
 #[server(GetModelStatus, "/api")]
 pub async fn model_status() -> Result<ModelStatus, ServerFnError> {
     Ok(crate::llm::status().await)
+}
+
+/// Every model the King can choose between, and what each will accept.
+///
+/// Read live from the provider rather than hard-coded, so the picker cannot
+/// offer a model that has been withdrawn or hide one that has just landed.
+#[server(ListModels, "/api")]
+pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
+    Ok(crate::llm::catalogue::catalogue().await)
 }
 
 /// A suggested starting folder, so the King is not typing a path from scratch.

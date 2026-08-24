@@ -151,7 +151,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     <For each={move || plans.get()} key=|p: &Plan| p.id.clone() let:plan>
                         <li class="plan-row" title=plan.summary.clone()>
                             <span class="plan-title">{plan.title.clone()}</span>
-                            <span class="plan-model">{plan.model.clone()}</span>
+                            <span class="plan-model">{plan.choice().label()}</span>
                             <span class=format!("plan-badge plan-{}", plan.status.css_suffix())>
                                 {plan.status.label()}
                             </span>
