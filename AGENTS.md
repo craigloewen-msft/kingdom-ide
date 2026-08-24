@@ -54,9 +54,53 @@ reject. You do not draw the blueprints yourself. Every UI decision should
 reinforce that stance — the user's scarce resource is *attention and judgement*,
 not keystrokes.
 
-Use this vocabulary in type names, function names, UI copy, and commit
-messages. Consistency is what makes a metaphor explain itself instead of
-needing a glossary.
+### Where the metaphor lives, and where it does not
+
+**The metaphor is presentation, not domain.** It belongs in everything the King
+reads, and nowhere the compiler reads.
+
+| Layer | Vocabulary |
+|---|---|
+| UI copy — every string the King sees | **metaphor**: "The court sent an errand" |
+| CSS class names, `style/` | **metaphor**: `.deed-mark`, `.chamber-log` |
+| Type names, functions, variables, modules | **standard**: `ToolCall`, `Permissions` |
+| Doc comments and commit messages | **standard**: "the model", "a tool call" |
+
+The reason is asymmetric cost. In the UI the metaphor is the product's voice and
+costs a reader nothing. In the code it is a second vocabulary every reader must
+learn before they can read a match arm — and one that no error message, crate
+doc or Stack Overflow answer will ever use back.
+
+The translation, in full:
+
+| Shown as | Called in code |
+|---|---|
+| a deed | `ToolCall`, `ToolOutcome`, `Entry::Tool` |
+| the Court | `Speaker::Assistant` |
+| the King | `Speaker::User`, "the user" |
+| an errand | a subagent — `Plan::spawned`, `SpawnedBy`, `subagents_of` |
+| a decree | a prompt — `slug_for_prompt`, `PromptBar` |
+| the chamber | the conversation — `Conversation`, `conversation.rs` |
+| the spyglass | the screencast — `screencast.rs`, `BrowserView` |
+| the herald | the event bus — `events::publish`, `events::subscribe` |
+| a remit | `Permissions::ReadOnly` / `Permissions::Full` |
+| a workshop | `Sandbox` |
+| a realm (fixture) | `FixtureSpec`, `fixtures.rs` |
+| a ward | `Language` |
+| a district / building | `Folder` / `SourceFile` |
+
+`Kingdom`, `City` and `Plan` are deliberately **both**. They are the crate names,
+the routes and the `.kingdom/` directory, and they are also ordinary English for
+a folder, a project and a unit of proposed work — so they need no translation.
+
+The one other exception is the map's own geometry: `layout.rs`, `terrain.rs` and
+`skyline.rs` keep `Realm`, `Road`, `CityPlacement`, `Lot` and `Plate`. That code
+draws a literal map of cities and roads, so there the metaphor *is* the subject
+matter rather than a euphemism for something else.
+
+When you add a concept, name the type for what it is and let the view call it
+what the King calls it. If you find yourself writing a glossary comment to
+explain an identifier, that is the signal you named it for the UI.
 
 ## 3. Architecture
 
@@ -68,13 +112,14 @@ crates/
                     BOTH native and wasm32 — keep it that way.
     ids.rs          Newtyped IDs (CityId, PlanId)
     model.rs        Kingdom, City, Plan,
-                    District/Building/Ward (a project's shape on disk)
+                    Folder/SourceFile/Language (a project's shape on disk)
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
-    sample.rs       Placeholder court data
-    mockdata/       The Proving Grounds: synthetic realms, in Rust
-                    mod.rs (RealmSpec + expansion), realms.rs (THE FAKE DATA),
-                    build.rs (terse constructors), court.rs (opening courts)
+    sample.rs       Placeholder starter plans
+    mockdata/       The Proving Grounds: synthetic fixtures, in Rust
+                    mod.rs (FixtureSpec + expansion), fixtures.rs (THE FAKE
+                    DATA), build.rs (terse constructors),
+                    starter_plans.rs (the plans a kingdom opens with)
 
   kingdom-app/      Server + UI in one crate, split by feature flag.
     main.rs         Axum binary          (feature: ssr)
@@ -82,11 +127,11 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
-    herald.rs       Proclaiming a plan's changes to its watchers (ssr only)
+    events.rs       Publishing a plan's changes to its watchers (ssr only)
     watch.rs        The chamber's push socket (ssr only)
-    spyglass.rs     The King's live view of a plan's browser (ssr only)
+    screencast.rs   The King's live view of a plan's browser (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
-    mock.rs         Seeding a realm onto disk (ssr only)
+    mock.rs         Seeding a fixture onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model + Provider traits, Brief, Reply, the provider
@@ -94,11 +139,12 @@ crates/
                     provider + its /models catalogue), catalogue.rs (assembles
                     one catalogue from every provider), credential.rs
     tools/          What the court can do with its own hands (ssr only)
-                    mod.rs (Tool trait, Workshop = the workspace boundary,
-                    Remit = how much of the world a plan may touch),
+                    mod.rs (Tool trait, Sandbox = the workspace boundary,
+                    Permissions = how much of the world a plan may touch),
                     think, read_file, read_image, search, bash, tmux, patch,
                     browser, profile (browser_profile),
-                    spawn_agents (errands), ask_user_question
+                    spawn_agents (errands — subagents in code),
+                    ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -106,11 +152,13 @@ crates/
     session.rs      Per-plan Chrome, finding one on the machine, and the
                     operations the tools call
     screencast.rs   CDP screencast, relayed to the spyglass's viewers
+                    (the panel is components/browser_view.rs)
     profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
     perf.rs         The in-page helper injected before any page script
 
     app.rs          Shell, routes, shared UI state
-    components/     sidebar.rs, decree.rs, conversation.rs, spyglass.rs,
+    components/     sidebar.rs, prompt_bar.rs, conversation.rs,
+                    browser_view.rs,
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
@@ -157,23 +205,23 @@ flowchart TB
 
 ## 4. What is still faked today
 
-**Faked — `kingdom_core::sample::populate_court`:**
+**Faked — `kingdom_core::sample::starter_plans`:**
 - The *opening* court: the plans a kingdom starts with, before the King has
   issued any decree. Plans he opens himself are entirely real.
 
 **Not built at all:**
 - **Errands with hands, and errands that send errands.** An errand is read-only
-  (`tools::Remit::Survey`), which is what makes running several of them in one
-  worktree safe without arbitrating anything. Both extensions need the same
-  missing piece: the moment an errand can write, two of them can collide, and
-  that is the resource question above. `Remit::Full` is the seam either would
-  arrive at.
+  (`tools::Permissions::ReadOnly`), which is what makes running several of them
+  in one worktree safe without arbitrating anything. Both extensions need the
+  same missing piece: the moment an errand can write, two of them can collide,
+  and that is the resource question above. `Permissions::Full` is the seam
+  either would arrive at.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
 - Live updates beyond a plan's own chamber. The chamber is pushed to over a
-  WebSocket (`herald.rs`, `watch.rs`), and the plan's browser is mirrored over a
-  second one (`spyglass.rs`) — but the map and the rail still only learn of a
+  WebSocket (`events.rs`, `watch.rs`), and the plan's browser is mirrored over a
+  second one (`screencast.rs`) — but the map and the rail still only learn of a
   change when something refetches the kingdom. The spyglass is deliberately
   *not* surfaced on the map for that reason: a city lighting up because a plan
   holds a live browser needs both this, and a plan that knows it owns a session.
@@ -194,7 +242,7 @@ flowchart TB
   a loader for a directory nobody populates would be building for no user.
 
 **The court can see, and can be seen.** `read_image` closes the loop
-`browser_take_screenshot` opened, and it cost a domain change: `DeedOutcome`
+`browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
 carries images beside its text. Two things about that are load-bearing and easy
 to undo by accident. Images are *not* persisted — `store.rs` strips them, because
 a plan's record is rewritten on every update and would otherwise grow by a
@@ -219,7 +267,6 @@ Plans are kept as one JSON document each under the kingdom root:
 
 ```
 <kingdom_root>/.kingdom/
-  kingdom.json              format version
   plans/<plan-id>.json      one document per plan
   archive/<plan-id>.patch   the work an archived plan set aside
 ```
@@ -257,9 +304,9 @@ cargo run -p kingdom-app --bin kingdom-seed -- --list
 cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror [--force]
 ```
 
-To change the fake data, edit `crates/kingdom-core/src/mockdata/realms.rs` and
+To change the fake data, edit `crates/kingdom-core/src/mockdata/fixtures.rs` and
 re-seed with `--force`. It is plain Rust with terse builders — no config format,
-no parser, and a mistyped realm fails to compile rather than at seed time.
+no parser, and a mistyped fixture fails to compile rather than at seed time.
 
 The browser cannot hand a server a real filesystem path, so the opening screen
 asks the King to type one; the server reads it directly from disk. A native
