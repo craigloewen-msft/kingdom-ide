@@ -468,6 +468,21 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 
     update(&mut kingdom, &plan_id, |p| {
         p.status = PlanStatus::Drafting;
+        // The busy mark is cleared, not merely overwritten by the status.
+        //
+        // `draft_plan` refuses to start a turn over a plan that `is_busy()`,
+        // and `is_busy()` is exactly `working_on.is_some()`. So a mark left
+        // behind by a turn that died without clearing it -- a panic, a dropped
+        // future -- makes the plan unstartable *and* disables the composer,
+        // which is the one control that could have rescued it. `store::reconcile`
+        // repairs this, but only on load, so before this line the sole cure for
+        // a wedged plan was restarting the server.
+        //
+        // Safe because the user is speaking to this plan right now: either
+        // nothing is running, or what is running is the turn they are
+        // interrupting, and either way the next `draft_plan` is the one that
+        // should own it.
+        p.working_on = None;
         p.say(Speaker::User, prompt);
     })
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
@@ -482,6 +497,28 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 /// actually a truncation.
 #[cfg(feature = "ssr")]
 const MOST_ROUNDS: usize = 500;
+
+/// The note left when Kingdom sends a preamble back round rather than parking
+/// it in front of the user.
+///
+/// Doubles as the record that it has happened: [`converse`] looks for this in
+/// the transcript, so a plan is nudged once and never again, whatever restarts
+/// or re-drafts happen in between. That is why the marker is a note rather than
+/// a local flag -- the loop's state is the plan's state, and a local would
+/// forget across a `say`.
+#[cfg(feature = "ssr")]
+const NUDGED: &str = "The court announced what it was about to do without doing it, which would \
+     have ended its turn. Sent back round once to get on with it.";
+
+/// What is sent back to a model that narrated instead of acting.
+///
+/// Phrased as an instruction rather than as the user speaking, because it is
+/// not the user: it is never written to the transcript, only appended to the
+/// brief for the one round that follows.
+#[cfg(feature = "ssr")]
+const NUDGE: &str = "That reply had no tool call, which ends your turn and hands the plan back \
+     to the user with nothing done. Carry on now: make the calls you just described. Reply with \
+     words only when you have an answer, a blocking question, or `propose_plan`.";
 
 /// Draws up the plan: marks it busy, then takes turns with the model until it
 /// has something to say.
@@ -562,22 +599,45 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // prompt could restart. A detached task loses only this caller's view of
     // the result, never the clearing; and since every step is pushed to the
     // conversation, that view was never the only way to see it.
-    let handle = tokio::spawn(async move {
-        converse(
-            plan_id,
-            city_brief,
-            workspace,
-            city_name,
-            choice,
-            root,
-            MOST_ROUNDS,
-        )
-        .await
+    let handle = tokio::spawn({
+        let plan_id = plan_id.clone();
+        async move {
+            converse(
+                plan_id,
+                city_brief,
+                workspace,
+                city_name,
+                choice,
+                root,
+                MOST_ROUNDS,
+            )
+            .await
+        }
     });
 
-    handle
-        .await
-        .map_err(|e| ServerFnError::new(format!("drafting task failed: {e}")))?
+    // A panic inside the turn is the other way the busy mark outlives the task
+    // that set it. `converse` clears it on every path it controls, but it
+    // cannot clear it on a path that unwound -- and the plan left behind is the
+    // wedged one described on `say`. Clearing it here means the failure is
+    // visible and the plan is restartable, rather than needing a server restart
+    // to reach `store::reconcile`.
+    match handle.await {
+        Ok(result) => result,
+        Err(e) => {
+            let mut kingdom = lock()?;
+            let repaired = update(&mut kingdom, &plan_id, |p| {
+                p.working_on = None;
+                p.status = kingdom_core::PlanStatus::Failed;
+                p.summary = "The turn stopped unexpectedly.".to_string();
+                p.note(
+                    NoteKind::Failed,
+                    "This plan's turn stopped unexpectedly. Anything it had already done is \
+                     still in its workspace. Say something to set it going again.",
+                );
+            });
+            repaired.ok_or_else(|| ServerFnError::new(format!("drafting task failed: {e}")))
+        }
+    }
 }
 
 /// Takes turns with the model until it speaks, proposes, runs out of rope, or
@@ -618,6 +678,9 @@ pub(crate) async fn converse(
         Err(e) => return settle(plan_id, Err(e)),
     };
 
+    // Set for the single round that follows a narration-only reply. See `NUDGE`.
+    let mut nudge_next = false;
+
     for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than
         // accumulated in a local. The tool calls recorded below are already in
@@ -643,6 +706,24 @@ pub(crate) async fn converse(
             )
         };
 
+        // Whether this plan has already been sent back round for narrating, and
+        // whether the court has actually done anything yet. Both are read off
+        // the transcript for the same reason everything else here is: the log is
+        // the state, and a local would not survive the `say` that revives a
+        // plan.
+        let nudged = {
+            let kingdom = lock()?;
+            kingdom
+                .plan(&plan_id)
+                .map(|p| {
+                    p.transcript.iter().any(
+                        |e| matches!(e, kingdom_core::Entry::Note(n) if n.body == NUDGED),
+                    )
+                })
+                .unwrap_or(false)
+        };
+        let has_acted = turns.iter().any(|t| matches!(t, kingdom_core::Turn::Tool(_)));
+
         // A model that cannot call tools still drafts perfectly good prose, so
         // it gets a prose-only turn rather than an error; one that cannot see is
         // not offered the tool that hands back a picture; and a plan under a
@@ -659,6 +740,18 @@ pub(crate) async fn converse(
             turns,
             tools: tools.clone(),
         };
+
+        // The nudge rides on the brief for exactly the round that follows a
+        // preamble, and is never recorded as a turn -- see `NUDGE`. Appending it
+        // to the system prompt rather than faking a user message is deliberate:
+        // the transcript is what the user reads, and a instruction they never
+        // gave has no business appearing there as though they had.
+        let mut brief = brief;
+        if nudge_next {
+            brief.system_prompt.permissions =
+                format!("{}\n\n{NUDGE}", brief.system_prompt.permissions);
+            nudge_next = false;
+        }
 
         let answer = match model.take_turn(&brief).await {
             Ok(answer) => answer,
@@ -686,7 +779,29 @@ pub(crate) async fn converse(
         }
 
         match answer.reply {
-            Reply::Spoke(draft) => return settle(plan_id, Ok(draft)),
+            Reply::Spoke(draft) => {
+                // A model that has done nothing at all and replies with prose
+                // has almost always written a preamble -- "I'll start by
+                // reading the router" -- rather than counsel. Settling here
+                // would park the plan in front of the user with an empty
+                // workspace and make them type "Keep going", which is exactly
+                // what happened to every real plan before this.
+                //
+                // Bounded to once per plan, and only while it has no tool calls
+                // to its name: a model that has worked and then speaks is
+                // reporting, and a second nudge would be Kingdom arguing with an
+                // answer it asked for. `propose_plan` is unaffected -- that ends
+                // the turn through its own path, not through `Spoke`.
+                if !has_acted && !nudged {
+                    let mut kingdom = lock()?;
+                    update(&mut kingdom, &plan_id, |p| {
+                        p.note(NoteKind::Failed, NUDGED);
+                    });
+                    nudge_next = true;
+                    continue;
+                }
+                return settle(plan_id, Ok(draft));
+            }
 
             Reply::Acts(acts) => {
                 // One id for everything this reply asked for, so the calls can
@@ -1384,6 +1499,47 @@ mod tests {
             seed_starter_plans(recorded.clone(), &[], starter_plans),
             recorded,
             "a kingdom with records keeps them, and gets no second court"
+        );
+    }
+
+    /// Speaking to a plan must be able to rescue a wedged one.
+    ///
+    /// `draft_plan` refuses to start a turn while `is_busy()`, and the
+    /// conversation disables the composer while the plan is `Drafting` -- so a
+    /// `working_on` left behind by a turn that died mid-flight locks the plan
+    /// out of both doors at once. This is the state three real plans were found
+    /// in on disk, and before the clear in `say` the only cure was restarting
+    /// the server so `store::reconcile` could run.
+    ///
+    /// Pinned on `Plan` rather than through the `say` server function, which
+    /// needs the process-global kingdom lock to reach: what matters is that the
+    /// mark is gone and the plan is startable again.
+    #[test]
+    fn speaking_to_a_wedged_plan_makes_it_startable_again() {
+        use kingdom_core::{CityId, ModelChoice, PlanId, Speaker, Workspace};
+
+        let mut plan = Plan::opened(
+            PlanId::new("plan-wedged"),
+            CityId::new("c1"),
+            "A decree whose turn died",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+
+        // Exactly what a turn killed mid-flight leaves behind.
+        plan.status = kingdom_core::PlanStatus::Drafting;
+        plan.working_on = Some("bash: cargo build".to_string());
+        assert!(plan.is_busy(), "the fixture must start out wedged");
+
+        // What `say` does to it.
+        plan.status = kingdom_core::PlanStatus::Drafting;
+        plan.working_on = None;
+        plan.say(Speaker::User, "try again");
+
+        assert!(
+            !plan.is_busy(),
+            "a plan the user has just spoken to must not still look busy, or \
+             `draft_plan` will refuse to start it"
         );
     }
 

@@ -95,6 +95,9 @@ impl SystemPrompt {
         out.push_str(&self.permissions);
 
         out.push_str("\n\n");
+        out.push_str(ENDING_A_TURN);
+
+        out.push_str("\n\n");
         out.push_str(ECONOMY);
 
         out.push_str("\n\n");
@@ -123,6 +126,24 @@ impl SystemPrompt {
 }
 
 const PREAMBLE: &str = "You are a senior software engineer helping with one project.";
+
+/// What ending a turn means, told plainly because the model cannot infer it.
+///
+/// Kingdom ends the turn the moment a reply arrives carrying prose and no tool
+/// call: [`crate::llm::Reply::Spoke`] settles the plan and hands control back to
+/// the user. Models are trained to *narrate* before acting -- "I'll start by
+/// reading the router" -- and in most harnesses that preamble is followed by
+/// tool calls in the same reply. Here it silently finishes the job.
+///
+/// Three real plans died on their opening sentence this way, each parked in
+/// front of the user having done nothing, and the only way on was for them to
+/// type "Keep going". The model was behaving reasonably; nothing had told it
+/// what prose costs. So this says it.
+const ENDING_A_TURN: &str = "How a turn ends. Replying with prose and no tool call ends your turn \
+     and hands control back to the user -- so narration is not free here. If you mean to keep \
+     working, put the tool call in the same reply as the words; do not announce what you are \
+     about to do and stop. Speak only when you have something for them: an answer, a question \
+     you cannot proceed without, or a report that the work is done.";
 
 /// Counters the model's "more tests is better" prior with a cost model.
 ///
@@ -356,6 +377,34 @@ mod tests {
         assert_eq!(found[1].body, "city rules", "the specific file reads last");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every remit that can act must be told that prose ends its turn.
+    ///
+    /// This is the whole fix for the failure that killed three real plans on
+    /// their opening sentence: the model wrote "I'll start by reading the
+    /// router", Kingdom read a tool-call-less reply as the finished answer and
+    /// parked the plan in front of the user having done nothing. The model was
+    /// not being lazy -- nothing had told it what prose costs here.
+    ///
+    /// Pinned across remits because the trap is not specific to one: a proposing
+    /// plan and a working plan both end their turn the same way.
+    #[test]
+    fn every_acting_remit_is_told_that_prose_ends_the_turn() {
+        for permissions in [Permissions::Propose, Permissions::Full] {
+            let prompt = SystemPrompt {
+                city: CityBrief::default(),
+                workspace: String::new(),
+                permissions: permissions_block(permissions, false),
+                guidance: Vec::new(),
+            };
+
+            assert!(
+                prompt.render().contains(ENDING_A_TURN),
+                "{permissions:?} must be told that a reply without a tool call hands \
+                 the plan back to the user"
+            );
+        }
     }
 
     /// The walk stops at the kingdom root. Guidance above it belongs to the
