@@ -75,6 +75,27 @@
   text-align: left;
 }
 
+// The door back to the opening screen.
+//
+// Quiet on purpose: it is needed rarely -- once, when the King works somewhere
+// else -- and sits beside the kingdom's own name, which should stay the loudest
+// thing in the header.
+.leave-kingdom {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border: 1px solid t.$edge;
+  border-radius: 5px;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+
+  &:hover { color: t.$gold; border-color: rgba(212, 175, 55, 0.45); }
+}
+
 // --- Toolbar ---------------------------------------------------------------
 
 .sidebar-toolbar {

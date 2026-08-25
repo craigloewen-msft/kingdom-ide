@@ -87,12 +87,17 @@ async fn main() {
         .expect("server error");
 }
 
-/// Opens the proving ground named by `KINGDOM_REALM`, if one is named.
+/// Opens whatever the server should come up on: the named proving ground, or
+/// failing that the kingdom the King last chose.
 ///
 /// The server otherwise comes up with no kingdom open, so every restart sends
 /// the user back to the folder picker -- and `cargo leptos watch` restarts on
-/// every save. Setting this makes the rehearsal loop land straight on a
-/// populated map.
+/// every save. `KINGDOM_REALM` makes the rehearsal loop land straight on a
+/// populated map; the remembered folder does the same for ordinary use.
+///
+/// `KINGDOM_REALM` wins outright when it is set. An explicit instruction for
+/// *this* run must beat a preference left over from the last one, or a
+/// rehearsal session would silently reopen real work.
 ///
 /// A failure is a warning rather than a panic: refusing to boot over a
 /// convenience setting would be worse than starting on the picker, which still
@@ -101,18 +106,30 @@ async fn main() {
 /// Returns the banner line to print, so the startup output stays in one block.
 #[cfg(feature = "ssr")]
 fn opening_realm() -> Option<String> {
-    let name = std::env::var("KINGDOM_REALM")
+    if let Some(name) = std::env::var("KINGDOM_REALM")
         .ok()
         .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())?;
+        .filter(|n| !n.is_empty())
+    {
+        return match kingdom_app::api::open_fixture(&name) {
+            Ok(kingdom) => Some(format!(
+                "     Opened the proving ground '{name}' at {}",
+                kingdom.root
+            )),
+            Err(e) => {
+                eprintln!("  Could not open the proving ground '{name}': {e}");
+                eprintln!("  Starting on the folder picker instead.");
+                None
+            }
+        };
+    }
 
-    match kingdom_app::api::open_fixture(&name) {
-        Ok(kingdom) => Some(format!(
-            "     Opened the proving ground '{name}' at {}",
-            kingdom.root
-        )),
+    match kingdom_app::api::open_last_kingdom() {
+        Ok(Some(kingdom)) => Some(format!("     Reopened {} at {}", kingdom.name, kingdom.root)),
+        // Nothing recorded: the ordinary first run, and not worth a word.
+        Ok(None) => None,
         Err(e) => {
-            eprintln!("  Could not open the proving ground '{name}': {e}");
+            eprintln!("  Could not reopen the last kingdom: {e}");
             eprintln!("  Starting on the folder picker instead.");
             None
         }

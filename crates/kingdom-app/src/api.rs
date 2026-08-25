@@ -174,6 +174,54 @@ pub fn open_fixture(name: &str) -> Result<Kingdom, String> {
     assemble(&root, Some(spec.starter_plans)).map_err(|e| e.to_string())
 }
 
+/// Opens the kingdom the King last chose, if there is one on record.
+///
+/// Not a `#[server]` function, for the same reason [`open_fixture`] is not: the
+/// caller is the boot path, where there is no browser to call anything.
+///
+/// `Ok(None)` means nothing was recorded -- the ordinary first run, and not a
+/// problem. An `Err` means something *was* recorded and could not be honoured,
+/// which is worth saying out loud before falling back to the picker.
+///
+/// The sandbox check is the part that matters: without it, `KINGDOM_SANDBOX=1`
+/// would be quietly defeated by a root remembered from a session that ran
+/// without it. It goes through the same canonicalising [`enforce_sandbox`] the
+/// browser path uses rather than a second, looser rule.
+#[cfg(feature = "ssr")]
+pub fn open_last_kingdom() -> Result<Option<Kingdom>, String> {
+    let Some(root) = crate::profile::last_kingdom() else {
+        return Ok(None);
+    };
+
+    if !root.is_dir() {
+        return Err(format!(
+            "{} is no longer a folder. Choose a kingdom again.",
+            root.display()
+        ));
+    }
+
+    enforce_sandbox(&root).map_err(|e| e.to_string())?;
+    assemble(&root, None)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Closes the kingdom, returning the King to the opening screen.
+///
+/// The door out of an auto-opened kingdom. Without it, remembering the folder
+/// would make the picker unreachable -- the app only shows it when no kingdom
+/// is open, and one always would be. Forgetting is deliberate rather than
+/// incidental: the next start must ask again, not reopen the folder just left.
+///
+/// Nothing recorded is deleted. The plans stay in the profile and come back
+/// with the kingdom.
+#[server(LeaveKingdom, "/api")]
+pub async fn leave_kingdom() -> Result<(), ServerFnError> {
+    *lock()? = Kingdom::unopened();
+    crate::profile::forget_kingdom();
+    Ok(())
+}
+
 /// Every fixture the user can enter, for the opening screen.
 #[server(ListRealms, "/api")]
 pub async fn list_fixtures() -> Result<Vec<(String, String)>, ServerFnError> {
@@ -197,6 +245,13 @@ fn assemble(
 
     let cities = scan_kingdom(root)
         .map_err(|e| ServerFnError::new(format!("Could not read {}: {e}", root.display())))?;
+
+    // A kingdom recorded under the old layout -- inside its own root -- has its
+    // records copied into the profile before anything reads them. Once only,
+    // and the originals are left where they are; `profile::migrate` says why.
+    if let Some(line) = crate::profile::migrate(root) {
+        println!("  {line}");
+    }
 
     // Cities are rescanned every time -- disk is their source of truth. Plans
     // are not: they are the one thing here that disk cannot tell us again.
@@ -234,6 +289,11 @@ fn assemble(
     };
 
     *lock()? = kingdom.clone();
+
+    // Recorded here rather than in each caller, so the real-folder and
+    // proving-ground paths cannot drift -- and only ever *after* a folder has
+    // actually opened, so a typo is never remembered and reopened at boot.
+    crate::profile::remember_kingdom(root);
 
     Ok(kingdom)
 }
@@ -1732,6 +1792,15 @@ pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
 /// A suggested starting folder, so the user is not typing a path from scratch.
 #[server(SuggestRoot, "/api")]
 pub async fn suggest_root() -> Result<String, ServerFnError> {
+    // The folder last opened, above any guess: if the King has told us once,
+    // that answer beats probing for a folder called `dev`. Reached only when
+    // the picker is showing at all -- boot reopens it without asking.
+    if let Some(last) = crate::profile::last_kingdom() {
+        if last.is_dir() {
+            return Ok(last.to_string_lossy().to_string());
+        }
+    }
+
     let home = std::env::var("HOME").unwrap_or_default();
     for candidate in ["dev", "Development", "projects", "code", "src", "repos"] {
         let p = std::path::Path::new(&home).join(candidate);
