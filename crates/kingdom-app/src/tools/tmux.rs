@@ -108,7 +108,12 @@ impl Tool for TmuxRun {
             "properties": {
                 "cmd": {
                     "type": "string",
-                    "description": "The command, run via `bash -lc` with the workspace as its working directory."
+                    // Worded to match `bash`, but deliberately *without* its
+                    // "you never need to `cd` there" sentence. A pane holds a
+                    // live shell whose working directory persists across
+                    // send-keys, so the claim bash can make truthfully would be
+                    // false here after the first `cd`.
+                    "description": "The command, run via `bash -lc` in your workspace root."
                 },
                 "name": {
                     "type": "string",
