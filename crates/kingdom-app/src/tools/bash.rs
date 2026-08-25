@@ -101,8 +101,27 @@ impl Tool for Bash {
         // counterpart here, and naming them would earn a stream of calls that
         // get refused. This tool reports in prose and takes the arguments its
         // schema lists.
+        //
+        // The second line is an *addition* to Phoenix's, not a replacement, and
+        // it is here because of a measured failure. Phoenix's opening said only
+        // that working directory does not persist between calls, which a model
+        // reads as "re-establish it every time": across ten real plans, 233 of
+        // 365 bash calls -- 64% -- opened with a `cd` to the workspace root the
+        // command already started in. The transcript is resent every round, so
+        // one such prefix in round 3 is paid again in every round after it; two
+        // plans alone replayed roughly 570 KB of them. Saying plainly where a
+        // call starts, *before* saying what it forgets, is what turns that line
+        // from an instruction to compensate into an explanation.
+        //
+        // AGENTS.md's rule for the port holds either way: Phoenix wins on
+        // wording, never on facts about Kingdom. The facts do not differ here --
+        // Phoenix's commands start in their working directory too -- so this is
+        // the `SHARED_MACHINE` case rather than the `label`/`since` case: kept
+        // alongside Phoenix's sentence because Kingdom measured a reason for it.
         r#"Executes shell commands via bash -c, capturing combined stdout/stderr.
-Bash state changes (working dir, variables, aliases) don't persist between calls.
+Every call starts in your workspace root, so you never need to `cd` there first.
+Bash state changes (working dir, variables, aliases) don't persist between
+calls — each call starts fresh at that root.
 
 Common patterns:
   Run synchronously:    op="run", cmd="...", wait_seconds=30
@@ -171,7 +190,7 @@ file first and execute the file."#
                 },
                 "cmd": {
                     "type": "string",
-                    "description": "The shell command, for op=run. Runs under `bash -c` with the workspace as its working directory."
+                    "description": "The shell command, for op=run. Runs under `bash -c` in your workspace root."
                 },
                 "handle": {
                     "type": "string",
@@ -799,6 +818,52 @@ mod tests {
         assert!(body.contains("line 19"), "the tail is what is kept: {body}");
         assert!(!body.contains("line 00"));
         assert!(dropped > 0, "the loss must be countable, not silent");
+    }
+
+    /// The court is told it is already standing in the workspace.
+    ///
+    /// Kingdom's own addition to Phoenix's description, and the reason is in the
+    /// comment above the string: told only that working directory does not
+    /// persist, models re-established it on 64% of all `bash` calls, paying for
+    /// the prefix again on every later round of the turn.
+    ///
+    /// **The order is the assertion that does the work.** Both sentences are
+    /// true in either arrangement, but "it does not persist" read first is an
+    /// instruction to compensate, and read second it is an explanation of a
+    /// place the model has already been told it starts. If the two are ever
+    /// swapped, the words survive and the effect does not -- so the ordering is
+    /// pinned rather than the mere presence.
+    #[test]
+    fn the_court_is_told_it_is_already_in_the_workspace() {
+        let described = Bash.description();
+
+        let affordance = described
+            .find("you never need to `cd` there first")
+            .expect("the court must be told it starts in the workspace: {described}");
+        let caveat = described
+            .find("don't persist")
+            .expect("Phoenix's non-persistence sentence must survive the addition");
+
+        assert!(
+            affordance < caveat,
+            "where a call starts must be read before what it forgets, or the \
+             caveat reads as an instruction to `cd` every time: {described}"
+        );
+    }
+
+    /// The one other place the fact is stated, for a model whose gateway renders
+    /// parameter descriptions and prose in either order.
+    #[test]
+    fn the_command_parameter_says_where_it_runs() {
+        let schema = Bash.input_schema();
+        let described = schema["properties"]["cmd"]["description"]
+            .as_str()
+            .expect("cmd must describe itself");
+
+        assert!(
+            described.contains("workspace root"),
+            "the parameter must still say where the command runs: {described}"
+        );
     }
 
     /// A handle nobody minted is a refusal, not an empty log: told the handle

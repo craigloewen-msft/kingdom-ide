@@ -235,8 +235,18 @@ const SKILLS_PREAMBLE: &str = "The following skills are available. Invoke them w
 /// without this an agent in a worktree at `<city>/.kingdom/<uuid>` has no idea
 /// it is not in the project's own checkout, and will describe its work as having
 /// changed the user's files.
+///
+/// The second clause is the block finishing its own job. Naming the directory
+/// says *where* the model is standing; it took a count of 365 real `bash` calls,
+/// 64% of which opened with a `cd` to this very path, to notice that nothing
+/// said commands **start** here. `tools/bash.rs` says it too, at the one moment
+/// it is acted on; this says it once, up front, for every tool that takes a path.
 fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
-    let mut out = format!("Working directory: {}\n", workspace.path);
+    let mut out = format!(
+        "Working directory: {}\nEvery command runs here, and every relative path is \
+         resolved from here.\n",
+        workspace.path
+    );
     match (&workspace.branch, workspace.is_isolated()) {
         (Some(branch), true) => out.push_str(&format!(
             "This is an isolated worktree on branch {branch}. It is yours: the user's own \
@@ -680,6 +690,41 @@ mod tests {
         let rendered = prompt_with(Permissions::Full, false).render();
         assert!(rendered.contains("Never kill a process you did not start"));
         assert!(rendered.contains("3000"));
+    }
+
+    /// The workspace block says commands *start* here, not merely where here is.
+    ///
+    /// Both kinds of workspace, because the sentence is about how tools resolve
+    /// paths rather than about isolation -- an in-place plan needs it exactly as
+    /// much as a worktree, and the two take different arms of the match below.
+    ///
+    /// This is the prompt's half of the same fix `tools/bash.rs` carries in its
+    /// description. Stated twice on purpose: the tool says it at the moment a
+    /// command is written, and this says it once for every tool that takes a
+    /// path. 64% of real `bash` calls opened with a redundant `cd` while only
+    /// the *location* was stated and never the fact that work begins there.
+    #[test]
+    fn the_workspace_block_says_commands_start_there() {
+        let isolated = kingdom_core::Workspace {
+            branch: Some("kingdom/a-plan".to_string()),
+            id: Some("abc".to_string()),
+            ..kingdom_core::Workspace::in_place("/dev/city/.kingdom/abc")
+        };
+        assert!(isolated.is_isolated(), "the worktree arm must be the one taken");
+
+        for workspace in [isolated, kingdom_core::Workspace::in_place("/dev/city")] {
+            let block = workspace_block(&workspace);
+
+            assert!(
+                block.contains(&workspace.path),
+                "the model must still be told where it stands: {block}"
+            );
+            assert!(
+                block.contains("Every command runs here"),
+                "naming the directory is not the same as saying work begins in \
+                 it -- that gap is what buys a `cd` on every command: {block}"
+            );
+        }
     }
 
     /// An approved plan is told it is carrying out a plan; an unapproved one is
