@@ -159,7 +159,9 @@ crates/
                     patch, browser, profile (browser_profile),
                     propose_plan (the gateway from proposing to working: the
                     court drafts its plan to .kingdom/draft.md with a scoped
-                    patch, then proposes that path — Phoenix's flow, ported),
+                    patch, then proposes that path — Phoenix's flow, ported.
+                    That draft is the plan, and store::file_plan copies it out
+                    of the worktree before it is destroyed),
                     spawn_agents (subagents), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
@@ -262,13 +264,43 @@ always won. Giving it somewhere to put the plan is what fixes that; a paragraph
 of prose telling it to stop looking is what Kingdom tried instead, and Phoenix
 sends no such paragraph.
 
-**Approval is written down and never rewritten.** `approve_plan` records
-`<kingdom_root>/.kingdom/approved/<plan-id>.md` at the moment of the grant: the
-proposal as the King read it, the decree that led to it, and the branch the work
-will land on. `plans/<id>.json` cannot answer this later — it is rewritten on
-every update, so a revision after approval replaces the standing proposal and
-the agreed terms are gone. The entry is write-once for that reason, and a failed
-write costs the entry rather than the approval.
+**The plan is one document, and it is filed when the worktree goes.** The court
+drafts to `.kingdom/draft.md` inside its own worktree and revises it there as it
+works — that file *is* the plan. But `.kingdom/` is excluded from the
+repository, so the draft is never committed, and `git worktree remove --force`
+deletes it with the checkout. So `store::file_plan` copies it out to
+`plans/<plan-id>--<slug>.md` in the profile: at approval, and again at merge or
+archive for a plan that was never approved. The id makes the name unique (slugs
+collide), the slug makes it readable in `ls`, and `store::load` filters on the
+`json` extension so the markdown sits beside the record without being mistaken
+for one.
+
+This is Phoenix's `tasks/` directory with its one liability removed. Phoenix
+commits its task files into the project; Kingdom files the plan into the King's
+profile, because a plan is Kingdom's bookkeeping *about* a repository rather
+than that repository's content.
+
+The writing is **write-once**, and that is load-bearing rather than tidy:
+filing happens twice on the ordinary path, and between the two moments the court
+holds an unrestricted `patch` and may rewrite its own draft freely. Without it,
+finishing a plan would replace what the King agreed to with whatever the draft
+said by the end. A failed write costs the document rather than the approval or
+the merge, and the finish tries again.
+
+Two details worth keeping straight. The draft must be read **before** the
+disposal — `worktree.rs` has a test that pins this against real git, because
+after the teardown there is nothing left to read and the patch cannot carry an
+excluded file. And an **in-place** plan has no teardown, so its draft is deleted
+explicitly after filing — guarded on the filing having succeeded, since that is
+the only remaining copy.
+
+This replaced an `approved/<plan-id>.md` ledger holding a second rendering of
+the same prose. Its stated justification was that a revision after approval
+replaces the standing proposal — but `Plan::propose` cannot be reached once
+permissions widen (`propose_plan` is not offered at `Full` and refuses there
+anyway), so that loss was not reachable. The guarantee it offered is kept by the
+filed plan. Nothing already on disk was deleted, and `profile::migrate` still
+brings `approved/` forward.
 
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
@@ -431,8 +463,8 @@ he opened:
   kingdoms/<key>/
     kingdom.json                 which root this folder is for
     plans/<plan-id>.json         one document per plan
+    plans/<id>--<slug>.md        the plan itself, filed when its worktree goes
     archive/<plan-id>.patch      the work an archived plan set aside
-    approved/<plan-id>.md        what the King agreed to
   realms/<name>/                 the proving grounds
 ```
 
