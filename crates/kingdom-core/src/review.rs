@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeSummary {
     /// What the comparison was made against, in words the King can read --
-    /// `"main"`, `"origin/main"`, or whatever was actually found.
+    /// `"main"`, `"master"`, or whatever was actually found. Local branches
+    /// win over remote-tracking ones, so this reads `"origin/main"` only in a
+    /// clone that has no local default branch at all.
     pub base: String,
     pub files: Vec<ChangedFile>,
     /// Why the list is as it is, when that needs saying.
