@@ -784,7 +784,10 @@
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
-  padding: 0 14px;
+  // Matches .start-btn beside it. That one is royal-button(11px 22px) over a
+  // borderless gradient; this one carries a 1px border, so it takes 1px less
+  // padding on each side to land on the same height.
+  padding: 10px 14px;
   border: 1px solid t.$edge-bright;
   border-radius: t.$radius;
   background: t.$panel-2;
