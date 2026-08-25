@@ -19,7 +19,19 @@
 }
 
 // The two columns: everything the chamber always had, and the panel beside it.
+// Three children now -- the city's files stand left of both.
 .chamber-frame {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+// The transcript and the spyglass, grouped. The group exists so the files rail
+// is not part of it: on a narrow screen this is what stacks into a column
+// (`_spyglass.scss`), and a rail caught in that stack would become a band of
+// file names across the top rather than a column down the side.
+.chamber-body {
   display: flex;
   flex: 1;
   min-height: 0;

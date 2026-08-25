@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar, WardTree};
+use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar};
 use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -31,9 +31,14 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 /// returns it to.
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 
-/// Width the files rail opens at. Narrower than the rail by default and capped
-/// lower (see `ward_tree.rs`): a tree of names needs less room than a rail of
-/// titles and badges, and neither rail may become the widest thing on screen.
+/// Width the files rail opens at. Narrower than the cities rail by default and
+/// capped lower (see `ward_tree.rs`): a tree of names needs less room than a
+/// rail of titles and badges, and neither column may become the widest thing on
+/// screen.
+///
+/// The rail itself lives inside the chamber rather than in this grid -- it
+/// belongs to a conversation -- but the width is remembered here so it survives
+/// moving between plans. See [`KingdomState::tree_width`].
 pub const DEFAULT_TREE_WIDTH: f64 = 240.0;
 
 /// What the rail collapses *to*. Never zero: the rail is this app's entire
@@ -69,6 +74,11 @@ pub struct KingdomState {
     /// Current width of the left rail, in pixels. Driven by the resizer.
     pub sidebar_width: RwSignal<f64>,
     /// Current width of the files rail, in pixels. Driven by its own resizer.
+    ///
+    /// The rail is part of a plan's chamber, not of the throne room, so nothing
+    /// outside a conversation reads this. It lives here anyway rather than as a
+    /// local signal in the chamber, because a width the King dragged should not
+    /// reset every time he opens a different plan.
     pub tree_width: RwSignal<f64>,
     /// Whether the cities rail is folded away to a strip.
     ///
@@ -317,12 +327,18 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// The frame both screens hang in: the two rails, and whichever view is routed.
+/// The frame both screens hang in: the cities rail, and whichever view is
+/// routed beside it.
 ///
-/// Three tracks, and the proportion between them is the point: the rails are
-/// **fixed** widths and the main region takes `1fr`. The map and the chamber are
-/// what the King came to look at; the rails support them and must never grow
-/// into equal columns, which is what their own resizers' bounds enforce.
+/// Two tracks, and the proportion between them is the point: the rail is a
+/// **fixed** width and the main region takes `1fr`. The map and the chamber are
+/// what the King came to look at; the rail supports them and must never grow
+/// into an equal column, which is what its resizer's bounds enforce.
+///
+/// The files rail is deliberately *not* here. It describes the city a plan is
+/// working in, so it belongs to the chamber and is rendered there -- on the map
+/// it had no conversation to belong to and nothing to say but an instruction to
+/// go and pick a city, next to the very screen for picking one.
 #[component]
 fn ThroneRoom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -336,11 +352,10 @@ fn ThroneRoom() -> impl IntoView {
                 } else {
                     state.sidebar_width.get()
                 };
-                format!("{}px {}px 1fr", rail, state.tree_width.get())
+                format!("{}px 1fr", rail)
             }
         >
             <Sidebar/>
-            <WardTree/>
             <main class="main-region">
                 <Outlet/>
             </main>
