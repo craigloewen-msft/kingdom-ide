@@ -114,6 +114,11 @@ crates/
     model.rs        Kingdom, City, Plan, Proposal (a plan put to the user),
                     Folder/SourceFile/Language (a project's shape on disk)
     permissions.rs  Permissions = what a plan may do to the world
+    proposal.rs     Reading a proposal: splitting one into the blocks the King
+                    annotates, and diffing a revision against its predecessor.
+                    Shared deliberately — the browser splits to offer a target
+                    and the server splits to quote it back, and two answers to
+                    "where does a block begin" is how those come to disagree
     layout.rs       Deterministic map placement (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
     sample.rs       Placeholder starter plans
@@ -183,6 +188,10 @@ crates/
                     public/vendor/ and fetched only when a fence appears),
                     browser_view.rs, resizer.rs (the drag handle the rail
                     and the spyglass share),
+                    proposal/ (the plan put to the King: mod.rs is the card,
+                    body.rs draws it as blocks he can write against, notes.rs
+                    is one note and the gathered margin, diff.rs reads a
+                    revision against the plan it revises),
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
@@ -242,6 +251,32 @@ on it. The user either sends notes back — ordinary `say` + `draft_plan`, the
 composer's own path — or presses **Start with this**, which is `approve_plan`:
 the permissions widen to `Full` and the same conversation carries on with tools
 it did not have.
+
+**Or he writes in the margin.** `proposal.rs` splits the plan into markdown
+blocks, and each one takes a note: `annotate_proposal` records it on the
+`Proposal`, several may stand at once, and `send_notes` drains them into **one**
+`Speaker::User` turn that blockquotes each annotated block above the objection to
+it. Nothing new reaches the model — no tool, no message kind, no prompt change.
+The court revises its draft and calls `propose_plan` again exactly as it always
+did, and `Plan::propose` carries the outgoing body onto the new proposal as
+`revises`, so the card can open on a diff of what moved. A switch in the head
+turns that off; it is not drawn at all on a first proposal, which has nothing to
+be read against.
+
+Three things there are load-bearing. The notes live on the plan rather than in
+the browser, for the reason `queued` does — a note typed and not sent must
+survive a reload — and they are excluded from `Plan::turns` the same way, so
+half-written second thoughts never reach a model. `ProposalNote` carries the
+annotated **text** beside the line number, because a line is a reference into a
+document that is about to be replaced and the quote is the half that cannot go
+stale. And `send_notes` reuses `receive`, the branch `say` already splits out, so
+notes sent into a working chamber queue and are heard at the next round boundary
+with no second code path to get wrong.
+
+`revises` is a whole body rather than a stored diff: the diff is computed for
+display and thrown away, and keeping one would be a third rendering of prose that
+already exists twice and is free to drift from both — the liability recorded
+against the old `approved/` ledger below.
 
 Nothing is parked while they read. The turn genuinely ends, so a server restart
 mid-review loses nothing — the proposal is on the plan and the plan is on disk.

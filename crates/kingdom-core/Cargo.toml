@@ -8,3 +8,8 @@ description = "Domain model for Kingdom IDE: kingdoms, cities, architects, plans
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# Both are for `proposal.rs`, and both are already in the wasm bundle by way of
+# `kingdom-app` -- so the browser pays nothing new for them. See the workspace
+# manifest for why each is safe in a crate that compiles to wasm.
+pulldown-cmark.workspace = true
+similar.workspace = true

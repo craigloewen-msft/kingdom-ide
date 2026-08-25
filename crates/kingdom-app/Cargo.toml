@@ -58,8 +58,10 @@ regex = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 
 # Unified diffs for the `patch` tool: a deed reports where each edit landed, so
-# the model can confirm it without re-reading the file.
-similar = { version = "2", optional = true }
+# the model can confirm it without re-reading the file. Not optional: it is a
+# workspace dependency now, because `kingdom-core::proposal` diffs a revised
+# plan against the one it revises and that runs in the browser.
+similar.workspace = true
 
 # Encoding an image for a model that can see one, and decoding the base64 JPEG
 # frames CDP delivers to the spyglass. Server-only: nothing in the wasm bundle
@@ -96,7 +98,7 @@ web-sys = { version = "0.3", features = [
     "WheelEvent",
     "Window",
 ] }
-pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 # A throwaway git repository for the worktree tests. Nothing in the product
@@ -126,7 +128,6 @@ ssr = [
     "dep:globset",
     "dep:regex",
     "dep:libc",
-    "dep:similar",
     "dep:base64",
     "leptos/ssr",
     "leptos_meta/ssr",
