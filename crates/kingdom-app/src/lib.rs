@@ -29,6 +29,8 @@ pub mod store;
 #[cfg(feature = "ssr")]
 pub mod tools;
 #[cfg(feature = "ssr")]
+pub mod turns;
+#[cfg(feature = "ssr")]
 pub mod watch;
 #[cfg(feature = "ssr")]
 pub mod worktree;

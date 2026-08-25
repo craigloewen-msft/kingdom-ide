@@ -179,6 +179,44 @@
   // problem to fix.
   &.drafting .msg-body { color: t.$ink-faint; font-style: italic; }
   &.failed .msg-body { color: t.$blocked; }
+
+  // Words the King has said that the court has not heard yet. Ghosted like a
+  // draft in flight, because both are provisional -- but this one is his, so it
+  // carries the row he will recognise as his own and adds the mark that says
+  // why it is dimmed.
+  &.queued-word {
+    align-items: baseline;
+    .msg-body { color: t.$ink-faint; font-style: italic; }
+  }
+}
+
+// Says why a queued line is dimmed. Breathes at the same rate as a running
+// deed's clock, because both mean "this is not finished yet" and two different
+// rhythms in one column would read as two different kinds of pending.
+.queued-mark {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: t.$review;
+  animation: deed-pulse 1.4s ease-in-out infinite;
+}
+
+// Taking the words back. Quiet until reached for: it sits in the log, where
+// nothing else is a control, so it must not read as one until the King's cursor
+// is on it.
+.queued-drop {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: t.$ink-faint;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.6;
+
+  &:hover { color: t.$blocked; opacity: 1; }
 }
 
 // When the line landed. Deliberately the quietest thing in the row: it exists
@@ -218,6 +256,10 @@
   text-align: center;
 
   &.note-failed { color: t.$failed; border-color: rgba(t.$failed, 0.4); }
+  // A halt the King called is not a failure and must not wear the colour of
+  // one: he did this on purpose, and the note is a receipt rather than an
+  // alarm. Quieter than a failed call for exactly that reason.
+  &.note-stopped { color: t.$ink-dim; border-color: t.$edge-bright; }
   // Where the work is fenced in is reassurance, not an alarm.
   &.note-workspace { font-family: t.$font-mono; }
   // A conflict is the King's to resolve, so it is louder than a workspace note
@@ -869,6 +911,27 @@
   &:hover:not(:disabled) {
     border-color: t.$gold-dim;
     color: t.$gold;
+  }
+
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+// Calling a halt. The one destructive control in the row, so it takes the
+// .done-btn shape -- and therefore its height -- and differs only in what it
+// turns when reached for.
+.stop-btn {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  background: t.$panel-2;
+  color: t.$ink-dim;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: rgba(t.$blocked, 0.6);
+    color: t.$blocked;
   }
 
   &:disabled { opacity: 0.5; cursor: not-allowed; }
