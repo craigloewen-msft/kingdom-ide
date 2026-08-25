@@ -36,7 +36,7 @@
 //! is complete.
 
 use super::{Refusal, Tool, Sandbox};
-use kingdom_core::ToolOutcome;
+use kingdom_core::{ToolOutcome, WaitBudget};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -155,6 +155,24 @@ impl Tool for Bash {
                 Err(refusal) => refusal.into(),
             },
             Ok(Op::Kill) => kill(&input),
+        }
+    }
+
+    /// Always [`WaitBudget::Patience`], never a deadline -- which is this
+    /// module's central promise stated in a second place. Passing
+    /// `wait_seconds` here is the design working, not a fault: the command runs
+    /// on and the model is handed a handle. A deadline would have the chamber
+    /// flag every cold `cargo build` as trouble.
+    ///
+    /// Only the two ops that block have one. A peek and a kill answer from
+    /// what is already known and return at once, so a figure on their line
+    /// would be describing a wait that never happens.
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        match op(input) {
+            Ok(Op::Run) | Ok(Op::Wait) => Some(WaitBudget::Patience {
+                seconds: wait_seconds(input).as_secs(),
+            }),
+            _ => None,
         }
     }
 }

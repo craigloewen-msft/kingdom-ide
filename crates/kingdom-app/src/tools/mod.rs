@@ -33,7 +33,7 @@ pub mod spawn_agents;
 pub mod think;
 pub mod tmux;
 
-use kingdom_core::{ToolOutcome, Workspace};
+use kingdom_core::{ToolOutcome, WaitBudget, Workspace};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -125,6 +125,24 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     }
 
     tools
+}
+
+/// How long a call to `tool` will wait, before it is run.
+///
+/// The counterpart to [`invoke`], and separate from it because the answer is
+/// wanted at a different moment: the call is *recorded* before it runs, so the
+/// chamber can show a command while it is still going, and the budget has to be
+/// on it at that point or the King watches a figure appear only once it no
+/// longer matters.
+///
+/// An unknown tool, or one outside these permissions, waits for nothing as far
+/// as anyone can tell: it is about to be refused by [`invoke`] and never waits
+/// at all.
+pub fn waits_for(tool: &str, input: &Value, shop: &Sandbox) -> Option<WaitBudget> {
+    all(shop.permissions())
+        .into_iter()
+        .find(|t| t.name() == tool)
+        .and_then(|t| t.waits_for(input))
 }
 
 /// Runs one tool call by name, inside the workspace's bounds and its
@@ -384,6 +402,28 @@ pub trait Tool: Send + Sync {
     /// business -- a poisoned lock, a vanished plan -- belong to the caller,
     /// not here.
     async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome;
+
+    /// How long this call will wait before it stops waiting, read from the
+    /// arguments the model sent.
+    ///
+    /// The chamber puts this on the deed's line, so the King can tell a build
+    /// that has forty seconds left from a browser call that ran out thirty
+    /// seconds ago. `None` -- the default, and the answer for most tools -- is
+    /// "this does not wait on anything", and the line simply shows how long it
+    /// has been going.
+    ///
+    /// **It lives on the tool because the numbers do.** Every default here is a
+    /// constant inside the tool that parses it, and the arguments are the
+    /// model's own JSON. A table of these kept next to the view would be a
+    /// second copy of the tool surface: wrong the first time anybody changed a
+    /// default, and wrong silently, since a figure on a line looks equally
+    /// confident either way.
+    ///
+    /// Answered from the arguments alone, never by starting anything. This is
+    /// called while the call is being *recorded*, before [`Tool::run`].
+    fn waits_for(&self, _input: &Value) -> Option<WaitBudget> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -549,5 +589,122 @@ mod tests {
                 "only a proposing plan puts work to the user"
             );
         }
+    }
+
+    /// The distinction the deed line's whole rendering rests on, checked at the
+    /// two tools that sit on opposite sides of it.
+    ///
+    /// `bash` reaching `wait_seconds` is the design working -- the command runs
+    /// on and a handle comes back -- while `browser_click` reaching its timeout
+    /// has failed outright. The chamber colours one and not the other, so an
+    /// inverted variant here would either cry alarm over every cold build or go
+    /// quiet on the calls actually going wrong. Neither looks broken on screen,
+    /// which is why it is pinned rather than left to reading.
+    #[test]
+    fn a_shell_asks_for_patience_and_a_browser_sets_a_deadline() {
+        let shop = sandbox();
+
+        assert_eq!(
+            waits_for("bash", &serde_json::json!({ "cmd": "cargo build" }), &shop),
+            Some(WaitBudget::Patience { seconds: 30 }),
+            "nothing is killed when a shell's wait elapses, so it is never a deadline"
+        );
+        assert_eq!(
+            waits_for("browser_click", &serde_json::json!({ "selector": ".btn" }), &shop),
+            Some(WaitBudget::Deadline { seconds: 30 }),
+            "a browser call that runs out of time has failed, and nothing is left running"
+        );
+    }
+
+    /// The model's own figure wins where it gave one, and each tool's own
+    /// default stands in where it did not.
+    ///
+    /// The defaults differ per tool and per *operation* -- 15s to act on a page
+    /// that is there, 30s to wait for one to arrive -- and the point of asking
+    /// the tool rather than a table is that these stay true when somebody edits
+    /// them. This is the test that fails when the two copies drift.
+    #[test]
+    fn a_wait_is_the_models_own_where_it_gave_one_and_the_tools_default_otherwise() {
+        let shop = sandbox();
+
+        assert_eq!(
+            waits_for(
+                "bash",
+                &serde_json::json!({ "cmd": "sleep 100", "wait_seconds": 0 }),
+                &shop
+            ),
+            Some(WaitBudget::Patience { seconds: 0 }),
+            "asking not to wait at all is a wait of zero, not an absent budget"
+        );
+        assert_eq!(
+            waits_for(
+                "browser_navigate",
+                &serde_json::json!({ "url": "http://localhost", "timeout": "2m" }),
+                &shop
+            ),
+            Some(WaitBudget::Deadline { seconds: 120 }),
+            "a timeout is read in the tool's own vocabulary, so `2m` is two minutes"
+        );
+        assert_eq!(
+            waits_for(
+                "browser_navigate",
+                &serde_json::json!({ "url": "http://localhost" }),
+                &shop
+            ),
+            Some(WaitBudget::Deadline { seconds: 15 }),
+            "acting on a page that is already there gets the shorter default"
+        );
+        assert_eq!(
+            waits_for(
+                "browser_wait_for_selector",
+                &serde_json::json!({ "selector": "#app" }),
+                &shop
+            ),
+            Some(WaitBudget::Deadline { seconds: 30 }),
+            "waiting for a page to become something gets the longer one"
+        );
+    }
+
+    /// A budget is a claim about waiting, so the tools that do not wait must not
+    /// make one. Silence on the line means "this simply takes as long as it
+    /// takes", and a figure there would have the King watching a countdown that
+    /// governs nothing.
+    #[test]
+    fn a_tool_that_does_not_wait_says_nothing() {
+        let shop = sandbox();
+
+        assert_eq!(
+            waits_for("read_file", &serde_json::json!({ "path": "src/lib.rs" }), &shop),
+            None
+        );
+        assert_eq!(
+            waits_for(
+                "bash",
+                &serde_json::json!({ "op": "peek", "handle": "b-1" }),
+                &shop
+            ),
+            None,
+            "a peek answers from what is already known and returns at once"
+        );
+        assert_eq!(
+            waits_for("tmux_run", &serde_json::json!({ "cmd": "npm run dev" }), &shop),
+            None,
+            "without `readiness` a tmux window is opened and not waited on"
+        );
+        assert_eq!(
+            waits_for(
+                "tmux_run",
+                &serde_json::json!({
+                    "cmd": "npm run dev",
+                    "readiness": { "text": "listening on", "timeout_seconds": 45 }
+                }),
+                &shop
+            ),
+            Some(WaitBudget::Patience { seconds: 45 }),
+            "and with it, the command still outlives the watching -- so, patience"
+        );
+
+        // Not a tool at all: about to be refused, and it never waits.
+        assert_eq!(waits_for("nonesuch", &serde_json::json!({}), &shop), None);
     }
 }
