@@ -702,58 +702,7 @@ impl Model for CopilotModel {
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| ModelError::Transport(format!("unreadable response: {e}")))?;
 
-        let message = &parsed["choices"][0]["message"];
-        // Read once, before any ending: how full the window is is true of the
-        // turn, not of the way it happened to end.
-        let tokens = tokens_used(&parsed);
-        let finish = parsed["choices"][0]["finish_reason"].as_str().unwrap_or_default();
-
-        // Tool calls take precedence over any prose alongside them. A model
-        // often narrates what it is about to do in the same message; treating
-        // that narration as the finished answer would settle the plan while the
-        // model still had work it wanted to do. It is no longer *discarded*
-        // either -- it rides along as `narration`, because "here is what I am
-        // about to do and why" is exactly the thread the next round needs.
-        let calls = parse_acts(&message["tool_calls"]);
-        let text = message["content"].as_str().unwrap_or_default().trim().to_string();
-
-        if !calls.is_empty() {
-            return Ok(Answer {
-                reply: Reply::Acts(Acts {
-                    calls,
-                    reasoning: parse_reasoning(message),
-                    narration: (!text.is_empty()).then_some(text),
-                }),
-                tokens,
-            });
-        }
-
-        if text.is_empty() {
-            // An empty reply after a `length` finish is not the model declining
-            // to answer -- it is the model spending its entire output budget on
-            // reasoning and having nothing left to say with. Those are different
-            // problems with different fixes, and reporting both as "empty reply"
-            // sends the reader looking in the wrong place. This is how the 4096
-            // token budget hid for as long as it did.
-            if finish == "length" {
-                return Err(ModelError::Refused(
-                    "The model used its entire output budget before answering. This usually \
-                     means a high reasoning effort on a long conversation."
-                        .to_string(),
-                ));
-            }
-            return Err(ModelError::Refused(
-                "Copilot returned an empty reply.".to_string(),
-            ));
-        }
-
-        Ok(Answer {
-            reply: Reply::Spoke(Draft {
-                summary: first_sentence(&text),
-                body: text,
-            }),
-            tokens,
-        })
+        answer_from(&parsed)
     }
 
     fn id(&self) -> &str {
@@ -771,6 +720,100 @@ impl Model for CopilotModel {
     fn context_window(&self) -> usize {
         self.context_window
     }
+}
+
+/// Reads one chat-completions response into an [`Answer`].
+///
+/// Lifted out of `take_turn` so the shape can be tested without a gateway: the
+/// bug this exists to prevent was invisible from the outside, because a reply
+/// whose tool calls were never read is indistinguishable from a model that
+/// chose to say something instead.
+fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
+    // Every choice, not just the first.
+    //
+    // Copilot splits a Claude reply that both narrates and acts across
+    // *several* choices: `choices[0]` carries the prose with no `tool_calls` at
+    // all, and each tool call arrives as its own further choice. Reading only
+    // `choices[0]` therefore saw a model that had asked to run three commands
+    // as a model that had merely said "I'll start by exploring the repository"
+    // -- which is `Reply::Spoke`, which ends the turn. That is why real plans
+    // died on their opening sentence, and it left no error behind: the calls
+    // were not malformed, they were never looked at.
+    //
+    // OpenAI-shaped models put everything in `choices[0]` and are unchanged by
+    // this: one choice in, one choice out.
+    let choices = parsed["choices"].as_array().cloned().unwrap_or_default();
+
+    // Read once, before any ending: how full the window is is true of the turn,
+    // not of the way it happened to end.
+    let tokens = tokens_used(parsed);
+    let finish = choices
+        .iter()
+        .find_map(|c| c["finish_reason"].as_str())
+        .unwrap_or_default();
+
+    // Tool calls take precedence over any prose alongside them. A model often
+    // narrates what it is about to do in the same message; treating that
+    // narration as the finished answer would settle the plan while the model
+    // still had work it wanted to do. It is no longer *discarded* either -- it
+    // rides along as `narration`, because "here is what I am about to do and
+    // why" is exactly the thread the next round needs.
+    //
+    // Gathered across choices in the order the gateway listed them, so a split
+    // reply is put back together as the single decision it was.
+    let mut calls = Vec::new();
+    let mut narrations: Vec<String> = Vec::new();
+    let mut reasoning = None;
+    for choice in &choices {
+        let message = &choice["message"];
+        calls.extend(parse_acts(&message["tool_calls"]));
+        let said = message["content"].as_str().unwrap_or_default().trim();
+        if !said.is_empty() {
+            narrations.push(said.to_string());
+        }
+        if reasoning.is_none() {
+            reasoning = parse_reasoning(message);
+        }
+    }
+    let text = narrations.join("\n\n");
+
+    if !calls.is_empty() {
+        return Ok(Answer {
+            reply: Reply::Acts(Acts {
+                calls,
+                reasoning,
+                narration: (!text.is_empty()).then_some(text),
+            }),
+            tokens,
+        });
+    }
+
+    if text.is_empty() {
+        // An empty reply after a `length` finish is not the model declining to
+        // answer -- it is the model spending its entire output budget on
+        // reasoning and having nothing left to say with. Those are different
+        // problems with different fixes, and reporting both as "empty reply"
+        // sends the reader looking in the wrong place. This is how the 4096
+        // token budget hid for as long as it did.
+        if finish == "length" {
+            return Err(ModelError::Refused(
+                "The model used its entire output budget before answering. This usually \
+                 means a high reasoning effort on a long conversation."
+                    .to_string(),
+            ));
+        }
+        return Err(ModelError::Refused(
+            "Copilot returned an empty reply.".to_string(),
+        ));
+    }
+
+    Ok(Answer {
+        reply: Reply::Spoke(Draft {
+            summary: first_sentence(&text),
+            body: text,
+        }),
+        tokens,
+    })
 }
 
 /// How many tokens a reply says it cost, if it says.
@@ -1316,6 +1359,69 @@ mod tests {
             explicit_none["reasoning_effort"], "none",
             "an explicit `none` is a level in its own right, not the absent case"
         );
+    }
+
+    /// A Claude reply arrives split across several choices, and all of it counts.
+    ///
+    /// This is the exact wire shape Copilot returns for `claude-opus-5`, taken
+    /// from a live response: `choices[0]` is the narration and carries no
+    /// `tool_calls` at all, and each call it asked for is its own further
+    /// choice. Reading only the first choice saw "I'll start by exploring the
+    /// repository" and nothing else -- a `Reply::Spoke`, which ends the turn and
+    /// parks the plan in front of the King having done nothing.
+    ///
+    /// The failure was invisible: no error, no malformed payload, just a court
+    /// that appeared to answer instead of working. Worth a test precisely
+    /// because nothing else would catch it coming back.
+    #[test]
+    fn a_reply_split_across_choices_keeps_all_of_its_calls() {
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "I'll start by exploring the repository."
+                    }
+                },
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {"role": "assistant", "tool_calls": [{
+                        "id": "toolu_1", "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}
+                    }]}
+                },
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {"role": "assistant", "tool_calls": [{
+                        "id": "toolu_2", "type": "function",
+                        "function": {"name": "search", "arguments": "{\"pattern\":\"delete\"}"}
+                    }]}
+                }
+            ],
+            "usage": {"total_tokens": 625}
+        });
+
+        let answer = answer_from(&response).expect("a reply asking for tools is not an error");
+
+        match answer.reply {
+            Reply::Acts(acts) => {
+                assert_eq!(
+                    acts.calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>(),
+                    vec!["bash", "search"],
+                    "every choice's calls are gathered, in the order the gateway listed them"
+                );
+                assert_eq!(
+                    acts.narration.as_deref(),
+                    Some("I'll start by exploring the repository."),
+                    "the prose from the first choice rides along rather than ending the turn"
+                );
+            }
+            Reply::Spoke(draft) => panic!(
+                "the court asked to run two commands; treating that as counsel ends the \
+                 turn having done nothing: {draft:?}"
+            ),
+        }
     }
 
     /// The `usage` block is the only honest source of how full the window is,
