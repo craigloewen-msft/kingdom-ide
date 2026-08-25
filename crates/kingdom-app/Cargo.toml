@@ -58,8 +58,10 @@ regex = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 
 # Unified diffs for the `patch` tool: a deed reports where each edit landed, so
-# the model can confirm it without re-reading the file.
-similar = { version = "2", optional = true }
+# the model can confirm it without re-reading the file. `inline` for the review
+# drawer's side-by-side view, which emphasises the words within a changed line
+# rather than only the line.
+similar = { version = "2", features = ["inline"], optional = true }
 
 # Encoding an image for a model that can see one, and decoding the base64 JPEG
 # frames CDP delivers to the spyglass. Server-only: nothing in the wasm bundle
@@ -101,7 +103,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false, features = ["ht
 [dev-dependencies]
 # A throwaway git repository for the worktree tests. Nothing in the product
 # needs it: preparing a workspace is only meaningfully testable against a real
-# repo on a real disk.
+# repo on a real disk. The review drawer's git reading is tested the same way.
 tempfile = "3"
 
 [features]

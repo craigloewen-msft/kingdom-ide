@@ -136,6 +136,8 @@ crates/
                     targets; the handler ssr only)
     profile.rs      The King's own ~/.kingdom: durable settings, and where each
                     kingdom's records are kept (ssr only)
+    review.rs       What a plan has changed against the default branch, and one
+                    file's diff, read out of its workspace with git (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)
@@ -181,8 +183,14 @@ crates/
                     never passed through — the text is model output and it
                     lands via inner_html. Mermaid itself is vendored at
                     public/vendor/ and fetched only when a fence appears),
-                    browser_view.rs, resizer.rs (the drag handle the rail
-                    and the spyglass share),
+                    browser_view.rs, resizer.rs (the drag handle the rail, the
+                    focused panel and the files rail's split all share — it
+                    drags height as well as width),
+                    city_rail.rs (the files rail's column, split between) over
+                    ward_tree.rs (the city's tree) and review_drawer.rs (every
+                    file this plan has changed),
+                    diff_view.rs (one of those files, old beside new — it and
+                    the spyglass are alternatives for one panel, see `Aside`),
                     map/ (mod.rs + city.rs)
 
 style/main.scss     All styling
@@ -412,6 +420,53 @@ both go with it.
 re-reading, and on writing tests are gone, and so is the `NUDGE` machinery in
 `api.rs` that sent a narration-only reply back round. A reply with prose and no
 tool call now simply ends the turn, as it does in Phoenix.
+
+**The King can read what a plan changed, not only what it said.** The files rail
+is **split**: the city's tree above, and below it a **review drawer** listing
+every file this plan has touched with its `+`/`−` counts. Both are on screen at
+once, with a draggable divider between them, because the question "what did my
+agent change?" is answered *against* "what is in this project?" — tabs made
+holding both in view impossible. Clicking a file opens a side-by-side diff in the
+panel the spyglass occupies.
+
+Three decisions there are load-bearing. **The comparison is against
+`merge-base(default, HEAD)`, not against `main`** — `git diff main` is
+symmetric, so every commit that lands on main while an agent works renders as a
+deletion *by the plan*, and the King opens the drawer to review his agent and is
+shown files it never touched. A test in `review.rs` pins that against a real
+repository. **It reads the plan's own workspace**, which is the worktree rather
+than the city, and it counts committed, uncommitted and untracked work alike,
+because a plan's checkout is normally in all three states at once and a drawer
+showing only commits would be empty for most of a plan's life. And **the rows
+arrive already paired**: deciding which deletion sits opposite which insertion
+needs the differ that knows a replacement was a replacement, so `review.rs` does
+it and the browser renders two columns without re-deciding anything — a flat
+sequence of tagged lines would be mispaired on any uneven replace.
+
+The diff and the spyglass are **alternatives for one panel**, held in a single
+`Aside` value in `conversation.rs`: opening either closes the other, because
+there is one signal holding one value rather than two booleans that must remember
+to close each other. The transcript is deliberately outside that decision — it is
+not one of the alternatives, it is the thing they are alternatives beside, and
+the panel is always to its **right** rather than stacked above it. It used to
+stack below 1100px, which put a diff between the King and the chamber header and
+pushed the transcript off the bottom of the screen.
+
+What yields instead is the **cities rail**, which folds itself to a strip below
+1250px (`app.rs::fold_rail_when_cramped`). A chamber can want four columns at
+once, and that rail is the one the King has finished using by the time he is
+reading a diff. Two things there are load-bearing: it **never writes to storage**,
+so the stored flag stays his *preference* and widening the window gives back what
+he chose rather than what the last resize left behind; and it defers to a choice
+made at the current width (`rail_decided_at`), because otherwise opening the rail
+on a laptop is undone by the very next resize — and window managers send a flurry
+of them. Crossing the threshold is what makes that choice stale.
+
+The drawer was also the first thing to open a plan's workspace directory and find
+nothing there. `sample::starter_plans` builds a `Workspace` from `City::path`,
+which is *relative* to the kingdom root, and hands it to a field documented as
+absolute; `api::grounded` closes that at the one boundary that holds the root,
+and a test pins it.
 
 **The court can see, and can be seen.** `read_image` closes the loop
 `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`

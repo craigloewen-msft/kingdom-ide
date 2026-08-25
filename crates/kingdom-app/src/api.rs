@@ -610,6 +610,110 @@ fn read_directory(
     Ok(listed)
 }
 
+/// What one plan has changed against its city's default branch.
+///
+/// Keyed on the **plan** rather than the city, because the comparison is of the
+/// plan's own workspace: an isolated plan works in a worktree, and the city's
+/// checkout would show the King somebody else's files.
+///
+/// Never an error for an ordinary absence -- a disposed worktree, a project
+/// without git, a repository with no default branch all come back as an empty
+/// summary carrying a note that says which. The drawer exists to say what is
+/// true, and "this is not a repository" is an answer rather than a failure. A
+/// plan the records no longer hold is the one real error, because there is then
+/// no workspace to name.
+#[server(PlanChanges, "/api")]
+pub async fn plan_changes(plan: String) -> Result<kingdom_core::ChangeSummary, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = {
+        let kingdom = lock()?;
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+        grounded(&kingdom.root, &plan.workspace)
+    };
+
+    Ok(crate::review::changes(&workspace).await)
+}
+
+/// One changed file, as a side-by-side diff against the same base.
+///
+/// # The boundary
+///
+/// This is the third place in Kingdom where an outsider names a path and the
+/// server opens it, and it is held to the rule the first two set: the path is
+/// resolved through a [`crate::tools::Sandbox`] rooted at the plan's workspace
+/// -- exactly as [`list_directory`] and [`crate::artifact`] do -- so
+/// `a/../../etc/passwd` is refused lexically, before git or the filesystem sees
+/// it. What goes on to git is the *workspace-relative* form the sandbox agreed
+/// to, never the string as it arrived.
+#[server(PlanDiff, "/api")]
+pub async fn plan_diff(
+    plan: String,
+    path: String,
+) -> Result<kingdom_core::FileDiff, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = {
+        let kingdom = lock()?;
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+        grounded(&kingdom.root, &plan.workspace)
+    };
+
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    Ok(crate::review::diff(&workspace, &inside).await)
+}
+
+/// Puts a workspace on the actual disk, when its path does not already say
+/// where it is.
+///
+/// [`kingdom_core::Workspace::path`] is documented as absolute, and every
+/// workspace [`crate::worktree::prepare`] builds is -- but the *placeholder*
+/// plans a kingdom opens with are made by `sample::starter_plans`, which has
+/// only `City::path`, and that is relative to the kingdom root. So a starter
+/// plan claims to work in `almanac` rather than in `/…/realms/…/almanac`, and
+/// anything that opens the directory finds nothing there.
+///
+/// Resolved here rather than in `review.rs` because the kingdom root is what
+/// closes the gap and this is the layer that holds it. It is a no-op for every
+/// real plan, since an absolute path is already grounded.
+#[cfg(feature = "ssr")]
+fn grounded(root: &str, workspace: &kingdom_core::Workspace) -> kingdom_core::Workspace {
+    if std::path::Path::new(&workspace.path).is_absolute() {
+        return workspace.clone();
+    }
+
+    let mut grounded = workspace.clone();
+    grounded.path = std::path::Path::new(root)
+        .join(&workspace.path)
+        .to_string_lossy()
+        .into_owned();
+    grounded
+}
+
+/// Turns a path from the browser into one relative to the plan's workspace, or
+/// refuses it.
+///
+/// Split out from [`plan_diff`] so the refusal can be tested without a kingdom
+/// in global state -- the same split, for the same reason, as [`read_directory`]
+/// and `artifact::from_workspace`.
+#[cfg(feature = "ssr")]
+fn within_workspace(
+    workspace: &kingdom_core::Workspace,
+    requested: &str,
+) -> Result<String, String> {
+    let shop = crate::tools::Sandbox::new(workspace.clone());
+    let resolved = shop
+        .resolve(requested)
+        .map_err(|_| format!("{requested} is outside this plan's workspace."))?;
+
+    shop.relative(&resolved)
+        .filter(|inside| !inside.is_empty())
+        .ok_or_else(|| format!("{requested} is outside this plan's workspace."))
+}
+
 /// Records another prompt on an existing plan, without drafting a reply.
 ///
 /// Paired with [`draft_plan`] for the same reason as [`begin_plan`]: the user's
@@ -2129,6 +2233,71 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A starter plan's workspace is relative to the kingdom root, and
+    /// everything that opens a workspace assumes it is absolute.
+    ///
+    /// The gap is `sample::starter_plans`, which builds a `Workspace` out of
+    /// `City::path` -- documented as relative -- and hands it to a field
+    /// documented as absolute. The review drawer was the first thing to open
+    /// that directory and find nothing there. Pinned because the fix is one
+    /// call at one boundary, and losing it makes every placeholder plan report
+    /// its workspace as missing.
+    #[test]
+    fn a_relative_workspace_is_put_back_on_the_disk() {
+        use kingdom_core::Workspace;
+
+        let relative = Workspace::in_place("almanac");
+        assert_eq!(
+            grounded("/realms/kingdom-mirror", &relative).path,
+            "/realms/kingdom-mirror/almanac"
+        );
+
+        // A real plan's workspace already says where it is, and must be left
+        // exactly as it stands -- joining a root onto it would corrupt it.
+        let absolute = Workspace::in_place("/dev/testburg/.kingdom/abc");
+        assert_eq!(grounded("/dev", &absolute), absolute);
+    }
+
+    /// The review drawer's diff is the third place an outsider names a path and
+    /// the server opens it, so it is held to the same wall as the first two.
+    ///
+    /// The refusal is what matters: a path that walks out of the workspace must
+    /// be turned away *before* git is invoked, because `git show` and
+    /// `std::fs::read` will both happily read a file the King never meant to
+    /// expose. Tested through the predicate rather than through `plan_diff`,
+    /// which needs a scanned kingdom and the process-global lock to reach --
+    /// the same split the sandbox test above uses.
+    #[test]
+    fn a_diff_cannot_be_asked_for_outside_the_workspace() {
+        use kingdom_core::Workspace;
+
+        let workspace = Workspace::in_place("/dev/testburg");
+
+        assert_eq!(
+            within_workspace(&workspace, "src/main.rs").unwrap(),
+            "src/main.rs",
+            "an ordinary path passes through as the workspace-relative form"
+        );
+        assert_eq!(
+            within_workspace(&workspace, "/dev/testburg/src/main.rs").unwrap(),
+            "src/main.rs",
+            "an absolute path already inside is relativised rather than refused"
+        );
+
+        assert!(
+            within_workspace(&workspace, "../../etc/passwd").is_err(),
+            "a path that walks out with .. must be refused"
+        );
+        assert!(
+            within_workspace(&workspace, "/etc/passwd").is_err(),
+            "an absolute path outside must be refused"
+        );
+        assert!(
+            within_workspace(&workspace, "").is_err(),
+            "the workspace root is not a file to diff"
+        );
     }
 
     /// The prompt viewer must show what the model is actually given.
