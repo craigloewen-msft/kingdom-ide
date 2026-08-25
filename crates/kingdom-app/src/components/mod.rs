@@ -6,6 +6,7 @@ mod prompt_bar;
 mod map;
 mod resizer;
 mod sidebar;
+mod ward_tree;
 mod browser_view;
 
 pub use conversation::Conversation;
@@ -13,4 +14,5 @@ pub use markdown::Prose;
 pub use prompt_bar::PromptBar;
 pub use map::KingdomMap;
 pub use sidebar::Sidebar;
+pub use ward_tree::WardTree;
 pub use browser_view::BrowserView;

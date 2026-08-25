@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar};
+use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar, WardTree};
 use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -31,6 +31,20 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 /// returns it to.
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 
+/// Width the files rail opens at. Narrower than the rail by default and capped
+/// lower (see `ward_tree.rs`): a tree of names needs less room than a rail of
+/// titles and badges, and neither rail may become the widest thing on screen.
+pub const DEFAULT_TREE_WIDTH: f64 = 240.0;
+
+/// What the rail collapses *to*. Never zero: the rail is this app's entire
+/// navigation, so a collapsed one that could not be reopened would be a dead
+/// end. The strip is wide enough to hold the button that brings it back.
+pub const COLLAPSED_RAIL_WIDTH: f64 = 34.0;
+
+/// Where the rail's collapsed state is remembered between visits.
+#[cfg(feature = "hydrate")]
+const RAIL_COLLAPSED_KEY: &str = "kingdom.rail_collapsed";
+
 /// Where the last-used model and effort are remembered between visits.
 #[cfg(feature = "hydrate")]
 const MODEL_KEY: &str = "kingdom.model";
@@ -54,6 +68,14 @@ pub struct KingdomState {
     pub selected: RwSignal<Option<CityId>>,
     /// Current width of the left rail, in pixels. Driven by the resizer.
     pub sidebar_width: RwSignal<f64>,
+    /// Current width of the files rail, in pixels. Driven by its own resizer.
+    pub tree_width: RwSignal<f64>,
+    /// Whether the cities rail is folded away to a strip.
+    ///
+    /// A view preference and nothing more, but it lives here rather than in
+    /// `sidebar.rs` because `ThroneRoom` is what writes the grid track and so
+    /// has to read it.
+    pub rail_collapsed: RwSignal<bool>,
     /// False shows only live plans; true also shows settled history.
     pub show_all_plans: RwSignal<bool>,
     /// Set while a folder scan is in flight.
@@ -74,6 +96,8 @@ impl KingdomState {
             kingdom: RwSignal::new(Kingdom::unopened()),
             selected: RwSignal::new(None),
             sidebar_width: RwSignal::new(DEFAULT_SIDEBAR_WIDTH),
+            tree_width: RwSignal::new(DEFAULT_TREE_WIDTH),
+            rail_collapsed: RwSignal::new(false),
             show_all_plans: RwSignal::new(false),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
@@ -92,6 +116,13 @@ impl KingdomState {
     pub fn choose_workspace(&self, mode: WorkspaceMode) {
         store_workspace(&mode);
         self.workspace.set(mode);
+    }
+
+    /// Folds the cities rail away, or brings it back, remembering which.
+    pub fn toggle_rail(&self) {
+        let next = !self.rail_collapsed.get_untracked();
+        self.rail_collapsed.set(next);
+        store_rail_collapsed(next);
     }
 }
 
@@ -213,6 +244,33 @@ fn store_workspace(mode: &WorkspaceMode) {
     let _ = mode;
 }
 
+/// Restores whether the rail was left folded away, in an effect for the same
+/// reason and in the same place as [`restore_choice`]: reading storage during
+/// rendering would make the server emit markup hydration then disagrees with.
+fn restore_rail_collapsed(collapsed: RwSignal<bool>) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        if let Some(stored) =
+            local_storage().and_then(|s| s.get_item(RAIL_COLLAPSED_KEY).ok().flatten())
+        {
+            collapsed.set(stored == "1");
+        }
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = collapsed;
+}
+
+fn store_rail_collapsed(collapsed: bool) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(RAIL_COLLAPSED_KEY, if collapsed { "1" } else { "0" });
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = collapsed;
+}
+
 /// Root component: the throne room.
 #[component]
 pub fn App() -> impl IntoView {
@@ -222,6 +280,7 @@ pub fn App() -> impl IntoView {
     provide_context(state);
     restore_choice(state.choice);
     restore_workspace(state.workspace);
+    restore_rail_collapsed(state.rail_collapsed);
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the user back to the folder picker.
@@ -258,7 +317,12 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// The frame both screens hang in: the rail, and whichever view is routed.
+/// The frame both screens hang in: the two rails, and whichever view is routed.
+///
+/// Three tracks, and the proportion between them is the point: the rails are
+/// **fixed** widths and the main region takes `1fr`. The map and the chamber are
+/// what the King came to look at; the rails support them and must never grow
+/// into equal columns, which is what their own resizers' bounds enforce.
 #[component]
 fn ThroneRoom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -267,10 +331,16 @@ fn ThroneRoom() -> impl IntoView {
         <div
             class="throne-room"
             style:grid-template-columns=move || {
-                format!("{}px 1fr", state.sidebar_width.get())
+                let rail = if state.rail_collapsed.get() {
+                    COLLAPSED_RAIL_WIDTH
+                } else {
+                    state.sidebar_width.get()
+                };
+                format!("{}px {}px 1fr", rail, state.tree_width.get())
             }
         >
             <Sidebar/>
+            <WardTree/>
             <main class="main-region">
                 <Outlet/>
             </main>

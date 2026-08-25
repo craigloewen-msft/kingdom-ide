@@ -28,14 +28,17 @@ pub const MARKER: &str = ".kingdom-mock";
 
 /// Where fixtures are seeded unless told otherwise.
 ///
-/// Under the repo rather than `/tmp` so a fixture survives a reboot and can be
-/// poked at with ordinary tools while debugging what the map did with it; not
-/// under `target/` so `cargo clean` cannot delete it mid-investigation.
-/// `.gitignore` already excludes `/.kingdom/`.
+/// In the King's profile ([`crate::profile`]), so a realm belongs to the person
+/// rather than to the directory the server happened to be launched from -- the
+/// old default was relative, which meant `cargo leptos serve` from one folder
+/// and from another disagreed about which proving grounds existed. Not under
+/// `/tmp`, so a fixture survives a reboot and can be poked at with ordinary
+/// tools; not under `target/`, so `cargo clean` cannot delete it mid-
+/// investigation.
 pub fn sandbox_root() -> PathBuf {
     match std::env::var("KINGDOM_SANDBOX_ROOT") {
         Ok(p) if !p.trim().is_empty() => PathBuf::from(p.trim()),
-        _ => PathBuf::from(".kingdom/realms"),
+        _ => crate::profile::home().join("realms"),
     }
 }
 

@@ -42,8 +42,36 @@ pub fn Sidebar() -> impl IntoView {
 
     restore_width(state.sidebar_width, WIDTH_KEY, BOUNDS);
 
+    let collapsed_rail = move || state.rail_collapsed.get();
+
+    // Clearing the kingdom locally is what returns the app to the opening
+    // screen; the server call is what stops the next start reopening it.
+    let leave = Action::new(move |(): &()| async move {
+        if let Err(e) = crate::api::leave_kingdom().await {
+            leptos::logging::warn!("could not leave the kingdom: {e}");
+        }
+        state.kingdom.set(kingdom_core::Kingdom::unopened());
+    });
+
     view! {
-        <aside class="sidebar">
+        <aside class="sidebar" class:collapsed=collapsed_rail>
+            // Folded away, the rail keeps exactly two things: the crown, so the
+            // strip still reads as the kingdom's, and the control that brings it
+            // back. It is never zero-width -- every route in the app is reached
+            // from this rail, so a rail with no way back would be a dead end.
+            <Show when=collapsed_rail>
+                <div class="rail-strip">
+                    <button
+                        class="rail-toggle"
+                        title="Show cities and plans"
+                        on:click=move |_| state.toggle_rail()
+                    >"\u{bb}"</button>
+                    <div class="crown-small strip-crown">"\u{265a}"</div>
+                    <div class="strip-legend">"CITIES"</div>
+                </div>
+            </Show>
+
+            <Show when=move || !collapsed_rail()>
             <header class="kingdom-header">
                 <div class="crown-small">"♚"</div>
                 <div class="kingdom-id">
@@ -65,6 +93,16 @@ pub fn Sidebar() -> impl IntoView {
                         {move || state.kingdom.get().root}
                     </div>
                 </div>
+                // The way out. A kingdom now reopens itself on every start, so
+                // without this the opening screen is unreachable once one has
+                // been chosen -- it shows only when nothing is open.
+                <button
+                    class="leave-kingdom"
+                    title="Close this kingdom and choose another"
+                    on:click=move |_| { leave.dispatch(()); }
+                >
+                    "Change"
+                </button>
             </header>
 
             <div class="sidebar-toolbar">
@@ -85,6 +123,11 @@ pub fn Sidebar() -> impl IntoView {
                         on:click=move |_| state.show_all_plans.set(true)
                     >"All"</button>
                 </div>
+                <button
+                    class="rail-toggle"
+                    title="Fold the rail away"
+                    on:click=move |_| state.toggle_rail()
+                >"\u{ab}"</button>
             </div>
 
             <div class="sidebar-body">
@@ -95,6 +138,8 @@ pub fn Sidebar() -> impl IntoView {
                 </ul>
             </div>
 
+            // The handle exists only while there is a panel to size: a divider
+            // on a folded rail is a control that does nothing.
             <Resizer
                 width=state.sidebar_width
                 grows=Grows::Rightwards
@@ -102,6 +147,7 @@ pub fn Sidebar() -> impl IntoView {
                 storage_key=WIDTH_KEY
                 class="sidebar-resizer"
             />
+            </Show>
         </aside>
     }
 }
