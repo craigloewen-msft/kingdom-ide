@@ -18,13 +18,14 @@
 //! Phoenix sends none of them and does better regardless, and a prompt that is
 //! *nearly* Phoenix's plus four house paragraphs is neither.
 //!
-//! **Phoenix wins on wording, never on facts about Kingdom.** Two blocks depart
-//! from it deliberately, and both are marked where they sit: Phoenix's mermaid
-//! hint is *false here* and is not ported, and [`SHARED_MACHINE`] has no Phoenix
-//! counterpart because sharing one machine between agents is Kingdom's own
-//! subject. A description is a promise about behaviour; matching prose that
-//! promises something Kingdom does not do is the one way this port can make the
-//! agents worse rather than better.
+//! **Phoenix wins on wording, never on facts about Kingdom.** [`SHARED_MACHINE`]
+//! has no Phoenix counterpart and is kept anyway, because sharing one machine
+//! between agents is Kingdom's own subject. [`MERMAID`] is the other way round:
+//! it is Phoenix's sentence, deleted from Kingdom for years because it was false
+//! here, and restored the day `components/markdown.rs` made it true. A
+//! description is a promise about behaviour; matching prose that promises
+//! something Kingdom does not do is the one way this port can make the agents
+//! worse rather than better.
 //!
 //! **The order carries the reasoning.** The remit lands last, after project
 //! guidance, because it is what the model must be holding when it starts work.
@@ -111,6 +112,9 @@ impl SystemPrompt {
         let mut out = String::from(BASE);
 
         out.push_str("\n\n");
+        out.push_str(MERMAID);
+
+        out.push_str("\n\n");
         out.push_str(SHARED_MACHINE);
 
         if !self.guidance.is_empty() {
@@ -160,19 +164,31 @@ const BASE: &str = "You are a helpful AI assistant with access to tools for exec
      editing files, and searching codebases. Use tools when appropriate to accomplish tasks.\n\n\
      Be concise in your responses. When using tools, explain what you're doing briefly.";
 
-// Phoenix's mermaid hint is deliberately NOT ported, and this note is here so it
-// does not get "restored" by the next person comparing the two prompts.
-//
-// Phoenix tells the model its conversation view renders mermaid fences as
-// diagrams. That is true of Phoenix and false of Kingdom: there is no markdown
-// renderer here, and `components/conversation.rs` prints every message verbatim.
-// Kingdom shipped the claim once anyway, and it cost a real plan its whole turn
-// -- asked to make proposals render markdown, the model found the contradiction
-// and spent 25 of its 30 reasoning blocks litigating it instead of proposing
-// anything. It was deleted for that reason before this port began.
-//
-// The rule the port follows: Phoenix's wording wins on style, never on facts
-// about Kingdom. Restore this the day a renderer exists.
+/// That diagrams are drawn, and how to keep a label from breaking one.
+///
+/// Phoenix's sentence, worded for Kingdom's surface: Phoenix says "Phoenix
+/// renders", and here the reader is the chamber and the proposal card.
+///
+/// This one string has a history worth knowing before touching it. Kingdom
+/// shipped the claim once while nothing rendered anything, and it cost a real
+/// plan its whole turn -- asked to make proposals render markdown, the model
+/// found the contradiction between the prompt and
+/// `components/conversation.rs` and spent 25 of its 30 reasoning blocks
+/// litigating it instead of proposing anything. It was deleted for that, with a
+/// note saying "restore this the day a renderer exists".
+///
+/// `components/markdown.rs` is that renderer, so the sentence is back, and the
+/// rule it illustrates still holds: what the prompt says about Kingdom must be
+/// true of Kingdom. If the renderer is ever removed, this goes with it.
+///
+/// The parenthetical about quoting labels is Phoenix's too and is the half that
+/// earns its keep -- an unquoted label containing brackets is the single most
+/// common way a model's diagram fails to parse.
+const MERMAID: &str = "The chamber renders Markdown mermaid code fences as diagrams -- \
+     in the conversation and in a proposal's body alike; prefer them for diagrams when \
+     useful. When a node label contains parentheses, quotes, or other punctuation, wrap \
+     the label text in double quotes (e.g. `A[\"svc.Get(\\\"x\\\")\"]`) so Mermaid does not \
+     read the punctuation as diagram syntax.";
 
 /// That the machine has other tenants, the King's own server among them.
 ///
@@ -518,26 +534,31 @@ mod tests {
         assert!(rendered.contains("Do not cat SKILL.md files directly"));
     }
 
-    /// Kingdom must not tell a model its output is rendered when it is not.
+    /// Kingdom may tell a model its output is rendered, because it now is.
     ///
-    /// Phoenix's prompt says its conversation renders mermaid fences as
-    /// diagrams, and porting that verbatim would have been wrong: Kingdom has
-    /// no markdown renderer. The claim was shipped once and cost a real plan
-    /// its entire turn -- asked to make proposals render markdown, the model
-    /// found the contradiction and spent 25 of its 30 reasoning blocks arguing
-    /// with the prompt instead of proposing anything.
+    /// This assertion is the *second* state of a string with a history. Phoenix
+    /// says its conversation renders mermaid fences as diagrams; Kingdom
+    /// shipped that claim once while nothing rendered anything, and it cost a
+    /// real plan its entire turn -- asked to make proposals render markdown,
+    /// the model found the contradiction and spent 25 of its 30 reasoning
+    /// blocks arguing with the prompt instead of proposing anything. The test
+    /// here used to forbid the word for that reason.
     ///
-    /// This guards the whole class rather than the one string: nothing in the
-    /// prompt may promise rendering until something renders.
+    /// `components/markdown.rs` now renders both the chamber's messages and a
+    /// proposal's body, so the promise is kept and the hint is back. The rule
+    /// it guards did not change, only which way it points: if the renderer ever
+    /// goes, this test and the sentence it pins go with it.
     #[test]
-    fn the_prompt_does_not_claim_output_is_rendered() {
+    fn the_court_is_told_its_diagrams_are_drawn() {
         let rendered = prompt_with(Permissions::Full, false).render();
 
         assert!(
-            !rendered.to_lowercase().contains("mermaid"),
-            "Kingdom prints messages verbatim (components/conversation.rs); \
-             promising a renderer derails the plans that notice: {rendered}"
+            rendered.to_lowercase().contains("mermaid"),
+            "the chamber renders markdown and diagrams (components/markdown.rs); \
+             a model that is not told will not draw one: {rendered}"
         );
+        // The half that prevents actually broken diagrams.
+        assert!(rendered.contains("wrap the label text in double quotes"));
     }
 
     /// The court is told the machine has other tenants on it.

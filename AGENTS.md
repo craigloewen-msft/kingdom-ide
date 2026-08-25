@@ -168,6 +168,11 @@ crates/
 
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, prompt_bar.rs, conversation.rs,
+                    markdown.rs (the court's prose rendered: markdown, and
+                    mermaid fences drawn as diagrams. Raw HTML is escaped,
+                    never passed through — the text is model output and it
+                    lands via inner_html. Mermaid itself is vendored at
+                    public/vendor/ and fetched only when a fence appears),
                     browser_view.rs, resizer.rs (the drag handle the rail
                     and the spyglass share),
                     map/ (mod.rs + city.rs)
@@ -294,12 +299,18 @@ that distance back, and a test pins the ordering.
 
 *Phoenix wins on wording, never on facts about Kingdom.* Where a Phoenix string
 would describe behaviour Kingdom does not have, the behaviour is authoritative:
-its mermaid hint is **not** ported (there is no markdown renderer here, and the
-claim once cost a plan 25 of its 30 reasoning blocks arguing with the prompt),
-and its `bash` description is trimmed of the `label` and `since` arguments this
-tool does not take. `SHARED_MACHINE` goes the other way — no Phoenix
-counterpart, kept anyway, because several agents on one machine is Kingdom's own
-subject. Both departures are tested.
+its `bash` description is trimmed of the `label` and `since` arguments this tool
+does not take. `SHARED_MACHINE` goes the other way — no Phoenix counterpart,
+kept anyway, because several agents on one machine is Kingdom's own subject.
+Both departures are tested.
+
+The mermaid hint is the case that shows the rule working in both directions. It
+was **not** ported at first, because Kingdom had no markdown renderer and the
+claim had once cost a plan 25 of its 30 reasoning blocks arguing with the
+prompt; the comment where it belonged said "restore this the day a renderer
+exists". `components/markdown.rs` is that renderer, so the sentence is back and
+the test that once forbade the word now requires it. If the renderer ever goes,
+both go with it.
 
 *What was deleted with it.* The house blocks on ending a turn, on the cost of
 re-reading, and on writing tests are gone, and so is the `NUDGE` machinery in

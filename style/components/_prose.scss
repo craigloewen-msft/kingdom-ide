@@ -1,0 +1,163 @@
+// Rendered markdown — what the court wrote, as the King reads it.
+//
+// Used by `components/markdown.rs` for a proposal's body and the court's own
+// messages. The brief is restraint: this sits *inside* a chat column, so a
+// heading that behaves like a document heading would shout over the
+// conversation around it. Headings here are barely larger than body text and
+// earn their weight from colour and spacing instead.
+//
+// Every size is relative (`em`) so one block can be dropped into a 13px chat row
+// and a 13px proposal card without a second set of numbers.
+
+@use "../abstracts/tokens" as t;
+
+.prose {
+  min-width: 0;
+  word-break: break-word;
+
+  // The outer element sets the rhythm; the first and last child must not add
+  // to it, or every block gains a margin its container already paid for.
+  > :first-child { margin-top: 0; }
+  > :last-child { margin-bottom: 0; }
+
+  p { margin: 0 0 0.75em; }
+
+  h1, h2, h3, h4, h5, h6 {
+    margin: 1.2em 0 0.5em;
+    color: t.$ink;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  h1 { font-size: 1.25em; }
+  h2 { font-size: 1.15em; }
+  h3 { font-size: 1.05em; }
+  h4, h5, h6 { font-size: 1em; }
+
+  // A rule under the top two levels, which is what makes a long proposal
+  // scannable without making its headings any louder.
+  h1, h2 {
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid t.$edge;
+  }
+
+  strong { color: t.$ink; font-weight: 600; }
+  em { font-style: italic; }
+  del { opacity: 0.6; }
+
+  ul, ol {
+    margin: 0 0 0.75em;
+    padding-left: 1.4em;
+  }
+
+  li { margin: 0.2em 0; }
+  li > ul, li > ol { margin-bottom: 0; }
+
+  // A task list carries its own bullet in the checkbox.
+  li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
+  input[type="checkbox"] { margin-right: 0.4em; accent-color: t.$gold; }
+
+  a {
+    color: t.$gold;
+    text-decoration: none;
+    border-bottom: 1px solid rgba(t.$gold, 0.35);
+
+    &:hover { border-bottom-color: t.$gold; }
+  }
+
+  code {
+    padding: 0.12em 0.35em;
+    border-radius: 3px;
+    background: rgba(t.$void, 0.6);
+    color: t.$ink;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em;
+  }
+
+  pre {
+    margin: 0 0 0.85em;
+    padding: 10px 12px;
+    overflow-x: auto;
+    border: 1px solid t.$edge;
+    border-radius: t.$radius;
+    background: t.$void;
+    line-height: 1.5;
+
+    // The block already has the frame; the inline treatment would double it.
+    code {
+      padding: 0;
+      background: none;
+      font-size: 0.88em;
+    }
+  }
+
+  blockquote {
+    margin: 0 0 0.85em;
+    padding: 0.1em 0 0.1em 0.9em;
+    border-left: 2px solid t.$edge-bright;
+    color: t.$ink-faint;
+  }
+
+  hr {
+    margin: 1.2em 0;
+    border: 0;
+    border-top: 1px solid t.$edge;
+  }
+
+  table {
+    margin: 0 0 0.85em;
+    border-collapse: collapse;
+    // A table wider than the column scrolls the whole block rather than
+    // stretching the chamber, which would move the conversation under the
+    // King's eye.
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    font-size: 0.95em;
+  }
+
+  th, td {
+    padding: 5px 10px;
+    border: 1px solid t.$edge;
+    text-align: left;
+  }
+
+  th {
+    background: rgba(t.$panel-2, 0.6);
+    color: t.$ink;
+    font-weight: 600;
+  }
+
+  img { max-width: 100%; border-radius: t.$radius; }
+}
+
+// A diagram, before and after mermaid gets to it.
+//
+// Before: it is a `<pre>` holding its own source, so it must not look like a
+// code block that is about to be replaced -- centred and frameless, it reads as
+// something loading.
+//
+// After: mermaid replaces the contents with an `<svg>`.
+.prose pre.mermaid {
+  padding: 12px;
+  border: 1px solid t.$edge;
+  background: rgba(t.$void, 0.5);
+  text-align: center;
+
+  svg {
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+// A diagram mermaid could not parse keeps its source, and says so quietly. The
+// King should still be able to read what the court meant -- an empty box would
+// hide it, and mermaid's own red error card would hide it louder.
+.prose pre.mermaid.mermaid-failed {
+  border-color: rgba(t.$failed, 0.5);
+  text-align: left;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  white-space: pre;
+  overflow-x: auto;
+}

@@ -96,6 +96,7 @@ web-sys = { version = "0.3", features = [
     "WheelEvent",
     "Window",
 ] }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 
 [dev-dependencies]
 # A throwaway git repository for the worktree tests. Nothing in the product

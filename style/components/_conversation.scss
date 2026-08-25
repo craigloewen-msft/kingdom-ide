@@ -246,10 +246,15 @@
 
 .msg-body {
   min-width: 0;
+  flex: 1;
   color: t.$ink-dim;
-  // A model's reply arrives as prose with real line breaks; collapsing them
-  // would run every paragraph and list item together.
+  // The King's own words arrive as he typed them, with real line breaks;
+  // collapsing them would run every paragraph together. The court's reply is
+  // rendered markdown instead (`.prose` below), where the blocks carry the
+  // structure and `pre-wrap` would double every gap.
   white-space: pre-wrap;
+
+  &.prose { white-space: normal; }
 }
 
 // --- What the court did ------------------------------------------------------
@@ -742,10 +747,8 @@
 // it below the fold -- the decision has to stay reachable from wherever he is
 // in the reading.
 //
-// `pre-wrap` because the body is markdown rendered as plain text: Kingdom has
-// no markdown renderer yet, so its own line breaks and indentation are the only
-// structure it has, and collapsing them would turn a structured plan into a
-// wall.
+// The body is rendered markdown (`components/markdown.rs`), so structure comes
+// from real blocks and `.prose` sizes them; this rule only sets the frame.
 .proposal-body {
   max-height: 320px;
   margin: 0 0 14px;
@@ -754,7 +757,6 @@
   font-family: inherit;
   font-size: 13px;
   line-height: 1.65;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 

@@ -130,12 +130,23 @@ pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
             "## What I would do\n\n\
              {} rescans every file on each start, which is most of the wait. I would \
              keep the previous scan and re-walk only what changed.\n\n\
+             ```mermaid\n\
+             flowchart LR\n  \
+               Open[\"open kingdom\"] --> Cached{{\"record on disk?\"}}\n  \
+               Cached -- no --> Full[\"full walk\"]\n  \
+               Cached -- yes --> Diff[\"compare mtimes\"]\n  \
+               Diff --> Partial[\"walk what moved\"]\n\
+             ```\n\n\
              ## The changes\n\n\
              1. Record the scan under `.kingdom/`, keyed by mtime.\n\
              2. Compare on open, and walk only the folders that moved.\n\
              3. Fall back to a full scan when the record is missing or unreadable.\n\n\
+             | Case | Today | After |\n\
+             |---|---|---|\n\
+             | unchanged tree | full walk | one `stat` per folder |\n\
+             | one file moved | full walk | that folder only |\n\n\
              ## What I am assuming\n\n\
-             That mtime is trustworthy here. I have not checked what happens on a \
+             That mtime is trustworthy here. I have *not* checked what happens on a \
              network mount.\n\n\
              (Placeholder court \u{2014} no real work was done.)",
             first.name

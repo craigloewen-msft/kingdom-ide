@@ -10,6 +10,7 @@ use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use crate::components::BrowserView;
+use crate::components::Prose;
 use kingdom_core::{
     Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Proposal, Speaker, Timestamp,
     ToolCall,
@@ -777,7 +778,21 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                                 <span class="msg-who">
                                     {if is_user { "You" } else { "Court" }}
                                 </span>
-                                <span class="msg-body">{u.body.clone()}</span>
+                                // The court's prose is markdown and is rendered
+                                // as such. The King's is not: he typed it, and
+                                // re-rendering his `#` as a heading would be a
+                                // small lie about what he said.
+                                {if is_user {
+                                    view! {
+                                        <span class="msg-body">{u.body.clone()}</span>
+                                    }
+                                    .into_any()
+                                } else {
+                                    view! {
+                                        <Prose text=u.body.clone() class="msg-body"/>
+                                    }
+                                    .into_any()
+                                }}
                             </div>
                         }
                         .into_any()
@@ -958,11 +973,10 @@ fn subagent_status(status: PlanStatus) -> &'static str {
 /// the same kind of thing at a larger scale. What differs is the stakes, so the
 /// accepting button is the loud one and the setting-aside is quiet.
 ///
-/// The body is rendered as **plain text**, in a `<pre>`. Kingdom has no
-/// markdown renderer -- the conversation prints every message verbatim -- and
-/// adding one is a real dependency in the wasm bundle rather than a detail.
-/// Proposals read perfectly well as prose in the meantime, and nothing else in
-/// the flow depends on it, so it is left as its own decision.
+/// The body is **rendered markdown** -- headings, lists, tables, code fences and
+/// mermaid diagrams -- through [`crate::components::Prose`]. A proposal is the
+/// one artefact the King is asked to read and judge in full, so it is the place
+/// where structure earns its keep most; the renderer was built for it.
 #[component]
 fn ProposalCard(
     proposal: Proposal,
@@ -1003,7 +1017,7 @@ fn ProposalCard(
             </div>
 
             <p class="proposal-title">{proposal.title}</p>
-            <pre class="proposal-body">{proposal.body}</pre>
+            <Prose text=proposal.body class="proposal-body"/>
 
             <div class="proposal-actions">
                 <button
