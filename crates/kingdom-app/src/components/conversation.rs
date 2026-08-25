@@ -6,7 +6,8 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    approve_plan, draft_plan, finish_plan, get_kingdom, say, set_aside_plan, stop_plan, unqueue,
+    approve_plan, draft_plan, finish_plan, get_kingdom, plan_briefing, say, set_aside_plan,
+    stop_plan, unqueue,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -443,6 +444,35 @@ fn ConversationBody(
     // user's direct control over whether Chrome is painting for an audience.
     let (watching, set_watching) = signal(false);
 
+    // The system prompt this plan's model is given, once it has been asked for.
+    // `None` means it has never been fetched: the panel opening is what fetches
+    // it, so a user who never asks pays nothing for the guidance walk that
+    // assembling one costs on the server.
+    let (briefing, set_briefing) = signal(None::<Result<String, String>>);
+    let (reading_orders, set_reading_orders) = signal(false);
+
+    let fetch_briefing = move || {
+        set_briefing.set(None);
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            let fetched = plan_briefing(plan_id.to_string())
+                .await
+                .map_err(|e| e.to_string());
+            set_briefing.set(Some(fetched));
+        });
+    };
+
+    // Escape closes it, as it closes every overlay. Registered once and gated
+    // inside rather than attached while the panel is open: a listener whose
+    // lifetime is tied to a `Show` has to be torn down from a branch that is no
+    // longer rendering, which is how a stray handler outlives its view.
+    let escape = window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" && reading_orders.get_untracked() {
+            set_reading_orders.set(false);
+        }
+    });
+    on_cleanup(move || escape.remove());
+
     // How wide the panel is, in pixels. A plain local signal rather than
     // something on `KingdomState`: like the rail's collapse set, it is a view
     // preference and nothing outside this view reads it.
@@ -575,6 +605,27 @@ fn ConversationBody(
                         on:click=move |_| set_watching.update(|w| *w = !*w)
                     >
                         "\u{1F50D}"
+                    </button>
+                    // What the court was told before it was asked anything. The
+                    // transcript carries every word since; this is the one text
+                    // that shaped all of them and is otherwise invisible.
+                    <button
+                        class="orders-toggle"
+                        class:open=move || reading_orders.get()
+                        title="Read the standing orders this plan was given"
+                        on:click=move |_| {
+                            let opening = !reading_orders.get_untracked();
+                            set_reading_orders.set(opening);
+                            // Refetched on every open rather than kept: the
+                            // permissions widen on approval and an AGENTS.md can
+                            // be edited under a running plan, so a cached copy
+                            // would answer a diagnostic question with stale text.
+                            if opening {
+                                fetch_briefing();
+                            }
+                        }
+                    >
+                        "\u{1F4DC}"
                     </button>
                 </header>
 
@@ -805,6 +856,57 @@ fn ConversationBody(
                             </ul>
                         </div>
                     </Show>
+                </Show>
+                // An overlay rather than a third column: the spyglass already
+                // owns the space beside the transcript, and this is read once
+                // and dismissed rather than watched alongside the work.
+                <Show when=move || reading_orders.get()>
+                    <div
+                        class="orders-backdrop"
+                        on:click=move |_| set_reading_orders.set(false)
+                    >
+                        // Stopped here so a click *inside* the panel -- selecting
+                        // the text, most likely -- does not dismiss it.
+                        <div class="orders-panel" on:click=|ev| ev.stop_propagation()>
+                            <header class="orders-head">
+                                <h2>"The standing orders"</h2>
+                                <p class="orders-note">
+                                    "What the court is told before it is asked anything, \
+                                     as it would be assembled now."
+                                </p>
+                                <button
+                                    class="orders-close"
+                                    title="Close"
+                                    on:click=move |_| set_reading_orders.set(false)
+                                >
+                                    "\u{00d7}"
+                                </button>
+                            </header>
+                            {move || match briefing.get() {
+                                // Deliberately a `<pre>` and not `Prose`: this is
+                                // the literal text sent to the model, and
+                                // rendering its markdown would hide the very
+                                // structure -- the tags, the block order -- that
+                                // a reader opens this to check.
+                                Some(Ok(text)) => view! {
+                                    <pre class="orders-text">{text}</pre>
+                                }
+                                .into_any(),
+                                // Reported in the panel rather than through
+                                // `state.error`, which belongs to the composer.
+                                Some(Err(e)) => view! {
+                                    <p class="orders-failed">
+                                        "The orders could not be read: " {e}
+                                    </p>
+                                }
+                                .into_any(),
+                                None => view! {
+                                    <p class="orders-waiting">"Fetching the orders\u{2026}"</p>
+                                }
+                                .into_any(),
+                            }}
+                        </div>
+                    </div>
                 </Show>
             </div>
 

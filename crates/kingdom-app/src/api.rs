@@ -1729,6 +1729,52 @@ pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
     Ok(crate::llm::catalogue::catalogue().await)
 }
 
+/// The system prompt a plan's model is given, rendered exactly as a turn would
+/// send it.
+///
+/// Goes through the same [`crate::llm::SystemPrompt::assemble`] and `render`
+/// that [`converse`] uses, with the plan's own workspace, permissions and
+/// approval. A second rendering path would drift from the real one the first
+/// time either was touched, and showing the user a prompt the model never
+/// received is worse than showing nothing.
+///
+/// Derived on demand rather than stored on the plan: the text is a function of
+/// the plan, the city on disk and every `AGENTS.md` found on the way up, so a
+/// copy frozen into `plans/<id>.json` would grow every write and go stale.
+///
+/// **This is the prompt as it would be assembled *now*.** A plan approved since
+/// its last turn shows the widened permissions -- the honest answer to what the
+/// next round will be told, rather than what the first round read.
+#[server(PlanBriefing, "/api")]
+pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
+    use crate::llm::{CityBrief, SystemPrompt};
+
+    let plan_id = PlanId::new(plan);
+    let kingdom = lock()?;
+
+    let Some(plan) = kingdom.plan(&plan_id) else {
+        return Err(ServerFnError::new("That plan is no longer in the records."));
+    };
+    let Some(city) = kingdom.city(&plan.city) else {
+        return Err(ServerFnError::new("That plan's city is gone."));
+    };
+
+    // Briefed on the workspace the plan actually holds, exactly as `draft_plan`
+    // does -- an isolated plan's prompt names files in its worktree, and a
+    // viewer showing the city's checkout instead would be quietly wrong.
+    let brief = CityBrief::from_city(city, &plan.workspace);
+    let root = std::path::PathBuf::from(&kingdom.root);
+
+    Ok(SystemPrompt::assemble(
+        &brief,
+        &plan.workspace,
+        plan.permissions,
+        plan.approved_proposal().is_some(),
+        &root,
+    )
+    .render())
+}
+
 /// A suggested starting folder, so the user is not typing a path from scratch.
 #[server(SuggestRoot, "/api")]
 pub async fn suggest_root() -> Result<String, ServerFnError> {
@@ -1819,6 +1865,83 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The prompt viewer must show what the model is actually given.
+    ///
+    /// Its whole value is diagnostic: a viewer rendering a second, similar
+    /// prompt would answer "why did it do that?" with a text nothing was ever
+    /// told. This pins the two facts that make it the real one -- it is built
+    /// from the plan's own workspace, and it moves with the plan's permissions.
+    ///
+    /// One test rather than three because they share the process-global
+    /// kingdom, which the server function reaches through `lock()`: separate
+    /// tests would race each other for it.
+    #[tokio::test]
+    async fn the_prompt_shown_is_the_prompt_sent() {
+        use kingdom_core::{City, CityId, CityKind, ModelChoice, PlanId, Workspace};
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kingdom-briefing-{unique}"));
+        let city_path = root.join("testburg");
+        std::fs::create_dir_all(&city_path).unwrap();
+
+        let city = City {
+            id: CityId::new("c1"),
+            name: "testburg".into(),
+            path: "testburg".into(),
+            kind: CityKind::Rust,
+            file_count: 1,
+            has_git: false,
+            dirty_files: 0,
+            structure: None,
+        };
+        let mut plan = Plan::opened(
+            PlanId::new("plan-briefing"),
+            CityId::new("c1"),
+            "Read the tests",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place(city_path.to_string_lossy()),
+        );
+        plan.permissions = kingdom_core::Permissions::Propose;
+
+        {
+            let mut kingdom = lock().unwrap();
+            kingdom.name = "proving".into();
+            kingdom.root = root.to_string_lossy().to_string();
+            kingdom.cities = vec![city];
+            kingdom.plans = vec![plan.clone()];
+        }
+
+        let proposing = plan_briefing("plan-briefing".into()).await.unwrap();
+        assert!(
+            proposing.contains(&city_path.to_string_lossy().to_string()),
+            "the prompt must name the workspace the plan actually holds"
+        );
+
+        {
+            let mut kingdom = lock().unwrap();
+            plan.permissions = kingdom_core::Permissions::Full;
+            kingdom.insert(plan);
+        }
+        let working = plan_briefing("plan-briefing".into()).await.unwrap();
+
+        assert_ne!(
+            proposing, working,
+            "a plan that has gained its hands must not be shown a counsellor's \
+             remit -- the widened permissions are the thing a reader opens this \
+             to check"
+        );
+
+        assert!(
+            plan_briefing("plan-nowhere".into()).await.is_err(),
+            "an unknown plan is an error, not an empty prompt"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A kingdom is opened many times; its model is fabricated once.
