@@ -763,6 +763,59 @@ mod tests {
         );
     }
 
+    /// The draft dies with the checkout, which is why it must be read first.
+    ///
+    /// The whole timing constraint on filing a plan, pinned against real git
+    /// rather than argued for in a comment. `.kingdom/` is excluded from the
+    /// repository, so the draft is never committed and cannot be recovered from
+    /// the branch or the patch -- and `worktree remove --force` then deletes
+    /// it. Read before the disposal it survives; read after, it is gone.
+    ///
+    /// If this ever fails, `api::finish_plan` is filing nothing and every plan
+    /// archived without approval loses its document.
+    #[tokio::test]
+    async fn a_draft_is_destroyed_with_the_worktree_that_held_it() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        let workspace = prepare(root, &WorkspaceMode::Fresh, "tidy-the-sidebar")
+            .await
+            .unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+
+        let draft = worktree.join(crate::tools::propose_plan::DRAFT);
+        std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
+        std::fs::write(&draft, "# The plan\n\nWhat I would do.\n").unwrap();
+
+        // What `finish_plan` does, in the order it does it.
+        let kept = crate::tools::propose_plan::draft_body(&workspace)
+            .expect("the draft is readable while the worktree stands");
+
+        let patch_path = dir.path().join("archive").join("plan-1.patch");
+        archive(root, &workspace, &patch_path).await.unwrap();
+
+        assert!(
+            !draft.exists(),
+            "the draft goes with the checkout -- this is what filing exists to survive"
+        );
+        assert!(
+            crate::tools::propose_plan::draft_body(&workspace).is_none(),
+            "and there is nothing left to read afterwards"
+        );
+        assert!(
+            kept.contains("What I would do."),
+            "the copy read beforehand is the one that survives: {kept}"
+        );
+
+        // Not merely deleted -- never recoverable from git either, which is why
+        // reading it out is the only option.
+        let patch = std::fs::read_to_string(&patch_path).unwrap_or_default();
+        assert!(
+            !patch.contains("draft.md"),
+            "an excluded file is never committed, so the patch cannot carry it"
+        );
+    }
+
     /// The destructive edge of pruning: a plan working on a branch the user
     /// named is working on *his* branch, which almost certainly has a life
     /// beyond this plan. Tidying up after ourselves must never reach that far.

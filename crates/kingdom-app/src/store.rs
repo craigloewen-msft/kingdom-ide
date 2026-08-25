@@ -5,10 +5,18 @@
 //!
 //! ```text
 //! ~/.kingdom/kingdoms/<key>/
-//!   plans/<plan-id>.json      one document per plan
-//!   archive/<plan-id>.patch   the work an archived plan set aside
-//!   approved/<plan-id>.md     what the King agreed to
+//!   plans/<plan-id>.json             one document per plan, the read path
+//!   plans/<plan-id>--<slug>.md       the plan itself, as the court wrote it
+//!   archive/<plan-id>.patch          the work an archived plan set aside
 //! ```
+//!
+//! **Why the plan is a file beside its JSON.** The court drafts its plan to
+//! `.kingdom/draft.md` in its own worktree, and that checkout is deleted when
+//! the plan is merged or archived -- taking the draft with it, since
+//! `.kingdom/` is excluded from the repository and so never committed. So the
+//! draft is copied out here, once, at approval or at the end. See
+//! [`file_plan`]. It replaces an earlier `approved/<id>.md` ledger that held a
+//! second rendering of the same prose; one document is the point.
 //!
 //! **Why not in each project.** The rail and the map read every plan at once, so
 //! sharding them across cities would mean walking every repository on each load
@@ -38,9 +46,9 @@ use std::path::{Path, PathBuf};
 
 /// Where everything recorded for `root` is kept.
 ///
-/// The single seam between this module and the profile's layout: `plans_dir`,
-/// [`archive_patch`] and [`approved_plan`] all hang off it, so moving the
-/// records again is this one function.
+/// The single seam between this module and the profile's layout: `plans_dir`
+/// and [`archive_patch`] both hang off it, so moving the records again is this
+/// one function.
 fn state_dir(root: &Path) -> PathBuf {
     crate::profile::kingdom_dir(root)
 }
@@ -57,42 +65,69 @@ pub fn archive_patch(root: &Path, id: &PlanId) -> PathBuf {
     state_dir(root).join("archive").join(format!("{id}.patch"))
 }
 
-/// Where the record of an approved plan is kept.
+/// Where this plan's own document is filed.
 ///
-/// Markdown rather than JSON because this one is written for a person. Its
-/// neighbour `plans/<id>.json` is the machine's copy and the read path; this is
-/// the King's ledger of what he agreed to.
-pub fn approved_plan(root: &Path, id: &PlanId) -> PathBuf {
-    state_dir(root).join("approved").join(format!("{id}.md"))
+/// `plans/<plan-id>--<slug>.md`, beside the JSON of the same plan. Markdown
+/// because this one is written for a person: its neighbour `plans/<id>.json` is
+/// the machine's copy and the read path, and this is the plan itself, in the
+/// words the King read.
+///
+/// The id leads and the slug follows. Slugs are not unique -- two plans opened
+/// from similar decrees genuinely share one -- so the id is what makes the name
+/// unambiguous, and the slug is what makes it readable in `ls`. It is the same
+/// slug the plan's branch was cut from, so `plan-12--tidy-the-sidebar.md` sits
+/// beside `kingdom/tidy-the-sidebar`.
+///
+/// A plan recorded before slugs existed has an empty one (`#[serde(default)]`),
+/// and falls back to plain `<plan-id>.md` rather than growing a trailing `--`.
+pub fn filed_plan(root: &Path, plan: &Plan) -> PathBuf {
+    let name = match plan.slug.trim() {
+        "" => format!("{}.md", plan.id),
+        slug => format!("{}--{slug}.md", plan.id),
+    };
+    plans_dir(root).join(name)
 }
 
-/// Records a plan at the moment the user approved it.
+/// Files a plan's own document, from the draft the court wrote.
 ///
-/// # Why this is not already covered by `plans/<id>.json`
+/// # Why the plan is filed at all
 ///
-/// That document is the plan as it is *now*, rewritten on every update -- and a
-/// plan keeps moving after approval. Revisions replace the standing proposal,
-/// the transcript grows, the status settles, and archiving may eventually take
-/// the whole thing away. None of that is wrong, but it means the JSON cannot
-/// answer "what exactly did I agree to, and when?" once the plan has moved on.
+/// The court writes its plan to `.kingdom/draft.md` inside its worktree and
+/// revises it there as it works -- that file is the plan, and
+/// [`crate::tools::propose_plan`] explains why it has to be a file rather than
+/// an argument. But `.kingdom/` is excluded from the repository and
+/// `git worktree remove` deletes it, so without this the one document the court
+/// actually wrote is the one thing that does not survive.
 ///
-/// This can, because it is written once and never touched again. Approval is
-/// the one moment in a plan's life where the user commits to something, so it
-/// is the one worth freezing: the proposal as it read when he pressed the
-/// button, the decree that led to it, and the branch the work will land on.
+/// So it is copied out, once, into the kingdom's records. `body` is the draft's
+/// own bytes rather than `proposal.body` re-rendered: they are the same words,
+/// and reading the file keeps this honest about which copy is the original.
 ///
-/// Write-once is enforced rather than assumed. A second approval of the same
-/// plan -- a stale tab, a revised proposal accepted twice -- must not overwrite
-/// the first record, or the ledger silently loses the entry it exists to keep.
-pub fn record_approval(root: &Path, plan: &Plan) -> std::io::Result<PathBuf> {
-    let Some(proposal) = plan.proposal.as_ref() else {
+/// # Why here rather than in the user's repository
+///
+/// Phoenix keeps its task files in the project and commits them. That is the
+/// part deliberately not copied: a plan is Kingdom's bookkeeping about the
+/// user's project, not the project's own content, and
+/// [`crate::profile`] made that call for every other record already.
+///
+/// # Write-once
+///
+/// Enforced rather than assumed. A plan is filed at approval and *again* when
+/// it is merged or archived, because a plan can end without ever having been
+/// approved -- so the second call is the ordinary case, not the exceptional
+/// one, and it must not overwrite what the King actually agreed to with
+/// whatever the draft says by the end. After approval the court holds an
+/// unrestricted `patch` and could rewrite the draft freely; filing at the
+/// moment of the grant is what puts the agreed text safely on disk first.
+pub fn file_plan(root: &Path, plan: &Plan, body: &str) -> std::io::Result<PathBuf> {
+    if body.trim().is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "a plan with no proposal cannot have been approved",
+            "a plan with an empty draft has nothing to file",
         ));
-    };
+    }
 
-    let path = approved_plan(root, &plan.id);
+    let path = filed_plan(root, plan);
     if path.exists() {
         return Ok(path);
     }
@@ -101,11 +136,9 @@ pub fn record_approval(root: &Path, plan: &Plan) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "# {}", proposal.title);
-    let _ = writeln!(out);
     let _ = writeln!(out, "- **Plan**: `{}`", plan.id);
     let _ = writeln!(out, "- **City**: {}", plan.city);
-    let _ = writeln!(out, "- **Approved**: {}", stamp(proposal.at));
+    let _ = writeln!(out, "- **Filed**: {}", stamp(filed_at(plan)));
     let _ = writeln!(out, "- **Model**: {}{}", plan.model, effort(plan));
     let _ = writeln!(out, "- **Workspace**: `{}`", plan.workspace.path);
     if let Some(branch) = &plan.workspace.branch {
@@ -118,18 +151,29 @@ pub fn record_approval(root: &Path, plan: &Plan) -> std::io::Result<PathBuf> {
         let _ = writeln!(out, "> {line}");
     }
     let _ = writeln!(out);
-    let _ = writeln!(out, "## The plan, as approved");
-    let _ = writeln!(out);
-    out.push_str(proposal.body.trim());
+
+    // The draft last and whole, including its own `# H1` -- which `propose_plan`
+    // has already refused a draft for lacking, so the document is titled by the
+    // court's own headline rather than by anything invented here.
+    out.push_str(body.trim());
     out.push('\n');
 
     // Same temp-then-rename as `save`: a reader must never catch this file
-    // half-written, and the ledger is exactly the thing nobody re-derives.
-    let tmp = dir.join(format!(".{}.tmp", plan.id));
+    // half-written, and this is exactly the thing nobody re-derives.
+    let tmp = dir.join(format!(".{}.md.tmp", plan.id));
     std::fs::write(&tmp, out.as_bytes())?;
     std::fs::rename(&tmp, &path)?;
 
     Ok(path)
+}
+
+/// When to say the plan was filed.
+///
+/// The proposal's own timestamp when there is one, because that is the moment
+/// the plan was put to the King and the moment the words were fixed. `None`
+/// falls through to [`stamp`]'s marker for a plan filed having never proposed.
+fn filed_at(plan: &Plan) -> Option<kingdom_core::Timestamp> {
+    plan.proposal.as_ref().and_then(|p| p.at)
 }
 
 /// A timestamp as a person reads it, or a plain marker when there is none.
@@ -393,14 +437,14 @@ mod tests {
         )
     }
 
-    /// The ledger keeps what the King agreed to, in the words he read.
+    /// The filed plan carries the court's own draft, not a re-rendering of it.
     ///
-    /// The plan's own JSON cannot answer this later: it is rewritten on every
-    /// update, so a revision after approval replaces the proposal and the
-    /// original terms are gone. This pins that the record carries the decree,
-    /// the approved body, and where the work will land.
+    /// This is the document that outlives the worktree: the draft file is
+    /// deleted with the checkout, so if it is not copied out here the one thing
+    /// the court actually wrote is gone. Pins that the draft's own words are
+    /// what lands, along with the decree and where the work was done.
     #[test]
-    fn an_approved_plan_is_written_down_for_the_king() {
+    fn a_plan_is_filed_from_the_draft_the_court_wrote() {
         let (_dir, _profile, root) = kingdom();
         let root = root.as_path();
 
@@ -408,51 +452,99 @@ mod tests {
         p.propose("Remember the folder", "# Remember the folder\n\nStore the root.");
         assert!(p.approve());
 
-        let path = record_approval(root, &p).expect("the ledger entry is written");
+        let path = file_plan(root, &p, "# Remember the folder\n\nStore the root.\n")
+            .expect("the plan is filed");
         let body = std::fs::read_to_string(&path).unwrap();
 
-        assert!(path.starts_with(state_dir(root).join("approved")), "{path:?}");
+        // Beside the JSON, named so a person can read it in `ls`.
+        assert!(path.starts_with(plans_dir(root)), "{path:?}");
+        assert_eq!(
+            path.file_name().unwrap(),
+            format!("plan-1--{}.md", p.slug).as_str(),
+            "the id makes it unique and the slug makes it readable"
+        );
+
         assert!(body.contains("Remember the folder"), "{body}");
-        assert!(body.contains("Store the root."), "the approved plan itself: {body}");
+        assert!(body.contains("Store the root."), "the plan itself: {body}");
         assert!(body.contains("Do the thing"), "the decree that led to it: {body}");
         assert!(body.contains("plan-1") && body.contains("testburg"), "{body}");
     }
 
-    /// Approving twice must not rewrite the first entry.
+    /// A plan whose record predates slugs is still filed, under a plain name.
     ///
-    /// Reachable without doing anything strange: a stale tab, or a proposal
-    /// revised and accepted again. The ledger's whole value is that an entry,
-    /// once written, still says what it said -- so the second approval is a
-    /// no-op rather than an overwrite.
+    /// `slug` is `#[serde(default)]`, so an older record genuinely has an empty
+    /// one. Without this the filename would grow a trailing `--`.
     #[test]
-    fn the_first_approval_is_the_one_that_is_kept() {
+    fn a_plan_without_a_slug_is_filed_under_its_id_alone() {
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
+
+        let mut p = plan("plan-4");
+        p.slug = String::new();
+
+        let path = file_plan(root, &p, "# Untitled\n\nWords.\n").unwrap();
+        assert_eq!(path.file_name().unwrap(), "plan-4.md");
+    }
+
+    /// Filing twice must not rewrite the first document.
+    ///
+    /// The ordinary path, not an exotic one: a plan is filed when the King
+    /// approves it and *again* when it is merged or archived. Between those two
+    /// moments the court holds an unrestricted `patch` and can rewrite its own
+    /// draft freely -- so without write-once, finishing a plan would replace
+    /// what the King agreed to with whatever the draft happened to say at the
+    /// end.
+    #[test]
+    fn the_first_filing_is_the_one_that_is_kept() {
         let (_dir, _profile, root) = kingdom();
         let root = root.as_path();
 
         let mut p = plan("plan-2");
         p.propose("First terms", "# First terms\n\nAs originally agreed.");
         assert!(p.approve());
-        record_approval(root, &p).unwrap();
+        file_plan(root, &p, "# First terms\n\nAs originally agreed.\n").unwrap();
 
-        // The court revises, and the King accepts again.
-        p.propose("Second terms", "# Second terms\n\nSomething else entirely.");
-        assert!(p.approve());
-        let path = record_approval(root, &p).unwrap();
+        // The court rewrites its draft, and the plan is finished.
+        let path = file_plan(root, &p, "# Second terms\n\nSomething else entirely.\n").unwrap();
 
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("As originally agreed."), "{body}");
         assert!(
             !body.contains("Something else entirely."),
-            "a later approval must not rewrite the record of the first: {body}"
+            "a later filing must not rewrite the first: {body}"
         );
     }
 
-    /// A plan with nothing standing cannot have been approved, and saying so
-    /// beats writing a record with an empty body in it.
+    /// A plan that never drafted has nothing to file, and saying so beats
+    /// writing a document with nothing in it.
     #[test]
-    fn a_plan_with_no_proposal_records_nothing() {
+    fn an_empty_draft_files_nothing() {
         let (_dir, _profile, root) = kingdom();
-        assert!(record_approval(&root, &plan("plan-3")).is_err());
+        assert!(file_plan(&root, &plan("plan-3"), "   \n").is_err());
+        assert!(!filed_plan(&root, &plan("plan-3")).exists());
+    }
+
+    /// A filed plan sits in `plans/` beside the JSON, and must not be mistaken
+    /// for one.
+    ///
+    /// `load` filters on the `json` extension, which is what makes it safe to
+    /// put the markdown in the same directory rather than inventing another.
+    /// If that filter ever loosened, every filed plan would come back as an
+    /// unparseable record.
+    #[test]
+    fn a_filed_plan_is_not_loaded_as_a_record() {
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
+
+        let p = plan("plan-1");
+        save(root, &p).unwrap();
+        file_plan(root, &p, "# The plan\n\nWhat I would do.\n").unwrap();
+
+        assert_eq!(
+            load(root),
+            vec![p],
+            "the markdown beside the JSON must be ignored by the loader"
+        );
     }
 
     /// A plan owns a worktree with commits in it, so forgetting a plan orphans

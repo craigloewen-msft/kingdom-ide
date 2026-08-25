@@ -43,6 +43,19 @@
 //! because the draft lives under `.kingdom/`, which `worktree.rs` already
 //! excludes from the repository.
 //!
+//! # Where the draft ends up
+//!
+//! The draft is not scratch. It is *the* plan document, and it outlives the
+//! checkout it was written in: [`crate::store::file_plan`] copies it into the
+//! kingdom's records at approval, and again at merge or archive for a plan that
+//! was never approved. See [`draft_path`] and [`draft_body`], which are how the
+//! two callers reach it.
+//!
+//! The timing is forced rather than chosen. `.kingdom/` is in the repository's
+//! `.git/info/exclude`, so the draft is never committed, and
+//! `git worktree remove --force` deletes it with the checkout -- which makes
+//! "before the worktree goes" the last moment the file exists at all.
+//!
 //! **One way to do it.** There is no inline form to fall back to. Two ways to
 //! propose would let the model skip the drafting step that is the whole point of
 //! this change, and would need prose telling it which to prefer -- which is
@@ -74,6 +87,60 @@ use serde_json::{json, Value};
 /// this plan's one plan; letting it choose where to put it would reintroduce the
 /// deliberation this change exists to remove.
 pub const DRAFT: &str = ".kingdom/draft.md";
+
+/// Where this plan's draft actually is on disk.
+///
+/// [`DRAFT`] is relative to a workspace, and two callers outside this module --
+/// approving a plan and finishing one -- need it joined onto a real one so they
+/// can read the draft before the worktree goes. Joining it here rather than in
+/// each of them keeps one piece of knowledge in one place: the constant and the
+/// way to resolve it travel together.
+///
+/// Deliberately *not* [`Sandbox::resolve`]: the callers are Kingdom's own code
+/// working from a workspace it recorded itself, not a path a model named, so
+/// there is nothing to bound.
+pub fn draft_path(workspace: &kingdom_core::Workspace) -> std::path::PathBuf {
+    std::path::Path::new(&workspace.path).join(DRAFT)
+}
+
+/// This plan's draft, if it wrote one worth keeping.
+///
+/// `None` for a plan that never drafted, and for an empty or whitespace-only
+/// file. Both are ordinary rather than exceptional -- a plan can be archived
+/// having never proposed at all -- so this reports absence rather than an error,
+/// and the caller files nothing.
+pub fn draft_body(workspace: &kingdom_core::Workspace) -> Option<String> {
+    let body = std::fs::read_to_string(draft_path(workspace)).ok()?;
+    (!body.trim().is_empty()).then_some(body)
+}
+
+/// Clears away the draft of a plan that has ended, where nothing else will.
+///
+/// Only for a workspace that is **not** isolated. An isolated plan's draft is
+/// inside its worktree and is destroyed with it, so there is nothing to do; a
+/// plan working *in place* has no teardown at all, and its draft would be left
+/// behind in the user's own project folder -- the one place Kingdom promises
+/// not to leave files of its own.
+///
+/// The caller must have filed the plan first. This deletes the only remaining
+/// copy, so calling it after a failed filing would destroy the document the
+/// filing exists to keep.
+///
+/// A failure is reported and swallowed: a leftover file the King can delete is
+/// a far smaller problem than an ending that fails over one.
+pub fn discard_draft(workspace: &kingdom_core::Workspace) {
+    if workspace.is_isolated() {
+        return;
+    }
+
+    let path = draft_path(workspace);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        // Never written, or already gone. Nothing to report.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => leptos::logging::warn!("could not remove {}: {e}", path.display()),
+    }
+}
 
 /// What the tool reports when a proposal is accepted for review.
 ///
@@ -350,5 +417,46 @@ mod tests {
 
         assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
         assert!(proposed(&json!({ "draft": DRAFT }), &shop).is_none());
+    }
+
+    /// An in-place plan's draft is cleared away; an isolated one's is not
+    /// touched here.
+    ///
+    /// The asymmetry is the whole point. An isolated plan's draft is inside its
+    /// worktree and `git worktree remove` destroys it, so reaching for it here
+    /// would be redundant. A plan working *in place* has no teardown at all --
+    /// without this its draft is left behind in the user's own project folder,
+    /// which is exactly what putting the draft under `.kingdom/` was meant to
+    /// avoid.
+    #[test]
+    fn only_an_in_place_plan_has_its_draft_cleared_away() {
+        let dir = tempfile::tempdir().unwrap();
+        draft(dir.path(), "# Done\n\nIt landed.\n");
+        let here = dir.path().join(DRAFT);
+
+        // Isolated: this is the worktree's business, and it has already dealt
+        // with it. Touching the file here would be reaching into a checkout
+        // that no longer exists.
+        let isolated = Workspace {
+            mode: kingdom_core::WorkspaceMode::Fresh,
+            path: dir.path().to_string_lossy().into_owned(),
+            branch: Some("kingdom/done".into()),
+            id: Some("abc".into()),
+            base: Some("main".into()),
+        };
+        assert!(isolated.is_isolated());
+        discard_draft(&isolated);
+        assert!(here.exists(), "an isolated plan's draft is not this function's");
+
+        // In place: nothing else will ever remove it.
+        let in_place = Workspace::in_place(dir.path().to_str().unwrap());
+        discard_draft(&in_place);
+        assert!(
+            !here.exists(),
+            "an in-place plan's draft must not be left in the user's project"
+        );
+
+        // And a plan that never drafted is not an error to clear up after.
+        discard_draft(&in_place);
     }
 }

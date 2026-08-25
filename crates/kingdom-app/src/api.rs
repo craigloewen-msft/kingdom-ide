@@ -1752,25 +1752,39 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
         // agent gained the ability to change his files -- and see it in the log
         // rather than only in a header that reflects the present.
         //
-        // The ledger entry is written in the same breath, at the one moment it
-        // is unambiguously true. `plans/<id>.json` keeps changing as the plan
-        // works; that record does not -- see `store::record_approval`. Doing it
-        // inside this closure means there is no path that widens the
-        // permissions without also writing the record.
-        match crate::store::record_approval(&root, p) {
+        // The plan is filed in the same breath, at the one moment it is
+        // unambiguously true. Doing it inside this closure means there is no
+        // path that widens the permissions without also filing the document.
+        //
+        // The timing matters beyond tidiness: from the next line onward the
+        // court holds an unrestricted `patch` and could rewrite its own draft.
+        // Filing here is what puts the text the King actually read safely on
+        // disk before that becomes possible -- and `file_plan` is write-once,
+        // so the copy made now is the copy that survives.
+        match crate::tools::propose_plan::draft_body(&p.workspace)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "this plan's draft is missing or empty",
+                )
+            })
+            .and_then(|body| crate::store::file_plan(&root, p, &body))
+        {
             Ok(path) => {
-                let kept = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
                 p.note(
                     NoteKind::Workspace,
                     format!(
                         "Approved. The court may now change the project. \
-                         Recorded at {kept}."
+                         Filed at {}.",
+                        path.display()
                     ),
                 );
             }
             // The approval stands: the King said yes and the permissions
             // widened. Refusing that over a bookkeeping failure would be the
             // worse outcome, so this reports the loss the way `remember` does.
+            // Finishing the plan tries again, so a draft that is merely
+            // unreadable right now is not necessarily lost for good.
             Err(e) => {
                 p.note(
                     NoteKind::Workspace,
@@ -1779,9 +1793,8 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
                 p.note(
                     NoteKind::Failed,
                     format!(
-                        "Could not record this approval under {}: {e}. The plan is \
-                         approved regardless; only the ledger entry was lost.",
-                        root.display()
+                        "Could not file this plan's document: {e}. The plan is \
+                         approved regardless; only the filed copy was lost."
                     ),
                 );
             }
@@ -1876,6 +1889,17 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         )
     };
 
+    // Read before the disposal, because the disposal is what destroys it:
+    // `worktree remove --force` takes `.kingdom/draft.md` with the checkout, and
+    // the draft was never committed to be recoverable from the branch. This is
+    // the last moment the plan's own document exists.
+    //
+    // Read unconditionally, even for a merge that git may refuse. Holding a few
+    // kilobytes that turn out not to be needed costs nothing; discovering after
+    // a successful teardown that the file should have been read costs the
+    // document.
+    let draft = crate::tools::propose_plan::draft_body(&workspace);
+
     let finish = match how {
         Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
         Disposition::Archive => {
@@ -1893,8 +1917,37 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     }
 
     let mut kingdom = lock()?;
-    update(&mut kingdom, &plan_id, |p| match finish {
+    let mut filed = false;
+    let plan = update(&mut kingdom, &plan_id, |p| match finish {
         Finish::Settled(outcome) => {
+            // The plan's document outlives the checkout it was written in.
+            // Usually this is a no-op -- `file_plan` is write-once and an
+            // approved plan was filed at the moment of the grant -- but a plan
+            // archived while still awaiting review, or set aside and then
+            // archived, was never approved and is filed here for the first and
+            // only time. That is the case this exists for.
+            //
+            // A plan that never drafted files nothing, and that is not a
+            // failure: it is what an abandoned plan looks like.
+            if let Some(body) = &draft {
+                match crate::store::file_plan(&root, p, body) {
+                    Ok(path) => {
+                        filed = true;
+                        p.note(
+                            NoteKind::Merge,
+                            format!("Plan filed at {}.", path.display()),
+                        );
+                    }
+                    // Reported rather than fatal, exactly as at approval: the
+                    // work has already landed and cannot be un-landed over a
+                    // bookkeeping failure.
+                    Err(e) => p.note(
+                        NoteKind::Failed,
+                        format!("Could not file this plan's document: {e}."),
+                    ),
+                }
+            }
+
             p.note(NoteKind::Merge, outcome.summary());
             p.settle(outcome);
         }
@@ -1902,7 +1955,22 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         // does either: it is still awaiting review, because it is.
         Finish::Refused(why) => p.note(NoteKind::Merge, why),
     })
-    .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
+    .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))?;
+
+    // A plan working *in place* has no worktree to tear down, so nothing has
+    // removed its draft -- it would be left sitting in the user's own project
+    // folder. `discard_draft` is a no-op for an isolated plan, whose whole
+    // checkout is already gone.
+    //
+    // Guarded on the filing having actually succeeded, because this deletes the
+    // only remaining copy. If filing failed, the draft stays exactly where it
+    // is and the note above says why -- a file the King has to tidy up himself
+    // is a far better outcome than a plan deleted twice over.
+    if filed {
+        crate::tools::propose_plan::discard_draft(&workspace);
+    }
+
+    Ok(plan)
 }
 
 /// Every model the user can choose between, and what each will accept.
@@ -2301,6 +2369,69 @@ mod tests {
             "a plan the user has just spoken to must not still look busy, or \
              `draft_plan` will refuse to start it"
         );
+    }
+
+    /// A plan is filed once, whichever way it ends.
+    ///
+    /// The two moments a plan can be filed -- approval, and merge or archive --
+    /// meeting in the one outcome that matters: exactly one document, holding
+    /// what the King agreed to. Approving and then merging must not file twice,
+    /// and a plan that ends without ever being approved must still be filed.
+    ///
+    /// Tested through `store::file_plan` in the order `api` calls it, rather
+    /// than through `finish_plan` itself, which needs a git repository, a
+    /// scanned kingdom and a process-global lock to reach -- the same reason
+    /// the subagent guard above is tested through its predicate. What the git
+    /// work does to the draft is pinned in `worktree.rs`.
+    #[test]
+    fn a_plan_is_filed_once_however_it_ends() {
+        use crate::profile::testing::Profile;
+        use kingdom_core::PlanId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let _profile = Profile::at(&dir.path().join("profile"));
+        let root = dir.path().join("dev");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Approved, then merged: the King's terms are filed at the grant, and
+        // finishing finds the document already there. The draft has moved on in
+        // between, because after approval the court may rewrite it freely.
+        let mut approved = a_plan();
+        approved.propose("The terms", "# The terms\n\nAs agreed.");
+        assert!(approved.approve());
+
+        crate::store::file_plan(&root, &approved, "# The terms\n\nAs agreed.\n").unwrap();
+        let path = crate::store::file_plan(&root, &approved, "# Drifted\n\nSomething else.\n")
+            .unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("As agreed."), "{body}");
+        assert!(
+            !body.contains("Something else."),
+            "finishing must not overwrite what the King approved: {body}"
+        );
+
+        // Archived having never been approved: nothing filed it earlier, so
+        // this is its first and only filing. Without it the plan's document
+        // would be lost entirely.
+        let mut abandoned = a_plan();
+        abandoned.id = PlanId::new("plan-2");
+        abandoned.propose("Never accepted", "# Never accepted\n\nSet aside.");
+
+        assert!(!crate::store::filed_plan(&root, &abandoned).exists());
+        let path =
+            crate::store::file_plan(&root, &abandoned, "# Never accepted\n\nSet aside.\n").unwrap();
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("Set aside."),
+            "a plan that ended without approval is still worth keeping"
+        );
+
+        // And a plan that never drafted files nothing, rather than an empty
+        // document -- what an abandoned plan legitimately looks like.
+        let mut silent = a_plan();
+        silent.id = PlanId::new("plan-3");
+        assert!(crate::store::file_plan(&root, &silent, "").is_err());
+        assert!(!crate::store::filed_plan(&root, &silent).exists());
     }
 
     /// The guard with the largest blast radius in the codebase.

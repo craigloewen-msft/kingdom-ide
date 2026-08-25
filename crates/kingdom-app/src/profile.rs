@@ -9,8 +9,9 @@
 //!   kingdoms/<key>/
 //!     kingdom.json              which root this folder is for
 //!     plans/<id>.json           (see `store.rs`)
+//!     plans/<id>--<slug>.md     the plan itself, filed when its worktree goes
 //!     archive/<id>.patch
-//!     approved/<id>.md
+//!     approved/<id>.md          retired; still migrated, no longer written
 //!   realms/<name>/              proving grounds (see `mock.rs`)
 //! ```
 //!
@@ -181,7 +182,12 @@ pub fn forget_kingdom() {
     }
 }
 
-/// Folders that used to live under `<kingdom_root>/.kingdom/`.
+/// Folders brought forward from a kingdom's own root.
+///
+/// `approved` is kept although nothing writes it any more: the plan document is
+/// now filed into `plans/` (see [`crate::store::file_plan`]). An older kingdom
+/// may still have entries there and they are the King's record of what he
+/// agreed to, so they are migrated rather than stranded.
 const MIGRATED: [&str; 3] = ["plans", "archive", "approved"];
 
 /// Brings an older kingdom's records into the profile, once.
