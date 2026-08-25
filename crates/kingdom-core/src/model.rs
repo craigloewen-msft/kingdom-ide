@@ -1181,6 +1181,53 @@ impl ToolCall {
             _ => &[],
         }
     }
+
+    /// What this call left on disk that the *user* could look at.
+    ///
+    /// The counterpart to [`ToolCall::shown`], and deliberately not the same
+    /// accessor: that one feeds a model for one turn and is dropped on save,
+    /// this one feeds the conversation and outlives the process. See
+    /// [`ToolArtifact`].
+    pub fn artifacts(&self) -> &[ToolArtifact] {
+        match &self.outcome {
+            Some(ToolOutcome::Done { artifacts, .. }) => artifacts,
+            _ => &[],
+        }
+    }
+}
+
+/// A file a tool produced that is worth looking at.
+///
+/// A path rather than the bytes, and that is the whole design. The file is
+/// already in the plan's workspace, so naming it keeps a plan's record small
+/// enough to rewrite on every update -- which is what [`ToolImage`] cannot be,
+/// and why `store.rs` drops those and keeps these.
+///
+/// The two channels answer different questions. `images` is *what the model
+/// was shown*, true for one turn. This is *what the work left behind*, true
+/// for as long as the file exists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolArtifact {
+    /// Where the file is, relative to the plan's workspace.
+    ///
+    /// Relative because an absolute path is a fact about one machine, and this
+    /// is written into a record that outlives it -- and because a viewer
+    /// resolves it against the plan's own workspace, which is the only
+    /// boundary that makes serving it safe.
+    pub path: String,
+    /// `image/png`, `image/jpeg`, and so on.
+    pub media_type: String,
+}
+
+impl ToolArtifact {
+    /// True when this is something a conversation could render inline.
+    ///
+    /// Artifacts are not all pictures -- a tool that saves a JSON payload may
+    /// reasonably name it -- and the view needs to tell them apart without
+    /// parsing paths.
+    pub fn is_image(&self) -> bool {
+        self.media_type.starts_with("image/")
+    }
 }
 
 /// An image a tool produced, for a model with eyes.
@@ -1221,6 +1268,16 @@ pub enum ToolOutcome {
         /// written after is not littered with `"images": []`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ToolImage>,
+        /// Files the tool left in the workspace that are worth looking at.
+        ///
+        /// Named, not carried: see [`ToolArtifact`]. This is the channel the
+        /// *conversation* reads, so unlike `images` it survives being written
+        /// to disk -- a screenshot the user was shown must still be there when
+        /// he reloads the plan tomorrow.
+        ///
+        /// Skipped on the wire when empty, on the same terms as `images`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifacts: Vec<ToolArtifact>,
     },
     /// The tool would not run: unknown name, unparseable arguments, or a path
     /// outside the workspace.
@@ -1237,6 +1294,7 @@ impl ToolOutcome {
         ToolOutcome::Done {
             output: output.into(),
             images: Vec::new(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -1248,6 +1306,36 @@ impl ToolOutcome {
         ToolOutcome::Done {
             output: output.into(),
             images,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// A tool that ran and left something behind worth looking at.
+    ///
+    /// Sibling of [`ToolOutcome::seen`], and the distinction is the point: that
+    /// one hands a picture to the model, this one tells the conversation where
+    /// a file is. A tool that does both -- `read_image` -- says both.
+    pub fn produced(output: impl Into<String>, artifacts: Vec<ToolArtifact>) -> Self {
+        ToolOutcome::Done {
+            output: output.into(),
+            images: Vec::new(),
+            artifacts,
+        }
+    }
+
+    /// The same outcome, additionally naming what it left on disk.
+    ///
+    /// For the one caller that has both: `read_image` hands the model the
+    /// bytes *and* names the file, so the King sees the picture the court was
+    /// looking at rather than a line saying it looked.
+    pub fn leaving(self, artifacts: Vec<ToolArtifact>) -> Self {
+        match self {
+            ToolOutcome::Done { output, images, .. } => ToolOutcome::Done {
+                output,
+                images,
+                artifacts,
+            },
+            refused => refused,
         }
     }
 
@@ -1264,9 +1352,17 @@ impl ToolOutcome {
     ///
     /// For the write path: a plan's record on disk keeps what was said about an
     /// image, not the image. See the note in `store.rs`.
+    ///
+    /// **Artifacts are kept.** They are paths, not payloads -- a handful of
+    /// bytes each, and the only thing that lets a reloaded conversation show a
+    /// screenshot again. Dropping them here would silently undo the feature
+    /// they exist for, which is why they are named rather than falling out of
+    /// a `..` pattern.
     pub fn without_images(self) -> Self {
         match self {
-            ToolOutcome::Done { output, .. } => ToolOutcome::done(output),
+            ToolOutcome::Done {
+                output, artifacts, ..
+            } => ToolOutcome::produced(output, artifacts),
             refused => refused,
         }
     }
@@ -2204,6 +2300,130 @@ mod transcript_tests {
             plan.turns().count(),
             1,
             "the note is still excluded, and nothing invented a deed that never happened"
+        );
+    }
+
+    /// A plan recorded before tool calls could name what they left behind must
+    /// still load, and must not sprout artifacts nobody wrote.
+    ///
+    /// Same reasoning as the record above, and worth its own test for the same
+    /// reason: `#[serde(default)]` *should* make the field additive, but
+    /// "should" and "does" are different claims and the cost of being wrong is
+    /// a kingdom that will not open.
+    #[test]
+    fn a_plan_recorded_before_artifacts_existed_still_loads() {
+        let before_artifacts = r#"{
+            "id": "plan-old",
+            "city": "c1",
+            "title": "An older plan",
+            "summary": "",
+            "prompt": "Look at the page",
+            "model": "mock",
+            "effort": null,
+            "transcript": [
+                { "Tool": {
+                    "id": "call-1",
+                    "tool": "browser_take_screenshot",
+                    "input": {},
+                    "outcome": { "Done": { "output": "Screenshot saved to /tmp/a.png." } },
+                    "at": 1
+                } }
+            ],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan =
+            serde_json::from_str(before_artifacts).expect("an older plan record must still load");
+
+        let Some(Entry::Tool(tool_call)) = plan.transcript.first() else {
+            panic!("the deed must survive the load");
+        };
+        assert_eq!(tool_call.report(), "Screenshot saved to /tmp/a.png.");
+        assert!(
+            tool_call.artifacts().is_empty(),
+            "absent means nothing was left behind, not a parse failure"
+        );
+    }
+
+    /// An outcome that names a file round-trips, and the two channels stay
+    /// apart on the way through.
+    ///
+    /// The failure this pins is the one the design turns on: if artifacts ever
+    /// serialise as images (or the reverse), `store.rs` would either drop the
+    /// paths the conversation needs or persist the megabytes it must not.
+    #[test]
+    fn an_outcome_can_name_what_it_left_behind() {
+        let outcome = ToolOutcome::produced(
+            "Screenshot saved to shot.png.",
+            vec![ToolArtifact {
+                path: ".kingdom-browser-screenshot-1.png".into(),
+                media_type: "image/png".into(),
+            }],
+        );
+
+        let json = serde_json::to_string(&outcome).expect("an outcome must serialise");
+        let read: ToolOutcome = serde_json::from_str(&json).expect("and come back");
+        assert_eq!(read, outcome);
+
+        let ToolOutcome::Done {
+            images, artifacts, ..
+        } = read
+        else {
+            panic!("a produced outcome is Done");
+        };
+        assert!(
+            images.is_empty(),
+            "naming a file must not put its bytes in front of a model"
+        );
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].is_image());
+
+        // An empty artifact list stays off the wire, so a plan document is not
+        // littered with a key nearly every deed would carry empty.
+        let plain = serde_json::to_string(&ToolOutcome::done("ok")).expect("serialises");
+        assert!(!plain.contains("artifacts"), "got {plain}");
+    }
+
+    /// Stripping the pictures keeps the paths.
+    ///
+    /// The write path calls this on every save. Dropping artifacts alongside
+    /// images would compile, pass every other test, and silently leave a
+    /// reloaded chamber with nothing to show -- which is the whole feature.
+    #[test]
+    fn dropping_the_pictures_keeps_the_paths() {
+        let outcome = ToolOutcome::seen(
+            "Looked at shot.png.",
+            vec![ToolImage {
+                media_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+        )
+        .leaving(vec![ToolArtifact {
+            path: "shot.png".into(),
+            media_type: "image/png".into(),
+        }]);
+
+        let ToolOutcome::Done {
+            images, artifacts, ..
+        } = outcome.without_images()
+        else {
+            panic!("still Done");
+        };
+        assert!(images.is_empty(), "the bytes must not reach the disk");
+        assert_eq!(
+            artifacts,
+            vec![ToolArtifact {
+                path: "shot.png".into(),
+                media_type: "image/png".into(),
+            }],
+            "the path must survive, or a reloaded chamber has nothing to show"
         );
     }
 

@@ -161,8 +161,13 @@ fn reconcile(mut plan: Plan) -> Plan {
 /// them would mean rewriting a megabyte per screenshot for the life of the
 /// plan, to store something nothing ever reads back. The words survive (`"Image
 /// loaded: <path> (N bytes)"`) and so does the file in the workspace, so a
-/// reloaded plan can still say what was looked at. It simply cannot show it
-/// again without looking again, which is what `read_image` is for.
+/// reloaded plan can still say what was looked at.
+///
+/// **The paths to them are.** A tool call's artifacts are names, not payloads,
+/// and they are exactly what lets a reloaded conversation show the picture
+/// again -- the file is still in the workspace and [`crate::artifact`] serves
+/// it. The two look alike and only one is dropped; that asymmetry is the whole
+/// design, and [`kingdom_core::ToolArtifact`] has the rest of the reasoning.
 pub fn save(root: &Path, plan: &Plan) -> std::io::Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir)?;
@@ -183,6 +188,8 @@ pub fn save(root: &Path, plan: &Plan) -> std::io::Result<()> {
 /// Cloned rather than stripping in place because the caller's plan is the live
 /// one, still being shown to a model this turn: blinding it as a side effect of
 /// saving would be a memory bug disguised as a storage decision.
+///
+/// Artifacts are deliberately left alone -- see [`save`].
 fn without_images(plan: &Plan) -> Plan {
     use kingdom_core::Entry;
 
@@ -354,14 +361,16 @@ mod tests {
         );
     }
 
-    /// Two things disk must get right about a picture, pinned together because
-    /// they are the same decision seen from either side.
+    /// Three things disk must get right about a picture, pinned together
+    /// because they are the same decision seen from different sides.
     ///
     /// A screenshot must not be *written*: this file is rewritten on every
     /// update to the plan, so persisting image payloads would cost a megabyte
     /// per screenshot per save, forever, to store something nothing reads back.
-    /// And a document written before images existed must still *load*, because
-    /// the alternative is a user whose model vanishes after an upgrade.
+    /// The *path* to it must be, because that is what lets a reloaded
+    /// conversation show the picture again. And a document written before
+    /// images existed must still *load*, because the alternative is a user
+    /// whose model vanishes after an upgrade.
     #[test]
     fn a_picture_is_shown_but_never_filed() {
         let dir = tempfile::tempdir().unwrap();
@@ -382,7 +391,11 @@ mod tests {
                     media_type: "image/png".into(),
                     data: "QUJD".repeat(1000),
                 }],
-            ),
+            )
+            .leaving(vec![kingdom_core::ToolArtifact {
+                path: "shot.png".into(),
+                media_type: "image/png".into(),
+            }]),
         );
 
         save(root, &seen).unwrap();
@@ -420,6 +433,12 @@ mod tests {
             .expect("the deed itself is still recorded");
         assert!(tool_call.shown().is_empty());
         assert_eq!(tool_call.report(), "Looked at shot.png (3 bytes).");
+        assert_eq!(
+            tool_call.artifacts().iter().map(|a| a.path.as_str()).collect::<Vec<_>>(),
+            vec!["shot.png"],
+            "the path must survive the round trip, or a reloaded chamber has \
+             nothing to point an <img> at"
+        );
     }
 
     /// A plan document written before tool calls could carry images -- no

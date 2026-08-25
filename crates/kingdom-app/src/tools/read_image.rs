@@ -9,10 +9,15 @@
 //! [`kingdom_core::ToolOutcome::seen`] for why images travel beside the text
 //! rather than inside it, and `llm/copilot.rs` for how they reach a model that
 //! can actually see.
+//!
+//! It also names the file it read, so the *user* sees the picture in the
+//! chamber rather than a line saying one was looked at. That is a different
+//! channel with a different lifetime -- see [`kingdom_core::ToolArtifact`] --
+//! and [`crate::artifact`] is what serves it back.
 
 use super::{Refusal, Tool, Sandbox};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use kingdom_core::{ToolImage, ToolOutcome};
+use kingdom_core::{ToolArtifact, ToolImage, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -29,7 +34,12 @@ const LARGEST: u64 = 5 * 1024 * 1024;
 /// Keyed by extension rather than sniffed from magic bytes: the media type has
 /// to be declared to the provider anyway, and a file whose name lies about its
 /// contents is a problem the model will report far more clearly than we could.
-const READABLE: &[(&str, &str)] = &[
+///
+/// Public because [`crate::artifact`] serves exactly this set back to the
+/// browser. One list, read from both ends: two would drift, and the drift is
+/// silent in the worst direction -- a picture the court could look at and the
+/// King could not.
+pub const READABLE: &[(&str, &str)] = &[
     ("png", "image/png"),
     ("jpg", "image/jpeg"),
     ("jpeg", "image/jpeg"),
@@ -37,7 +47,8 @@ const READABLE: &[(&str, &str)] = &[
     ("webp", "image/webp"),
 ];
 
-fn media_type(path: &Path) -> Option<&'static str> {
+/// The media type for a path, if it names something readable as an image.
+pub fn media_type(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_lowercase();
     READABLE
         .iter()
@@ -136,12 +147,25 @@ impl Tool for ReadImage {
         // The text is not a duplicate of the picture -- it is what the
         // conversation renders, what the plan's record keeps, and what a model
         // without vision is left with. The bytes ride the separate channel.
+        //
+        // The file is named as well as read, so the picture the court looked at
+        // appears in the chamber. Costs one path; see `ToolArtifact`.
         ToolOutcome::seen(
             format!("Looked at {} ({} bytes).", path.display(), bytes.len()),
             vec![ToolImage {
                 media_type: media.to_string(),
                 data: BASE64.encode(&bytes),
             }],
+        )
+        .leaving(
+            shop.relative(&path)
+                .map(|path| {
+                    vec![ToolArtifact {
+                        path,
+                        media_type: media.to_string(),
+                    }]
+                })
+                .unwrap_or_default(),
         )
     }
 }
@@ -173,7 +197,12 @@ mod tests {
 
         let outcome = ReadImage.run(json!({ "path": "shot.png" }), &shop).await;
 
-        let ToolOutcome::Done { output, images } = outcome else {
+        let ToolOutcome::Done {
+            output,
+            images,
+            artifacts,
+        } = outcome
+        else {
             panic!("reading a real png should succeed: {outcome:?}");
         };
         assert_eq!(images.len(), 1);
@@ -186,6 +215,11 @@ mod tests {
         assert!(
             !output.contains(&images[0].data),
             "the payload must not be duplicated into the text: {output}"
+        );
+        assert_eq!(
+            artifacts.iter().map(|a| a.path.as_str()).collect::<Vec<_>>(),
+            vec!["shot.png"],
+            "the file is named too, so the King sees what the court was looking at"
         );
     }
 

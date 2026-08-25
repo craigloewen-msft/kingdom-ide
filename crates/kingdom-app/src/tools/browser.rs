@@ -17,7 +17,7 @@
 
 use super::{Refusal, Tool, Sandbox};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
-use kingdom_core::ToolOutcome;
+use kingdom_core::{ToolArtifact, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
@@ -188,7 +188,10 @@ impl Tool for BrowserTakeScreenshot {
         "browser_take_screenshot"
     }
     fn description(&self) -> String {
-        "Capture the page or one element to a PNG file in the workspace. Returns its path; call read_image on that path to actually look at it.".into()
+        "Capture the page or one element to a PNG file in the workspace. The \
+         King is shown it in the chamber. Returns its path; call read_image on \
+         that path if you need to look at it yourself."
+            .into()
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"selector":{"type":"string"},"timeout":{"type":"string"}}})
@@ -208,11 +211,25 @@ impl Tool for BrowserTakeScreenshot {
         {
             Ok(image) => {
                 let path = artifact(shop, "browser-screenshot", "png");
-                outcome(
-                    write_artifact(&path, &image.png)
-                        .await
-                        .map(|_| format!("Screenshot saved to {}.", path.display())),
-                )
+                match write_artifact(&path, &image.png).await {
+                    // Named as well as saved. The *text* is unchanged -- the
+                    // model still gets a path and still calls `read_image`,
+                    // because the bytes must not be spent on a model that may
+                    // not need them. The name is for the chamber, which renders
+                    // the picture inline; see `ToolArtifact`.
+                    Ok(()) => ToolOutcome::produced(
+                        format!("Screenshot saved to {}.", path.display()),
+                        shop.relative(&path)
+                            .map(|path| {
+                                vec![ToolArtifact {
+                                    path,
+                                    media_type: "image/png".to_string(),
+                                }]
+                            })
+                            .unwrap_or_default(),
+                    ),
+                    Err(error) => outcome(Err(error)),
+                }
             }
             Err(error) => outcome(Err(error)),
         }

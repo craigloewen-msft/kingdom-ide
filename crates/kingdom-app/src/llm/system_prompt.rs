@@ -121,6 +121,9 @@ impl SystemPrompt {
         out.push_str("\n\n");
         out.push_str(MERMAID);
 
+        out.push_str("\n\n");
+        out.push_str(SCREENSHOTS);
+
         out
     }
 }
@@ -159,6 +162,21 @@ const TESTING: &str = "Tests are a liability as well as an asset: every test cos
 const MERMAID: &str = "The conversation view renders Markdown mermaid code fences as diagrams; prefer \
      them when a diagram would help. Wrap a node label in double quotes when it contains \
      parentheses or quotes, so Mermaid does not read the punctuation as syntax.";
+
+/// That a screenshot is *seen*, not merely saved.
+///
+/// Without this a model reasonably narrates "I've saved a screenshot you can
+/// open at /home/...", which was true when only `read_image` could look at one
+/// and is now simply false -- the chamber renders it under the deed that took
+/// it (`components/conversation.rs`, served by `artifact.rs`). Left unsaid, the
+/// model also keeps calling `read_image` purely to describe a page back to a
+/// user who is already looking at it, which spends a turn and a slice of
+/// context on prose nobody needs.
+const SCREENSHOTS: &str = "On screenshots. browser_take_screenshot is shown to the user in the \
+     conversation, under the call that took it -- so it is evidence you can point at rather than \
+     a file they have to go and open. Do not tell them where it was saved. Call read_image on it \
+     only when *you* need to see the page to decide what to do next; if the picture is for them, \
+     taking it is enough.";
 
 /// Where the model is standing.
 ///

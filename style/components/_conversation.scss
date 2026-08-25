@@ -370,6 +370,49 @@
   color: t.$ink-dim;
 }
 
+// --- What the court saw ------------------------------------------------------
+//
+// A screenshot, rendered under the deed that took it. Not behind the chevron:
+// that governs the text detail, which is usually a wall of output worth hiding.
+// A picture is the opposite — the highest-signal thing a transcript can hold,
+// and the one thing nobody would think to click for.
+//
+// The bytes are not on the plan; this is an `<img>` pointing at the plan's
+// workspace (`artifact.rs`). So a merged or archived plan's picture is
+// legitimately gone, and `.sight-gone` says so in words.
+.deed-sight {
+  display: block;
+  padding: 10px;
+  border-top: 1px solid t.$edge;
+  // Darker than the deed it hangs under, so a screenshot of a pale page reads
+  // as a picture in a frame rather than as the panel having lost its edges.
+  background: t.$void;
+}
+
+.sight-frame {
+  display: block;
+  max-width: 100%;
+  // Enough that a page capture is still legible, little enough that thirty of
+  // them do not turn the chamber into a scroll marathon. Full size is one
+  // click away.
+  max-height: 260px;
+  // Tall captures are cropped from the top rather than squashed: a page's
+  // header is where the King is looking, and a distorted screenshot is worse
+  // evidence than a cropped one.
+  object-fit: cover;
+  object-position: top;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  background: t.$panel;
+  cursor: zoom-in;
+}
+
+.sight-gone {
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+}
+
 // --- Errands the court sent --------------------------------------------------
 //
 // Rendered as a small roster rather than as a deed line, because the King's

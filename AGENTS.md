@@ -131,6 +131,9 @@ crates/
     events.rs       Publishing a plan's changes to its watchers (ssr only)
     watch.rs        The chamber's push socket (ssr only)
     screencast.rs   The King's live view of a plan's browser (ssr only)
+    artifact.rs     Serving a file a plan's work left behind, e.g. a
+                    screenshot the chamber renders (route + URL on both
+                    targets; the handler ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     mock.rs         Seeding a fixture onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
@@ -293,6 +296,22 @@ A model that cannot see is never offered `read_image` (`ToolSpec::for_model`,
 beside the existing `can_act` narrowing). The vision flag is read from three
 places in Copilot's `/models` payload because the catalogue is not ours; if it
 ever reads as blind for everything, that is where to look.
+
+**And so can the King.** A screenshot renders in the chamber, under the deed
+that took it. The picture is *not* carried on the plan: `ToolOutcome::Done`
+gained `artifacts` — workspace-relative **paths** beside the base64 `images` —
+and `artifact.rs` serves the file back over `/plan/{id}/artifact/{*path}`,
+resolved through the plan's own `Sandbox`. The two channels look alike and are
+not, which is the thing to keep straight: `images` feed a model for one turn and
+are stripped on save; `artifacts` feed the conversation and are persisted, which
+is the only reason a reloaded chamber can show the picture again. Inlining the
+bytes instead would have re-broken all three of the constraints above — the
+store's, the provider's, and the watch socket's, which re-sends whole plans.
+
+That route is the one place in Kingdom where an outsider names a file and the
+server opens it, so it refuses rather than guesses: outside the workspace, or a
+media type `read_image` would not accept, is a refusal. It must not become a
+general file server for a plan's checkout.
 
 The placeholder court deliberately includes a **failed plan**, a plan **mid
 draft**, and one with a **proposal standing in front of the user**, because

@@ -795,7 +795,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Tool(d) if d.tool == "spawn_agents" => {
                         view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
                     }
-                    Entry::Tool(d) => view! { <ToolCallLine tool_call=d/> }.into_any(),
+                    Entry::Tool(d) => view! { <ToolCallLine tool_call=d plan=plan_id/> }.into_any(),
                 }
             }
         </For>
@@ -1215,7 +1215,7 @@ fn entry_version(entry: &Entry) -> u8 {
 /// build log buries that. The summary line is the answer; the detail is one
 /// click away for when it is not.
 #[component]
-fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
+fn ToolCallLine(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
     use kingdom_core::ToolOutcome;
 
     let (open, set_open) = signal(false);
@@ -1247,6 +1247,19 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
     });
     let has_output = !output.read_value().is_empty();
 
+    // What this call left behind that can be looked at. Read once here rather
+    // than in the view, because the paths are fixed the moment the call settles
+    // and only the plan id is reactive.
+    let pictures = StoredValue::new(
+        tool_call
+            .artifacts()
+            .iter()
+            .filter(|a| a.is_image())
+            .map(|a| a.path.clone())
+            .collect::<Vec<_>>(),
+    );
+    let has_pictures = !pictures.read_value().is_empty();
+
     view! {
         <div class=format!("chat-deed deed-{state}")>
             <button class="deed-line" on:click=move |_| set_open.update(|o| *o = !*o)>
@@ -1262,6 +1275,21 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
                 </span>
             </button>
 
+            // Outside the `Show` above, and that is the decision worth stating:
+            // the chevron governs the *text*, which is usually a wall of output
+            // worth hiding. A picture is the opposite -- the highest-signal
+            // thing a transcript can hold, and one nobody would think to click
+            // for. So it is simply shown.
+            <Show when=move || has_pictures>
+                {move || pictures.get_value().into_iter().map(|path| {
+                    let src = plan
+                        .get()
+                        .map(|id| crate::artifact::url(&id, &path))
+                        .unwrap_or_default();
+                    view! { <Sight src=src/> }
+                }).collect_view()}
+            </Show>
+
             <Show when=move || open.get()>
                 <div class="deed-detail">
                     <pre class="deed-input">{move || input.get_value()}</pre>
@@ -1271,6 +1299,49 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall) -> impl IntoView {
                 </div>
             </Show>
         </div>
+    }
+}
+
+/// A picture the court left behind, as the King sees it.
+///
+/// The image is fetched from the plan's workspace rather than carried on the
+/// plan -- see `artifact.rs` for why -- which means the file can legitimately
+/// be gone: merging or archiving a plan clears its worktree away. That is the
+/// *expected* end state of any finished plan, so it is answered with a sentence
+/// rather than with a browser's broken-image glyph, which would read as a fault
+/// in Kingdom rather than as the ordinary passage of time.
+#[component]
+fn Sight(src: String) -> impl IntoView {
+    let (gone, set_gone) = signal(false);
+    let href = src.clone();
+
+    view! {
+        <Show
+            when=move || !gone.get()
+            fallback=move || view! {
+                <div class="deed-sight sight-gone">
+                    "The workshop this was taken in has been cleared away."
+                </div>
+            }
+        >
+            // A link, not a lightbox: full size in a new tab is the whole
+            // feature, and the route already serves it.
+            <a
+                class="deed-sight"
+                href=href.clone()
+                target="_blank"
+                rel="noreferrer"
+                title="Open this at full size"
+            >
+                <img
+                    class="sight-frame"
+                    src=src.clone()
+                    alt="What the court saw"
+                    loading="lazy"
+                    on:error=move |_| set_gone.set(true)
+                />
+            </a>
+        </Show>
     }
 }
 
@@ -1535,5 +1606,42 @@ mod tests {
         // A plan that has never browsed has nothing to caption, and a running
         // non-browser deed is not evidence that it has.
         assert!(browsing(&[call("bash", false)]).is_none());
+    }
+
+    /// A deed that left a picture behind offers one to render, and an ordinary
+    /// deed offers none.
+    ///
+    /// The view itself needs a browser to assert against, so what is pinned is
+    /// the decision the view reads: *which* deeds have something to show, and
+    /// the URL it would point at. That URL is the part worth pinning -- it has
+    /// to match `artifact::ROUTE`, and the failure if it does not is a broken
+    /// image rather than anything that fails to compile.
+    #[test]
+    fn only_a_deed_that_left_a_picture_has_one_to_show() {
+        let mut took = ToolCall::started("call-1", "browser_take_screenshot", json!({}));
+        took.outcome = Some(ToolOutcome::produced(
+            "Screenshot saved to shot.png.",
+            vec![kingdom_core::ToolArtifact {
+                path: "shot.png".into(),
+                media_type: "image/png".into(),
+            }],
+        ));
+
+        let pictures: Vec<_> = took
+            .artifacts()
+            .iter()
+            .filter(|a| a.is_image())
+            .map(|a| crate::artifact::url(&PlanId::new("plan-1"), &a.path))
+            .collect();
+
+        assert_eq!(pictures, vec!["/plan/plan-1/artifact/shot.png"]);
+
+        let Entry::Tool(ran) = call("bash", true) else {
+            panic!("a deed");
+        };
+        assert!(
+            ran.artifacts().is_empty(),
+            "an ordinary command must not sprout a frame in the chamber"
+        );
     }
 }

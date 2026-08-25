@@ -336,6 +336,28 @@ impl Sandbox {
 
         Ok(resolved)
     }
+
+    /// The other direction: a resolved path as the workspace sees it.
+    ///
+    /// For recording rather than for opening. A [`kingdom_core::ToolArtifact`]
+    /// names a file relative to the workspace, so the record does not carry a
+    /// fact about one machine and a viewer has something it can hand back
+    /// through [`Sandbox::resolve`] -- which is what keeps the boundary in one
+    /// place rather than two.
+    ///
+    /// `None` for a path outside the workspace, which the caller should read as
+    /// "nothing to record" rather than as an error: the tool has already done
+    /// its work, and a file with no serveable path is simply one the chamber
+    /// cannot show.
+    pub fn relative(&self, path: &Path) -> Option<String> {
+        Some(
+            normalise(path)
+                .strip_prefix(normalise(self.root()))
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
 }
 
 /// Collapses `.` and `..` without touching the filesystem.
@@ -454,6 +476,33 @@ mod tests {
             sandbox().resolve("/dev/city-old/secrets"),
             Err(Refusal::OutsideWorkspace { .. })
         ));
+    }
+
+    /// The round trip a recorded artifact depends on: what `relative` names,
+    /// `resolve` must find again.
+    ///
+    /// These are the two ends of one path -- a tool writes a file and records
+    /// where it put it, and later the artifact route is handed that record and
+    /// has to open the same file. If they ever disagree the symptom is a
+    /// picture that 403s in a chamber, with nothing in either function looking
+    /// wrong on its own.
+    #[test]
+    fn what_the_workspace_names_it_can_find_again() {
+        let shop = sandbox();
+        let written = shop.resolve("shots/a.png").unwrap();
+
+        let recorded = shop.relative(&written).expect("a path inside is nameable");
+        assert_eq!(recorded, "shots/a.png", "records must not carry the root");
+        assert_eq!(
+            shop.resolve(&recorded).unwrap(),
+            written,
+            "a recorded path must resolve back to the file it named"
+        );
+
+        assert!(
+            shop.relative(Path::new("/dev/elsewhere/a.png")).is_none(),
+            "a file outside the workspace has no name this plan can serve"
+        );
     }
 
     /// The invariant subagents rest on, and the level that was added beside it.

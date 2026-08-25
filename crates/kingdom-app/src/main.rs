@@ -47,6 +47,14 @@ async fn main() {
             kingdom_app::screencast::ROUTE,
             axum::routing::get(kingdom_app::screencast::upgrade),
         )
+        // Files a plan's work left behind -- a screenshot the chamber renders
+        // inline. Ahead of the Leptos routes because its path lives under
+        // `/plan/`, which the SSR fallback would otherwise claim and answer
+        // with the app shell instead of the picture.
+        .route(
+            kingdom_app::artifact::ROUTE,
+            axum::routing::get(kingdom_app::artifact::serve),
+        )
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();
             move || shell(opts.clone())

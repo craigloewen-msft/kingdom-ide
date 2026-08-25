@@ -8,6 +8,10 @@ pub mod api;
 pub mod app;
 pub mod components;
 
+// Both targets: the browser builds the link, the server answers it. See the
+// module's own note on what inside it is server-only.
+pub mod artifact;
+
 #[cfg(feature = "ssr")]
 pub mod events;
 #[cfg(feature = "ssr")]
