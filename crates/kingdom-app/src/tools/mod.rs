@@ -57,19 +57,28 @@ pub use kingdom_core::Permissions;
 /// disagreeing -- a model that invents `bash` under read-only permissions must
 /// not be handed `bash`.
 ///
-/// # Why `Propose` keeps `bash` but loses `patch`
+/// # Why `Propose` writes only its own draft
 ///
-/// These look inconsistent and are not. This list is **not a sandbox** -- see
-/// [`Sandbox::root`], which says plainly that the path boundary does not
-/// contain a shell. Withholding `bash` from a proposing plan would therefore
-/// buy a guarantee Kingdom cannot keep, while costing the model `git log`,
-/// `cargo tree`, and running the failing test it is proposing to fix.
+/// A proposing plan gets `patch`, scoped to one markdown file
+/// ([`patch::Patch::for_draft`], [`propose_plan::DRAFT`]). It cannot touch the
+/// project. This is Phoenix's shape: its Explore mode carries a `patch` scoped
+/// to the tasks directory for exactly the same reason.
 ///
-/// What the list *is* is a statement of the job. Offering `patch` says "you may
-/// edit"; withholding it says "you may not", and the system prompt says the
-/// rest in words. A model that means to follow its instructions is told clearly
-/// what they are; one that does not was never going to be stopped by a missing
-/// tool while it holds a shell.
+/// The reason is not containment. This list is **not a sandbox** -- see
+/// [`Sandbox::root`], which says plainly that the path boundary does not contain
+/// a shell, and a proposing plan holds `bash`. Withholding tools here buys no
+/// guarantee Kingdom can keep.
+///
+/// What the scoped patch buys is somewhere for the model to *put the plan* while
+/// it works it out. Without it the plan has to be produced whole, from memory,
+/// in a single `propose_plan` call -- and the observed result was a plan that
+/// investigated for 21 rounds, re-deciding the same names over and over, and
+/// never proposed at all. `propose_plan`'s module docs carry that story in full.
+///
+/// So the list still states the job, as it always did; only the sentence
+/// changed. Offering the editing tool *unrestricted* says "you may change the
+/// project"; offering it scoped to a draft says "you may write down what you
+/// would change". The system prompt says the rest in words.
 pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     // Reads: everything, at every level. Looking at a picture is a read, so it
     // sits with the other reads rather than with the browser tools it was built
@@ -116,14 +125,19 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     // permissions is already carrying out a proposal they accepted and cannot
     // propose its way to more authority; a subagent answers to the plan that
     // sent it, and nothing about it is ever waiting on the user.
+    //
+    // The scoped `patch` arrives with it, because the two are one mechanism:
+    // the draft is what `propose_plan` names, and the write is what points the
+    // model back at `propose_plan`.
     if matches!(permissions, Permissions::Propose) {
+        tools.push(Box::new(patch::Patch::for_draft(propose_plan::DRAFT)));
         tools.push(Box::new(propose_plan::ProposePlan));
     }
 
     // Changing the project: only once the user has said so.
     if matches!(permissions, Permissions::Full) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
-            Box::new(patch::Patch),
+            Box::new(patch::Patch::unrestricted()),
             // Withheld while proposing for a duller reason than `patch`: a
             // subagent of a proposing plan is a case nobody has needed yet. It
             // would inherit `ReadOnly`, which is probably right -- but guessing
@@ -593,21 +607,25 @@ mod tests {
 
     /// The Propose level: what a plan drawing one up may and may not do.
     ///
-    /// The withheld half is the load-bearing one, and it is narrower than it
-    /// looks. Propose keeps `bash` deliberately -- see the note on [`all`] --
-    /// so `patch` is the single tool standing between a proposing model and
-    /// editing the project. If it ever leaks into this level, every prompt
-    /// silently goes back to changing files before the user has seen a plan,
-    /// and nothing else in the system would notice.
+    /// The load-bearing claim moved when `patch` did. It used to be that
+    /// `patch` was absent entirely, so its mere presence was the alarm. Now it
+    /// is present and *scoped*, and the thing that must not leak is the
+    /// scope: a proposing plan may write its own draft and nothing else.
+    ///
+    /// So this pins the boundary where it actually lives -- by calling the tool
+    /// and checking the project is unchanged -- rather than by the tool's name.
+    /// A scope that silently widened would put every prompt back to editing
+    /// files before the user has seen a plan, and nothing else in the system
+    /// would notice.
     ///
     /// The refusal is tested as well as the absence for the same reason as
     /// above: the list a model is *shown* and the list it may *run* must not
-    /// disagree, and a model that invents `patch` must not be handed it.
+    /// disagree, and a model that invents `spawn_agents` must not be handed it.
     #[tokio::test]
     async fn proposing_may_look_and_run_but_not_change_the_project() {
         let proposing = sandbox().under(Permissions::Propose);
 
-        for forbidden in ["patch", "spawn_agents"] {
+        for forbidden in ["spawn_agents"] {
             assert!(
                 !all(Permissions::Propose).iter().any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered while drawing up a plan"
@@ -620,6 +638,40 @@ mod tests {
                 "{forbidden} must be refused even when a proposing plan asks by name"
             );
         }
+
+        // `patch` *is* offered now, because the model needs somewhere to write
+        // the plan down -- see the note on `all`. What must still hold is that
+        // it cannot reach the project.
+        assert!(
+            all(Permissions::Propose).iter().any(|t| t.name() == "patch"),
+            "a proposing plan drafts with `patch`; without it there is nowhere \
+             to put the plan and it never stops investigating"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let writing = Sandbox::new(Workspace::in_place(root.path().to_str().unwrap()))
+            .under(Permissions::Propose);
+        std::fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let refused = invoke(
+            "patch",
+            serde_json::json!({
+                "path": "main.rs",
+                "patches": [{"operation": "overwrite", "newText": "owned\n"}]
+            }),
+            &writing,
+        )
+        .await;
+
+        assert!(
+            matches!(refused, ToolOutcome::Refused { .. }),
+            "a proposing plan must not edit the project: {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("main.rs")).unwrap(),
+            "fn main() {}\n",
+            "the file must be untouched"
+        );
 
         // Proposing is meant to be a *strong* explorer: it can run the failing
         // test it is proposing to fix, and look at the app it is changing.

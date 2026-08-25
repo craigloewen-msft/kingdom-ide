@@ -355,35 +355,54 @@ impl MockModel {
             // transcript, for the same reason as `Work` -- and here it matters
             // more, because the real thing genuinely spans two separate turns
             // with a human decision between them.
+            //
+            // Two calls, in the order the real flow takes them: the plan is
+            // written to the draft and then proposed by path. The mock is the
+            // offline demonstration of the flow, so a mock that proposed out of
+            // thin air would show a workflow that no longer exists -- and would
+            // be refused, since `propose_plan` reads the file.
             Scenario::Propose if !approved(brief) => {
                 // A revision quotes what they asked for, so the user can see their
                 // feedback was actually read rather than a fresh plan appearing
                 // that happens to look the same.
                 let revising = revision_note(brief);
-                Ok(Reply::Acts(Acts::plain(vec![Act {
-                    id: format!("mock-proposal-{}", proposals_so_far(brief) + 1),
-                    tool: "propose_plan".to_string(),
-                    input: serde_json::json!({
-                        "title": format!("Tidy the edges of {}", city.name),
-                        "body": format!(
-                            "{revising}On the decree \"{}\":\n\n\
-                             ## What I would do\n\n\
-                             {} is a {} project of {} files. I would work through it in \
-                             three steps, checking after each.\n\n\
-                             ## The changes\n\n\
-                             1. Read the entry point and map what calls what.\n\
-                             2. Make the change itself, in one place.\n\
-                             3. Run the tests and report what moved.\n\n\
-                             ## What I am assuming\n\n\
-                             That the tests currently pass. I have not run them.\n\n\
-                             (Drafted by the mock model \u{2014} no real work was done.)",
-                            prompt.trim(),
-                            city.name,
-                            city.stack,
-                            city.file_count
-                        )
-                    }),
-                }])))
+                let nth = proposals_so_far(brief) + 1;
+                let draft = crate::tools::propose_plan::DRAFT;
+                let body = format!(
+                    "# Tidy the edges of {}\n\n\
+                     {revising}On the decree \"{}\":\n\n\
+                     ## What I would do\n\n\
+                     {} is a {} project of {} files. I would work through it in \
+                     three steps, checking after each.\n\n\
+                     ## The changes\n\n\
+                     1. Read the entry point and map what calls what.\n\
+                     2. Make the change itself, in one place.\n\
+                     3. Run the tests and report what moved.\n\n\
+                     ## What I am assuming\n\n\
+                     That the tests currently pass. I have not run them.\n\n\
+                     (Drafted by the mock model \u{2014} no real work was done.)",
+                    city.name,
+                    prompt.trim(),
+                    city.name,
+                    city.stack,
+                    city.file_count
+                );
+
+                Ok(Reply::Acts(Acts::plain(vec![
+                    Act {
+                        id: format!("mock-draft-{nth}"),
+                        tool: "patch".to_string(),
+                        input: serde_json::json!({
+                            "path": draft,
+                            "patches": [{ "operation": "overwrite", "newText": body }]
+                        }),
+                    },
+                    Act {
+                        id: format!("mock-proposal-{nth}"),
+                        tool: "propose_plan".to_string(),
+                        input: serde_json::json!({ "draft": draft }),
+                    },
+                ])))
             }
 
             Scenario::Propose => Ok(match done_since_approval(brief) {

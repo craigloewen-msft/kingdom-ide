@@ -270,12 +270,19 @@ const SUBAGENT: &str = "You are a sub-agent working on a specific task. You can 
 ///
 /// Phoenix's block describes drafting a task *file* under a tasks directory and
 /// pointing `propose_task` at it, with `patch` allowlisted to that directory.
-/// Kingdom has none of that -- `propose_plan` takes a title and a body inline,
-/// and a proposing plan holds no `patch` at all -- so that paragraph is dropped
-/// rather than mapped onto something it does not describe.
+/// Kingdom now does the same thing with its own names: the draft is a single
+/// file at [`crate::tools::propose_plan::DRAFT`], `patch` is scoped to it, and
+/// `propose_plan` takes its path.
 ///
-/// What is kept is Phoenix's shape: what you may do, what you may not, how to
-/// put work to the user, and what happens on approval.
+/// This block used to say a proposing plan held no `patch` at all, and the
+/// two-step workflow was dropped as machinery Kingdom did not need. That was the
+/// mistake: with nowhere to write the plan down, a real plan investigated for 21
+/// rounds and never proposed. The full story is in `tools/propose_plan.rs`.
+///
+/// Note what is *not* here. No advice about re-reading, about when to stop
+/// looking, or about how much investigation is enough -- Phoenix sends none, and
+/// the drafting mechanism is what does that job. A paragraph asking the model to
+/// conclude would be Kingdom re-inventing the guidance this port removed.
 const PROPOSE: &str = "You are in Propose mode. This conversation is read-only for source \
      files -- you can read files, search, run commands, analyse and discuss the codebase, but \
      you cannot modify code.\n\n\
@@ -283,10 +290,16 @@ const PROPOSE: &str = "You are in Propose mode. This conversation is read-only f
      anywhere on this machine. That boundary is one you are trusted to keep, not one Kingdom \
      enforces. Use it to look -- `git log`, `cargo tree`, running the tests to see which fail \
      -- and never to change.\n\n\
-     Workflow for proposing work: call `propose_plan` with a title and the plan itself. Say \
-     what you would change, in which files, and why; say what you checked and what you are \
-     assuming. The user will review and can approve, request revisions, or reject. On \
-     approval you gain full write access and carry the plan out in this same conversation.\n\n\
+     Workflow for proposing work:\n\
+     1. Draft the plan as markdown at `.kingdom/draft.md`, using `patch` with operation \
+        `overwrite`. Start it with an `# H1` title, then the plan itself. Write to it as \
+        soon as you know roughly what you intend and revise it with further patches as you \
+        learn more -- it is where the plan lives while you work it out, not a report you \
+        write at the end. `patch` is restricted to that one file in this mode.\n\
+     2. Call `propose_plan` with `draft` set to that path. Say what you would change, in \
+        which files, and why; say what you checked and what you are assuming. The user will \
+        review and can approve, request revisions, or reject. On approval you gain full \
+        write access and carry the plan out in this same conversation.\n\n\
      If the user asks you to change code directly, explain that you must propose a plan first.";
 
 /// Phoenix's `mode_work`, adapted.

@@ -787,8 +787,12 @@ pub(crate) async fn converse(
                     // tool, and from the same value the deed was recorded with
                     // a moment ago -- so what the transcript shows and what the
                     // chamber offers cannot disagree.
+                    //
+                    // Reads the draft the call names, which is why it takes the
+                    // sandbox: the plan's body lives in a file now, not in the
+                    // arguments. See `tools::propose_plan`.
                     let put = (act.tool == "propose_plan")
-                        .then(|| crate::tools::propose_plan::proposed(&act.input))
+                        .then(|| crate::tools::propose_plan::proposed(&act.input, &shop))
                         .flatten();
 
                     // The lock is deliberately not held across this. A tool can

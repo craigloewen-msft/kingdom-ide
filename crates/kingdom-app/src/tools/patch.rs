@@ -66,7 +66,98 @@ const NEAR_MISS_THRESHOLD: f32 = 0.6;
 /// whose paths are otherwise carefully bounded.
 static CLIPBOARDS: Mutex<Option<HashMap<String, HashMap<String, String>>>> = Mutex::new(None);
 
-pub struct Patch;
+/// Where a `Patch` may write.
+///
+/// Ported from Phoenix's `PatchScope` (`phoenix-tools/src/patch.rs`). Phoenix
+/// hands Explore mode a `patch` scoped to the project's tasks directory so the
+/// agent can *draft* the proposal it is about to make; Kingdom's counterpart
+/// scopes it to the one draft file described by [`super::propose_plan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// Anywhere inside the workspace. What a plan carrying out approved work
+    /// gets.
+    Unrestricted,
+    /// One markdown file, and nothing else: the plan's own draft.
+    Draft { file: String },
+}
+
+pub struct Patch {
+    scope: Scope,
+}
+
+impl Patch {
+    /// The editing tool proper, for a plan the user has approved.
+    pub fn unrestricted() -> Self {
+        Self {
+            scope: Scope::Unrestricted,
+        }
+    }
+
+    /// A patch that may write only the plan's draft.
+    ///
+    /// The point is not containment -- a proposing plan still holds `bash`, and
+    /// [`super::Sandbox::root`] is explicit that no path rule contains a shell.
+    /// The point is that the model has somewhere to *put the plan* as it works
+    /// it out, instead of having to hold the whole thing in its head until it
+    /// can emit it in one call. See the module docs on [`super::propose_plan`].
+    pub fn for_draft(file: impl Into<String>) -> Self {
+        Self {
+            scope: Scope::Draft { file: file.into() },
+        }
+    }
+
+    /// Refuses a path this scope may not write, in words the model can act on.
+    ///
+    /// Compares the *resolved* path against the resolved draft, so `./x/../`
+    /// games and an absolute spelling of the same file both land where they
+    /// should. `Sandbox::resolve` has already normalised `..` away and bounded
+    /// both to the workspace before either reaches here.
+    fn enforce(&self, shop: &Sandbox, raw: &str, resolved: &Path) -> Option<String> {
+        let Scope::Draft { file } = &self.scope else {
+            return None;
+        };
+
+        let allowed = shop.resolve(file).ok()?;
+        if resolved == allowed {
+            return None;
+        }
+
+        Some(format!(
+            "`patch` is restricted to `{file}` while you are drawing up a plan, and \
+             `{raw}` is not it. Write the plan there, then call `propose_plan` with \
+             `draft` set to that path. You get the editing tool proper if the user \
+             starts you on the work."
+        ))
+    }
+
+    /// The cue that points at the exit, appended to a successful draft write.
+    ///
+    /// Phoenix's `proposal_next_step`, and the half of this port that does the
+    /// most work. The model has just written its plan down; this is the moment
+    /// it is most likely to know it is finished, and the moment nothing in
+    /// Kingdom used to say so. `None` under [`Scope::Unrestricted`], exactly as
+    /// in Phoenix: a plan carrying out approved work must never be told to
+    /// propose.
+    fn next_step(&self) -> Option<String> {
+        match &self.scope {
+            Scope::Unrestricted => None,
+            Scope::Draft { file } => Some(format!(
+                "\n<next_step>Call propose_plan with draft=\"{}\" if this is the plan you \
+                 want the user to approve.</next_step>",
+                escape_xml_attribute(file)
+            )),
+        }
+    }
+}
+
+/// So a path containing markup cannot close the tag early and forge a cue.
+fn escape_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
 
 #[derive(Debug, Deserialize)]
 struct Input {
@@ -317,6 +408,12 @@ Usage notes:
             Err(refusal) => return refusal.into(),
         };
 
+        // Checked after the workspace boundary and before anything is read or
+        // written, so a refused call leaves the file exactly as it was.
+        if let Some(reason) = self.enforce(shop, &input.path, &resolved) {
+            return Refusal::Refused(reason).into();
+        }
+
         let original = match std::fs::read_to_string(&resolved) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -351,7 +448,15 @@ Usage notes:
 
         store_clipboards(shop.plan().as_str(), clipboards);
 
-        ToolOutcome::done(format!("Patched {}.\n\n{}", input.path, bounded(&diff)))
+        // The cue rides on success only. A refused patch that still pointed at
+        // `propose_plan` would invite the model to propose a draft it had just
+        // failed to write.
+        ToolOutcome::done(format!(
+            "Patched {}.\n\n{}{}",
+            input.path,
+            bounded(&diff),
+            self.next_step().unwrap_or_default()
+        ))
     }
 }
 
@@ -987,7 +1092,7 @@ mod tests {
         std::fs::write(&victim, "untouched\n").unwrap();
 
         let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
-        let outcome = Patch
+        let outcome = Patch::unrestricted()
             .run(
                 json!({
                     "path": victim.to_str().unwrap(),
@@ -1010,7 +1115,7 @@ mod tests {
         std::fs::write(dir.path().join("f.rs"), "fn main() {}\n").unwrap();
 
         let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
-        let outcome = Patch
+        let outcome = Patch::unrestricted()
             .run(
                 json!({
                     "path": "f.rs",
@@ -1028,5 +1133,131 @@ mod tests {
             std::fs::read_to_string(dir.path().join("f.rs")).unwrap(),
             "fn main() {}\n// end\n"
         );
+    }
+
+    /// A proposing plan may write its draft, and is told what to do next.
+    ///
+    /// The cue is the half of this that earns its keep: the model has just
+    /// written the plan down, which is the moment it is most likely to be
+    /// finished, and before this nothing in Kingdom said so. See
+    /// `super::propose_plan`.
+    #[tokio::test]
+    async fn a_draft_write_lands_and_points_at_propose_plan() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let outcome = Patch::for_draft(crate::tools::propose_plan::DRAFT)
+            .run(
+                json!({
+                    "path": crate::tools::propose_plan::DRAFT,
+                    "patches": [{"operation": "overwrite", "newText": "# Do it\n\nPlan.\n"}]
+                }),
+                &shop,
+            )
+            .await;
+
+        match outcome {
+            ToolOutcome::Done { output, .. } => assert!(
+                output.contains("<next_step>") && output.contains("propose_plan"),
+                "a draft write must point at the exit: {output}"
+            ),
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
+        }
+
+        // `overwrite` on a path whose parent does not exist still has to land,
+        // or the very first thing a proposing plan does fails.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(crate::tools::propose_plan::DRAFT)).unwrap(),
+            "# Do it\n\nPlan.\n"
+        );
+    }
+
+    /// The scope is a boundary, not a suggestion: a proposing plan cannot edit
+    /// the project, however it spells the path.
+    #[tokio::test]
+    async fn a_proposing_plan_may_not_patch_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let tool = Patch::for_draft(crate::tools::propose_plan::DRAFT);
+
+        // Directly, and by a route that normalises back to the same file.
+        for path in ["main.rs", "./.kingdom/../main.rs"] {
+            let outcome = tool
+                .run(
+                    json!({
+                        "path": path,
+                        "patches": [{"operation": "overwrite", "newText": "owned\n"}]
+                    }),
+                    &shop,
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, ToolOutcome::Refused { .. }),
+                "{path} must be refused: {outcome:?}"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("main.rs")).unwrap(),
+            "fn main() {}\n",
+            "a refused patch must leave the file exactly as it was"
+        );
+    }
+
+    /// The cue belongs to drafting alone.
+    ///
+    /// Phoenix returns `None` here, and the reason is worth keeping: a plan
+    /// carrying out work the user already approved must never be told to
+    /// propose. It would read as an instruction to stop and ask again.
+    #[tokio::test]
+    async fn an_unrestricted_patch_is_never_told_to_propose() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.rs"), "fn main() {}\n").unwrap();
+
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let outcome = Patch::unrestricted()
+            .run(
+                json!({
+                    "path": "f.rs",
+                    "patches": [{"operation": "append_eof", "newText": "// end\n"}]
+                }),
+                &shop,
+            )
+            .await;
+
+        match outcome {
+            ToolOutcome::Done { output, .. } => {
+                assert!(!output.contains("next_step"), "{output}");
+                assert!(!output.contains("propose_plan"), "{output}");
+            }
+            ToolOutcome::Refused { reason } => panic!("refused: {reason}"),
+        }
+    }
+
+    /// A failed patch must not point at the exit, or the model is invited to
+    /// propose a draft it has just failed to write.
+    #[tokio::test]
+    async fn a_failed_draft_patch_carries_no_cue() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+        let outcome = Patch::for_draft(crate::tools::propose_plan::DRAFT)
+            .run(
+                json!({
+                    "path": crate::tools::propose_plan::DRAFT,
+                    // Anchoring on a file that does not exist yet.
+                    "patches": [{"operation": "replace", "oldText": "nope", "newText": "x"}]
+                }),
+                &shop,
+            )
+            .await;
+
+        match outcome {
+            ToolOutcome::Refused { reason } => assert!(!reason.contains("next_step"), "{reason}"),
+            ToolOutcome::Done { output, .. } => panic!("should have refused: {output}"),
+        }
     }
 }

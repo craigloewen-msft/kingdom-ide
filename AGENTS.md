@@ -153,7 +153,9 @@ crates/
                     and the one place Permissions become a list of tools),
                     think, read_file, read_image, search, skill, bash, tmux,
                     patch, browser, profile (browser_profile),
-                    propose_plan (the gateway from proposing to working),
+                    propose_plan (the gateway from proposing to working: the
+                    court drafts its plan to .kingdom/draft.md with a scoped
+                    patch, then proposes that path — Phoenix's flow, ported),
                     spawn_agents (subagents), ask_user_question
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
@@ -226,28 +228,46 @@ flowchart TB
   issued any decree. Plans he opens himself are entirely real.
 
 **How a plan actually runs.** A prompt opens under `Permissions::Propose`: the
-model may read, search, and run commands, but has no `patch` and cannot change
-the project. When it knows what to do it calls `propose_plan`, which ends the
-turn and parks the plan in `AwaitingReview` with a `Proposal` standing on it.
-The user either sends notes back — ordinary `say` + `draft_plan`, the composer's
-own path — or presses **Start with this**, which is `approve_plan`: the
-permissions widen to `Full` and the same conversation carries on with tools it
-did not have.
+model may read, search, and run commands, and gets `patch` scoped to a single
+draft file — it cannot change the project. It writes the plan to
+`.kingdom/draft.md` as it works, then calls `propose_plan` with that path, which
+ends the turn and parks the plan in `AwaitingReview` with a `Proposal` standing
+on it. The user either sends notes back — ordinary `say` + `draft_plan`, the
+composer's own path — or presses **Start with this**, which is `approve_plan`:
+the permissions widen to `Full` and the same conversation carries on with tools
+it did not have.
 
 Nothing is parked while they read. The turn genuinely ends, so a server restart
 mid-review loses nothing — the proposal is on the plan and the plan is on disk.
 That is the whole reason `propose_plan` does not work like `ask_user_question`,
 which holds a request open on a oneshot; the module docs there spell it out.
 
+**The draft is the mechanism, not a formality.** This is Phoenix's shape, ported
+part for part: a scoped `patch` (`PatchTool::for_task_proposal_drafts` there,
+`Patch::for_draft` here), a `<next_step>` cue appended to every successful draft
+write pointing back at the propose tool, and a propose tool that takes a *path*
+rather than inline content.
+
+It exists because the inline form failed in a specific, measured way. A real
+plan asked for a file-tree view spent 21 rounds and 33 tool calls and never
+proposed at all: its reasoning had settled the design by round 11 and then
+re-derived it eight times, renaming the same component on each pass. Nothing it
+decided was ever written down, so every round it faced the same choice between
+emitting the whole plan from memory and looking a little further — and looking
+always won. Giving it somewhere to put the plan is what fixes that; a paragraph
+of prose telling it to stop looking is what Kingdom tried instead, and Phoenix
+sends no such paragraph.
+
 **The `Propose` boundary is a statement of the job, not a sandbox.** It keeps
 `bash`, which `Sandbox::root` is explicit about not containing — a command that
 names an absolute path writes wherever it likes. Withholding it would buy a
 guarantee Kingdom cannot keep while costing the model `git log`, `cargo tree`
-and running the failing test it is proposing to fix. What it loses is `patch`:
-offering the editing tool says *you may edit*, and withholding it says *you may
-not*. `system_prompt.rs` says the rest in words, and says plainly that the shell
-is a boundary the model is trusted to keep rather than one that is enforced. Closing that properly means an OS-level sandbox, which is a deliberate
-later decision.
+and running the failing test it is proposing to fix. What it narrows is `patch`:
+offering the editing tool unrestricted says *you may change the project*, and
+offering it scoped to a draft says *you may write down what you would change*.
+`system_prompt.rs` says the rest in words, and says plainly that the shell is a
+boundary the model is trusted to keep rather than one that is enforced. Closing
+that properly means an OS-level sandbox, which is a deliberate later decision.
 
 **Not built at all:**
 - **Subagents with tools, and subagents that spawn subagents.** A subagent is
