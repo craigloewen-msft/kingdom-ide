@@ -30,7 +30,7 @@
 //!    instead, which is the only place that can know.
 
 use super::{Refusal, Tool, Sandbox};
-use kingdom_core::{ToolOutcome, PlanId};
+use kingdom_core::{ToolOutcome, PlanId, WaitBudget};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -198,6 +198,24 @@ impl Tool for AskUserQuestion {
                 .into()
             }
         }
+    }
+
+    /// [`PATIENCE`], as a deadline: an unanswered question really does expire,
+    /// and what comes back is a refusal rather than a handle.
+    ///
+    /// Recorded but not currently drawn, and deliberately so. The chamber shows
+    /// a budget only while a call is in flight, and a question in flight is not
+    /// rendered as a deed at all -- it is rendered as the thing to *do*, by
+    /// `Question`. Putting a countdown under a decision the King is in the
+    /// middle of taking would hurry him over exactly the judgement this product
+    /// exists to let him make slowly. It is answered here anyway because the
+    /// question is a fact about the call, and the alternative -- a tool that
+    /// waits half an hour and reports no wait -- is the kind of quiet
+    /// inconsistency the next reader has to rediscover.
+    fn waits_for(&self, _input: &Value) -> Option<WaitBudget> {
+        Some(WaitBudget::Deadline {
+            seconds: PATIENCE.as_secs(),
+        })
     }
 }
 

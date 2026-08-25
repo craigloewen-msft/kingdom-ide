@@ -735,6 +735,19 @@ fn ConversationBody(
 #[component]
 fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     let plan_id = Memo::new(move |_| live.get().map(|p| p.id));
+
+    // The chamber's one clock. It runs only while some deed is actually in
+    // flight, and every running deed on the line reads this same signal -- see
+    // `ticking_clock`.
+    let anything_running = Memo::new(move |_| {
+        live.get().is_some_and(|p| {
+            p.transcript
+                .iter()
+                .any(|e| matches!(e, Entry::Tool(d) if d.in_flight()))
+        })
+    });
+    let now = ticking_clock(anything_running);
+
     view! {
         <For
             each={move || {
@@ -795,7 +808,9 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Tool(d) if d.tool == "spawn_agents" => {
                         view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
                     }
-                    Entry::Tool(d) => view! { <ToolCallLine tool_call=d plan=plan_id/> }.into_any(),
+                    Entry::Tool(d) => {
+                        view! { <ToolCallLine tool_call=d plan=plan_id now=now/> }.into_any()
+                    }
                 }
             }
         </For>
@@ -1215,7 +1230,15 @@ fn entry_version(entry: &Entry) -> u8 {
 /// build log buries that. The summary line is the answer; the detail is one
 /// click away for when it is not.
 #[component]
-fn ToolCallLine(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
+fn ToolCallLine(
+    tool_call: kingdom_core::ToolCall,
+    /// The plan this deed belongs to, so a file it left behind can be fetched
+    /// from that plan's workspace. See `artifact.rs`.
+    plan: Memo<Option<PlanId>>,
+    /// The chamber's clock, so a running deed can say how long it has been
+    /// going. Ticks only while something is in flight; see `ticking_clock`.
+    now: Memo<Option<Timestamp>>,
+) -> impl IntoView {
     use kingdom_core::ToolOutcome;
 
     let (open, set_open) = signal(false);
@@ -1260,6 +1283,12 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -
     );
     let has_pictures = !pictures.read_value().is_empty();
 
+    // Recomputed on each tick while this deed runs, and constant once it has
+    // settled -- at which point it no longer reads the clock at all, so a
+    // transcript full of finished deeds costs nothing per second.
+    let timing = StoredValue::new(tool_call.clone());
+    let timing = Memo::new(move |_| timing.with_value(|d| self::timing(d, now.get())));
+
     view! {
         <div class=format!("chat-deed deed-{state}")>
             <button class="deed-line" on:click=move |_| set_open.update(|o| *o = !*o)>
@@ -1267,8 +1296,26 @@ fn ToolCallLine(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -
                 <span class="deed-mark">{mark}</span>
                 <span class="deed-tool">{tool}</span>
                 <span class="deed-gist">{gist}</span>
-                <Show when=move || running>
-                    <span class="deed-running">"working\u{2026}"</span>
+                // The figure replaces "working..." rather than joining it: a
+                // ticking clock already says the deed is running, and says how
+                // long it has been at it as well. The word comes back only when
+                // there is no figure to show -- a plan mid-turn when the server
+                // restarted has a running deed and no clock to read it against.
+                <Show
+                    when=move || timing.get().is_some()
+                    fallback=move || view! {
+                        <Show when=move || running>
+                            <span class="deed-running">"working\u{2026}"</span>
+                        </Show>
+                    }
+                >
+                    <span
+                        class="deed-took"
+                        class:is-running=move || running
+                        class:is-overrun=move || timing.get().is_some_and(|(_, over)| over)
+                    >
+                        {move || timing.get().map(|(text, _)| text)}
+                    </span>
                 </Show>
                 <span class="deed-chevron">
                     {move || if open.get() { "\u{2303}" } else { "\u{2304}" }}
@@ -1385,6 +1432,169 @@ fn ellipsise(text: &str, max: usize) -> String {
         return text.to_string();
     }
     format!("{}\u{2026}", text.chars().take(max).collect::<String>())
+}
+
+/// How long a deed took, or has been going, written for a glance.
+///
+/// Four bands, because one format cannot serve a `read_file` and a
+/// `cargo build` at once:
+///
+/// | Under | Reads as | Why |
+/// |---|---|---|
+/// | 1s | `743ms` | the range where tools differ by a factor of ten |
+/// | 10s | `3.2s` | a decimal still means something while a person waits |
+/// | 1m | `42s` | tenths would be noise at this length |
+/// | -- | `4m 7s` | minutes, said in words |
+///
+/// The last band is `4m 7s` rather than `4:07` deliberately. A colon reads as a
+/// clock time, and a long deed would render as `61:11` -- which is not a time
+/// of day and not obviously sixty-one minutes either. Naming the unit costs one
+/// character and cannot be misread. This follows Phoenix's tool strip, which
+/// arrived at the same four bands.
+fn span(ms: i64) -> String {
+    let ms = ms.max(0);
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    let seconds = ms / 1_000;
+    if seconds < 10 {
+        // One decimal, so `1.0s` and `9.4s` are distinguishable in the range a
+        // person actually sits watching.
+        //
+        // Truncated with integer maths rather than rounded through a float:
+        // `{:.1}` would render 9.99s as `10.0s`, which contradicts the band it
+        // was chosen by -- the very next millisecond renders as `10s`. Anything
+        // shown with a decimal here is genuinely under ten seconds.
+        let tenths = ms / 100;
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    match (seconds / 60, seconds % 60) {
+        (minutes, 0) => format!("{minutes}m"),
+        (minutes, rest) => format!("{minutes}m {rest}s"),
+    }
+}
+
+/// What the deed line says about time, and whether it is cause for concern.
+///
+/// Returns nothing at all when there is nothing honest to say -- a settled call
+/// from a record written before deeds were timed, or one the server died
+/// during. Silence is the right rendering of "not known": a `0ms` would be a
+/// claim, and the same claim a genuinely instant call makes.
+///
+/// The budget is shown only while the call is still running, which is the only
+/// time it answers a question. Once a deed is settled, what it *would* have
+/// waited for is trivia; how long it actually took is the fact worth keeping.
+///
+/// **The budget shown is the effective one, defaults included.** Phoenix shows
+/// a wait only where the model named one, deliberately keeping the tools'
+/// defaults out of its frontend so there is no second copy to drift. The same
+/// concern is answered differently here: `Tool::waits_for` asks the tool, so
+/// the resolved figure is the tool's own and there is still only one copy. That
+/// is worth the difference, because the King's question is "is this about to
+/// time out" -- and a `browser_click` that will give up in thirty seconds is
+/// about to do so whether or not the model typed the number.
+fn timing(tool_call: &ToolCall, now: Option<Timestamp>) -> Option<(String, bool)> {
+    if !tool_call.in_flight() {
+        return tool_call.elapsed_ms().map(|ms| (span(ms), false));
+    }
+
+    let (Some(Timestamp(started)), Some(Timestamp(now))) = (tool_call.at, now) else {
+        return None;
+    };
+    let elapsed = (now - started).max(0);
+
+    let Some(budget) = tool_call.waits else {
+        return Some((span(elapsed), false));
+    };
+
+    // Past its budget, and the budget was one that mattered. This is the line
+    // the King should look at: a browser call that has outlived its own timeout
+    // is wedged, while a shell command past `wait_seconds` is simply still
+    // going -- which is why the type is asked rather than the number compared.
+    let overrun =
+        elapsed as u64 / 1_000 >= budget.seconds() && budget.overrunning_is_a_problem();
+
+    Some((
+        format!("{} / {}", span(elapsed), span(budget.seconds() as i64 * 1_000)),
+        overrun,
+    ))
+}
+
+/// A clock the chamber can read, ticking once a second while `while_busy`.
+///
+/// One timer for the whole conversation rather than one per deed. A busy turn's
+/// transcript holds dozens of settled calls, and a timer each would have every
+/// one of them waking to re-render a string that cannot change -- a cost that
+/// grows with the log for no gain, since only the deeds in flight move.
+///
+/// It stops when nothing is in flight, so a chamber left open overnight is not
+/// waking the browser once a second until morning. `while_busy` is a signal
+/// rather than a value for exactly that: the turn ends without anybody
+/// navigating away.
+///
+/// **Why the handle is held rather than left to `on_cleanup`.** This effect
+/// re-runs every time a turn starts or ends, which on a working plan is often.
+/// Relying on cleanup alone to cancel the previous interval is relying on that
+/// cleanup being scoped to the effect *run* rather than to the component -- and
+/// if it is the latter, every turn leaves another timer ticking until the user
+/// navigates away. That failure is invisible: the clock still reads correctly,
+/// it is merely being driven by five timers instead of one. Owning the handle
+/// makes the cancellation ours, and true under either scoping.
+fn ticking_clock(while_busy: Memo<bool>) -> Memo<Option<Timestamp>> {
+    let (now, set_now) = signal(Timestamp::now());
+
+    #[cfg(feature = "hydrate")]
+    {
+        let running: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>> =
+            StoredValue::new(None);
+
+        // Cancels whatever is ticking, if anything. Idempotent, so it is safe on
+        // the path where there was never a timer to begin with.
+        let stop = move || {
+            if let Some(handle) = running.try_get_value().flatten() {
+                handle.clear();
+                running.try_set_value(None);
+            }
+        };
+
+        Effect::new(move |_| {
+            // Unconditionally first: this run supersedes the last, whether it is
+            // about to start a new timer or to stop entirely.
+            stop();
+
+            if !while_busy.get() {
+                return;
+            }
+
+            // Read straight away, so the first figure appears without waiting a
+            // second for the first tick.
+            set_now.set(browser_now());
+
+            if let Ok(handle) = leptos::leptos_dom::helpers::set_interval_with_handle(
+                move || set_now.set(browser_now()),
+                std::time::Duration::from_secs(1),
+            ) {
+                running.try_set_value(Some(handle));
+            }
+        });
+
+        // And the last one stops when the chamber itself goes away.
+        on_cleanup(stop);
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = (while_busy, set_now);
+
+    Memo::new(move |_| now.get())
+}
+
+/// The wall clock, as the browser reads it.
+#[cfg(feature = "hydrate")]
+fn browser_now() -> Option<Timestamp> {
+    Some(Timestamp(js_sys::Date::now() as i64))
 }
 
 /// A log entry's time as a bare `HH:MM` in the user's own timezone.
@@ -1576,7 +1786,7 @@ impl Drop for PlanWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kingdom_core::ToolOutcome;
+    use kingdom_core::{ToolOutcome, WaitBudget};
     use serde_json::json;
 
     fn call(tool: &str, settled: bool) -> Entry {
@@ -1585,6 +1795,145 @@ mod tests {
             c.outcome = Some(ToolOutcome::done("ok"));
         }
         Entry::Tool(c)
+    }
+
+    /// The formatter has to serve a `read_file` and a `cargo build` on the same
+    /// line, and the band edges are where a single format breaks.
+    ///
+    /// The last band is the one worth pinning: `4m 7s` rather than `4:07`,
+    /// because a colon reads as a clock time and an hour-long deed would render
+    /// as `61:11` -- neither a time of day nor obviously sixty-one minutes.
+    #[test]
+    fn a_span_reads_the_same_whether_it_is_instant_or_an_hour() {
+        assert_eq!(span(0), "0ms");
+        assert_eq!(span(400), "400ms");
+        assert_eq!(span(999), "999ms");
+        assert_eq!(span(1_000), "1.0s");
+        assert_eq!(span(3_240), "3.2s");
+        assert_eq!(span(9_990), "9.9s", "the decimal band never rounds up into the next one");
+        assert_eq!(span(10_000), "10s");
+        assert_eq!(span(59_999), "59s");
+        assert_eq!(span(60_000), "1m");
+        assert_eq!(span(247_000), "4m 7s");
+        assert_eq!(span(3_671_000), "61m 11s");
+        // Impossible, but a clock that stepped backwards must not produce a
+        // deed that took less than no time.
+        assert_eq!(span(-5), "0ms");
+    }
+
+    /// A question waiting on the King must never be drawn as a deed.
+    ///
+    /// `ask_user_question` reports a half-hour `Deadline`, and `timing` turns a
+    /// passed deadline red. That is right for a wedged browser call and quite
+    /// wrong here: the King reading a question would get a countdown pressuring
+    /// him through the one decision this product exists to let him take slowly.
+    ///
+    /// What actually prevents it is `is_open_question` diverting the entry to
+    /// `Question` before `ToolCallLine` ever sees it. That is one match arm's
+    /// worth of protection, so it is pinned here rather than trusted -- and the
+    /// second half of the test is the reason the first is not enough on its
+    /// own: once *answered*, the same call is ordinary history, and history
+    /// shows what it took rather than what it was waiting for.
+    #[test]
+    fn a_question_waiting_on_the_king_never_shows_him_a_countdown() {
+        let mut asked = ToolCall::started("q", "ask_user_question", json!({}));
+        asked.at = Some(Timestamp(0));
+        asked.waits = Some(WaitBudget::Deadline { seconds: 30 * 60 });
+
+        assert!(
+            is_open_question(&asked),
+            "an unanswered question is diverted to `Question`, so it is never a deed line"
+        );
+
+        // Answered an hour later -- twice its own budget. Were this ever drawn
+        // as a deed, it must read as history and not as an alarm.
+        asked.outcome = Some(ToolOutcome::done("The careful way"));
+        asked.settled_at = Some(Timestamp(3_600_000));
+
+        assert!(!is_open_question(&asked));
+        assert_eq!(
+            timing(&asked, Some(Timestamp(3_600_000))),
+            Some(("60m".to_string(), false)),
+            "a settled call shows what it took, with no budget and no alarm"
+        );
+    }
+
+    /// What the line says about time, in the four states it can be in.
+    ///
+    /// The one that matters most is the silence. A deed with no end recorded --
+    /// an old record, or a call the server died during -- must show nothing at
+    /// all: `0.0s` there is not a smaller mistake than a wrong number, it *is*
+    /// a wrong number, and indistinguishable from a genuinely instant call.
+    #[test]
+    fn the_line_says_nothing_about_a_deed_nobody_timed() {
+        let now = Some(Timestamp(60_000));
+
+        let mut settled = ToolCall::started("c", "read_file", json!({}));
+        settled.at = Some(Timestamp(10_000));
+        settled.outcome = Some(ToolOutcome::done("ok"));
+        settled.settled_at = Some(Timestamp(10_400));
+        assert_eq!(
+            timing(&settled, now),
+            Some(("400ms".to_string(), false)),
+            "a settled deed reports what it took, and a budget it no longer has \
+             any use for is not shown"
+        );
+
+        let mut unknown = settled.clone();
+        unknown.settled_at = None;
+        assert_eq!(
+            timing(&unknown, now),
+            None,
+            "a settled deed with no end recorded says nothing rather than zero"
+        );
+
+        let mut running = ToolCall::started("c", "bash", json!({}));
+        running.at = Some(Timestamp(48_000));
+        assert_eq!(
+            timing(&running, now),
+            Some(("12s".to_string(), false)),
+            "a running deed with no budget simply counts up"
+        );
+
+        assert_eq!(
+            timing(&running, None),
+            None,
+            "and with no clock to read -- under SSR -- it says nothing"
+        );
+    }
+
+    /// Overrunning is drawn in alarm for a deadline and left alone for
+    /// patience, which is the whole reason the budget is a type.
+    ///
+    /// Both deeds below are past their number by the same margin. Flagging the
+    /// shell one would put a red figure on every cold `cargo build` -- the most
+    /// common long deed there is -- and the King would learn within a day that
+    /// the colour means nothing.
+    #[test]
+    fn only_a_deed_past_a_real_deadline_is_drawn_as_trouble() {
+        let mut shell = ToolCall::started("c", "bash", json!({}));
+        shell.at = Some(Timestamp(0));
+        shell.waits = Some(WaitBudget::Patience { seconds: 30 });
+
+        let mut browser = ToolCall::started("c", "browser_click", json!({}));
+        browser.at = Some(Timestamp(0));
+        browser.waits = Some(WaitBudget::Deadline { seconds: 30 });
+
+        let within = Some(Timestamp(29_000));
+        assert_eq!(timing(&shell, within), Some(("29s / 30s".to_string(), false)));
+        assert_eq!(timing(&browser, within), Some(("29s / 30s".to_string(), false)));
+
+        let past = Some(Timestamp(45_000));
+        assert_eq!(
+            timing(&shell, past),
+            Some(("45s / 30s".to_string(), false)),
+            "a command outliving its wait is the design working: the work goes on"
+        );
+        assert_eq!(
+            timing(&browser, past),
+            Some(("45s / 30s".to_string(), true)),
+            "a browser call outliving its timeout is wedged, and worth looking at"
+        );
     }
 
     /// The caption must name what the court is doing *now* when there is such a

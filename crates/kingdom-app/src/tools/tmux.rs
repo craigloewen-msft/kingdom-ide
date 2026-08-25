@@ -35,7 +35,7 @@
 //! OS-level sandbox, a deliberate later decision.
 
 use super::{Refusal, Tool, Sandbox};
-use kingdom_core::ToolOutcome;
+use kingdom_core::{ToolOutcome, WaitBudget};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -224,6 +224,21 @@ impl Tool for TmuxRun {
         };
 
         ToolOutcome::done(report(&socket, &window, &name, cmd, readiness.as_ref(), seen).await)
+    }
+
+    /// Only when `readiness` was asked for: without it this returns as soon as
+    /// the window is open, and a figure on the line would describe a wait that
+    /// never happens.
+    ///
+    /// [`WaitBudget::Patience`], because the readiness wait is a wait on
+    /// *watching*, not on the work. When it runs out the command is still
+    /// running in its window and the model is told the text was not seen -- the
+    /// same shape as a `bash` handle, and not a failure to flag.
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        let (_, limit) = readiness(input).ok().flatten()?;
+        Some(WaitBudget::Patience {
+            seconds: limit.as_secs(),
+        })
     }
 }
 
