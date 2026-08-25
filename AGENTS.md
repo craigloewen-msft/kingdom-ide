@@ -338,7 +338,27 @@ cargo test -p kingdom-app --features ssr --no-default-features
 # usual install locations, and failing that a Chromium that Playwright or
 # Puppeteer already downloaded. Set KINGDOM_CHROME_EXECUTABLE only to override
 # that on a machine where the guess is wrong.
+```
 
+### What a plan needs that the tests do not
+
+The suite runs on a bare machine. *Driving a real project* does not, and the
+gap is invisible until a plan is halfway through a job and cannot finish:
+
+- **A browser**, for the `browser_*` tools. Any Chrome or Chromium on `PATH`.
+  On arm64 note that Google Chrome has no Linux build at all -- Chromium is the
+  native one, and is what Kingdom's own error text points at.
+- **Whatever the city itself needs to run.** `mommys-heart`, for instance,
+  brings up Postgres and Azurite through `etc/dev.sh`, so a plan there needs a
+  container runtime. That is the *project's* prerequisite rather than Kingdom's,
+  and Kingdom cannot install it -- but a plan asked to "verify in the browser"
+  will discover it the hard way, several minutes in.
+
+Neither is checked up front on purpose: a plan that only reads and proposes
+needs neither, and refusing to start without them would be worse than the
+diagnosis. Worth knowing before you ask a plan to prove its work.
+
+```bash
 # Raise a proving ground: a synthetic dev folder, safe to work against.
 cargo run -p kingdom-app --bin kingdom-seed -- --list
 cargo run -p kingdom-app --bin kingdom-seed -- kingdom-mirror [--force]
