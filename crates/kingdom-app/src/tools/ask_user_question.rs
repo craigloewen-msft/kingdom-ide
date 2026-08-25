@@ -75,6 +75,19 @@ pub fn answer(plan: &PlanId, tool_call: &str, answer: String) -> bool {
     }
 }
 
+/// Abandons a question whose turn has stopped.
+///
+/// Called when the user calls a halt: the parked call is about to be settled as
+/// refused, so its sender must go with it. Without this, `PENDING` would keep a
+/// oneshot nobody will ever send on until [`PATIENCE`] expired, and an answer
+/// typed into a stale tab would arrive for a tool call the transcript has
+/// already closed.
+pub fn abandon(plan: &PlanId, tool_call: &str) {
+    if let Ok(mut pending) = pending().lock() {
+        pending.remove(&(plan.clone(), tool_call.to_string()));
+    }
+}
+
 pub struct AskUserQuestion;
 
 #[async_trait::async_trait]

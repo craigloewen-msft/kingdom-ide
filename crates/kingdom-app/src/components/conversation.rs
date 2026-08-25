@@ -5,7 +5,9 @@
 //! signals, which is what lets a reload -- or a link shared between tabs --
 //! rebuild the conversation exactly.
 
-use crate::api::{approve_plan, draft_plan, finish_plan, get_kingdom, say, set_aside_plan};
+use crate::api::{
+    approve_plan, draft_plan, finish_plan, get_kingdom, say, set_aside_plan, stop_plan, unqueue,
+};
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
@@ -270,6 +272,38 @@ fn ConversationBody(
     let settled = Memo::new(move |_| status.get().is_settled());
     let title = Memo::new(move |_| live.get().map(|p| p.title).unwrap_or_default());
 
+    // Whether a turn is actually in flight, as against merely `Drafting` --
+    // which is also true of a plan nobody has started yet. This is what gates
+    // Stop, so that the button appears only when there is something to stop.
+    let busy = Memo::new(move |_| live.get().is_some_and(|p| p.is_busy()));
+
+    // What the King has said that the court has not heard yet. Read live: it
+    // grows as he types into a working chamber, and empties the moment the turn
+    // reaches a round boundary.
+    let queued = Memo::new(move |_| live.get().map(|p| p.queued).unwrap_or_default());
+
+    // Calling a halt. Its own action so the button can read its pending state,
+    // and so a second click while the first is in flight does nothing.
+    let stop = Action::new(move |id: &PlanId| {
+        let id = id.to_string();
+        async move {
+            if let Err(e) = stop_plan(id).await {
+                state.error.set(Some(e.to_string()));
+            }
+        }
+    });
+
+    // Taking words back before the court hears them. Losing the race is
+    // reported rather than swallowed -- see `api::unqueue`.
+    let withdraw = Callback::new(move |(plan, message): (PlanId, String)| {
+        leptos::task::spawn_local(async move {
+            match unqueue(plan.to_string(), message).await {
+                Ok(_) => state.error.set(None),
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
     // The plan the model has put to the user, if it is their move. Read live,
     // because it arrives mid-conversation over the watch socket -- and read
     // through `standing_proposal` rather than by testing the fields here, so
@@ -347,9 +381,14 @@ fn ConversationBody(
 
     // `StoredValue` rather than a captured `PlanId`: a closure holding an owned
     // non-Copy value is `FnOnce` and cannot be used by both handlers below.
+    //
+    // No longer refuses while the court is working. Sending mid-turn queues the
+    // words instead of dropping them -- the server decides which, on the one
+    // question the browser cannot answer: whether a turn is genuinely running.
+    // See `api::say`.
     let submit = move || {
         let text = reply.get().trim().to_string();
-        if text.is_empty() || drafting.get_untracked() {
+        if text.is_empty() {
             return;
         }
         set_reply.set(String::new());
@@ -553,6 +592,40 @@ fn ConversationBody(
                             <span class="msg-body">"Drawing up the plan\u{2026}"</span>
                         </div>
                     </Show>
+
+                    // The King's words, waiting their turn. Below the drafting
+                    // line because that is where they belong in time: the court
+                    // started, and then he spoke. Drawn as ghosts rather than as
+                    // messages because nobody has heard them yet -- putting them
+                    // in the log proper would claim they were part of a
+                    // conversation the model has not been shown.
+                    <For
+                        each=move || queued.get()
+                        key=|word| word.id.clone()
+                        let:word
+                    >
+                        {
+                            let message = word.id.clone();
+                            view! {
+                                <div class="chat-msg is_user queued-word">
+                                    <span class="msg-at">{clock(word.at)}</span>
+                                    <span class="msg-who">"You"</span>
+                                    <span class="msg-body">{word.body.clone()}</span>
+                                    <span class="queued-mark">"waiting to be heard"</span>
+                                    <button
+                                        class="queued-drop"
+                                        title="Take this back before the court hears it"
+                                        on:click=move |_| withdraw.run((
+                                            id.get_value(),
+                                            message.clone(),
+                                        ))
+                                    >
+                                        "\u{00d7}"
+                                    </button>
+                                </div>
+                            }
+                        }
+                    </For>
                 </div>
 
                 // Outside the log, because an error is not something anybody said. A
@@ -610,6 +683,12 @@ fn ConversationBody(
                     <div class="chamber-composer">
                         // Enter sends; Shift+Enter makes a line, so a long reply
                         // does not have to be one paragraph.
+                        //
+                        // Never disabled. The court being busy is exactly when the
+                        // King most wants to say something -- a twenty-minute turn
+                        // going the wrong way used to be twenty minutes he could
+                        // not speak into. What he sends now is queued and heard at
+                        // the next round boundary.
                         <textarea
                             class="decree-input"
                             node_ref=composer
@@ -621,7 +700,9 @@ fn ConversationBody(
                                 // started -- and once a plan is in front of him, the
                                 // useful thing to type is what he would change *about
                                 // the plan*.
-                                if permissions.get().is_full() {
+                                if drafting.get() {
+                                    "The court is working \u{2014} say something for it to hear next\u{2026}"
+                                } else if permissions.get().is_full() {
                                     "Say more, or ask for a change\u{2026}"
                                 } else if proposal.get().is_some() {
                                     "Say what you would change about this plan\u{2026}"
@@ -630,7 +711,6 @@ fn ConversationBody(
                                 }
                             }
                             prop:value=move || reply.get()
-                            disabled={move || drafting.get()}
                             on:input=move |ev| set_reply.set(event_target_value(&ev))
                             on:keydown=move |ev| {
                                 if ev.key() == "Enter" && !ev.shift_key() {
@@ -639,13 +719,34 @@ fn ConversationBody(
                                 }
                             }
                         />
+                        // Still "Send" while the court works, because it still does
+                        // something. What it does is queue, and the chip that appears
+                        // in the log says so better than a disabled button did.
                         <button
                             class="start-btn"
-                            disabled={move || drafting.get()}
                             on:click=move |_| submit()
                         >
-                            {move || if drafting.get() { "Drafting\u{2026}" } else { "Send" }}
+                            "Send"
                         </button>
+
+                        // Only while a turn is genuinely in flight. `drafting` alone
+                        // is also true of a plan nobody has started yet, and offering
+                        // to stop something that has not begun is a button that does
+                        // nothing the first time it is pressed.
+                        <Show when={move || drafting.get() && busy.get()}>
+                            <button
+                                class="stop-btn"
+                                title="Stop the court where it stands"
+                                disabled={move || stop.pending().get()}
+                                on:click=move |_| { stop.dispatch(id.get_value()); }
+                            >
+                                {move || if stop.pending().get() {
+                                    "Stopping\u{2026}"
+                                } else {
+                                    "Stop"
+                                }}
+                            </button>
+                        </Show>
 
                         // Closing the plan sits beside sending to it, because they are
                         // the two things the user does from here.

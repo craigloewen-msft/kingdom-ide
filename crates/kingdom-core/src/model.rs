@@ -485,6 +485,23 @@ pub struct Plan {
     /// plan is prevented from working.
     #[serde(default)]
     pub working_on: Option<String>,
+    /// What the user said while a turn was in flight, in the order they said
+    /// it, waiting to be heard.
+    ///
+    /// Deliberately **not** in the transcript. The transcript is what was said
+    /// and done; these are words nobody has heard yet. Keeping them apart is
+    /// what lets the conversation draw them as pending, lets the user withdraw
+    /// one before it lands, and -- most importantly -- keeps them out of
+    /// [`Plan::turns`], so a turn already in flight cannot pick them up halfway
+    /// through a round.
+    ///
+    /// They are moved across by [`Plan::hear_queued`], which the turn loop
+    /// calls at a round boundary: the one moment where nothing is half-done.
+    ///
+    /// `#[serde(default)]` because every plan record already on disk predates
+    /// the field.
+    #[serde(default)]
+    pub queued: Vec<QueuedMessage>,
     /// The call this plan was sent to answer, when it is a subagent.
     ///
     /// `None` for a plan the user opened, which is every plan they see in the
@@ -683,6 +700,7 @@ impl Plan {
             outcome: None,
             workspace,
             working_on: None,
+            queued: Vec::new(),
             spawned_by: None,
             // A prompt opens under Propose: the model draws up a plan and puts
             // it to the user before it touches anything. This one line is what
@@ -735,6 +753,9 @@ impl Plan {
             outcome: None,
             workspace: parent.workspace.clone(),
             working_on: None,
+            // A subagent answers to the model that sent it and renders no
+            // composer, so nobody can queue anything against it.
+            queued: Vec::new(),
             spawned_by: Some(SpawnedBy {
                 parent: parent.id.clone(),
                 tool_call: tool_call.to_string(),
@@ -805,6 +826,60 @@ impl Plan {
     /// Records something Kingdom itself reports. Never leaves the machine.
     pub fn note(&mut self, kind: NoteKind, body: impl Into<String>) {
         self.transcript.push(Entry::Note(Note::new(kind, body)));
+    }
+
+    /// Sets words aside to be heard when the court next comes up for air.
+    ///
+    /// Returns the id naming them, which is how [`Plan::unqueue`] finds them
+    /// again. The id is derived from the plan and the queue's length rather
+    /// than from a random source, because this crate compiles to wasm and must
+    /// not reach for one -- and it only has to be unique among the handful of
+    /// messages waiting on *this* plan at *this* moment, which it is: a message
+    /// only leaves the queue by being heard or withdrawn, and both are
+    /// server-side under the kingdom lock.
+    pub fn queue(&mut self, body: impl Into<String>) -> String {
+        let at = Timestamp::now();
+        let id = format!(
+            "{}-{}-{}",
+            self.id.as_str(),
+            self.queued.len(),
+            at.map(|Timestamp(ms)| ms).unwrap_or_default()
+        );
+        self.queued.push(QueuedMessage {
+            id: id.clone(),
+            body: body.into(),
+            at,
+        });
+        id
+    }
+
+    /// Moves everything queued into the transcript, oldest first, and returns
+    /// how many moved.
+    ///
+    /// The entries are stamped *now* rather than carrying the time they were
+    /// queued, because now is when they entered the log -- which is the rule
+    /// [`Message::new`] exists to enforce. The moment they were spoken is not
+    /// lost: it stays on the [`QueuedMessage`] until this call, which is what
+    /// the conversation shows while they wait.
+    pub fn hear_queued(&mut self) -> usize {
+        let heard = std::mem::take(&mut self.queued);
+        let count = heard.len();
+        for message in heard {
+            self.say(Speaker::User, message.body);
+        }
+        count
+    }
+
+    /// Withdraws queued words before anyone has heard them.
+    ///
+    /// False when there is no such message, which is not an error: the caller
+    /// raced [`Plan::hear_queued`] and lost, so the words are already in the
+    /// transcript and withdrawing them would mean editing a conversation that
+    /// has happened. The caller should say so rather than swallow it.
+    pub fn unqueue(&mut self, id: &str) -> bool {
+        let before = self.queued.len();
+        self.queued.retain(|message| message.id != id);
+        self.queued.len() != before
     }
 
     /// Puts a plan to the user, replacing whatever was standing before it.
@@ -1581,6 +1656,25 @@ impl Message {
     }
 }
 
+/// Words the user spoke while a turn was in flight, waiting to be heard.
+///
+/// Not a [`Message`] because it is not in the log yet, and the difference
+/// matters to three readers: [`Plan::turns`] must not offer it to a model, the
+/// conversation must draw it as pending rather than as said, and
+/// [`Plan::unqueue`] must be able to find one by name -- which a [`Message`],
+/// having no id, could not support.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// Names this message so it can be withdrawn before it is heard. See
+    /// [`Plan::queue`] for how it is derived.
+    pub id: String,
+    pub body: String,
+    /// When the user spoke, which is *not* when it enters the log. See
+    /// [`Plan::hear_queued`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
 /// Something that happened, reported by Kingdom itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Note {
@@ -1644,6 +1738,14 @@ pub enum NoteKind {
     /// What happened when the user moved to finish the plan: work landing, a
     /// conflict git refused, a worktree disposed of.
     Merge,
+    /// The user called a halt on a turn that was running.
+    ///
+    /// Its own kind rather than [`NoteKind::Failed`] because nothing failed:
+    /// the user chose this, and dressing a deliberate act in the colour of a
+    /// breakage misreports who did what. It is also what keeps the plan out of
+    /// [`PlanStatus::Failed`], which is the status the conversation offers a
+    /// retry against.
+    Stopped,
 }
 
 impl NoteKind {
@@ -1653,6 +1755,7 @@ impl NoteKind {
             NoteKind::Failed => "failed",
             NoteKind::Workspace => "workspace",
             NoteKind::Merge => "merge",
+            NoteKind::Stopped => "stopped",
         }
     }
 }
@@ -2880,6 +2983,160 @@ mod transcript_tests {
             !plan.is_subagent(),
             "a plan recorded before errands existed is the King's own work, and \
              must not be mistaken for something the court sent"
+        );
+    }
+
+    /// A plan with nothing but its opening decree in the log.
+    fn working() -> Plan {
+        Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        )
+    }
+
+    /// Queued words are heard oldest-first, and only when asked for.
+    ///
+    /// The order is the whole contract. `converse` drains at a round boundary
+    /// and hands the result straight to the model, so a queue that reversed --
+    /// or that dropped one in the middle -- would put the King's instructions
+    /// in an order he never spoke them in, and the court would act on the wrong
+    /// one last.
+    #[test]
+    fn queued_words_are_heard_in_the_order_they_were_spoken() {
+        let mut plan = working();
+        let before = plan.transcript.len();
+
+        plan.queue("first");
+        plan.queue("second");
+        plan.queue("third");
+
+        assert_eq!(
+            plan.transcript.len(),
+            before,
+            "queuing must not touch the log -- nobody has heard these yet"
+        );
+
+        assert_eq!(plan.hear_queued(), 3);
+        assert!(
+            plan.queued.is_empty(),
+            "hearing must empty the queue, or the next round hears them twice"
+        );
+
+        let said: Vec<String> = plan.transcript[before..]
+            .iter()
+            .map(|entry| match entry {
+                Entry::Message(m) => {
+                    assert_eq!(m.speaker, Speaker::User);
+                    m.body.clone()
+                }
+                other => panic!("queued words must land as messages, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(said, vec!["first", "second", "third"]);
+
+        assert_eq!(
+            plan.hear_queued(),
+            0,
+            "hearing an empty queue is a no-op, not a repeat"
+        );
+    }
+
+    /// The King can take words back, and only the ones he named.
+    #[test]
+    fn withdrawing_queued_words_leaves_their_neighbours_alone() {
+        let mut plan = working();
+        let first = plan.queue("first");
+        let second = plan.queue("second");
+        let third = plan.queue("third");
+
+        assert!(plan.unqueue(&second));
+        assert!(
+            !plan.unqueue(&second),
+            "withdrawing the same words twice must be reported, not silently \
+             accepted -- the second call is a race with the drain, already lost"
+        );
+        assert!(!plan.unqueue("plan-1-nothing-like-this"));
+
+        let left: Vec<&str> = plan.queued.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(left, vec![first.as_str(), third.as_str()]);
+
+        plan.hear_queued();
+        let said: Vec<&str> = plan
+            .transcript
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Message(m) => Some(m.body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !said.contains(&"second"),
+            "words withdrawn before they were heard must never reach the court"
+        );
+    }
+
+    /// The invariant that keeps a queue out of a turn already in flight.
+    ///
+    /// [`Plan::turns`] is the single doorway between a plan's log and anything
+    /// that talks to a model, and `converse` reads it afresh on every round. A
+    /// queued message visible there would be picked up mid-round and spliced
+    /// between a tool call and its result -- a conversation that never
+    /// happened -- which is the whole reason the queue is a field of its own
+    /// rather than an early `say`.
+    #[test]
+    fn queued_words_are_not_a_turn_until_they_are_heard() {
+        let mut plan = working();
+        let before = plan.turns().count();
+
+        plan.queue("do not read this yet");
+        assert_eq!(
+            plan.turns().count(),
+            before,
+            "a queued message must be invisible to anything briefing a model"
+        );
+
+        plan.hear_queued();
+        assert_eq!(
+            plan.turns().count(),
+            before + 1,
+            "and visible the moment it is heard"
+        );
+    }
+
+    /// A plan written before the King could speak over the court still loads,
+    /// with nothing waiting on it. Being wrong here is a kingdom that will not
+    /// open, which is why the claim is tested rather than assumed of
+    /// `#[serde(default)]`.
+    #[test]
+    fn a_plan_recorded_before_words_could_be_queued_still_loads() {
+        let before_queueing = r#"{
+            "id": "plan-old",
+            "city": "c1",
+            "title": "An older plan",
+            "summary": "",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan =
+            serde_json::from_str(before_queueing).expect("an older plan record must still load");
+
+        assert!(
+            plan.queued.is_empty(),
+            "a plan from before the queue existed has nothing waiting on it"
         );
     }
 }

@@ -361,6 +361,37 @@ mod tests {
         );
     }
 
+    /// Words the King spoke while the court was working must survive a
+    /// restart, and for a reason the rest of the queue's design depends on:
+    /// the queue is the *only* place they exist. They are deliberately kept out
+    /// of the transcript until they are heard, so a crash between speaking and
+    /// hearing would otherwise lose them outright -- with the user believing
+    /// he had already given the instruction.
+    ///
+    /// Note the contrast with `reconcile` above, which repairs a wedged plan:
+    /// queued words are *not* something to repair. They are still waiting, and
+    /// the next turn drains them.
+    #[test]
+    fn words_waiting_to_be_heard_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let mut waiting = plan("plan-1");
+        waiting.status = kingdom_core::PlanStatus::AwaitingReview;
+        waiting.queue("first");
+        waiting.queue("second");
+
+        save(root, &waiting).unwrap();
+        let loaded = load(root);
+
+        let bodies: Vec<&str> = loaded[0].queued.iter().map(|w| w.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second"],
+            "queued words and their order must both come back"
+        );
+    }
+
     /// Three things disk must get right about a picture, pinned together
     /// because they are the same decision seen from different sides.
     ///

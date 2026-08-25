@@ -135,6 +135,8 @@ crates/
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
     store.rs        The kingdom's records on disk (ssr only)
+    turns.rs        Which plans have a turn running *in this process*, and the
+                    King's way of stopping one (ssr only)
     mock.rs         Seeding a fixture onto disk (ssr only)
     worktree.rs     Preparing and disposing of a plan's workspace (ssr only)
     llm/            Drafting plans with a model (ssr only)
@@ -238,6 +240,38 @@ Nothing is parked while they read. The turn genuinely ends, so a server restart
 mid-review loses nothing — the proposal is on the plan and the plan is on disk.
 That is the whole reason `propose_plan` does not work like `ask_user_question`,
 which holds a request open on a oneshot; the module docs there spell it out.
+
+**The King can speak over a running turn, and can stop one.** The composer is
+never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
+deliberately *out* of the transcript and therefore out of `Plan::turns`) and
+heard by `Plan::hear_queued` at the top of the next round — the one moment where
+nothing is half-done. Splicing them in mid-deed would hand the model a
+conversation in which a tool call and its result are separated by something
+nobody said at the time. `converse` also drains on its two normal exits, because
+otherwise words queued just as a turn ended would be waited on by nobody; it
+deliberately does *not* drain on its failure exits, where re-entering the loop
+would burn the round budget against a model that just errored.
+
+**Stop** signals `turns::halt`, which `converse` races against its two long
+awaits with `tokio::select!`. Cooperative rather than an abort, so the code that
+clears the busy mark and settles the in-flight deed still runs — the difference
+between a stopped plan and a wedged one. The interrupted deed is closed as
+`ToolOutcome::Refused`, exactly as `store::reconcile` closes a deed the server
+died during and for the same reason: an unsettled call is replayed to the model
+as still running, forever. The plan lands in `AwaitingReview`, not `Failed` —
+nothing failed, and `Failed` is the status the chamber offers a retry against. A
+halted `bash` keeps its process, as Phoenix's does; the `JOBS` handle survives
+for a later turn to peek at or kill.
+
+`turns.rs` answers a narrower question than `Plan::working_on`, and the gap is
+load-bearing. `working_on` is a *description* that survives a restart and a
+panic; the registry is emptied by a guard on every exit path. `say` branches on
+the registry, so a plan whose busy mark outlived its turn still takes the direct
+path and is un-wedged by being spoken to — branching on `is_busy()` would queue
+every message behind a turn nothing would ever drain, turning today's
+recoverable wedge into a permanent one. `stop_plan` reads the same absence as
+its diagnosis and repairs such a plan, which is why Stop is also the cure that
+used to need a server restart.
 
 **The `Propose` boundary is a statement of the job, not a sandbox.** It keeps
 `bash`, which `Sandbox::root` is explicit about not containing — a command that

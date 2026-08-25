@@ -430,8 +430,6 @@ pub async fn list_branches(city: String) -> Result<Vec<String>, ServerFnError> {
 /// only once the model has finished thinking.
 #[server(Say, "/api")]
 pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
-    use kingdom_core::{PlanStatus, Speaker};
-
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(ServerFnError::new("A decree cannot be empty."));
@@ -467,23 +465,150 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
     }
 
     update(&mut kingdom, &plan_id, |p| {
-        p.status = PlanStatus::Drafting;
-        // The busy mark is cleared, not merely overwritten by the status.
+        // The one question that matters here is whether a turn is *actually*
+        // running -- not whether the plan says it is busy. See `turns` for why
+        // those differ, and why answering with `is_busy()` would turn today's
+        // recoverable wedge into a permanent one.
+        receive(p, prompt, crate::turns::is_running(&plan_id));
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+}
+
+/// Puts the user's words either in the queue or straight into the log.
+///
+/// Split out from [`say`] so the branch can be tested without a live turn and
+/// without the kingdom singleton: `turn_running` is the only thing the two
+/// paths differ on, and it is the one fact the caller must establish.
+#[cfg(feature = "ssr")]
+fn receive(plan: &mut Plan, prompt: String, turn_running: bool) {
+    use kingdom_core::{PlanStatus, Speaker};
+
+    if turn_running {
+        // Heard at the top of the court's next round, by `converse`.
         //
-        // `draft_plan` refuses to start a turn over a plan that `is_busy()`,
-        // and `is_busy()` is exactly `working_on.is_some()`. So a mark left
-        // behind by a turn that died without clearing it -- a panic, a dropped
-        // future -- makes the plan unstartable *and* disables the composer,
-        // which is the one control that could have rescued it. `store::reconcile`
-        // repairs this, but only on load, so before this line the sole cure for
-        // a wedged plan was restarting the server.
-        //
-        // Safe because the user is speaking to this plan right now: either
-        // nothing is running, or what is running is the turn they are
-        // interrupting, and either way the next `draft_plan` is the one that
-        // should own it.
+        // Deliberately not appended to the transcript here. The turn in flight
+        // rebuilds its brief from the transcript on every pass, so writing
+        // straight into it would splice the user's words between a tool call
+        // and its result -- handing the model a conversation that never
+        // happened, and doing it mid-deed rather than at a boundary.
+        plan.queue(prompt);
+        return;
+    }
+
+    // Anything a turn left queued when it ended goes in first, so the log can
+    // never carry the user's words out of the order they said them. This is the
+    // path words take when a turn failed while they were waiting: `converse`
+    // deliberately does not drain on its failure exits, because looping a
+    // queued message back into a provider that just errored would burn the
+    // round budget against a broken model.
+    plan.hear_queued();
+
+    plan.status = PlanStatus::Drafting;
+    // The busy mark is cleared, not merely overwritten by the status.
+    //
+    // `draft_plan` refuses to start a turn over a plan that `is_busy()`, and
+    // `is_busy()` is exactly `working_on.is_some()`. So a mark left behind by a
+    // turn that died without clearing it -- a panic, a dropped future -- makes
+    // the plan unstartable, and before this line the sole cure was restarting
+    // the server. `store::reconcile` repairs it too, but only on load.
+    //
+    // Safe because this branch is reached only when no turn is running: there
+    // is nothing in flight for the clearing to interrupt, which is a stronger
+    // guarantee than this line used to rest on.
+    plan.working_on = None;
+    plan.say(Speaker::User, prompt);
+}
+
+/// Withdraws words the user queued, before the court has heard them.
+///
+/// Racing the drain is expected rather than exceptional: the turn may reach a
+/// round boundary while the request is in flight. Losing that race is reported
+/// rather than swallowed -- the words are in the transcript by then, and
+/// quietly doing nothing would leave the user believing they had been taken
+/// back.
+#[server(Unqueue, "/api")]
+pub async fn unqueue(plan: String, message: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut withdrawn = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        withdrawn = p.unqueue(&message);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    if !withdrawn {
+        return Err(ServerFnError::new(
+            "The court has already heard that. It is in the chamber's log now.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The user calls a halt on a turn that is running.
+///
+/// Two outcomes, and the difference is diagnosis rather than failure:
+///
+/// - A turn is genuinely running: it is signalled, and it cleans up after
+///   itself. Deliberately *not* cleaned up from here -- the turn owns its own
+///   writes to the plan, and a second writer racing it is how the in-flight
+///   deed would end up settled twice, once with a real outcome and once as
+///   stopped.
+/// - Nothing is running, but the plan says it is busy: the mark has outlived
+///   its turn, and this repairs it. So Stop is also the cure for a wedged plan,
+///   which until now needed a server restart to reach `store::reconcile`.
+#[server(StopPlan, "/api")]
+pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
+    use kingdom_core::{NoteKind, PlanStatus};
+
+    let plan_id = PlanId::new(plan);
+
+    // The errands the court sent are stopped with it. Without this, "Stop"
+    // leaves subagents running against a turn nobody is waiting for any more --
+    // and the spend they carry on making is a large part of why the button
+    // exists at all. Read before the parent is halted, because a subagent's own
+    // turn is what keeps it in the registry.
+    let subagents: Vec<PlanId> = {
+        let kingdom = lock()?;
+        kingdom
+            .plans
+            .iter()
+            .filter(|p| {
+                p.spawned_by
+                    .as_ref()
+                    .is_some_and(|sent| sent.parent == plan_id)
+            })
+            .map(|p| p.id.clone())
+            .collect()
+    };
+    for subagent in &subagents {
+        crate::turns::halt(subagent);
+    }
+
+    if crate::turns::halt(&plan_id) {
+        // The turn will publish its own stopped state in a moment. Returning
+        // the plan as it stands keeps this caller honest about what it knows.
+        return snapshot(&plan_id)
+            .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."));
+    }
+
+    let mut kingdom = lock()?;
+    update(&mut kingdom, &plan_id, |p| {
+        // Only worth saying anything if the plan claimed to be working. A Stop
+        // that lands just after a turn finished on its own is a no-op, and
+        // should not write a note about a halt that halted nothing.
+        if !p.is_busy() {
+            return;
+        }
         p.working_on = None;
-        p.say(Speaker::User, prompt);
+        p.status = PlanStatus::AwaitingReview;
+        p.note(
+            NoteKind::Stopped,
+            "This plan was marked as working, but no turn was running -- most \
+             likely the server stopped while it was mid-decree. It has been \
+             set right. Say something to send the court round again.",
+        );
     })
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
@@ -644,6 +769,13 @@ pub(crate) async fn converse(
     use crate::tools::Sandbox;
     use kingdom_core::{NoteKind, ToolCall, ToolOutcome};
 
+    // Registers this turn as genuinely running, and yields the signal a Stop
+    // travels down. Taken before the first model call and held to the last
+    // line, because both of its readers depend on the bracket being exact:
+    // `say` queues only while this exists, and `stop_plan` reads its absence as
+    // a stale busy mark to repair.
+    let mut halt = crate::turns::begin(&plan_id);
+
     let model = match crate::llm::open(&choice).await {
         Ok(model) => model,
         // A missing credential surfaces as a failed plan the user can see and
@@ -656,6 +788,15 @@ pub(crate) async fn converse(
     let turn = uuid::Uuid::new_v4().to_string();
 
     for round in 0..cap {
+        // A halt that landed between the two long awaits below is caught here
+        // rather than being held until the next one. Without this, stopping a
+        // turn during the brief window where it is neither calling the model
+        // nor running a tool would appear to do nothing until the *next* model
+        // call had already been paid for.
+        if halt.was_halted() {
+            return stopped(plan_id, None);
+        }
+
         // The conversation is rebuilt from the plan each pass rather than
         // accumulated in a local. The tool calls recorded below are already in
         // it, and reading them back is what makes this loop's state the plan's
@@ -669,7 +810,26 @@ pub(crate) async fn converse(
         // implies. Resolving the tools once before the loop -- as this used to
         // -- would have left an approved plan holding a counsellor's toolbox.
         let (turns, permissions, approved) = {
-            let kingdom = lock()?;
+            let mut kingdom = lock()?;
+
+            // The user spoke while the court was working. Their words join the
+            // log *before* it is read back, so this round's brief carries them.
+            //
+            // Here rather than anywhere else because this is the one moment in
+            // a turn where nothing is half-done: the last deed is settled and
+            // the next has not been asked for. Splicing them in mid-deed would
+            // hand the model a conversation in which a tool call and its result
+            // are separated by something nobody said at the time.
+            //
+            // Guarded rather than called unconditionally: `update` saves and
+            // publishes, and a write per round with nothing in it would push a
+            // whole plan over every watch socket for no news.
+            if kingdom.plan(&plan_id).is_some_and(|p| !p.queued.is_empty()) {
+                update(&mut kingdom, &plan_id, |p| {
+                    p.hear_queued();
+                });
+            }
+
             let Some(plan) = kingdom.plan(&plan_id) else {
                 return Err(ServerFnError::new("That plan vanished mid-decree."));
             };
@@ -702,9 +862,21 @@ pub(crate) async fn converse(
             tools: tools.clone(),
         };
 
-        let answer = match model.take_turn(&brief).await {
-            Ok(answer) => answer,
-            Err(e) => return settle(plan_id, Err(e)),
+        // Raced against the halt so a Stop lands while the model is still
+        // thinking, rather than after a reply nobody wants has been paid for.
+        // Dropping the future drops the HTTP request, which is what Phoenix
+        // achieves by aborting the task -- the same effect, with no task to
+        // abort and with every careful clearing below still on the return path.
+        //
+        // `biased` so a halt already signalled wins deterministically instead
+        // of by coin-flip against a reply that happened to arrive at once.
+        let answer = tokio::select! {
+            biased;
+            _ = halt.halted() => return stopped(plan_id, None),
+            answer = model.take_turn(&brief) => match answer {
+                Ok(answer) => answer,
+                Err(e) => return settle(plan_id, Err(e)),
+            },
         };
 
         // Recorded before the reply is acted on, and in a write of its own.
@@ -733,7 +905,27 @@ pub(crate) async fn converse(
                 // Kingdom used to intercept a narration-only first reply and
                 // send it back round with an instruction appended; that was a
                 // Kingdom invention and it is gone.
-                return settle(plan_id, Ok(draft));
+                let answered = settle(plan_id.clone(), Ok(draft))?;
+
+                // ...unless the user got a word in while the court was
+                // working. `settle` has already recorded the reply and parked
+                // the plan, so nothing is lost if this is the last pass; but
+                // words left queued here would be waited on by nobody, because
+                // the turn that was going to hear them is this one.
+                //
+                // This also closes the race `say` cannot: it decides to queue
+                // while a turn is alive, and the turn can end before coming
+                // back round to the top-of-loop drain.
+                if answered.queued.is_empty() {
+                    return Ok(answered);
+                }
+
+                let mut kingdom = lock()?;
+                update(&mut kingdom, &plan_id, |p| {
+                    p.status = kingdom_core::PlanStatus::Drafting;
+                    p.working_on = Some("Hearing what the King added".to_string());
+                });
+                continue;
             }
 
             Reply::Acts(acts) => {
@@ -799,8 +991,23 @@ pub(crate) async fn converse(
                     // Bound to this tool call, so a tool that has to reach back
                     // out to the user has something the browser can name when
                     // it answers.
-                    let outcome =
-                        crate::tools::invoke(&act.tool, act.input, &shop.for_tool_call(&act.id)).await;
+                    // Raced against the halt for the same reason as the model
+                    // call, and with one deliberate consequence: a stopped
+                    // `bash` keeps its process. Phoenix documents the same
+                    // choice, and here the `JOBS` registry means the handle
+                    // survives, so a later turn can still peek at it or kill
+                    // it. Killing on stop is a separate decision about what a
+                    // halt means -- see the task's out-of-scope note.
+                    // Bound before the race rather than inside it: a temporary
+                    // built in a `select!` arm is dropped at the end of the
+                    // statement, and `invoke` borrows it for the length of the
+                    // call.
+                    let bench = shop.for_tool_call(&act.id);
+                    let outcome = tokio::select! {
+                        biased;
+                        _ = halt.halted() => return stopped(plan_id, Some(&act.id)),
+                        outcome = crate::tools::invoke(&act.tool, act.input, &bench) => outcome,
+                    };
 
                     let mut kingdom = lock()?;
                     let mut proposed = None;
@@ -844,7 +1051,19 @@ pub(crate) async fn converse(
                     // see the module docs on `tools::propose_plan` for why that
                     // is worth more than resuming in place would have been.
                     if let Some(plan) = proposed {
-                        return Ok(plan);
+                        // Unless the user was already speaking. A proposal
+                        // parks the turn *for review*, and words queued during
+                        // it are that review arriving early -- the same path
+                        // `say` + `draft_plan` take for notes sent back on a
+                        // proposal, without the round trip.
+                        if plan.queued.is_empty() {
+                            return Ok(plan);
+                        }
+                        update(&mut kingdom, &plan_id, |p| {
+                            p.status = kingdom_core::PlanStatus::Drafting;
+                            p.working_on = Some("Hearing what the King added".to_string());
+                        });
+                        break;
                     }
                 }
 
@@ -1127,6 +1346,66 @@ fn settle(
     });
 
     updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
+}
+
+/// Records that the user called a halt, and marks the plan no longer busy.
+///
+/// The sibling of [`settle`], and it differs in exactly one judgement: the plan
+/// is left `AwaitingReview`, not `Failed`. Nothing failed. The user chose this,
+/// and painting a deliberate act in the colour of a breakage misreports who did
+/// what -- besides putting the plan into the status the conversation offers a
+/// retry against, which is not what he asked for.
+///
+/// `in_flight` names the deed the halt interrupted, when it interrupted one. It
+/// is settled as [`ToolOutcome::Refused`] -- the same variant `store::reconcile`
+/// uses for a call the server died during, for the same reason: a call left
+/// unsettled is replayed to the model on every later turn as though it were
+/// still running, and the model waits forever for a result nobody will send.
+#[cfg(feature = "ssr")]
+fn stopped(plan_id: PlanId, in_flight: Option<&str>) -> Result<Plan, ServerFnError> {
+    // A question parked in front of the user belongs to a turn that has now
+    // stopped. Clearing it keeps `PENDING` from holding a oneshot that nothing
+    // will ever answer, and stops a stale question in an open tab from
+    // resolving a call that is already settled below.
+    if let Some(id) = in_flight {
+        crate::tools::ask_user_question::abandon(&plan_id, id);
+    }
+
+    let mut kingdom = lock()?;
+
+    let updated = update(&mut kingdom, &plan_id, |plan| halted(plan, in_flight));
+
+    updated.ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))
+}
+
+/// What a halt leaves on the plan. Split from [`stopped`] so the judgement can
+/// be tested without a kingdom or a running turn.
+#[cfg(feature = "ssr")]
+fn halted(plan: &mut Plan, in_flight: Option<&str>) {
+    use kingdom_core::{NoteKind, PlanStatus, ToolOutcome};
+
+    plan.working_on = None;
+    plan.status = PlanStatus::AwaitingReview;
+
+    if let Some(id) = in_flight {
+        plan.settle_tool_call(
+            id,
+            ToolOutcome::Refused {
+                reason: "The King called a halt while this was running. Whether it \
+                         finished is unknown."
+                    .to_string(),
+            },
+        );
+    }
+
+    // A note rather than a reply: the court did not say this, Kingdom did.
+    // Recording it as counsel would replay it to the model next turn as
+    // something it had told the user itself.
+    plan.note(
+        NoteKind::Stopped,
+        "The King called a halt. The court stopped where it stood; anything it had \
+         already done is still in its workspace. Say something to set it going again.",
+    );
 }
 
 /// Carries the user's answer to a question the model is waiting on.
@@ -1587,5 +1866,194 @@ mod tests {
         // And calls from one reply still share an id, which is the grouping the
         // whole mechanism exists for.
         assert_eq!(batch_id(&plan, "turn-a", 3), batch_id(&plan, "turn-a", 3));
+    }
+
+    fn a_plan() -> Plan {
+        Plan::opened(
+            PlanId::new("plan-1"),
+            kingdom_core::CityId::new("c1"),
+            "Fix the parser",
+            &kingdom_core::ModelChoice::new("mock", None),
+            kingdom_core::Workspace::in_place("/dev/testburg"),
+        )
+    }
+
+    fn said(plan: &Plan) -> Vec<&str> {
+        plan.transcript
+            .iter()
+            .filter_map(|e| match e {
+                kingdom_core::Entry::Message(m) => Some(m.body.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// While a turn is running, the user's words wait rather than landing in a
+    /// conversation the model is already halfway through reading.
+    #[test]
+    fn words_spoken_over_a_running_turn_are_queued() {
+        let mut plan = a_plan();
+        plan.working_on = Some("bash: cargo test".into());
+        let before = plan.transcript.len();
+
+        receive(&mut plan, "also check the tests".into(), true);
+
+        assert_eq!(
+            plan.transcript.len(),
+            before,
+            "the log must not gain an entry the running turn did not put there"
+        );
+        assert_eq!(plan.queued.len(), 1);
+        assert!(
+            plan.is_busy(),
+            "queuing must leave the busy mark alone -- the turn holding it is \
+             still running, and clearing it would let a second turn start"
+        );
+    }
+
+    /// The regression the `is_running`/`is_busy` split exists to prevent.
+    ///
+    /// A plan whose busy mark outlived its turn -- a panic, a dropped future,
+    /// a server killed mid-round -- *looks* busy and is not. If `say` decided
+    /// by `is_busy()`, every message the user sent such a plan would be queued
+    /// behind a turn that will never drain it, and the plan would be
+    /// permanently mute. Deciding by whether a turn is genuinely running keeps
+    /// speaking to it the cure it has always been.
+    #[test]
+    fn a_plan_wedged_by_a_dead_turn_is_still_rescued_by_speaking_to_it() {
+        let mut plan = a_plan();
+        plan.working_on = Some("bash: cargo test".into());
+
+        // No turn is registered: the mark is stale.
+        receive(&mut plan, "are you still there?".into(), false);
+
+        assert!(
+            !plan.is_busy(),
+            "the stale mark must be cleared, or `draft_plan` keeps refusing"
+        );
+        assert!(
+            plan.queued.is_empty(),
+            "words to a wedged plan must not be queued -- nothing would drain them"
+        );
+        assert_eq!(plan.status, kingdom_core::PlanStatus::Drafting);
+        assert!(said(&plan).contains(&"are you still there?"));
+    }
+
+    /// A turn can fail with words still waiting -- `converse` deliberately does
+    /// not drain on its failure exits. Those words must not then be overtaken
+    /// by whatever the user says next, or the court reads his instructions in
+    /// an order he never gave them.
+    #[test]
+    fn words_left_over_from_a_failed_turn_are_heard_before_newer_ones() {
+        let mut plan = a_plan();
+        plan.working_on = Some("thinking".into());
+
+        receive(&mut plan, "first, while it worked".into(), true);
+        receive(&mut plan, "second, while it worked".into(), true);
+
+        // The turn dies without draining, as a failed one does.
+        plan.working_on = None;
+        plan.status = kingdom_core::PlanStatus::Failed;
+
+        receive(&mut plan, "third, after it stopped".into(), false);
+
+        let said = said(&plan);
+        let ordered: Vec<&str> = said
+            .into_iter()
+            .filter(|body| body.contains("while it worked") || body.contains("after it stopped"))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                "first, while it worked",
+                "second, while it worked",
+                "third, after it stopped",
+            ]
+        );
+        assert!(plan.queued.is_empty());
+    }
+
+    /// What a halt must leave behind, and the one thing it must not.
+    ///
+    /// The status is the judgement worth pinning: `Failed` would paint a
+    /// deliberate act in the colour of a breakage, and it is also the status
+    /// the conversation offers a retry against -- so a stopped plan would
+    /// invite the user to restart the thing he just stopped.
+    ///
+    /// The deed must be settled for a harder reason: `Plan::turns` replays
+    /// in-flight calls to the model on every later round, so a call left open
+    /// is one the court waits on forever, in every turn the plan ever takes
+    /// again.
+    #[test]
+    fn a_halt_closes_the_deed_it_interrupted_without_calling_it_a_failure() {
+        use kingdom_core::{Entry, NoteKind, PlanStatus, ToolCall, Turn};
+
+        let mut plan = a_plan();
+        plan.working_on = Some("bash: cargo test".into());
+        plan.begin_tool_call(ToolCall::started(
+            "call-1",
+            "bash",
+            serde_json::json!({ "cmd": "cargo test" }),
+        ));
+
+        halted(&mut plan, Some("call-1"));
+
+        assert_eq!(
+            plan.status,
+            PlanStatus::AwaitingReview,
+            "the King stopped this on purpose -- it did not fail"
+        );
+        assert!(!plan.is_busy(), "the busy mark must go, or nothing can restart");
+        assert!(
+            plan.turns()
+                .all(|t| !matches!(t, Turn::Tool(d) if d.in_flight())),
+            "an unsettled call is replayed to the model as still running, forever"
+        );
+        assert!(
+            plan.transcript
+                .iter()
+                .any(|e| matches!(e, Entry::Note(n) if n.kind == NoteKind::Stopped)),
+            "the King must be able to see why the court stopped"
+        );
+    }
+
+    /// A halt between deeds has no call to close, and must still park the plan
+    /// rather than falling through to a no-op. This is the path taken when Stop
+    /// lands while the model is thinking.
+    #[test]
+    fn a_halt_with_no_deed_in_flight_still_parks_the_plan() {
+        let mut plan = a_plan();
+        plan.working_on = Some("thinking".into());
+
+        halted(&mut plan, None);
+
+        assert_eq!(plan.status, kingdom_core::PlanStatus::AwaitingReview);
+        assert!(!plan.is_busy());
+    }
+
+    /// Stopping does not throw away what the King had already queued. The two
+    /// are deliberately independent: he may have stopped the court precisely
+    /// *because* of what he typed, and discarding it would lose the correction
+    /// along with the work.
+    #[test]
+    fn a_halt_leaves_queued_words_waiting() {
+        let mut plan = a_plan();
+        plan.working_on = Some("thinking".into());
+        plan.queue("stop and do this instead");
+
+        halted(&mut plan, None);
+
+        assert_eq!(plan.queued.len(), 1);
+
+        // And the next thing he says flushes them, in order.
+        receive(&mut plan, "here is the rest of it".into(), false);
+        let ordered: Vec<&str> = said(&plan)
+            .into_iter()
+            .filter(|b| b.contains("instead") || b.contains("the rest"))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec!["stop and do this instead", "here is the rest of it"]
+        );
     }
 }
