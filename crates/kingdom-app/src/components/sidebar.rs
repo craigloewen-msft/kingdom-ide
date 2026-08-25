@@ -42,6 +42,15 @@ pub fn Sidebar() -> impl IntoView {
 
     restore_width(state.sidebar_width, WIDTH_KEY, BOUNDS);
 
+    // Clearing the kingdom locally is what returns the app to the opening
+    // screen; the server call is what stops the next start reopening it.
+    let leave = Action::new(move |(): &()| async move {
+        if let Err(e) = crate::api::leave_kingdom().await {
+            leptos::logging::warn!("could not leave the kingdom: {e}");
+        }
+        state.kingdom.set(kingdom_core::Kingdom::unopened());
+    });
+
     view! {
         <aside class="sidebar">
             <header class="kingdom-header">
@@ -65,6 +74,16 @@ pub fn Sidebar() -> impl IntoView {
                         {move || state.kingdom.get().root}
                     </div>
                 </div>
+                // The way out. A kingdom now reopens itself on every start, so
+                // without this the opening screen is unreachable once one has
+                // been chosen -- it shows only when nothing is open.
+                <button
+                    class="leave-kingdom"
+                    title="Close this kingdom and choose another"
+                    on:click=move |_| { leave.dispatch(()); }
+                >
+                    "Change"
+                </button>
             </header>
 
             <div class="sidebar-toolbar">
