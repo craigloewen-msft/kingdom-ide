@@ -1094,6 +1094,13 @@ fn ProposalCard(
     let (decided, set_decided) = signal(false);
     let deciding = move || decided.get() || busy.get();
 
+    // A proposal is the one thing in the chamber that is *his* to do, so it
+    // takes the whole column and the log goes behind it: nothing else in view
+    // to read while he is judging it. Collapsible rather than absolute, because
+    // the reasoning that led to the plan is often what he wants to check before
+    // deciding, and hiding it with no way back would make the card a wall.
+    let (full, set_full) = signal(true);
+
     let accept = move |_| {
         if deciding() {
             return;
@@ -1110,11 +1117,22 @@ fn ProposalCard(
     };
 
     view! {
-        <div class="chat-proposal" class:decided=move || decided.get()>
+        <div
+            class="chat-proposal"
+            class:decided=move || decided.get()
+            class:full=move || full.get()
+        >
             <div class="proposal-head">
                 <span class="proposal-mark">"\u{1F4DC}"</span>
                 <span class="proposal-who">"The court proposes"</span>
                 <span class="proposal-at">{clock(proposal.at)}</span>
+                <button
+                    class="proposal-expand"
+                    title="Show the conversation behind this proposal"
+                    on:click=move |_| set_full.update(|f| *f = !*f)
+                >
+                    {move || if full.get() { "Show conversation" } else { "Read in full" }}
+                </button>
             </div>
 
             <p class="proposal-title">{proposal.title}</p>
