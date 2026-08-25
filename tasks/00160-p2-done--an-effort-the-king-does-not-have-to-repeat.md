@@ -79,12 +79,21 @@ reuse if the chamber ever gets one.
 
 ### 2. `components/prompt_bar.rs` — use it
 
-`pick_model` becomes `state.choose_model(chosen.get_untracked()…with_model(&option.id))`,
-falling back to `ModelChoice::new(id, None)` when nothing is chosen yet. The
+`pick_model` reads the standing wish from **`state.choice`**, not from the local
+`chosen` memo, and aims it at the newly picked model with `with_model`. It falls
+back to `ModelChoice::new(id, None)` when nothing is chosen yet. The
 `option.efforts.contains` filter goes.
 
+The `state.choice` / `chosen` distinction is load-bearing, and was found in the
+browser rather than by the type system — both are `Option<ModelChoice>`, so
+either compiles. `chosen` is the **resolved** view, already stripped of any level
+the *currently selected* model does not declare, so sourcing the wish from it
+only moves the erasure one click later: storage survives the trip *into* an
+effortless model and loses the level on the way back *out*.
+
 `pick_effort` is untouched: it is the caller for which `None` genuinely means
-"the model's own default", and it should keep clearing the key.
+"the model's own default", and it should keep clearing the key. It reads its
+model from `chosen`, which is right — that is the model actually selected.
 
 ### 3. `app.rs` — say what `None` now means
 
@@ -111,6 +120,27 @@ implementation and the second needs a browser to say anything the `Effect` does
 not already say plainly.
 
 ---
+
+## Verified
+
+The unit test pins the domain half. The UI half was checked end to end against a
+live Copilot catalogue (21 models) on a proving ground, since that is where the
+bug actually bit:
+
+1. Pick `high` on `claude-opus-5` — chip reads `claude-opus-5 · high`,
+   `kingdom.effort` is `high`.
+2. Switch to `gpt-4o`, which declares no levels — chip drops to `gpt-4o`, the
+   effort row hides, **and `kingdom.effort` is still `high`**.
+3. Switch back to `claude-opus-5` — chip reads `claude-opus-5 · high` again, with
+   `high` marked chosen. *(This step is what caught the `chosen` vs
+   `state.choice` mistake: it read `default` before the fix was corrected.)*
+4. Reload the page — still `claude-opus-5 · high`.
+5. Press `default` — the level clears, as it should. The King forgets it only
+   when he says so.
+
+No console errors; the 23 warnings present are pre-existing Leptos resource
+warnings on untouched lines. `cargo fmt --check` reports the same 111 diffs
+before and after this change, so it introduces no formatting drift.
 
 ## Out of scope
 
