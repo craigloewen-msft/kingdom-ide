@@ -1227,6 +1227,18 @@ impl ToolCall {
     /// stamps are wall-clock readings taken minutes apart, and a clock that
     /// steps backwards between them must not produce a deed that took less than
     /// no time.
+    ///
+    /// **Two wall-clock stamps rather than a monotonic reading.** Phoenix times
+    /// its tool calls with `Instant::elapsed`, which no clock adjustment can
+    /// disturb, and reports the figure rather than the endpoints. That is
+    /// strictly more accurate and was not copied, for a reason worth stating: an
+    /// `Instant` cannot be serialised, so it would be a *third* field carrying
+    /// the duration alongside the two stamps -- and the stamps have to stay,
+    /// because the conversation counts up from `at` while the call is still
+    /// running. The exposure that buys is narrow. Both stamps are taken by the
+    /// same process, so nothing here cares what any other machine's clock says;
+    /// only a step *during* a single call distorts anything, and the guard above
+    /// keeps the worst case to a missing figure rather than a wrong one.
     pub fn elapsed_ms(&self) -> Option<i64> {
         let (Some(Timestamp(from)), Some(Timestamp(to))) = (self.at, self.settled_at) else {
             return None;
