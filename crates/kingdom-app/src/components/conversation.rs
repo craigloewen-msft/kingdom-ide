@@ -73,6 +73,26 @@ pub fn Conversation() -> impl IntoView {
         state.kingdom.get().plan(&id).cloned()
     });
 
+    // Which plan is open, by identity rather than by value.
+    //
+    // This is what the chamber's body is built from, and the distinction is
+    // load-bearing. Branching on `plan` itself rebuilds `ConversationBody` on
+    // every watch-socket push, because a growing transcript makes the memo's
+    // value differ every round. Leptos reuses the DOM nodes, so it never looked
+    // like a remount -- but each rebuild constructs the component afresh, and
+    // every signal declared in its body is born empty again: the files rail's
+    // cache of listings, the folders the King had opened, whether the spyglass
+    // is watching, and the half-written decree in the composer. A turn running
+    // anywhere -- including one the King is not watching -- collapsed his tree
+    // and wiped his textarea twice per exchange.
+    //
+    // `PlanId` is `PartialEq`, so this fires only when the conversation
+    // genuinely becomes a different one: navigating between plans, or a plan
+    // leaving the kingdom. Those *should* rebuild, because the snapshot the
+    // body takes describes that plan and not this one. Everything that moves
+    // during a turn is read through `live` by the body itself.
+    let open_plan = Memo::new(move |_| plan.get().map(|p| p.id));
+
     let city_name = Memo::new(move |_| {
         let plan = plan.get()?;
         state.kingdom.get().city(&plan.city).map(|c| c.name.clone())
@@ -203,19 +223,32 @@ pub fn Conversation() -> impl IntoView {
 
     view! {
         <div class="chamber">
-            {move || match plan.get() {
-                Some(p) => view! {
-                    <ConversationBody
-                        plan=p
-                        live=plan
-                        city=city_name
-                        drafting=drafting
-                        on_say=speak
-                        on_draft=redraft
-                        finish=finish
-                    />
+            {move || match open_plan.get() {
+                Some(_) => {
+                    // Read untracked: this closure must depend on the plan's
+                    // identity alone. A tracked `get()` here would subscribe it
+                    // to every field of the plan again, reinstating the
+                    // rebuild-per-push that `open_plan` exists to prevent.
+                    let Some(snapshot) = plan.get_untracked() else {
+                        // `open_plan` was `Some`, so the plan was there when
+                        // the memo last ran. Unreachable in practice, and
+                        // rendering nothing beats an `expect` that would take
+                        // the chamber down over a race.
+                        return ().into_any();
+                    };
+                    view! {
+                        <ConversationBody
+                            plan=snapshot
+                            live=plan
+                            city=city_name
+                            drafting=drafting
+                            on_say=speak
+                            on_draft=redraft
+                            finish=finish
+                        />
+                    }
+                    .into_any()
                 }
-                .into_any(),
                 None => view! {
                     <div class="empty-chamber">
                         <p>"No such plan in the records."</p>
@@ -2169,6 +2202,77 @@ mod tests {
             c.outcome = Some(ToolOutcome::done("ok"));
         }
         Entry::Tool(c)
+    }
+
+    /// What the chamber rebuilds its body on.
+    ///
+    /// Mirrors the `open_plan` memo in [`Conversation`]. The memo itself needs
+    /// a reactive runtime and a DOM to observe, but the decision it encodes is
+    /// this pure one -- which part of a plan is allowed to trigger a rebuild --
+    /// and that is the part a regression would get wrong.
+    fn rebuild_key(plan: Option<&Plan>) -> Option<PlanId> {
+        plan.map(|p| p.id.clone())
+    }
+
+    fn a_plan(id: &str) -> Plan {
+        Plan::opened(
+            PlanId::new(id),
+            kingdom_core::CityId::new("forge"),
+            "Do the thing",
+            &kingdom_core::ModelChoice::new("mock", None),
+            kingdom_core::Workspace::in_place("forge"),
+        )
+    }
+
+    /// A turn moving must not rebuild the chamber.
+    ///
+    /// `ConversationBody` is constructed from this key, and constructing it
+    /// again makes every signal in its body afresh: the files rail's cache of
+    /// listings and the folders the King had opened, whether the spyglass is
+    /// watching, and whatever he has half-typed into the composer. Keying on
+    /// the plan's *value* rebuilt on every watch-socket push -- so a turn
+    /// running anywhere collapsed his file tree to "Surveying..." and erased
+    /// his textarea, twice per exchange, without him touching the tab.
+    ///
+    /// Everything that moves during a turn is read through the `live` memo
+    /// instead, which is why the body does not need rebuilding to stay current.
+    #[test]
+    fn a_plan_that_merely_moved_does_not_rebuild_the_chamber() {
+        let before = a_plan("plan-foundations");
+
+        // The three ways a plan changes mid-turn: it speaks, it acts, and its
+        // status moves. None of them is a different conversation.
+        let mut after = before.clone();
+        after.transcript.push(call("read_file", true));
+        let spoke = kingdom_core::Message::new(Speaker::Assistant, "Here is what I found.");
+        after.transcript.push(Entry::Message(spoke));
+        after.status = PlanStatus::AwaitingReview;
+        after.title = "A better title".to_string();
+
+        assert_ne!(
+            before, after,
+            "the guard is worthless if the plan is unchanged"
+        );
+        assert_eq!(
+            rebuild_key(Some(&before)),
+            rebuild_key(Some(&after)),
+            "a plan whose transcript, status or title moved is the same conversation",
+        );
+    }
+
+    /// The other half: a rebuild is *required* when the conversation genuinely
+    /// changes, because the body snapshots the fields that cannot change while
+    /// one plan is open -- its id, workspace, prompt and errand parentage. Left
+    /// standing, those would describe the plan the King navigated away from.
+    #[test]
+    fn a_different_plan_does_rebuild_the_chamber() {
+        let one = a_plan("plan-foundations");
+        let two = a_plan("plan-aqueduct");
+
+        assert_ne!(rebuild_key(Some(&one)), rebuild_key(Some(&two)));
+        // And a plan leaving the kingdom must fall back to "no such plan"
+        // rather than leave the last one on screen.
+        assert_ne!(rebuild_key(Some(&one)), rebuild_key(None));
     }
 
     /// The formatter has to serve a `read_file` and a `cargo build` on the same
