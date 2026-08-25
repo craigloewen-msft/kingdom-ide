@@ -71,7 +71,56 @@ pub struct Patch;
 #[derive(Debug, Deserialize)]
 struct Input {
     path: String,
-    patches: Vec<Request>,
+    /// The edits, which may arrive as an array or as a *string holding* one.
+    ///
+    /// Models routinely send this argument JSON-encoded rather than as a real
+    /// array -- observed repeatedly from Claude through Copilot, and the reason
+    /// is structural: `patches` is the only deeply-nested argument in the
+    /// toolbox, and a gateway that flattens arguments to strings does so
+    /// invisibly. Refusing it taught the model nothing it could act on; it
+    /// simply retried the same shape and burned a round each time.
+    ///
+    /// The edits themselves are unambiguous either way, so this reads both and
+    /// gets on with the work. See [`Edits`].
+    patches: Edits,
+}
+
+/// A list of edits, however the gateway chose to encode it.
+///
+/// Deliberately narrow: it accepts an array, or a string that parses *as* that
+/// same array. Anything else is still an error, so a genuinely malformed call
+/// is reported rather than quietly reinterpreted.
+#[derive(Debug)]
+struct Edits(Vec<Request>);
+
+impl<'de> Deserialize<'de> for Edits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let value = match &raw {
+            serde_json::Value::String(text) => {
+                serde_json::from_str(text).map_err(|e| {
+                    D::Error::custom(format!(
+                        "`patches` was a string, and the JSON inside it did not parse: {e}"
+                    ))
+                })?
+            }
+            _ => raw,
+        };
+
+        serde_json::from_value(value)
+            .map(Edits)
+            .map_err(D::Error::custom)
+    }
+}
+
+impl std::ops::Deref for Edits {
+    type Target = Vec<Request>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -731,6 +780,46 @@ mod tests {
             &mut clipboards,
         )
         .map(|(updated, _)| updated)
+    }
+
+    /// The edits survive a gateway that stringifies them.
+    ///
+    /// Claude through Copilot sends `patches` JSON-encoded as a string rather
+    /// than as an array, often enough that refusing it cost real rounds of a
+    /// real plan: the model could not tell what was wrong from the error, so it
+    /// retried the identical shape. `patches` is the only deeply-nested
+    /// argument in the toolbox, which is why this tool alone hits it.
+    ///
+    /// Both encodings must land the same edit -- and something that is neither
+    /// must still be an error, so a genuinely malformed call is reported rather
+    /// than quietly reinterpreted.
+    #[test]
+    fn edits_are_read_whether_or_not_the_gateway_stringified_them() {
+        let as_array = serde_json::json!({
+            "path": "f.rs",
+            "patches": [{"operation": "replace", "oldText": "a", "newText": "b"}]
+        });
+        let as_string = serde_json::json!({
+            "path": "f.rs",
+            "patches": "[{\"operation\": \"replace\", \"oldText\": \"a\", \"newText\": \"b\"}]"
+        });
+
+        let array: Input = serde_json::from_value(as_array).expect("an array is the plain case");
+        let string: Input =
+            serde_json::from_value(as_string).expect("a stringified array is read the same way");
+
+        assert_eq!(array.patches.len(), 1);
+        assert_eq!(string.patches.len(), 1);
+        assert_eq!(
+            string.patches[0].old_text, array.patches[0].old_text,
+            "both encodings must describe the same edit"
+        );
+
+        let nonsense = serde_json::json!({"path": "f.rs", "patches": "not json at all"});
+        assert!(
+            serde_json::from_value::<Input>(nonsense).is_err(),
+            "a string that is not the edits must still be refused, not guessed at"
+        );
     }
 
     /// The rule the whole tool rests on. Three identical call sites is the
