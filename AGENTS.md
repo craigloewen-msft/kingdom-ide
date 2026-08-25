@@ -140,17 +140,19 @@ crates/
     llm/            Drafting plans with a model (ssr only)
                     mod.rs (Model + Provider traits, Brief, Reply/Answer, the
                     provider
-                    list), system_prompt.rs (everything the model is told: the
-                    city, where it stands, its permissions, and the project's
-                    AGENTS.md),
+                    list), system_prompt.rs (everything the model is told,
+                    ported from Phoenix IDE: base prompt, the project's
+                    AGENTS.md, the skill catalogue, where it stands, and its
+                    permissions LAST),
                     mock.rs (offline provider), copilot.rs (Copilot provider +
                     its /models catalogue), catalogue.rs (assembles one
                     catalogue from every provider), credential.rs
+    skills.rs       Finding a project's skills on disk (ssr only)
     tools/          What the court can do with its own hands (ssr only)
                     mod.rs (Tool trait, Sandbox = the workspace boundary,
                     and the one place Permissions become a list of tools),
-                    think, read_file, read_image, search, bash, tmux, patch,
-                    browser, profile (browser_profile),
+                    think, read_file, read_image, search, skill, bash, tmux,
+                    patch, browser, profile (browser_profile),
                     propose_plan (the gateway from proposing to working),
                     spawn_agents (subagents), ask_user_question
 
@@ -279,8 +281,30 @@ later decision.
 - `keyword_search`. Wants a model call of its own. Genuinely useful, but
   `search` plus `read_file` cover most of the ground, so it earns its place
   only once someone finds the gap.
-- `skill`. Kingdom has no skills directory and no convention for one. Porting
-  a loader for a directory nobody populates would be building for no user.
+
+**The prompt and the tool descriptions are Phoenix IDE's**, ported wholesale
+because its agents demonstrably answered better on the same work. Three things
+about that are worth keeping straight.
+
+*The order is the point.* The remit renders **last**, after the project's
+`AGENTS.md` and the skill catalogue, because it is what the model must still be
+holding when it picks its first tool. Kingdom used to render it early and then
+bury it under up to 64 KB of guidance. Anything appended after the remit puts
+that distance back, and a test pins the ordering.
+
+*Phoenix wins on wording, never on facts about Kingdom.* Where a Phoenix string
+would describe behaviour Kingdom does not have, the behaviour is authoritative:
+its mermaid hint is **not** ported (there is no markdown renderer here, and the
+claim once cost a plan 25 of its 30 reasoning blocks arguing with the prompt),
+and its `bash` description is trimmed of the `label` and `since` arguments this
+tool does not take. `SHARED_MACHINE` goes the other way — no Phoenix
+counterpart, kept anyway, because several agents on one machine is Kingdom's own
+subject. Both departures are tested.
+
+*What was deleted with it.* The house blocks on ending a turn, on the cost of
+re-reading, and on writing tests are gone, and so is the `NUDGE` machinery in
+`api.rs` that sent a narration-only reply back round. A reply with prose and no
+tool call now simply ends the turn, as it does in Phoenix.
 
 **The court can see, and can be seen.** `read_image` closes the loop
 `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`

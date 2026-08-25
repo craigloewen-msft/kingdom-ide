@@ -335,15 +335,25 @@ fn hash(text: &str) -> u64 {
 mod tests {
     use super::*;
 
+    /// A directory of this test's own.
+    ///
+    /// The counter is not belt-and-braces. Every test in this module runs in
+    /// one process, so the pid is shared, and two threads calling this in the
+    /// same clock tick would otherwise get the same path -- which shows up as
+    /// one test finding another's skills, only sometimes, and only under the
+    /// full suite. That is exactly the failure this replaced.
     fn temp() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
         let dir = std::env::temp_dir().join(format!(
             "kingdom-skills-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // A leftover from a previous run would be another test's skills as far
+        // as this one is concerned.
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
