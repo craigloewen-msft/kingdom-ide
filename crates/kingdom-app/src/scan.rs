@@ -6,7 +6,11 @@ use kingdom_core::{SourceFile, City, CityId, CityKind, Folder, Language};
 use std::path::Path;
 
 /// Directories that are never projects and are expensive to walk.
-const SKIP_DIRS: &[&str] = &[
+///
+/// Shared with `api::list_directory`, which hides the same build detritus from
+/// the files rail. One list rather than two, so a folder the map ignores and a
+/// folder the rail hides cannot drift apart.
+pub(crate) const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
     ".git",

@@ -15,6 +15,48 @@
   min-width: 0;
 }
 
+// --- Folded away ------------------------------------------------------------
+//
+// The rail is the app's whole navigation, so collapsing it narrows the strip
+// but never removes it: the control that brings it back has to live somewhere
+// the King can still reach. The width of the track is set in `app.rs`
+// (`COLLAPSED_RAIL_WIDTH`); this is only what stands inside it.
+
+.rail-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  height: 100%;
+  min-height: 0;
+}
+
+.strip-crown { font-size: 18px; }
+
+// Vertical, so the strip says what it is without needing the width to say it.
+.strip-legend {
+  writing-mode: vertical-rl;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: t.$ink-faint;
+  user-select: none;
+}
+
+.rail-toggle {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: t.$ink-faint;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover { color: t.$gold; background: t.$panel-2; }
+}
+
 .sidebar-resizer {
   position: absolute;
   top: 0;

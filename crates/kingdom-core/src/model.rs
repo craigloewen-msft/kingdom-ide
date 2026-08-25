@@ -149,6 +149,27 @@ pub struct SourceFile {
     pub bytes: u64,
 }
 
+/// One rung of a directory listing: a single name inside a folder.
+///
+/// Deliberately **not** a variant of [`Folder`]. A `Folder` is a whole recursive
+/// subtree carrying aggregate weights, built once by the scanner for the map;
+/// this is one flat rung of a ladder, fetched on demand as the King opens a
+/// folder in the files rail. Nothing here is aggregated and nothing is pruned,
+/// which is the entire difference: the map's tree keeps the *largest* files and
+/// the files rail must keep *every* file or it is lying about the repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    /// Path relative to the city root, which is what identifies this entry and
+    /// what is handed back to list a directory one level down.
+    pub path: String,
+    pub is_dir: bool,
+    /// What tints the entry, reusing the map's own language colours so a `.rs`
+    /// file reads the same in the rail as it does on the skyline. Meaningless
+    /// for a directory, where it is [`Language::Other`].
+    pub language: Language,
+}
+
 /// One folder in a project: a district of its city.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
