@@ -1130,9 +1130,10 @@ fn thinking(tool_call: &ToolCall) -> Option<String> {
 /// itself. Drawing them alike would tell the King that a model's musing carries
 /// the weight of its stated intent.
 ///
-/// Collapsed by default, for the reason [`ToolCallLine`] is: a chamber that
-/// renders every reasoning block in full is unreadable at precisely the moment
-/// it becomes interesting.
+/// Collapsed by default, and deliberately *unlike* [`ToolCallLine`], which is
+/// now open. A deed is what the court chose to do and the King is watching for
+/// it; reasoning is what it happened to think on the way, and a chamber that
+/// renders every block of it in full buries the deeds under the musing.
 ///
 /// Deliberately *not* markdown. Reasoning arrives as a stream of thought with
 /// stray `#` and `*` in it that was never meant as formatting, and rendering it
@@ -1591,14 +1592,17 @@ fn entry_version(entry: &Entry) -> u8 {
     }
 }
 
-/// One tool call, collapsed to a line the user can skim and expand when it
-/// matters.
+/// One tool call: a summary line the user can skim, and the detail beneath it.
 ///
-/// Collapsed by default because a transcript that renders every command's full
-/// output inline is unreadable at exactly the moment it becomes interesting:
-/// the user is watching for *what the model is doing*, and a thousand lines of
-/// build log buries that. The summary line is the answer; the detail is one
-/// click away for when it is not.
+/// **Open by default.** The King is here to watch the court work, and the
+/// output *is* the work -- a chamber of closed lines makes him click through
+/// every one of them to learn what happened, which is the opposite of the
+/// question this product exists to answer. What kept them shut was the fear of
+/// a thousand-line build log burying the conversation, and that is answered by
+/// capping the panes' height (`.deed-input`, `.deed-output` in
+/// `_conversation.scss`) rather than by hiding them: a deed is a small scroll
+/// box, not a truncation. The chevron still folds one away for when a
+/// particular deed is not worth the room.
 #[component]
 fn ToolCallLine(
     tool_call: kingdom_core::ToolCall,
@@ -1611,7 +1615,7 @@ fn ToolCallLine(
 ) -> impl IntoView {
     use kingdom_core::ToolOutcome;
 
-    let (open, set_open) = signal(false);
+    let (open, set_open) = signal(true);
 
     let running = tool_call.in_flight();
     let state = match &tool_call.outcome {

@@ -396,10 +396,11 @@
 // width, monospaced, left-aligned like a terminal line rather than centred like
 // a note.
 //
-// Collapsed by default. A transcript that renders every command's output inline
-// is unreadable at exactly the moment it becomes interesting: a thousand lines
-// of build log buries the one fact worth having, which is what the court is
-// doing right now.
+// Open by default. The King is here to watch the court work, and the output is
+// the work — a column of closed lines makes him click through every one of them
+// to learn what happened. What used to keep them shut was a thousand lines of
+// build log burying the conversation, and that is answered below by capping
+// each pane's height rather than by hiding it.
 .chat-deed {
   align-self: stretch;
   // The log is a column flexbox, so a tall child gets *shrunk* to fit rather
@@ -511,13 +512,19 @@
 }
 .chat-deed.deed-done .deed-mark { color: t.$review; }
 
+// The two panes a deed opens with. Both are capped and scrollable rather than
+// truncated: nothing is hidden, but no single deed may take the whole log.
+// The caps differ because the panes do — arguments are usually three lines of
+// JSON, output is usually a page — and the worst case for a deed holding both
+// is now about half what one pane alone used to be allowed.
 .deed-detail {
   border-top: 1px solid t.$edge;
 
   pre {
     margin: 0;
-    padding: 8px 10px;
-    max-height: 320px;
+    // A row tighter than the 8px it was: every open deed pays this twice, so
+    // the pixels come back across a chamber of them.
+    padding: 6px 10px;
     overflow: auto;
     color: t.$ink-faint;
     font-family: t.$font-mono;
@@ -528,7 +535,14 @@
   }
 }
 
+// Arguments. Three lines for most calls; the exception is a `patch` carrying a
+// file, and that one scrolls.
+.deed-input { max-height: 120px; }
+
+// Long enough for a test summary or a short file, short enough that a build log
+// does not evict the conversation around it.
 .deed-output {
+  max-height: 200px;
   border-top: 1px solid t.$edge;
   color: t.$ink-dim;
 }
