@@ -630,6 +630,7 @@ mod tests {
                 Speaker::User,
                 prompt,
             ))],
+            aside: None,
             tools: Vec::new(),
         }
     }

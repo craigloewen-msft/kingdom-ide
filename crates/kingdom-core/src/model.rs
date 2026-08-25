@@ -1767,6 +1767,16 @@ pub enum NoteKind {
     /// [`PlanStatus::Failed`], which is the status the conversation offers a
     /// retry against.
     Stopped,
+    /// The model answered, and the answer had nothing in it.
+    ///
+    /// Its own kind rather than [`NoteKind::Failed`] because the next turn has
+    /// to be able to *find* it. A plan whose reply came back empty must not
+    /// resend a byte-identical request -- that is the loop that made this
+    /// failure feel unfixable -- so `converse` reads the last entry of the
+    /// transcript and, seeing this, tells the model what happened. Matching on
+    /// a kind is how that stays honest; sniffing the note's prose for the word
+    /// "empty" would break the first time the wording improved.
+    EmptyReply,
 }
 
 impl NoteKind {
@@ -1777,6 +1787,9 @@ impl NoteKind {
             NoteKind::Workspace => "workspace",
             NoteKind::Merge => "merge",
             NoteKind::Stopped => "stopped",
+            // Styled as a failure because it is one. The kind exists to be
+            // matched on by the turn loop, not to be coloured differently.
+            NoteKind::EmptyReply => "failed",
         }
     }
 }
