@@ -469,7 +469,14 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
         // running -- not whether the plan says it is busy. See `turns` for why
         // those differ, and why answering with `is_busy()` would turn today's
         // recoverable wedge into a permanent one.
-        receive(p, prompt, crate::turns::is_running(&plan_id));
+        //
+        // Asked *inside* the closure, so the registry is read under the same
+        // kingdom lock that `converse` deregisters under. Sampling it at the
+        // call site would leave a window in which a turn ends between the
+        // answer and the write, and the words would be queued for a turn that
+        // has already gone.
+        let running = crate::turns::is_running(&plan_id);
+        receive(p, prompt, running);
     })
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
@@ -582,8 +589,28 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
             .map(|p| p.id.clone())
             .collect()
     };
+
+    // A subagent with no turn behind it is wedged in exactly the way the
+    // parent is repaired for below, and for the same reason -- most often the
+    // server stopped while it was mid-round. Repairing it here too is what
+    // stops "Stop" reporting success on a parent while leaving a child stuck
+    // `Drafting` forever, which nothing else would ever come back to clear.
+    let mut stale = Vec::new();
     for subagent in &subagents {
-        crate::turns::halt(subagent);
+        if !crate::turns::halt(subagent) {
+            stale.push(subagent.clone());
+        }
+    }
+    if !stale.is_empty() {
+        let mut kingdom = lock()?;
+        for subagent in &stale {
+            update(&mut kingdom, subagent, |p| {
+                if p.is_busy() {
+                    p.working_on = None;
+                    p.status = kingdom_core::PlanStatus::AwaitingReview;
+                }
+            });
+        }
     }
 
     if crate::turns::halt(&plan_id) {
@@ -905,26 +932,53 @@ pub(crate) async fn converse(
                 // Kingdom used to intercept a narration-only first reply and
                 // send it back round with an instruction appended; that was a
                 // Kingdom invention and it is gone.
-                let answered = settle(plan_id.clone(), Ok(draft))?;
+                // `settle` still records the reply and parks the plan; its
+                // return value is deliberately discarded, because the decision
+                // below must be made against a fresher read than it can give.
+                settle(plan_id.clone(), Ok(draft))?;
 
-                // ...unless the user got a word in while the court was
+                // ...unless the King got a word in while the court was
                 // working. `settle` has already recorded the reply and parked
                 // the plan, so nothing is lost if this is the last pass; but
                 // words left queued here would be waited on by nobody, because
                 // the turn that was going to hear them is this one.
                 //
-                // This also closes the race `say` cannot: it decides to queue
-                // while a turn is alive, and the turn can end before coming
-                // back round to the top-of-loop drain.
-                if answered.queued.is_empty() {
-                    return Ok(answered);
+                // The queue is re-read under the lock rather than taken from
+                // `answered`, and the turn deregisters in the same critical
+                // section. That pairing is the whole correctness argument, and
+                // the snapshot alone was not enough: `settle` releases the lock
+                // before returning, so `say` could see a turn still running,
+                // queue against it, and have this branch then consult a
+                // snapshot taken before those words existed -- stranding them
+                // behind a turn already on its way out.
+                //
+                // `say` reads the registry under this same lock, so after this
+                // block it either queued (and we see it) or found no turn (and
+                // takes the direct path, starting a fresh one). There is no
+                // third case.
+                let mut kingdom = lock()?;
+                let waiting = kingdom
+                    .plan(&plan_id)
+                    .is_some_and(|p| !p.queued.is_empty());
+
+                // Going round again costs a round, so a drain on the last one
+                // would fall through to the out-of-rope branch below and report
+                // a turn that actually answered as having run out. The words
+                // stay queued instead, exactly as they do when a turn fails
+                // with some waiting: the next thing the King says flushes them.
+                if !waiting || round + 1 >= cap {
+                    halt.stand_down();
+                    return kingdom
+                        .plan(&plan_id)
+                        .cloned()
+                        .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."));
                 }
 
-                let mut kingdom = lock()?;
                 update(&mut kingdom, &plan_id, |p| {
                     p.status = kingdom_core::PlanStatus::Drafting;
                     p.working_on = Some("Hearing what the King added".to_string());
                 });
+                drop(kingdom);
                 continue;
             }
 
@@ -1051,12 +1105,23 @@ pub(crate) async fn converse(
                     // see the module docs on `tools::propose_plan` for why that
                     // is worth more than resuming in place would have been.
                     if let Some(plan) = proposed {
-                        // Unless the user was already speaking. A proposal
+                        // Unless the King was already speaking. A proposal
                         // parks the turn *for review*, and words queued during
                         // it are that review arriving early -- the same path
                         // `say` + `draft_plan` take for notes sent back on a
                         // proposal, without the round trip.
-                        if plan.queued.is_empty() {
+                        //
+                        // Safe to read off `plan` here, unlike the prose path
+                        // above: `proposed` was cloned inside the `update`
+                        // that ran under the lock this scope still holds, so
+                        // no `say` can have run since. `stand_down` happens
+                        // under that same lock for the reason given there.
+                        //
+                        // The round check matches the prose path: draining
+                        // costs a round, and spending the last one would report
+                        // a plan that did propose as having run out of rope.
+                        if plan.queued.is_empty() || round + 1 >= cap {
+                            halt.stand_down();
                             return Ok(plan);
                         }
                         update(&mut kingdom, &plan_id, |p| {

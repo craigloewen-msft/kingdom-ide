@@ -42,19 +42,31 @@
 
 use kingdom_core::PlanId;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::watch;
 
 /// The turns running in this process, keyed by the plan each is drawing up.
+///
+/// The value carries a *token* as well as the signal. Two turns can briefly
+/// overlap on one plan -- `draft_plan`'s busy check races a turn that has
+/// settled but whose guard is still alive -- and without the token the older
+/// guard's `Drop` would deregister the newer turn. That would make `say` take
+/// the direct path over a live turn and `stop_plan` misdiagnose a running plan
+/// as wedged, which are exactly the two things this registry exists to get
+/// right.
 ///
 /// Deliberately not persisted, for the same reason as
 /// `tools::ask_user_question::PENDING`: the thing being stored is a live
 /// channel into a running future, and writing a record of it to disk would
 /// leave the next process holding a handle to a turn that no longer exists.
 /// `store::reconcile` repairs what a restart leaves behind.
-static RUNNING: OnceLock<Mutex<HashMap<PlanId, watch::Sender<bool>>>> = OnceLock::new();
+static RUNNING: OnceLock<Mutex<HashMap<PlanId, (u64, watch::Sender<bool>)>>> = OnceLock::new();
 
-fn running() -> &'static Mutex<HashMap<PlanId, watch::Sender<bool>>> {
+/// Names each registration, so a guard can only ever remove its own.
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn running() -> &'static Mutex<HashMap<PlanId, (u64, watch::Sender<bool>)>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -71,11 +83,13 @@ fn running() -> &'static Mutex<HashMap<PlanId, watch::Sender<bool>>> {
 /// can see.
 pub fn begin(plan: &PlanId) -> TurnGuard {
     let (tx, rx) = watch::channel(false);
+    let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut running) = running().lock() {
-        running.insert(plan.clone(), tx);
+        running.insert(plan.clone(), (token, tx));
     }
     TurnGuard {
         plan: plan.clone(),
+        token,
         halted: rx,
     }
 }
@@ -106,7 +120,7 @@ pub fn halt(plan: &PlanId) -> bool {
     match running.get(plan) {
         // `send` fails only when every receiver is gone, which means the turn
         // has already finished; that is the same answer as not finding it.
-        Some(tx) => tx.send(true).is_ok(),
+        Some((_, tx)) => tx.send(true).is_ok(),
         None => false,
     }
 }
@@ -118,10 +132,31 @@ pub fn halt(plan: &PlanId) -> bool {
 /// behind for a turn that has stopped.
 pub struct TurnGuard {
     plan: PlanId,
+    token: u64,
     halted: watch::Receiver<bool>,
 }
 
 impl TurnGuard {
+    /// Deregisters this turn *now*, rather than waiting for the guard to drop.
+    ///
+    /// Exists so a turn can end its registration inside the same kingdom lock
+    /// it makes its final decision under. `converse` needs that: it decides
+    /// whether to return or go round again by reading the plan's queue, and
+    /// `say` decides whether to queue by reading this registry -- both under
+    /// the kingdom lock. Deregistering anywhere else leaves a window in which
+    /// `say` sees a turn still running and queues for it, while the turn has
+    /// already read an empty queue and is on its way out, stranding the words.
+    ///
+    /// Idempotent, and safe to call before the guard drops: `Drop` removes only
+    /// an entry still bearing this guard's token, so neither call can take a
+    /// newer turn's registration with it.
+    pub fn stand_down(&self) {
+        if let Ok(mut running) = running().lock() {
+            if running.get(&self.plan).is_some_and(|(t, _)| *t == self.token) {
+                running.remove(&self.plan);
+            }
+        }
+    }
     /// Resolves when the King calls a halt, and never otherwise.
     ///
     /// Written to be safe in a `select!` arm that is polled many times: it
@@ -156,15 +191,42 @@ impl TurnGuard {
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        if let Ok(mut running) = running().lock() {
-            running.remove(&self.plan);
-        }
+        self.stand_down();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `stand_down` must be idempotent and must never take a *newer* turn's
+    /// registration with it.
+    ///
+    /// `converse` deregisters explicitly, under the kingdom lock, and then its
+    /// guard drops moments later. If the second removal were unconditional, a
+    /// turn that started in that window would be deregistered by a guard that
+    /// no longer owns the plan -- and `say` would take the direct path over a
+    /// live turn, which is the exact splice-mid-deed this whole design exists
+    /// to prevent.
+    #[test]
+    fn standing_down_twice_cannot_deregister_the_turn_that_replaced_it() {
+        let plan = PlanId::new("plan-handover");
+
+        let first = begin(&plan);
+        first.stand_down();
+        assert!(!is_running(&plan));
+
+        // A new turn takes the plan while the old guard is still alive.
+        let _second = begin(&plan);
+        assert!(is_running(&plan));
+
+        // The old guard finally drops. It must leave the newer turn alone.
+        drop(first);
+        assert!(
+            is_running(&plan),
+            "a stale guard must not deregister the turn that succeeded it"
+        );
+    }
 
     /// The registry must not answer for a plan whose turn has ended, because
     /// `say` reads it to decide whether to queue. A stale `true` here is a
