@@ -681,6 +681,10 @@ pub(crate) async fn converse(
     // Set for the single round that follows a narration-only reply. See `NUDGE`.
     let mut nudge_next = false;
 
+    // Distinguishes this turn's rounds from every other turn's on the same
+    // plan. See `batch_id`.
+    let turn = uuid::Uuid::new_v4().to_string();
+
     for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than
         // accumulated in a local. The tool calls recorded below are already in
@@ -807,8 +811,8 @@ pub(crate) async fn converse(
                 // One id for everything this reply asked for, so the calls can
                 // be replayed as the single decision they were rather than as a
                 // sequence the model deliberated through. See
-                // `kingdom_core::ToolCall::batch`.
-                let batch = format!("{}-{round}", plan_id.as_str());
+                // `kingdom_core::ToolCall::batch` and `batch_id`.
+                let batch = batch_id(&plan_id, &turn, round);
                 let mut first = true;
 
                 for act in acts.calls {
@@ -1410,6 +1414,26 @@ pub async fn suggest_root() -> Result<String, ServerFnError> {
     Ok(home)
 }
 
+/// The id shared by every call in one reply.
+///
+/// Scoped to the *turn* as well as the round, and that is the whole point of it
+/// being a function. `round` restarts at zero each time the user sets a plan
+/// going again, so an id built from the round alone repeats within one plan --
+/// and [`crate::llm`]'s replay groups *consecutive* calls that share one.
+///
+/// [`kingdom_core::Plan::turns`] filters notes out, so a turn that ended on a
+/// note rather than a message leaves its last call directly adjacent to the
+/// next turn's first. The `Failed` note left behind when the server stops
+/// mid-turn is exactly that shape, and it is common: the user says "keep
+/// going", the new turn opens at round 0, and it collides with whatever the
+/// dead turn ended on. Two separate decisions then replay as one assistant
+/// message -- and the second's thinking is dropped, because only the first call
+/// of a batch carries any.
+#[cfg(feature = "ssr")]
+fn batch_id(plan: &PlanId, turn: &str, round: usize) -> String {
+    format!("{}-{turn}-{round}", plan.as_str())
+}
+
 /// Expands a leading `~` to the user's home directory.
 #[cfg(feature = "ssr")]
 fn expand_home(path: &str) -> String {
@@ -1597,5 +1621,37 @@ mod tests {
             "and must not hold for the plan that sent it, or the King could \
              never finish anything"
         );
+    }
+
+    /// Two turns must not be able to claim the same batch id.
+    ///
+    /// The replay groups consecutive calls that share one, and `round` starts
+    /// again at zero on every turn -- so without the turn in the id, the first
+    /// call after "keep going" collides with the last call of the turn that
+    /// died. The two decisions merge into one assistant message and the later
+    /// one's thinking is discarded. See [`batch_id`].
+    #[test]
+    fn a_batch_id_is_not_reused_by_the_next_turn() {
+        let plan = PlanId::new("plan-7");
+
+        // The shape that bit: a turn that ended at round 0, then a new turn
+        // opening at round 0 after the user said "keep going".
+        assert_ne!(
+            batch_id(&plan, "turn-a", 0),
+            batch_id(&plan, "turn-b", 0),
+            "round 0 of one turn must not be round 0 of the next"
+        );
+
+        // Within one turn the round still separates replies, or every call a
+        // turn ever made would replay as a single vast decision.
+        assert_ne!(
+            batch_id(&plan, "turn-a", 0),
+            batch_id(&plan, "turn-a", 1),
+            "two replies in one turn are still two decisions"
+        );
+
+        // And calls from one reply still share an id, which is the grouping the
+        // whole mechanism exists for.
+        assert_eq!(batch_id(&plan, "turn-a", 3), batch_id(&plan, "turn-a", 3));
     }
 }

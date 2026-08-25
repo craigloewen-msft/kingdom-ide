@@ -159,6 +159,33 @@ A one-line prompt hint — *the King's own server may hold :3000; pick a free po
 
 Three tests total: one per cause. No new fixtures.
 
+## What implementation found that the plan did not
+
+Changing `Reasoning::opaque` to a map is a **stored-format change**, and
+`store::load` parses each plan with `serde_json::from_str(..).ok()` — a document
+that will not parse is *skipped*. Every plan on disk holds `opaque` as a bare
+string, so a strict deserialiser would not have raised an error: it would have
+silently emptied the King's rail of every plan that ever thought with a signed
+model. Caught before it shipped, and now pinned by
+`thinking_recorded_before_opaque_fields_were_keyed_still_loads`.
+
+`Reasoning::opaque` therefore has a custom `deserialize_with` that reads the old
+bare value as "no opaque fields" rather than failing. The stale blob is dropped
+rather than given an invented key — it is unreplayable either way, since nothing
+recorded which field it belonged to, and guessing `signature` would hand a
+gateway a blob under a name it may never have used. The prose half still loads.
+
+Verified against the real records: all **13** plans in `~/dev/.kingdom/plans/`
+load intact, titles and transcripts included.
+
+Two further notes on what shipped:
+
+- `parse_reasoning` now keeps **every** opaque field present rather than the
+  first one found. A provider sending both a signature and an encrypted trace
+  needs both back, and `find_map` silently dropped the rest.
+- Change 3 replaced `MERMAID` rather than merely deleting it: the freed slot now
+  holds `SHARED_MACHINE`, the port-collision hint the plan flagged as optional.
+
 ## How to verify
 
 The unit tests pin causes 1 and 2. The real check is behavioural, and both live

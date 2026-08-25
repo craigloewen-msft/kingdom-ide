@@ -1124,23 +1124,61 @@ pub struct ToolCall {
 /// or the next request is rejected. We can read the first and must not touch
 /// the second, and a shape that conflated them would invite something to
 /// normalise a value whose whole purpose is to survive unchanged.
+///
+/// **Why the opaque half is a map and not a bare value.** "Echoed back
+/// unmodified" includes *the key it arrived under*. A blob read from
+/// `signature` and written back as `reasoning_opaque` is as unusable to the
+/// gateway as one whose bytes were rewritten: it looks like an unknown field,
+/// the thinking block it signs is discarded, and the model is handed its own
+/// tool results with its reasoning stripped. That failure is silent -- the
+/// request stays well-formed and the gateway keeps accepting it -- and it is
+/// what made long investigations wander and repeat themselves. Keeping the key
+/// beside the value makes the round trip total: whatever came in goes back out
+/// under the same name, and there is no branch left that can invent one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Reasoning {
     /// The thinking as prose, where the provider gave us prose.
     #[serde(default)]
     pub text: Option<String>,
     /// Provider-opaque fields that must be quoted back exactly as they came --
-    /// a signature, an encrypted trace. Never parsed, never rewritten: it is
-    /// carried, not understood.
-    #[serde(default)]
-    pub opaque: Option<serde_json::Value>,
+    /// a signature, an encrypted trace -- each under the key it arrived under.
+    /// Never parsed, never rewritten, never re-keyed: it is carried, not
+    /// understood.
+    #[serde(default, deserialize_with = "opaque_fields")]
+    pub opaque: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Reads the opaque half, tolerating the shape that came before it had keys.
+///
+/// Records written earlier hold a bare value here rather than a map. That is
+/// not a curiosity to be tidied later: [`crate::Plan`] documents are loaded with
+/// `serde_json::from_str(..).ok()` and a document that will not parse is
+/// **skipped**, so rejecting the old shape would not surface as an error the
+/// user could act on -- it would silently empty his rail of every plan that ever
+/// thought with a signed model.
+///
+/// The stale value is dropped rather than given an invented key. It cannot be
+/// replayed whatever we do -- nothing recorded which field it belonged to, which
+/// is precisely the bug this map exists to fix -- and guessing `signature` would
+/// hand a gateway a blob under a name it may never have used. The prose half
+/// still loads, so the plan keeps the part of its thinking that can be shown.
+fn opaque_fields<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Object(fields) => fields.into_iter().collect(),
+        _ => std::collections::BTreeMap::new(),
+    })
 }
 
 impl Reasoning {
     /// True when there is nothing here worth sending, so a caller can skip it
     /// rather than emit an empty object a gateway may reject.
     pub fn is_empty(&self) -> bool {
-        self.text.as_ref().is_none_or(|t| t.trim().is_empty()) && self.opaque.is_none()
+        self.text.as_ref().is_none_or(|t| t.trim().is_empty()) && self.opaque.is_empty()
     }
 }
 
@@ -2483,6 +2521,32 @@ mod transcript_tests {
         assert!(
             tool_call.artifacts().is_empty(),
             "absent means nothing was left behind, not a parse failure"
+        );
+    }
+
+    /// Thinking recorded before opaque fields carried their key must still load.
+    ///
+    /// Older records hold `opaque` as a bare string, and `store::load` *skips a
+    /// plan it cannot parse* rather than failing loudly -- so a deserialiser
+    /// that rejected the old shape would not raise an error, it would quietly
+    /// empty the King's rail. The stale blob itself is unreplayable (nothing
+    /// recorded which field it arrived in, which is the whole bug this shape
+    /// fixes) but losing a signature must not mean losing the plan.
+    #[test]
+    fn thinking_recorded_before_opaque_fields_were_keyed_still_loads() {
+        let before_keys = r#"{ "text": "the title is read in sidebar.rs", "opaque": "c2lnbmVk" }"#;
+
+        let reasoning: Reasoning =
+            serde_json::from_str(before_keys).expect("an older record must still load");
+
+        assert_eq!(
+            reasoning.text.as_deref(),
+            Some("the title is read in sidebar.rs"),
+            "the prose is the half that can still be replayed, so it must survive"
+        );
+        assert!(
+            reasoning.opaque.is_empty(),
+            "an unkeyed blob cannot go back under a key it never recorded"
         );
     }
 

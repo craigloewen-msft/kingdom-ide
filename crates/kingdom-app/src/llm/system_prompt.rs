@@ -119,7 +119,7 @@ impl SystemPrompt {
         }
 
         out.push_str("\n\n");
-        out.push_str(MERMAID);
+        out.push_str(SHARED_MACHINE);
 
         out.push_str("\n\n");
         out.push_str(SCREENSHOTS);
@@ -159,9 +159,23 @@ const TESTING: &str = "Tests are a liability as well as an asset: every test cos
      trivial accessors, or duplicate coverage that already exists. If a change needs no new \
      test, say so instead of inventing one.";
 
-const MERMAID: &str = "The conversation view renders Markdown mermaid code fences as diagrams; prefer \
-     them when a diagram would help. Wrap a node label in double quotes when it contains \
-     parentheses or quotes, so Mermaid does not read the punctuation as syntax.";
+/// That the machine has other tenants, the King's own server among them.
+///
+/// Kingdom arbitrates no resources yet (AGENTS.md §4), so nothing detects two
+/// plans binding one port -- or a plan binding the port the user is reading the
+/// chamber on. That last one is observed, not hypothetical: a plan ran `cargo
+/// leptos serve` with no override and collided with the King's own server on
+/// 3000. It recovered unaided, having reasoned that the occupant was probably
+/// the user's and should not be killed, which is the right instinct and one
+/// nothing had told it to have.
+///
+/// Saying it costs a sentence and is not a substitute for arbitration. It only
+/// makes the good outcome the likely one instead of the lucky one.
+const SHARED_MACHINE: &str = "On ports and long-running processes. This machine is shared -- \
+     the user's own Kingdom server is very likely on port 3000, and other plans may be \
+     working alongside you. Never kill a process you did not start. If you need to run a \
+     server, pick an unusual free port explicitly rather than taking a project's default, \
+     and stop it when you are done with it.";
 
 /// That a screenshot is *seen*, not merely saved.
 ///
