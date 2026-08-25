@@ -295,9 +295,9 @@ fn ConversationBody(
 
     // Taking words back before the court hears them. Losing the race is
     // reported rather than swallowed -- see `api::unqueue`.
-    let withdraw = Callback::new(move |(plan, message): (PlanId, String)| {
+    let withdraw = Callback::new(move |(plan, queued_id): (PlanId, String)| {
         leptos::task::spawn_local(async move {
-            match unqueue(plan.to_string(), message).await {
+            match unqueue(plan.to_string(), queued_id).await {
                 Ok(_) => state.error.set(None),
                 Err(e) => state.error.set(Some(e.to_string())),
             }
@@ -605,7 +605,7 @@ fn ConversationBody(
                         let:word
                     >
                         {
-                            let message = word.id.clone();
+                            let queued_id = word.id.clone();
                             view! {
                                 <div class="chat-msg is_user queued-word">
                                     <span class="msg-at">{clock(word.at)}</span>
@@ -617,7 +617,7 @@ fn ConversationBody(
                                         title="Take this back before the court hears it"
                                         on:click=move |_| withdraw.run((
                                             id.get_value(),
-                                            message.clone(),
+                                            queued_id.clone(),
                                         ))
                                     >
                                         "\u{00d7}"

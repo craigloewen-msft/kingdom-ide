@@ -534,13 +534,13 @@ fn receive(plan: &mut Plan, prompt: String, turn_running: bool) {
 /// quietly doing nothing would leave the user believing they had been taken
 /// back.
 #[server(Unqueue, "/api")]
-pub async fn unqueue(plan: String, message: String) -> Result<Plan, ServerFnError> {
+pub async fn unqueue(plan: String, queued_id: String) -> Result<Plan, ServerFnError> {
     let plan_id = PlanId::new(plan);
     let mut kingdom = lock()?;
 
     let mut withdrawn = false;
     let updated = update(&mut kingdom, &plan_id, |p| {
-        withdrawn = p.unqueue(&message);
+        withdrawn = p.unqueue(&queued_id);
     })
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
 
