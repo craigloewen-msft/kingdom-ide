@@ -86,18 +86,22 @@ pub struct Guidance {
 
 impl SystemPrompt {
     /// Assembles the prompt for one turn.
+    ///
+    /// `kingdom_root` bounds the guidance walk. See [`discover_guidance`] for
+    /// why that bound is load-bearing rather than tidiness.
     pub fn assemble(
         city: &CityBrief,
         workspace: &kingdom_core::Workspace,
         permissions: Permissions,
         approved: bool,
+        kingdom_root: &Path,
     ) -> Self {
         let root = Path::new(&workspace.path);
         Self {
             city: city.clone(),
             workspace: workspace_block(workspace),
             permissions: permissions_block(permissions, approved),
-            guidance: discover_guidance(root),
+            guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
         }
     }
@@ -304,9 +308,24 @@ const CARRYING_OUT: &str = "You are carrying out a plan the user approved. It is
      the record of your own `propose_plan` call. Follow it; if you find it was wrong, say so \
      rather than quietly doing something else.";
 
-/// Every guidance file from `from` up to the filesystem root, root-most first.
+/// Every guidance file from `from` up to `stop`, root-most first.
 ///
-/// Matches Phoenix's `discover_guidance_files`. Two things are load-bearing.
+/// Matches Phoenix's `discover_guidance_files`. Three things are load-bearing.
+///
+/// **The bound.** The walk stops after `stop` -- the kingdom root -- and never
+/// climbs past it. Guidance above the kingdom belongs to the user's machine
+/// rather than to this kingdom, and picking it up would let a file they had
+/// forgotten about instruct every plan in every project: a stray `AGENTS.md` in
+/// `$HOME`, or in any folder that happens to be a parent of several checkouts,
+/// would silently join every system prompt Kingdom ever sends. That is both a
+/// prompt-injection surface and a per-round token cost, and the content dedup
+/// below does not mitigate it, because such a file is a *different* file rather
+/// than a duplicate of one.
+///
+/// A workspace outside the kingdom entirely -- which nothing produces today,
+/// but a future in-place plan on a path elsewhere would -- reads its own
+/// directory and stops, rather than walking to `/` because the bound was never
+/// met.
 ///
 /// **The order.** Root guidance first, project guidance last, so the more
 /// specific file is the one the model reads most recently.
@@ -316,13 +335,26 @@ const CARRYING_OUT: &str = "You are carrying out a plan the user approved. It is
 /// twice -- once in the worktree and once in the city. Deduping on *content*
 /// rather than path is what catches that, because the two copies have different
 /// paths and identical bodies.
-fn discover_guidance(from: &Path) -> Vec<Guidance> {
+fn discover_guidance(from: &Path, stop: &Path) -> Vec<Guidance> {
     let mut found: Vec<Guidance> = Vec::new();
     let mut here = Some(from.to_path_buf());
+
+    // A workspace that is not under the kingdom at all would never meet the
+    // bound below, and would walk to `/` -- which is the failure this bound
+    // exists to prevent, reached by the one path that skips it. Nothing
+    // produces such a workspace today; this makes the guarantee hold anyway,
+    // rather than resting on that staying true.
+    let bounded = from.starts_with(stop);
 
     while let Some(dir) = here {
         if let Some(file) = read_guidance(&dir) {
             found.push(file);
+        }
+        // Inclusive of `stop` itself: a kingdom-wide `AGENTS.md` sitting in the
+        // dev folder is guidance for every city in it, and is exactly the file
+        // this walk should reach.
+        if !bounded || dir == stop {
+            break;
         }
         here = dir.parent().map(Path::to_path_buf);
     }
@@ -417,7 +449,7 @@ mod tests {
         // The worktree is a checkout: the same file, byte for byte.
         write(&worktree, "AGENTS.md", "city rules");
 
-        let found = discover_guidance(&worktree);
+        let found = discover_guidance(&worktree, &root);
 
         let ours: Vec<&Guidance> = found.iter().filter(|g| g.body == "city rules").collect();
         assert_eq!(
@@ -438,7 +470,7 @@ mod tests {
         write(&root, "AGENTS.md", "kingdom rules");
         write(&city, "AGENTS.md", "city rules");
 
-        let found = discover_guidance(&city);
+        let found = discover_guidance(&city, &root);
         let bodies: Vec<&str> = found.iter().map(|g| g.body.as_str()).collect();
 
         let kingdom = bodies.iter().position(|b| *b == "kingdom rules");
@@ -447,6 +479,69 @@ mod tests {
         assert!(kingdom < city_at, "specific guidance must read last: {found:#?}");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The walk stops at the kingdom root. Guidance above it belongs to the
+    /// user's machine rather than to this kingdom, and picking it up would let
+    /// a file they had forgotten about instruct every plan in every project.
+    ///
+    /// This is a prompt-injection surface as much as a token cost: a stray
+    /// `AGENTS.md` in `$HOME`, or in any folder that happens to be a parent of
+    /// several checkouts, would otherwise join every system prompt Kingdom
+    /// sends. The content dedup does not catch it -- it is a different file,
+    /// not a duplicate of one.
+    #[test]
+    fn guidance_above_the_kingdom_is_left_alone() {
+        let outer = temp();
+        let root = outer.join("kingdom");
+        let city = root.join("city");
+
+        write(&outer, "AGENTS.md", "somebody else's rules");
+        write(&root, "AGENTS.md", "kingdom rules");
+        write(&city, "AGENTS.md", "city rules");
+
+        let found = discover_guidance(&city, &root);
+        let bodies: Vec<&str> = found.iter().map(|g| g.body.as_str()).collect();
+
+        assert!(
+            !bodies.contains(&"somebody else's rules"),
+            "guidance above the kingdom must never reach the model: {found:#?}"
+        );
+        // The kingdom's own file is *inside* the bound: it is guidance for
+        // every city in the dev folder, and is exactly what the walk should
+        // reach.
+        assert_eq!(bodies, vec!["kingdom rules", "city rules"]);
+
+        std::fs::remove_dir_all(&outer).ok();
+    }
+
+    /// A workspace that is not under the kingdom at all must not fall out of
+    /// the bound and walk to `/`.
+    ///
+    /// Nothing produces such a workspace today, which is exactly why this is
+    /// worth pinning: the guarantee above would otherwise rest on that staying
+    /// true, and the one path that skips the bound is the one that re-opens the
+    /// hole it exists to close.
+    #[test]
+    fn a_workspace_outside_the_kingdom_does_not_climb_out_of_it() {
+        let outer = temp();
+        let root = outer.join("kingdom");
+        let elsewhere = outer.join("elsewhere");
+
+        write(&outer, "AGENTS.md", "somebody else's rules");
+        write(&root, "AGENTS.md", "kingdom rules");
+        write(&elsewhere, "AGENTS.md", "its own rules");
+
+        let found = discover_guidance(&elsewhere, &root);
+        let bodies: Vec<&str> = found.iter().map(|g| g.body.as_str()).collect();
+
+        assert_eq!(
+            bodies,
+            vec!["its own rules"],
+            "an unbounded walk must read its own directory and stop: {found:#?}"
+        );
+
+        std::fs::remove_dir_all(&outer).ok();
     }
 
     /// The remit is the last thing in the prompt, under every permission level.
@@ -583,3 +678,4 @@ mod tests {
         assert!(!permissions_block(Permissions::Full, false).contains("plan the user approved"));
     }
 }
+

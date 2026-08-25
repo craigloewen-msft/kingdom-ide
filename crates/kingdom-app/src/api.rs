@@ -803,6 +803,14 @@ pub(crate) async fn converse(
     // a stale busy mark to repair.
     let mut halt = crate::turns::begin(&plan_id);
 
+    // Read once, outside the loop: the kingdom's root cannot move while a turn
+    // runs, and it bounds the guidance walk in every round's prompt. See
+    // `SystemPrompt::assemble`.
+    let kingdom_root = {
+        let kingdom = lock()?;
+        std::path::PathBuf::from(&kingdom.root)
+    };
+
     let model = match crate::llm::open(&choice).await {
         Ok(model) => model,
         // A missing credential surfaces as a failed plan the user can see and
@@ -884,7 +892,13 @@ pub(crate) async fn converse(
             .under(permissions);
 
         let brief = Brief {
-            system_prompt: SystemPrompt::assemble(&city, &workspace, permissions, approved),
+            system_prompt: SystemPrompt::assemble(
+                &city,
+                &workspace,
+                permissions,
+                approved,
+                &kingdom_root,
+            ),
             turns,
             tools: tools.clone(),
         };
