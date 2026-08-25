@@ -153,7 +153,7 @@
 // this replaced, kept as the small-screen branch rather than deleted.
 
 @media (max-width: 1100px) {
-  .chamber-frame { flex-direction: column; }
+  .chamber-body { flex-direction: column; }
 
   .spyglass {
     // The dragged width is meaningless once the panel is full-bleed.

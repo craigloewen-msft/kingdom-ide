@@ -1,21 +1,24 @@
 // Throne room layout.
 //
-// Two rails down the left, and whichever view is routed filling the rest. Both
-// rails are on the parent route, so this grid survives navigation and only the
-// main region's contents change.
+// The cities rail down the left, and whichever view is routed filling the rest.
+// The rail is on the parent route, so this grid survives navigation and only
+// the main region's contents change.
 //
-// The proportion is the point and is deliberately NOT three equal columns: the
-// rails are **fixed** tracks and the main region takes `1fr`, so the map and the
-// chamber keep every pixel neither rail was dragged to. Each rail's resizer
-// bounds cap how far that can go -- the files rail's ceiling sits below the
-// cities rail's for the same reason.
+// The proportion is the point and is deliberately NOT two equal columns: the
+// rail is a **fixed** track and the main region takes `1fr`, so the map and the
+// chamber keep every pixel the rail was not dragged to. The rail's resizer
+// bounds cap how far that can go.
+//
+// The files rail is not a track here. It belongs to a plan's chamber and is
+// laid out inside it (`_ward-tree.scss`), because it describes the city a
+// conversation is working in.
 
 .throne-room {
   display: grid;
-  // The first two columns are set inline from the width signals, so the
-  // resizers can drive them live. This is only the pre-hydration fallback.
-  grid-template-columns: 290px 240px 1fr;
-  grid-template-areas: "sidebar tree main";
+  // The first column is set inline from the width signal, so the resizer can
+  // drive it live. This is only the pre-hydration fallback.
+  grid-template-columns: 290px 1fr;
+  grid-template-areas: "sidebar main";
   height: 100vh;
 }
 

@@ -1,8 +1,15 @@
 //! The files rail: the tree of the selected city, as it actually stands on disk.
 //!
-//! A supporting column, not a peer of the map. It sits between the cities rail
-//! and the main region, is narrower than the rail by default and capped lower
-//! (see [`BOUNDS`]), because the King came to look at the map and the chamber.
+//! Part of a plan's chamber, not of the throne room. It describes the ground a
+//! *conversation* stands on, so it is rendered by `conversation.rs` as the
+//! column left of the transcript and exists only while a plan is open. On the
+//! map it had nothing to belong to and nothing to say but an instruction to go
+//! and choose a city, standing next to the screen whose whole job is choosing
+//! one.
+//!
+//! A supporting column, not a peer of the transcript. It is narrower than the
+//! cities rail by default and capped lower (see [`BOUNDS`]), because the King
+//! came to read the conversation.
 //!
 //! # Why it fetches rather than reading the city it already has
 //!
@@ -31,10 +38,11 @@ use std::collections::{HashMap, HashSet};
 
 /// How far the files rail may be dragged.
 ///
-/// The ceiling is deliberately below the cities rail's 560: this is the *second*
-/// supporting column, and two rails that could each grow to the rail's maximum
-/// would leave the map fighting for the middle of the screen. A tree of names
-/// also needs less room than a rail of titles, badges and model names.
+/// The ceiling is deliberately below the cities rail's 560: this is the
+/// *second* supporting column on the left, and two columns that could each grow
+/// to the rail's maximum would leave the transcript fighting for the middle of
+/// the screen. A tree of names also needs less room than a rail of titles,
+/// badges and model names.
 const BOUNDS: Bounds = Bounds {
     min: 180.0,
     max: 420.0,
@@ -184,7 +192,10 @@ pub fn WardTree() -> impl IntoView {
     let loading_root = Memo::new(move |_| fetching.get().contains(ROOT));
 
     view! {
-        <aside class="ward-tree">
+        // The width is set inline from the signal, as the spyglass's is: this
+        // is a flex child of the chamber now rather than a grid track, so the
+        // resizer drives the element itself.
+        <aside class="ward-tree" style:width=move || format!("{}px", state.tree_width.get())>
             <div class="ward-tree-head">
                 <span class="ward-tree-label">"Wards"</span>
                 <span class="ward-tree-city" title=move || city_name.get()>

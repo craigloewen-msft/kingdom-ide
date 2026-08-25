@@ -1,16 +1,20 @@
 // The files rail: the selected city's tree as it stands on disk.
 //
-// A supporting column. It borrows the cities rail's surface and edge so the two
-// read as one band of chrome down the left, and it stays quieter than the rail
-// beside it -- names in dim ink, one small tinted dot per file, and no hover
-// affordance on anything that cannot be pressed.
+// A supporting column *inside a plan's chamber*, left of the transcript. It
+// borrows the cities rail's surface and edge so the two read as one band of
+// chrome down the left, and it stays quieter than the rail beside it -- names
+// in dim ink, one small tinted dot per file, and no hover affordance on
+// anything that cannot be pressed.
 
 @use "../abstracts/tokens" as t;
 @use "../abstracts/mixins" as m;
 
 .ward-tree {
-  grid-area: tree;
   position: relative;  // anchors the resizer to the right edge
+  // Width comes from the resizer's signal, set inline, exactly as the
+  // spyglass's does. `flex: 0 0 auto` so the transcript yields the room rather
+  // than the rail being squeezed out of the width the King dragged it to.
+  flex: 0 0 auto;
   background: t.$panel;
   border-right: 1px solid t.$edge;
   display: flex;
@@ -137,4 +141,22 @@
   color: t.$ink-dim;
 
   .ward-row.is-dir & { color: t.$ink; }
+}
+
+// --- Too narrow to stand beside the transcript -------------------------------
+//
+// Deliberately a *lower* threshold than the spyglass's 1100. The rail is not
+// caught in that stacking any more (it is a sibling of `.chamber-body`, not a
+// child), so the only question left is whether there is room -- and at 1024,
+// the ordinary laptop width, the cities rail and this one together still leave
+// the transcript the larger half. Hiding at 1100 would have taken the rail away
+// from the commonest screen there is, which is a worse fault than the one this
+// whole change set out to fix.
+//
+// Below 900 there genuinely is not room: two fixed columns would leave the
+// conversation the narrowest thing on screen, so the supporting column goes.
+
+@media (max-width: 900px) {
+  .ward-tree,
+  .ward-tree-resizer { display: none; }
 }
