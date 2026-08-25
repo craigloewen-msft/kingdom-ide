@@ -158,6 +158,12 @@
   gap: 14px;
 }
 
+// A standing proposal takes the column, so the log is not shrunk beside it --
+// it is removed from the flow. Left in the DOM rather than unmounted so the
+// scroll position, and everything already rendered, is still there when he
+// asks for it back.
+.chamber-column:has(.chat-proposal.full) .chamber-log { display: none; }
+
 // --- Transcript ------------------------------------------------------------
 //
 // Shared with nothing else now, but the class names are kept as they were so
@@ -743,13 +749,40 @@
 // Outside the log because a proposal is not a line of history. It is the
 // current question, and it must not scroll away from him while he reads the
 // work that led to it.
+//
+// And when it stands, it stands alone. `.full` gives the card the whole column
+// and takes the log out of the flow entirely (the `:has` above) -- a proposal
+// is the King's one job at that moment, and half a screen of scrollback beside
+// it is half his attention spent reading what has already happened. He can put
+// the log back with the one button in the card's head; the composer stays, so
+// "say what you would change" is still the third option it claims to be.
 .chat-proposal {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   flex-shrink: 0;
   margin: 0 16px 10px;
   padding: 16px;
   border: 1px solid rgba(t.$gold, 0.5);
   border-radius: t.$radius;
   background: rgba(t.$gold, 0.05);
+
+  &.full {
+    flex: 1;
+    margin: 16px;
+    padding: 24px 28px;
+
+    .proposal-title { font-size: 20px; }
+
+    // The frame, not the cap: filling the column is the whole point, so the
+    // body takes what is left and scrolls inside it.
+    .proposal-body {
+      flex: 1;
+      min-height: 0;
+      max-height: none;
+      font-size: 14px;
+    }
+  }
 
   // Decided and waiting on the server. Dimmed rather than removed, exactly as
   // an answered question is: he should still see what he chose.
@@ -771,8 +804,26 @@
 
 .proposal-mark { opacity: 0.8; }
 
+// The way back to the conversation. Quiet: it is an escape hatch from the
+// full-column reading, not a third decision.
+.proposal-expand {
+  padding: 3px 8px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+}
+
 .proposal-at {
   margin-left: auto;
+  margin-right: 2px;
   color: t.$ink-faint;
   font-variant-numeric: tabular-nums;
 }
