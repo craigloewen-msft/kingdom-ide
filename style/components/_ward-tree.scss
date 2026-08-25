@@ -1,0 +1,140 @@
+// The files rail: the selected city's tree as it stands on disk.
+//
+// A supporting column. It borrows the cities rail's surface and edge so the two
+// read as one band of chrome down the left, and it stays quieter than the rail
+// beside it -- names in dim ink, one small tinted dot per file, and no hover
+// affordance on anything that cannot be pressed.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+.ward-tree {
+  grid-area: tree;
+  position: relative;  // anchors the resizer to the right edge
+  background: t.$panel;
+  border-right: 1px solid t.$edge;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ward-tree-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;      // straddle the border so the grab area is easy to hit
+  width: 7px;
+  height: 100%;
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
+
+  &:hover, &.dragging { background: rgba(212, 175, 55, 0.35); }
+}
+
+// --- Head ------------------------------------------------------------------
+//
+// Matches the cities rail's toolbar height, so the two columns' first rows line
+// up and the left edge reads as one band rather than two panels.
+
+.ward-tree-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid t.$edge;
+}
+
+.ward-tree-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: t.$ink-faint;
+}
+
+// Which city the tree belongs to. Without it a rail showing `src/` and
+// `Cargo.toml` could be any of them.
+.ward-tree-city {
+  @include m.truncate;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: t.$ink-dim;
+}
+
+// --- Body ------------------------------------------------------------------
+
+.ward-tree-body { flex: 1; overflow-y: auto; min-height: 0; }
+
+.ward-tree-hint {
+  margin: 0;
+  padding: 14px 12px;
+  font-size: 12px;
+  color: t.$ink-faint;
+}
+
+.ward-list { list-style: none; margin: 0; padding: 4px 0; }
+.ward-list li { list-style: none; }
+
+.ward-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 8px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  // padding-left carries the indent and is set inline, so nesting depth is
+  // arithmetic rather than a rule per level.
+
+  // A file is not pressable, and must not pretend to be: no pointer cursor and
+  // no hover fill. Opening a file is not built, and a row that looks like it
+  // does something is a worse lie than a row that plainly does not.
+  cursor: default;
+
+  &.is-dir {
+    cursor: pointer;
+    &:hover { background: t.$panel-2; }
+  }
+}
+
+.ward-chevron {
+  flex-shrink: 0;
+  width: 10px;
+  color: t.$ink-faint;
+  font-size: 9px;
+  line-height: 1;
+
+  // A file still reserves the column, so names stay aligned down the rail.
+  &.empty { visibility: hidden; }
+}
+
+.ward-folder {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: t.$ink-faint;
+  line-height: 1;
+}
+
+// The same language colours the skyline tints a building with, so a `.rs` file
+// reads the same in the rail as it does on the map.
+.ward-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  opacity: 0.75;
+}
+
+// Truncate rather than scroll sideways: a deep path must never widen the
+// column, and the full path is on the row's `title`.
+.ward-name {
+  @include m.truncate;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: t.$ink-dim;
+
+  .ward-row.is-dir & { color: t.$ink; }
+}

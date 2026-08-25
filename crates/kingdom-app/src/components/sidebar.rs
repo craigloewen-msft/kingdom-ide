@@ -42,8 +42,27 @@ pub fn Sidebar() -> impl IntoView {
 
     restore_width(state.sidebar_width, WIDTH_KEY, BOUNDS);
 
+    let collapsed_rail = move || state.rail_collapsed.get();
+
     view! {
-        <aside class="sidebar">
+        <aside class="sidebar" class:collapsed=collapsed_rail>
+            // Folded away, the rail keeps exactly two things: the crown, so the
+            // strip still reads as the kingdom's, and the control that brings it
+            // back. It is never zero-width -- every route in the app is reached
+            // from this rail, so a rail with no way back would be a dead end.
+            <Show when=collapsed_rail>
+                <div class="rail-strip">
+                    <button
+                        class="rail-toggle"
+                        title="Show cities and plans"
+                        on:click=move |_| state.toggle_rail()
+                    >"\u{bb}"</button>
+                    <div class="crown-small strip-crown">"\u{265a}"</div>
+                    <div class="strip-legend">"CITIES"</div>
+                </div>
+            </Show>
+
+            <Show when=move || !collapsed_rail()>
             <header class="kingdom-header">
                 <div class="crown-small">"♚"</div>
                 <div class="kingdom-id">
@@ -85,6 +104,11 @@ pub fn Sidebar() -> impl IntoView {
                         on:click=move |_| state.show_all_plans.set(true)
                     >"All"</button>
                 </div>
+                <button
+                    class="rail-toggle"
+                    title="Fold the rail away"
+                    on:click=move |_| state.toggle_rail()
+                >"\u{ab}"</button>
             </div>
 
             <div class="sidebar-body">
@@ -95,6 +119,8 @@ pub fn Sidebar() -> impl IntoView {
                 </ul>
             </div>
 
+            // The handle exists only while there is a panel to size: a divider
+            // on a folded rail is a control that does nothing.
             <Resizer
                 width=state.sidebar_width
                 grows=Grows::Rightwards
@@ -102,6 +128,7 @@ pub fn Sidebar() -> impl IntoView {
                 storage_key=WIDTH_KEY
                 class="sidebar-resizer"
             />
+            </Show>
         </aside>
     }
 }

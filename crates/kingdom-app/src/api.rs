@@ -423,6 +423,133 @@ pub async fn list_branches(city: String) -> Result<Vec<String>, ServerFnError> {
     Ok(crate::worktree::branches(&root).await)
 }
 
+/// One directory of a city, listed on demand for the files rail.
+///
+/// `path` is relative to the city root; empty lists the root itself. Returns
+/// directories first, then files, each case-insensitively by name -- the order
+/// a person expects to read a tree in, which the map's own tree deliberately
+/// does not use (it sorts by size, because a skyline is drawn largest-first).
+///
+/// # Why this exists rather than reading [`kingdom_core::City::structure`]
+///
+/// The city already carries a [`kingdom_core::Folder`] tree, and reusing it
+/// would cost nothing -- but it is the *map's* tree. [`crate::scan`] keeps only
+/// the largest `FILES_PER_DISTRICT` files per folder, sorted by byte size, to a
+/// bounded depth, and drops empty folders. That is right for a skyline, where
+/// the remainder is still weighed in `extra_files`, and wrong for a panel whose
+/// whole promise is "these are the files": a tree silently missing `main.rs`
+/// because it is small is worse than no tree. Listing one directory at a time
+/// also means nothing walks a monorepo until the King opens the folder.
+///
+/// # The boundary
+///
+/// This is the second place in Kingdom where an outsider names a path and the
+/// server opens it, so it is held to the same rule as the first: the path is
+/// resolved through a [`crate::tools::Sandbox`] rooted at the city, exactly as
+/// [`crate::artifact`] does, so `a/../../etc` is refused lexically before the
+/// filesystem sees it. It lists **names only** and reads no file contents,
+/// which is the property that keeps it from becoming a file server.
+#[server(ListDirectory, "/api")]
+pub async fn list_directory(
+    city: String,
+    path: String,
+) -> Result<Vec<kingdom_core::DirEntry>, ServerFnError> {
+    use kingdom_core::CityId;
+
+    let city_id = CityId::new(city);
+    let city_root = {
+        let kingdom = lock()?;
+        let Some(city) = kingdom.city(&city_id) else {
+            // A city Kingdom does not know has no directory to read. An empty
+            // listing rather than an error: the rail asks about whatever is
+            // selected, and a selection that has gone stale is ordinary.
+            return Ok(Vec::new());
+        };
+        std::path::Path::new(&kingdom.root).join(&city.path)
+    };
+
+    read_directory(&city_root, &path).map_err(ServerFnError::new)
+}
+
+/// Everything [`list_directory`] decides once the city's root is known.
+///
+/// Split out so the boundary and the ordering can be tested against a real
+/// directory without a kingdom in global state -- the same split, for the same
+/// reason, as `artifact::from_workspace`.
+#[cfg(feature = "ssr")]
+fn read_directory(
+    city_root: &std::path::Path,
+    path: &str,
+) -> Result<Vec<kingdom_core::DirEntry>, String> {
+    use kingdom_core::{DirEntry, Language, Workspace};
+
+    let shop = crate::tools::Sandbox::new(Workspace::in_place(city_root.to_string_lossy()));
+    let dir = shop
+        .resolve(path)
+        .map_err(|_| format!("{path} is outside this city."))?;
+
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        // A folder that cannot be read is an empty one as far as the rail is
+        // concerned: a permission-denied subdirectory should not fail the whole
+        // listing the King asked for.
+        return Ok(Vec::new());
+    };
+
+    let mut listed = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // `file_type` avoids the second stat `is_dir()` would cost. An entry
+        // whose type cannot be read is skipped rather than guessed at.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+
+        if !is_dir && !file_type.is_file() {
+            continue;
+        }
+
+        // Build detritus only. Dotfiles are otherwise *shown*: `scan.rs` hides
+        // them because a skyline of `.venv` is noise, but a source tree that
+        // hides `.github` and `.gitignore` is not the repository the King is
+        // looking at.
+        if is_dir && crate::scan::SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+
+        let child = if path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", path.trim_end_matches('/'), name)
+        };
+
+        listed.push(DirEntry {
+            language: if is_dir {
+                Language::Other
+            } else {
+                Language::from_path(&child)
+            },
+            name,
+            path: child,
+            is_dir,
+        });
+    }
+
+    // Directories first, then by name ignoring case. `read_dir` yields in
+    // whatever order the filesystem holds, which differs between machines, so
+    // sorting here is what makes the rail the same tree everywhere.
+    listed.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(listed)
+}
+
 /// Records another prompt on an existing plan, without drafting a reply.
 ///
 /// Paired with [`draft_plan`] for the same reason as [`begin_plan`]: the user's
@@ -1819,6 +1946,86 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The order the files rail draws, and the two things it hides.
+    ///
+    /// Directories before files and case-insensitive by name is what makes the
+    /// rail readable; it is deliberately *not* the map's order, which is by
+    /// byte size. `read_dir` yields in whatever order the filesystem holds, so
+    /// without the sort here the rail would differ between machines.
+    #[test]
+    fn a_listing_is_ordered_for_reading_and_hides_only_detritus() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".github")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+        std::fs::write(root.join(".gitignore"), "").unwrap();
+
+        let listed = read_directory(root, "").unwrap();
+        let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            vec![".github", "src", ".gitignore", "Cargo.toml", "README.md"],
+            "directories first, then files, each case-insensitively by name"
+        );
+
+        // The whole reason this is not the map's tree: build output is noise in
+        // both, but a dotfile is noise only on a skyline. A source tree that
+        // hides `.github` and `.gitignore` is not the repository the King is
+        // looking at.
+        assert!(
+            !names.contains(&"target") && !names.contains(&"node_modules"),
+            "build detritus is hidden"
+        );
+
+        let github = listed.iter().find(|e| e.name == ".github").unwrap();
+        assert!(github.is_dir, "a directory must be marked as one");
+
+        let readme = listed.iter().find(|e| e.name == "README.md").unwrap();
+        assert!(!readme.is_dir);
+        assert_eq!(
+            readme.language,
+            kingdom_core::Language::Docs,
+            "a file carries the same language the map would tint it with"
+        );
+    }
+
+    /// Paths in a listing are relative to the city root, so the entry the King
+    /// clicks is the one that can be listed a level down without the browser
+    /// ever knowing an absolute path.
+    #[test]
+    fn a_nested_listing_names_its_entries_from_the_city_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/inner")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+
+        let listed = read_directory(dir.path(), "src").unwrap();
+        let paths: Vec<&str> = listed.iter().map(|e| e.path.as_str()).collect();
+
+        assert_eq!(paths, vec!["src/inner", "src/main.rs"]);
+    }
+
+    /// The second place in Kingdom where an outsider names a path and the server
+    /// opens it, so it is pinned here as it is in `artifact.rs`: `..` must be
+    /// refused lexically, not prefix-matched and then handed to the filesystem.
+    #[test]
+    fn a_path_that_leaves_the_city_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+
+        for escape in ["../..", "src/../../etc", "/etc"] {
+            assert!(
+                read_directory(dir.path(), escape).is_err(),
+                "{escape} leaves the city and must be refused"
+            );
+        }
     }
 
     /// A kingdom is opened many times; its model is fabricated once.
