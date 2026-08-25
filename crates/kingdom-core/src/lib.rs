@@ -25,6 +25,7 @@ pub mod mockdata;
 pub mod model;
 pub mod naming;
 pub mod permissions;
+pub mod proposal;
 pub mod sample;
 pub mod skyline;
 pub mod terrain;

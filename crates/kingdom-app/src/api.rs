@@ -1954,6 +1954,173 @@ pub async fn set_aside_plan(plan: String) -> Result<Plan, ServerFnError> {
         .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
+/// The King writes a note against one part of a standing proposal.
+///
+/// Recorded on the plan rather than held in the browser, for the same reason
+/// queued words are: a note typed and not sent must survive a reload, a second
+/// tab and a server restart. Going through [`update`] means it is stored and
+/// pushed to every watcher like everything else, so a note written in one tab
+/// appears in the other.
+///
+/// `line` and `quote` both travel because they answer different questions.
+/// The line puts the note beside the right block while the card is open; the
+/// quote is what is actually put to the model, and is the half that cannot go
+/// stale -- see [`kingdom_core::ProposalNote::quote`].
+#[server(AnnotateProposal, "/api")]
+pub async fn annotate_proposal(
+    plan: String,
+    line: usize,
+    quote: String,
+    note: String,
+) -> Result<Plan, ServerFnError> {
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Err(ServerFnError::new("An empty note says nothing."));
+    }
+
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut written = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        written = p.annotate(line, quote, note).is_some();
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    // The ordinary case here is a stale tab: the King left a card open and the
+    // court revised it, or he accepted it elsewhere. Reported rather than
+    // swallowed, because a note silently written onto nothing is one he
+    // believes he has made.
+    if !written {
+        return Err(ServerFnError::new(
+            "There is no plan awaiting your word here. The court may have revised it \
+             since, or it may have been accepted in another tab.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The King takes a note back before the court has been told of it.
+///
+/// The sibling of [`unqueue`], and it loses its race the same way: the notes may
+/// have been sent while this request was in flight. Saying so is the point --
+/// quietly doing nothing would leave him believing he had withdrawn something
+/// the model is already reading.
+#[server(WithdrawNote, "/api")]
+pub async fn withdraw_note(plan: String, note_id: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut withdrawn = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        withdrawn = p.unannotate(&note_id);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    if !withdrawn {
+        return Err(ServerFnError::new(
+            "That note is no longer in the margin. It may already have gone to the court.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The King sends his notes back for the court to answer.
+///
+/// The margin is drained and becomes **one** [`kingdom_core::Speaker::User`]
+/// turn, composed by [`notes_as_decree`]. One turn rather than one per note
+/// because they are one review: a model handed five separate messages would
+/// answer the last one and treat the rest as history.
+///
+/// Deliberately reuses [`receive`], which [`say`] already splits out for exactly
+/// this decision -- whether a turn is genuinely running, and therefore whether
+/// the words go into the queue or straight into the log. Notes sent into a
+/// working chamber are heard at the next round boundary with no second branch to
+/// get wrong, and a plan wedged by a stale busy mark is un-wedged by the same
+/// line that un-wedges it for `say`.
+///
+/// Makes no model call. The chamber dispatches `draft_plan` afterwards, exactly
+/// as it does after speaking -- which is what lets the King watch his notes land
+/// rather than watching a spinner for the first round of work.
+#[server(SendNotes, "/api")]
+pub async fn send_notes(plan: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    // Checked before the drain rather than inside it, so a refusal can say why
+    // and the notes are still there to try again with.
+    match kingdom.plan(&plan_id) {
+        None => return Err(ServerFnError::new("That plan is no longer in the records.")),
+        Some(existing) if existing.notes().is_empty() => {
+            return Err(ServerFnError::new(
+                "There are no notes to send. Write against a part of the plan first.",
+            ))
+        }
+        Some(_) => {}
+    }
+
+    update(&mut kingdom, &plan_id, |p| {
+        let notes = p.take_notes();
+        if notes.is_empty() {
+            return;
+        }
+        // Asked inside the closure, under the same lock `converse` deregisters
+        // under -- see `say` for why sampling it at the call site would leave a
+        // window where words are queued for a turn that has already gone.
+        let running = crate::turns::is_running(&plan_id);
+        receive(p, notes_as_decree(&notes), running);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan vanished as its notes were sent."))
+}
+
+/// The King's marginal notes as one thing he said.
+///
+/// Ordinary prose in his own voice, blockquoting the part each note is against.
+/// No new message kind and nothing for a provider to learn -- the same call
+/// [`kingdom_core::APPROVAL`] makes, and true in the same way: he did write
+/// these.
+///
+/// The quote is what makes a note answerable. "This is wrong" against nothing is
+/// an objection the model has to guess the target of; against the paragraph it
+/// is about, it is an instruction.
+///
+/// Split out and tested because the shape is the whole payload: a decree that
+/// separated a note from its quote would be read by the model as two unrelated
+/// remarks.
+#[cfg(feature = "ssr")]
+fn notes_as_decree(notes: &[kingdom_core::ProposalNote]) -> String {
+    let mut decree = String::new();
+    decree.push_str(match notes.len() {
+        1 => {
+            "I have read the plan and written a note against part of it. \
+             Revise the draft to answer it, then propose again.\n"
+        }
+        _ => {
+            "I have read the plan and written notes against parts of it. \
+             Revise the draft to answer them, then propose again.\n"
+        }
+    });
+
+    for note in notes {
+        decree.push('\n');
+        // Every line of the quote is prefixed, not just the first: a wrapped
+        // paragraph quoted with one `>` reads as a quote that ends after its
+        // first line, with the rest apparently the King speaking.
+        for line in note.quote.lines() {
+            decree.push_str("> ");
+            decree.push_str(line);
+            decree.push('\n');
+        }
+        decree.push('\n');
+        decree.push_str(note.body.trim());
+        decree.push('\n');
+    }
+
+    decree
+}
+
 /// Closes a plan: lands its work, or sets it aside.
 ///
 /// The two endings share this one function because they share their whole
@@ -2496,6 +2663,95 @@ mod tests {
             !plan.is_busy(),
             "a plan the user has just spoken to must not still look busy, or \
              `draft_plan` will refuse to start it"
+        );
+    }
+
+    /// The King's notes reach the court as one review, each against its own quote.
+    ///
+    /// The pairing is the whole payload. A decree that let a note drift from the
+    /// text it answers gives the model an objection with no target -- and the
+    /// failure would be silent, because a plausible revision of the wrong
+    /// paragraph looks exactly like work.
+    #[test]
+    fn notes_reach_the_court_as_one_review_beside_what_they_answer() {
+        use kingdom_core::ProposalNote;
+
+        let note = |line: usize, quote: &str, body: &str| ProposalNote {
+            id: format!("n{line}"),
+            line,
+            quote: quote.to_string(),
+            body: body.to_string(),
+            at: None,
+        };
+
+        let decree = notes_as_decree(&[
+            note(1, "## The domain", "This should not touch `Plan::approve`."),
+            note(9, "- `annotate(line, quote, body)`", "Why an Option?"),
+        ]);
+
+        assert!(
+            decree.contains("> ## The domain\n\nThis should not touch `Plan::approve`."),
+            "each note follows the text it is against: {decree}"
+        );
+        assert!(
+            decree.contains("> - `annotate(line, quote, body)`\n\nWhy an Option?"),
+            "{decree}"
+        );
+        assert!(
+            decree.starts_with("I have read the plan and written notes"),
+            "the notes arrive as one review, not as five separate remarks: {decree}"
+        );
+
+        // A wrapped quote is prefixed on every line. With only the first
+        // prefixed, the quote reads as ending after one line and the rest reads
+        // as the King speaking -- which is the model's cue to act on it.
+        let wrapped = notes_as_decree(&[note(3, "One line.\nAnd its second.", "Shorten this.")]);
+        assert!(
+            wrapped.contains("> One line.\n> And its second.\n"),
+            "{wrapped}"
+        );
+        assert!(
+            wrapped.starts_with("I have read the plan and written a note"),
+            "one note is not addressed in the plural: {wrapped}"
+        );
+    }
+
+    /// A note is not something the King has said until he sends it.
+    ///
+    /// The same exclusion `queued` has, and for the same reason: `Plan::turns`
+    /// is the one door between a plan's log and a model, so a half-written note
+    /// reaching it would put the King's private second thoughts to the court
+    /// while he was still deciding whether to make them.
+    #[test]
+    fn a_note_is_not_a_turn_until_it_is_sent() {
+        let mut plan = a_plan();
+        plan.status = kingdom_core::PlanStatus::AwaitingReview;
+        plan.permissions = kingdom_core::Permissions::Propose;
+        plan.propose("A plan", "# A plan\n\nDo the thing.");
+
+        let before = plan.turns().count();
+        plan.annotate(3, "Do the thing.", "Which thing?")
+            .expect("a standing proposal can be annotated");
+
+        assert_eq!(
+            plan.turns().count(),
+            before,
+            "a note in the margin is not yet addressed to anyone"
+        );
+        assert!(
+            !plan.turns().any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+                if m.body.contains("Which thing?"))),
+            "the note's text must not reach a model before it is sent"
+        );
+
+        // Sent, by the path `send_notes` takes: drained, composed, received.
+        let notes = plan.take_notes();
+        receive(&mut plan, notes_as_decree(&notes), false);
+
+        assert!(
+            plan.turns().any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+                if m.body.contains("Which thing?"))),
+            "once sent, it is an ordinary thing the King said"
         );
     }
 

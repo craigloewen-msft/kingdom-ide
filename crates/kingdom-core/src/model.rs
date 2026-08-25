@@ -599,6 +599,62 @@ pub struct Proposal {
     /// unapproved one does not.
     #[serde(default)]
     pub approved: bool,
+    /// What the user has written in the margin, and has not yet sent.
+    ///
+    /// The same shape and the same reasoning as [`Plan::queued`]: a note typed
+    /// but not sent must survive a reload, a second tab and a server restart,
+    /// and it is deliberately nowhere near the transcript until it is sent.
+    /// Nothing here is ever handed to a model -- [`Plan::take_notes`] is the
+    /// only way out, and it empties this in the same breath as composing the
+    /// message that carries it.
+    ///
+    /// Cleared by [`Plan::propose`] when a revision arrives: a note the court
+    /// has answered is no longer pending, and the decree that carried it is in
+    /// the transcript where the history of a plan lives.
+    #[serde(default)]
+    pub notes: Vec<ProposalNote>,
+    /// The body of the proposal this one revises, when it revises one.
+    ///
+    /// `None` on a plan's first proposal, which is what the view reads to decide
+    /// whether there is anything to show a diff against.
+    ///
+    /// A whole body rather than a stored diff. The diff is computed for display
+    /// and thrown away; keeping one would be a second rendering of prose that
+    /// already exists twice, free to drift from both -- the same liability
+    /// `AGENTS.md` records against the old `approved/` ledger. Written exactly
+    /// once, by [`Plan::propose`], from the body it is replacing.
+    #[serde(default)]
+    pub revises: Option<String>,
+}
+
+/// Something the user wrote against one part of a proposal.
+///
+/// Its own type rather than a bare string because a note without its anchor is
+/// an opinion about an unnamed thing: the whole point is that the court is told
+/// *which* paragraph the objection is to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalNote {
+    /// Names this note so it can be withdrawn before it is sent. Derived like
+    /// [`Plan::queue`]'s id, and for the same purpose.
+    pub id: String,
+    /// Where the annotated block starts in [`Proposal::body`], 1-based.
+    ///
+    /// What orders the notes and what puts each one beside the right block
+    /// while the card is open. See [`crate::proposal::blocks`].
+    pub line: usize,
+    /// The annotated text itself, as it stood when the note was written.
+    ///
+    /// Carried rather than looked up again at sending time, and that is the
+    /// point of the field. A line number is a reference into a document that is
+    /// about to be replaced: if the court revises while a note is open, line 34
+    /// is a different paragraph and the note would be put to the model against
+    /// prose the user never read. The text he actually annotated cannot move.
+    pub quote: String,
+    /// What he wrote.
+    pub body: String,
+    /// When he wrote it. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
 }
 
 impl Proposal {
@@ -609,7 +665,25 @@ impl Proposal {
             body: body.into(),
             at: Timestamp::now(),
             approved: false,
+            notes: Vec::new(),
+            revises: None,
         }
+    }
+
+    /// The parts of this proposal the user can write against.
+    ///
+    /// Here rather than only in the view so the server quotes exactly what the
+    /// browser offered -- see [`crate::proposal`] for why one answer to that
+    /// question is worth more than two.
+    pub fn blocks(&self) -> Vec<crate::proposal::Block> {
+        crate::proposal::blocks(&self.body)
+    }
+
+    /// This proposal read against the one it revises, or `None` if it is the
+    /// first.
+    pub fn changes(&self) -> Option<Vec<crate::proposal::DiffLine>> {
+        let previous = self.revises.as_deref()?;
+        Some(crate::proposal::diff(previous, &self.body))
     }
 }
 
@@ -920,10 +994,91 @@ impl Plan {
     ///
     /// [`Plan::slug`] is left alone: the branch is already cut on disk under it,
     /// and renaming a branch mid-flight is its own decision.
+    ///
+    /// The body being replaced is carried onto the new proposal as
+    /// [`Proposal::revises`], which is what lets the view show a revision
+    /// against the plan the user actually annotated. Taking the old proposal
+    /// rather than overwriting it also drops its notes, which is right: a note
+    /// this revision answers is no longer pending, and the decree that carried
+    /// it is in the transcript.
     pub fn propose(&mut self, title: impl Into<String>, body: impl Into<String>) {
-        let proposal = Proposal::put(title, body);
+        let previous = self.proposal.take().map(|p| p.body);
+        let mut proposal = Proposal::put(title, body);
+        proposal.revises = previous;
         self.title = proposal.title.clone();
         self.proposal = Some(proposal);
+    }
+
+    /// The user writes a note against one part of the standing proposal.
+    ///
+    /// Returns the note's id, or `None` when there is nothing standing to
+    /// annotate -- a stale tab, or a proposal the court has revised since the
+    /// browser drew it. The caller reports that rather than swallowing it: a
+    /// note silently written onto nothing is one the user believes he has made.
+    ///
+    /// Only ever the *standing* proposal. Annotating an approved one would be
+    /// marking up work already under way, which is a different act with a
+    /// different answer -- speaking to the plan.
+    pub fn annotate(
+        &mut self,
+        line: usize,
+        quote: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Option<String> {
+        // The same three conditions `standing_proposal` reads, asked here
+        // because that returns a shared borrow and this needs a unique one.
+        if self.permissions.is_full() || self.status != PlanStatus::AwaitingReview {
+            return None;
+        }
+        let proposal = self.proposal.as_mut().filter(|p| !p.approved)?;
+
+        let at = Timestamp::now();
+        let id = format!(
+            "{}-note-{}-{}",
+            self.id.as_str(),
+            proposal.notes.len(),
+            at.map(|Timestamp(ms)| ms).unwrap_or_default()
+        );
+        proposal.notes.push(ProposalNote {
+            id: id.clone(),
+            line,
+            quote: quote.into(),
+            body: body.into(),
+            at,
+        });
+        Some(id)
+    }
+
+    /// Takes a note back before the court has been told of it.
+    ///
+    /// False when there is no such note, which the caller should report for the
+    /// same reason [`Plan::unqueue`] does: it means the note has already been
+    /// sent, and quietly doing nothing would leave the user believing he had
+    /// withdrawn something the model is about to read.
+    pub fn unannotate(&mut self, id: &str) -> bool {
+        let Some(proposal) = self.proposal.as_mut() else {
+            return false;
+        };
+        let before = proposal.notes.len();
+        proposal.notes.retain(|note| note.id != id);
+        proposal.notes.len() != before
+    }
+
+    /// Empties the margin, for the moment the notes are put to the court.
+    ///
+    /// Draining rather than reading is deliberate: the one way notes leave a
+    /// proposal is by being sent, so there is no path that composes the message
+    /// and then leaves the notes standing to be sent a second time.
+    pub fn take_notes(&mut self) -> Vec<ProposalNote> {
+        self.proposal
+            .as_mut()
+            .map(|p| std::mem::take(&mut p.notes))
+            .unwrap_or_default()
+    }
+
+    /// What the user has written in the margin and not yet sent.
+    pub fn notes(&self) -> &[ProposalNote] {
+        self.proposal.as_ref().map_or(&[], |p| &p.notes)
     }
 
     /// The user accepts the standing proposal, and the model gains its tools.
@@ -2533,6 +2688,137 @@ mod proposal_tests {
             plan.standing_proposal().is_none(),
             "an old plan must not sprout a proposal card it can never satisfy"
         );
+    }
+
+    /// The margin: written on, withdrawn from, and drained exactly once.
+    ///
+    /// The draining half is the one that matters. Notes leave a proposal only
+    /// by being sent, so if `take_notes` left them standing, the next send would
+    /// put the same objections to the court a second time -- and the user would
+    /// have no way to tell that from the court ignoring them.
+    #[test]
+    fn notes_gather_in_the_margin_and_leave_it_only_once() {
+        let mut plan = proposing();
+
+        let first = plan
+            .annotate(1, "# Fix the off-by-one", "Call it what it is.")
+            .expect("a standing proposal can be annotated");
+        let second = plan
+            .annotate(3, "Change `lex.rs` line 42.", "Which line, in today's file?")
+            .expect("more than one note may stand at a time");
+        assert_ne!(first, second, "each note is separately withdrawable");
+        assert_eq!(plan.notes().len(), 2);
+
+        assert!(plan.unannotate(&first));
+        assert!(
+            !plan.unannotate(&first),
+            "withdrawing a note twice must be reported, not silently accepted"
+        );
+        assert_eq!(plan.notes().len(), 1);
+
+        let sent = plan.take_notes();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].quote, "Change `lex.rs` line 42.");
+        assert!(
+            plan.notes().is_empty(),
+            "sending the notes empties the margin, so nothing is put twice"
+        );
+    }
+
+    /// A note is only ever written on the question actually on the table.
+    ///
+    /// Each branch is a stale tab: the user left a card open and something moved
+    /// underneath it. Writing the note anyway would leave him believing he had
+    /// objected to work that is already under way.
+    #[test]
+    fn there_is_nothing_to_annotate_unless_a_proposal_stands() {
+        let mut nothing = Plan::opened(
+            PlanId::new("plan-2"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+        assert!(
+            nothing.annotate(1, "anything", "a note").is_none(),
+            "a plan with no proposal has nothing to write against"
+        );
+
+        let mut drafting = proposing();
+        drafting.status = PlanStatus::Drafting;
+        assert!(
+            drafting.annotate(1, "anything", "a note").is_none(),
+            "the court may be mid-revision of the very block being annotated"
+        );
+
+        let mut approved = proposing();
+        assert!(approved.approve());
+        assert!(
+            approved.annotate(1, "anything", "a note").is_none(),
+            "marking up approved work is speaking to the plan, not annotating it"
+        );
+    }
+
+    /// A revision remembers what it revised, and forgets what it answered.
+    ///
+    /// `revises` is the whole basis of the diff view, and it is written in
+    /// exactly one place. The forgetting half is the other guarantee: a note the
+    /// court has now answered must not still be standing in the margin of the
+    /// answer, waiting to be sent back a second time.
+    #[test]
+    fn a_revision_remembers_the_plan_it_replaces() {
+        let mut plan = proposing();
+        assert!(
+            plan.proposal.as_ref().unwrap().revises.is_none(),
+            "a first proposal has nothing to be read against"
+        );
+
+        plan.annotate(3, "Change `lex.rs` line 42.", "Which line?")
+            .expect("a standing proposal can be annotated");
+
+        plan.propose("Fix the off-by-one", "Change `lex.rs` line 43.");
+
+        let revised = plan.proposal.as_ref().unwrap();
+        assert_eq!(
+            revised.revises.as_deref(),
+            Some("Change `lex.rs` line 42."),
+            "the body being replaced is carried forward for the diff"
+        );
+        assert!(
+            revised.notes.is_empty(),
+            "a note this revision answers is no longer pending"
+        );
+
+        let changes = revised.changes().expect("a revision can be read as a diff");
+        assert!(
+            !crate::proposal::unchanged(&changes),
+            "a revision that moved a line must read as having moved it"
+        );
+    }
+
+    /// A proposal recorded before the margin existed still loads.
+    ///
+    /// The same guarantee `#[serde(default)]` gives everywhere else in this
+    /// file, pinned on the two fields added last -- a record on disk that failed
+    /// to load is a plan the user has lost, and disk cannot tell us again.
+    #[test]
+    fn a_proposal_recorded_before_notes_existed_still_loads() {
+        let before_notes = r#"{
+            "title": "Fix the off-by-one",
+            "body": "Change `lex.rs` line 42.",
+            "at": 1700000000000,
+            "approved": false
+        }"#;
+
+        let proposal: Proposal =
+            serde_json::from_str(before_notes).expect("an older proposal must still load");
+
+        assert!(proposal.notes.is_empty());
+        assert!(
+            proposal.revises.is_none(),
+            "an older proposal has no predecessor recorded, so it shows no diff"
+        );
+        assert!(proposal.changes().is_none());
     }
 }
 

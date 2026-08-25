@@ -6,18 +6,18 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    approve_plan, draft_plan, finish_plan, get_kingdom, plan_briefing, say, set_aside_plan,
-    stop_plan, unqueue,
+    annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom, plan_briefing, say,
+    send_notes, set_aside_plan, stop_plan, unqueue, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use crate::components::BrowserView;
 use crate::components::Prose;
+use crate::components::ProposalCard;
 use crate::components::WardTree;
 use kingdom_core::{
-    Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Proposal, Speaker, Timestamp,
-    ToolCall,
+    Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Speaker, Timestamp, ToolCall,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
@@ -440,6 +440,71 @@ fn ConversationBody(
         });
     });
 
+    // What the King has written in the margin and not yet sent. Read live for
+    // the same reason the proposal itself is: a note written in another tab
+    // arrives over the watch socket, and the margin must empty here the moment
+    // the notes are sent from anywhere.
+    let notes = Memo::new(move |_| live.get().map(|p| p.notes().to_vec()).unwrap_or_default());
+
+    // Writing one. The whole card is presentational -- every call in this view
+    // is owned here, as it was before annotation existed -- so the components
+    // hand the note up and this decides what happens to it.
+    let annotate = Callback::new(move |(line, quote, note): (usize, String, String)| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match annotate_proposal(plan_id.to_string(), line, quote, note).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // Taking one back. Losing the race is reported rather than swallowed, for
+    // the same reason withdrawing queued words is -- see `api::withdraw_note`.
+    let withdraw_a_note = Callback::new(move |note_id: String| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match withdraw_note(plan_id.to_string(), note_id).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // Putting them to the court. An `Action` so the button can read its own
+    // pending state and a second click while the first is in flight does
+    // nothing -- a double send would drain the margin once and then report a
+    // confusing failure for notes that in fact landed.
+    //
+    // Sending and drafting are split for exactly the reason accepting and
+    // drafting are: the King's words land in the chamber immediately rather
+    // than behind the first round of the court's reply.
+    let send = Action::new(move |_: &()| {
+        let plan_id = id.get_value();
+        async move {
+            match send_notes(plan_id.to_string()).await {
+                Ok(_) => {
+                    state.error.set(None);
+                    if let Ok(k) = get_kingdom().await {
+                        state.kingdom.set(k);
+                    }
+                    on_draft.run(plan_id);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        }
+    });
+    let send_the_notes = Callback::new(move |_: ()| {
+        send.dispatch(());
+    });
+    let sending = Signal::derive(move || send.pending().get());
+
     // Closed by default. Opening it is what attaches a viewer and starts the
     // screencast, and closing it is what stops one -- so this signal is the
     // user's direct control over whether Chrome is painting for an audience.
@@ -711,8 +776,13 @@ fn ConversationBody(
                             <ProposalCard
                                 proposal=put
                                 busy=drafting
+                                notes=notes
+                                sending=sending
                                 on_accept=accept
                                 on_set_aside=set_aside
+                                on_note=annotate
+                                on_withdraw_note=withdraw_a_note
+                                on_send_notes=send_the_notes
                             />
                         })}
                     </Show>
@@ -1304,102 +1374,6 @@ fn subagent_status(status: PlanStatus) -> &'static str {
     }
 }
 
-/// A plan the model has put to the user, and the two things they can do with it.
-///
-/// Follows the `.chat-question` idiom deliberately: that card already means
-/// "this is not something to watch, it is something to do", and a proposal is
-/// the same kind of thing at a larger scale. What differs is the stakes, so the
-/// accepting button is the loud one and the setting-aside is quiet.
-///
-/// The body is **rendered markdown** -- headings, lists, tables, code fences and
-/// mermaid diagrams -- through [`crate::components::Prose`]. A proposal is the
-/// one artefact the King is asked to read and judge in full, so it is the place
-/// where structure earns its keep most; the renderer was built for it.
-#[component]
-fn ProposalCard(
-    proposal: Proposal,
-    /// True while a turn is in flight. The buttons go dead rather than
-    /// disappearing, so the card does not jump under the user's cursor.
-    busy: Memo<bool>,
-    on_accept: Callback<()>,
-    on_set_aside: Callback<()>,
-) -> impl IntoView {
-    // Locked the instant they decide, so a double-click cannot grant twice or
-    // race a set-aside against an acceptance. The same guard `Question` uses,
-    // and for the same reason -- except that here the thing being handed over
-    // is the ability to change their files.
-    let (decided, set_decided) = signal(false);
-    let deciding = move || decided.get() || busy.get();
-
-    // A proposal is the one thing in the chamber that is *his* to do, so it
-    // takes the whole column and the log goes behind it: nothing else in view
-    // to read while he is judging it. Collapsible rather than absolute, because
-    // the reasoning that led to the plan is often what he wants to check before
-    // deciding, and hiding it with no way back would make the card a wall.
-    let (full, set_full) = signal(true);
-
-    let accept = move |_| {
-        if deciding() {
-            return;
-        }
-        set_decided.set(true);
-        on_accept.run(());
-    };
-    let set_aside = move |_| {
-        if deciding() {
-            return;
-        }
-        set_decided.set(true);
-        on_set_aside.run(());
-    };
-
-    view! {
-        <div
-            class="chat-proposal"
-            class:decided=move || decided.get()
-            class:full=move || full.get()
-        >
-            <div class="proposal-head">
-                <span class="proposal-mark">"\u{1F4DC}"</span>
-                <span class="proposal-who">"The court proposes"</span>
-                <span class="proposal-at">{clock(proposal.at)}</span>
-                <button
-                    class="proposal-expand"
-                    title="Show the conversation behind this proposal"
-                    on:click=move |_| set_full.update(|f| *f = !*f)
-                >
-                    {move || if full.get() { "Show conversation" } else { "Read in full" }}
-                </button>
-            </div>
-
-            <p class="proposal-title">{proposal.title}</p>
-            <Prose text=proposal.body class="proposal-body"/>
-
-            <div class="proposal-actions">
-                <button
-                    class="proposal-accept"
-                    title="Let the court carry out this plan"
-                    disabled=deciding
-                    on:click=accept
-                >
-                    {move || if decided.get() { "Starting\u{2026}" } else { "Start with this" }}
-                </button>
-                <button
-                    class="proposal-aside"
-                    title="Put this plan aside and say what you want instead"
-                    disabled=deciding
-                    on:click=set_aside
-                >
-                    "Set aside"
-                </button>
-                <span class="proposal-hint">
-                    "Or say what you would change below."
-                </span>
-            </div>
-        </div>
-    }
-}
-
 /// A question the model has stopped to ask, rendered where it was asked.
 ///
 /// Inline in the transcript rather than as a modal. A modal would be the
@@ -1973,7 +1947,11 @@ fn browser_now() -> Option<Timestamp> {
 /// only the browser knows what the user's clock reads. Under SSR this is the
 /// empty string, which never reaches him -- the whole app is gated behind a
 /// kingdom being open, and that only becomes true on the client.
-fn clock(at: Option<Timestamp>) -> String {
+///
+/// Shared with the proposal card rather than spelled twice: a proposal's clock
+/// and a message's clock must read identically, and two implementations is how
+/// they come to differ by an hour on one side of a daylight-saving change.
+pub(crate) fn clock(at: Option<Timestamp>) -> String {
     #[cfg(feature = "hydrate")]
     {
         let Some(Timestamp(ms)) = at else {
