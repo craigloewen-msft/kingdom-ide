@@ -317,7 +317,10 @@ mod tests {
         let a = kingdom_dir(&root);
         let b = kingdom_dir(&root.join("."));
         assert_eq!(a, b, "the same folder, spelled two ways");
-        assert!(a.join("kingdom.json").is_file(), "the drawer says whose it is");
+        assert!(
+            a.join("kingdom.json").is_file(),
+            "the drawer says whose it is"
+        );
     }
 
     /// Two projects called `dev` are two kingdoms, not one.

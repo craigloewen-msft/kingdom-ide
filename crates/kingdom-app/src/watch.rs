@@ -77,5 +77,8 @@ async fn send(socket: &mut WebSocket, plan: &kingdom_core::Plan) -> Result<(), (
     let Ok(json) = serde_json::to_string(plan) else {
         return Err(());
     };
-    socket.send(Message::Text(json.into())).await.map_err(|_| ())
+    socket
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| ())
 }

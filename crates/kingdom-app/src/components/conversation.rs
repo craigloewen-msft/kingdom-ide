@@ -218,8 +218,10 @@ pub fn Conversation() -> impl IntoView {
             Entry::Tool(_) => true,
             Entry::Note(_) => false,
         });
-        let unstarted =
-            p.status == PlanStatus::Drafting && !p.is_busy() && !p.is_subagent() && !model_has_moved;
+        let unstarted = p.status == PlanStatus::Drafting
+            && !p.is_busy()
+            && !p.is_subagent()
+            && !model_has_moved;
         if unstarted && !draft.pending().get_untracked() {
             draft.dispatch(p.id.clone());
         }
@@ -397,8 +399,11 @@ fn ConversationBody(
     // the browser and the server agree on what "awaiting their word" means.
     let proposal = Memo::new(move |_| live.get().and_then(|p| p.standing_proposal().cloned()));
     // What the model may touch right now. Widens exactly once, on approval.
-    let permissions =
-        Memo::new(move |_| live.get().map(|p| p.permissions).unwrap_or(Permissions::Full));
+    let permissions = Memo::new(move |_| {
+        live.get()
+            .map(|p| p.permissions)
+            .unwrap_or(Permissions::Full)
+    });
 
     // How full the model's window is, read live because it moves every round --
     // including mid tool loop, which is when it is worth watching. `None` until
@@ -408,7 +413,11 @@ fn ConversationBody(
     let context = Memo::new(move |_| {
         let usage = live.get()?.context?;
         let percent = usage.percent()?;
-        Some((percent, kingdom_core::window_label(usage.window), usage.tokens))
+        Some((
+            percent,
+            kingdom_core::window_label(usage.window),
+            usage.tokens,
+        ))
     });
 
     // A subagent is settled once and never changes, so it is read off the
@@ -1432,7 +1441,8 @@ fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> i
     // created there is a moment with nothing to list, and an empty box there
     // would read as a call that sent nobody.
     let asked = StoredValue::new(
-        tool_call.input
+        tool_call
+            .input
             .get("tasks")
             .and_then(|t| t.as_array())
             .map(Vec::as_slice)
@@ -1558,7 +1568,9 @@ fn Question(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> im
         set_sent.set(true);
         let tool_call = tool_call_id.get_value();
         leptos::task::spawn_local(async move {
-            if let Err(e) = crate::api::answer_question(plan_id.to_string(), tool_call, answer).await {
+            if let Err(e) =
+                crate::api::answer_question(plan_id.to_string(), tool_call, answer).await
+            {
                 state.error.set(Some(e.to_string()));
                 set_sent.set(false);
             }
@@ -2019,11 +2031,14 @@ fn timing(tool_call: &ToolCall, now: Option<Timestamp>) -> Option<(String, bool)
     // the King should look at: a browser call that has outlived its own timeout
     // is wedged, while a shell command past `wait_seconds` is simply still
     // going -- which is why the type is asked rather than the number compared.
-    let overrun =
-        elapsed as u64 / 1_000 >= budget.seconds() && budget.overrunning_is_a_problem();
+    let overrun = elapsed as u64 / 1_000 >= budget.seconds() && budget.overrunning_is_a_problem();
 
     Some((
-        format!("{} / {}", span(elapsed), span(budget.seconds() as i64 * 1_000)),
+        format!(
+            "{} / {}",
+            span(elapsed),
+            span(budget.seconds() as i64 * 1_000)
+        ),
         overrun,
     ))
 }
@@ -2269,7 +2284,9 @@ impl PlanWatch {
     /// the server wherever it is served from, and upgrades to `wss` when the
     /// page itself is secure.
     fn url(id: &PlanId) -> String {
-        let location = web_sys::window().expect("a browser has a window").location();
+        let location = web_sys::window()
+            .expect("a browser has a window")
+            .location();
         let secure = location.protocol().map(|p| p == "https:").unwrap_or(false);
         let host = location.host().unwrap_or_default();
         let scheme = if secure { "wss" } else { "ws" };
@@ -2390,7 +2407,11 @@ mod tests {
         assert_eq!(span(999), "999ms");
         assert_eq!(span(1_000), "1.0s");
         assert_eq!(span(3_240), "3.2s");
-        assert_eq!(span(9_990), "9.9s", "the decimal band never rounds up into the next one");
+        assert_eq!(
+            span(9_990),
+            "9.9s",
+            "the decimal band never rounds up into the next one"
+        );
         assert_eq!(span(10_000), "10s");
         assert_eq!(span(59_999), "59s");
         assert_eq!(span(60_000), "1m");
@@ -2500,8 +2521,14 @@ mod tests {
         browser.waits = Some(WaitBudget::Deadline { seconds: 30 });
 
         let within = Some(Timestamp(29_000));
-        assert_eq!(timing(&shell, within), Some(("29s / 30s".to_string(), false)));
-        assert_eq!(timing(&browser, within), Some(("29s / 30s".to_string(), false)));
+        assert_eq!(
+            timing(&shell, within),
+            Some(("29s / 30s".to_string(), false))
+        );
+        assert_eq!(
+            timing(&browser, within),
+            Some(("29s / 30s".to_string(), false))
+        );
 
         let past = Some(Timestamp(45_000));
         assert_eq!(

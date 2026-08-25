@@ -125,7 +125,10 @@ fn opening_realm() -> Option<String> {
     }
 
     match kingdom_app::api::open_last_kingdom() {
-        Ok(Some(kingdom)) => Some(format!("     Reopened {} at {}", kingdom.name, kingdom.root)),
+        Ok(Some(kingdom)) => Some(format!(
+            "     Reopened {} at {}",
+            kingdom.name, kingdom.root
+        )),
         // Nothing recorded: the ordinary first run, and not worth a word.
         Ok(None) => None,
         Err(e) => {

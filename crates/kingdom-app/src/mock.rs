@@ -19,7 +19,7 @@
 //! **nothing is cleared or written into unless it is empty or carries the
 //! [`MARKER`] file.** No flag overrides it. See [`ensure_seedable`].
 
-use kingdom_core::mockdata::{FileContent, GitSpec, PlannedFile, FixtureSpec};
+use kingdom_core::mockdata::{FileContent, FixtureSpec, GitSpec, PlannedFile};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

@@ -22,7 +22,7 @@
 //! them, for the same reason: a caller must be told its measurement is shaky
 //! without having the data quietly adjusted underneath it.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use kingdom_browser::{profile, BrowserError, PerfReading};
 use kingdom_core::ToolOutcome;
 use serde::Deserialize;
@@ -367,9 +367,9 @@ impl Tool for BrowserProfile {
             },
 
             "why_render" => match browsers()
-                .profiling(&plan, |page, _| Box::pin(async move {
-                    Ok(profile::why_render(page).await)
-                }))
+                .profiling(&plan, |page, _| {
+                    Box::pin(async move { Ok(profile::why_render(page).await) })
+                })
                 .await
             {
                 Ok(Some(found)) => ToolOutcome::done(
@@ -460,10 +460,10 @@ async fn cpu_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
         .await;
 
     match result {
-        Ok(None) => Refusal::Refused(
-            "CPU profiling is not running; call cpu_start before cpu_stop.".into(),
-        )
-        .into(),
+        Ok(None) => {
+            Refusal::Refused("CPU profiling is not running; call cpu_start before cpu_stop.".into())
+                .into()
+        }
         Ok(Some(profile)) => {
             let path = artifact(shop, "cpu-profile", "cpuprofile");
             let body = serde_json::to_string(&profile).unwrap_or_else(|_| "{}".into());
@@ -666,7 +666,10 @@ async fn scenario(
         // Warmups are discarded here rather than filtered later, so there is no
         // point at which a warmup could be mistaken for a measurement.
         if index >= warmup {
-            samples.push(Sample { run: index - warmup, ..sample });
+            samples.push(Sample {
+                run: index - warmup,
+                ..sample
+            });
         }
     }
 

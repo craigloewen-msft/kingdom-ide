@@ -15,7 +15,7 @@
 //! absent because it served a Phoenix UI feature Kingdom lacked -- that has
 //! since been built, and the reasoning no longer holds.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
 use kingdom_core::{ToolArtifact, ToolOutcome, WaitBudget};
 use serde::Deserialize;

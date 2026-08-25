@@ -34,7 +34,7 @@
 //! does not hold is worse than a limit they can see. Closing it means an
 //! OS-level sandbox, a deliberate later decision.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use kingdom_core::{ToolOutcome, WaitBudget};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -147,7 +147,10 @@ impl Tool for TmuxRun {
             return refusal.into();
         }
 
-        let Some(cmd) = input.get("cmd").and_then(Value::as_str).filter(|c| !c.trim().is_empty())
+        let Some(cmd) = input
+            .get("cmd")
+            .and_then(Value::as_str)
+            .filter(|c| !c.trim().is_empty())
         else {
             return Refusal::BadArguments {
                 tool: "tmux_run".to_string(),
@@ -438,8 +441,8 @@ fn tmux_is_installed() -> Result<(), Refusal> {
 pub async fn dismiss(plan: &kingdom_core::PlanId) {
     // The workspace is irrelevant here -- only the plan decides which socket to
     // knock on -- so a placeholder is honest rather than lazy.
-    let shop = Sandbox::new(kingdom_core::Workspace::in_place(String::new()))
-        .for_plan(plan.clone());
+    let shop =
+        Sandbox::new(kingdom_core::Workspace::in_place(String::new())).for_plan(plan.clone());
     let socket = socket_for(&shop);
 
     // Nothing was ever started, so there is nothing to kill and no reason to
@@ -636,9 +639,7 @@ async fn report(
 
     let mut out = String::new();
     if alive {
-        out.push_str(&format!(
-            "{window} ({name}) is running `{cmd}`."
-        ));
+        out.push_str(&format!("{window} ({name}) is running `{cmd}`."));
     } else {
         out.push_str(&format!(
             "{window} ({name}) ran `{cmd}` and it has already exited{}. The \
@@ -694,7 +695,13 @@ fn name_from(cmd: &str) -> String {
 fn sanitise_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .take(32)
         .collect();
     if cleaned.trim_matches('-').is_empty() {
@@ -806,7 +813,10 @@ mod tests {
             json!({"args": ["-S", "/tmp/other.sock", "kill-server"]}),
         ] {
             assert!(
-                matches!(Tmux.run(escape.clone(), &shop).await, ToolOutcome::Refused { .. }),
+                matches!(
+                    Tmux.run(escape.clone(), &shop).await,
+                    ToolOutcome::Refused { .. }
+                ),
                 "{escape} must not be allowed to choose a server"
             );
         }

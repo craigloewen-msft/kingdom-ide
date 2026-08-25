@@ -27,9 +27,9 @@ use chromiumoxide::cdp::js_protocol::heap_profiler::{
     TakeHeapSnapshotParams,
 };
 use chromiumoxide::cdp::js_protocol::profiler::{
-    DisableParams as ProfilerDisable, EnableParams as ProfilerEnable,
-    StartParams as ProfilerStart, StartPreciseCoverageParams, StopParams as ProfilerStop,
-    StopPreciseCoverageParams, TakePreciseCoverageParams,
+    DisableParams as ProfilerDisable, EnableParams as ProfilerEnable, StartParams as ProfilerStart,
+    StartPreciseCoverageParams, StopParams as ProfilerStop, StopPreciseCoverageParams,
+    TakePreciseCoverageParams,
 };
 use chromiumoxide::Page;
 use futures::StreamExt;
@@ -157,12 +157,15 @@ pub async fn trace_start(page: &Page, categories: Option<&str>) -> Result<(), Br
          disabled-by-default-devtools.timeline.frame,blink.user_timing",
     );
     let config = TraceConfig {
-        included_categories: Some(categories.split(',').map(|c| c.trim().to_string()).collect()),
+        included_categories: Some(
+            categories
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .collect(),
+        ),
         ..Default::default()
     };
-    let params = TraceStart::builder()
-        .trace_config(config)
-        .build();
+    let params = TraceStart::builder().trace_config(config).build();
     page.execute(params).await?;
     Ok(())
 }
@@ -243,7 +246,9 @@ pub async fn heap_snapshot(page: &Page) -> Result<String, BrowserError> {
 /// below returns the absent default rather than a fabricated zero.
 pub async fn perf_reset(page: &Page) -> Result<(), BrowserError> {
     let _ = page
-        .evaluate("window.__kingdom && window.__kingdom.__perfReset && window.__kingdom.__perfReset()")
+        .evaluate(
+            "window.__kingdom && window.__kingdom.__perfReset && window.__kingdom.__perfReset()",
+        )
         .await;
     Ok(())
 }

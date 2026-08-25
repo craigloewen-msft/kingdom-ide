@@ -13,7 +13,7 @@
 //! worktree precisely so that what it touches is knowable, and a reader that
 //! wanders into another city's checkout makes the boundary a fiction.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -101,15 +101,15 @@ impl Tool for ReadFile {
                 ))
                 .into()
             }
-            Err(e) => return Refusal::Refused(format!("reading {path} did not finish: {e}")).into(),
+            Err(e) => {
+                return Refusal::Refused(format!("reading {path} did not finish: {e}")).into()
+            }
         };
 
         let sniff = bytes.len().min(BINARY_SNIFF_BYTES);
         if bytes[..sniff].contains(&0) {
-            return Refusal::Refused(format!(
-                "{path} is a binary file and has no lines to show."
-            ))
-            .into();
+            return Refusal::Refused(format!("{path} is a binary file and has no lines to show."))
+                .into();
         }
 
         let Ok(text) = String::from_utf8(bytes) else {
@@ -211,7 +211,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\ne\n").unwrap();
 
-        let out = read(dir.path(), json!({"path": "f.txt", "offset": 2, "limit": 2})).await;
+        let out = read(
+            dir.path(),
+            json!({"path": "f.txt", "offset": 2, "limit": 2}),
+        )
+        .await;
 
         assert!(out.contains("     2\tb"), "{out}");
         assert!(out.contains("     3\tc"), "{out}");
@@ -253,7 +257,9 @@ mod tests {
 
         match outcome {
             ToolOutcome::Refused { reason } => assert!(reason.contains("outside"), "{reason}"),
-            ToolOutcome::Done { output, .. } => panic!("read a file outside the workspace: {output}"),
+            ToolOutcome::Done { output, .. } => {
+                panic!("read a file outside the workspace: {output}")
+            }
         }
     }
 }

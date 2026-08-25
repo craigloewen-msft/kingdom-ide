@@ -23,7 +23,7 @@
 //! half-written is worse than one left untouched: the plan's next build fails
 //! for a reason unrelated to anything the model believes it did.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use kingdom_core::ToolOutcome;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -190,13 +190,11 @@ impl<'de> Deserialize<'de> for Edits {
 
         let raw = serde_json::Value::deserialize(deserializer)?;
         let value = match &raw {
-            serde_json::Value::String(text) => {
-                serde_json::from_str(text).map_err(|e| {
-                    D::Error::custom(format!(
-                        "`patches` was a string, and the JSON inside it did not parse: {e}"
-                    ))
-                })?
-            }
+            serde_json::Value::String(text) => serde_json::from_str(text).map_err(|e| {
+                D::Error::custom(format!(
+                    "`patches` was a string, and the JSON inside it did not parse: {e}"
+                ))
+            })?,
             _ => raw,
         };
 
@@ -431,7 +429,12 @@ Usage notes:
         // `toClipboard` writes behind, or the next `fromClipboard` pastes text
         // from an edit that never happened.
         let mut clipboards = clipboards_for(shop.plan().as_str());
-        let planned = plan(&input.path, original.as_deref(), &input.patches, &mut clipboards);
+        let planned = plan(
+            &input.path,
+            original.as_deref(),
+            &input.patches,
+            &mut clipboards,
+        );
 
         let (updated, diff) = match planned {
             Ok(pair) => pair,
@@ -547,7 +550,10 @@ fn plan(
         if let Some(name) = patch.to_clipboard.as_deref().filter(|n| !n.is_empty()) {
             if let Some(&(offset, length)) = spans.first() {
                 if length > 0 {
-                    clipboards.insert(name.to_string(), original[offset..offset + length].to_string());
+                    clipboards.insert(
+                        name.to_string(),
+                        original[offset..offset + length].to_string(),
+                    );
                 }
             }
         }
@@ -667,7 +673,11 @@ fn locate(content: &str, anchor: &str) -> Result<(usize, usize), MatchFailure> {
     match exact.len() {
         1 => return Ok(exact[0]),
         0 => {}
-        _ => return Err(MatchFailure::Ambiguous(exact.into_iter().map(|(o, _)| o).collect())),
+        _ => {
+            return Err(MatchFailure::Ambiguous(
+                exact.into_iter().map(|(o, _)| o).collect(),
+            ))
+        }
     }
 
     let loose = whitespace_insensitive_matches(content, anchor);
@@ -888,13 +898,8 @@ mod tests {
 
     fn planned(original: &str, patches: Value) -> Result<String, String> {
         let mut clipboards = HashMap::new();
-        plan(
-            "f.rs",
-            Some(original),
-            &requests(patches),
-            &mut clipboards,
-        )
-        .map(|(updated, _)| updated)
+        plan("f.rs", Some(original), &requests(patches), &mut clipboards)
+            .map(|(updated, _)| updated)
     }
 
     /// The edits survive a gateway that stringifies them.
@@ -1102,7 +1107,10 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ToolOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched\n");
     }
 

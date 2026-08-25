@@ -152,7 +152,10 @@ impl TurnGuard {
     /// newer turn's registration with it.
     pub fn stand_down(&self) {
         if let Ok(mut running) = running().lock() {
-            if running.get(&self.plan).is_some_and(|(t, _)| *t == self.token) {
+            if running
+                .get(&self.plan)
+                .is_some_and(|(t, _)| *t == self.token)
+            {
                 running.remove(&self.plan);
             }
         }

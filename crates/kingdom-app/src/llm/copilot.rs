@@ -891,7 +891,11 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
                  This is a bug in Kingdom or a change in the gateway's wire format, \
                  not something the model did wrong.",
                 unreadable.len(),
-                if unreadable.len() == 1 { "call" } else { "calls" },
+                if unreadable.len() == 1 {
+                    "call"
+                } else {
+                    "calls"
+                },
                 unreadable.join(", "),
             )));
         }
@@ -1152,7 +1156,10 @@ mod tests {
             "read_image",
             serde_json::json!({ "path": "shot.png" }),
         );
-        tool_call.outcome = Some(kingdom_core::ToolOutcome::seen("Looked at shot.png.", images));
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::seen(
+            "Looked at shot.png.",
+            images,
+        ));
 
         Brief {
             system_prompt: crate::llm::SystemPrompt {
@@ -1298,7 +1305,10 @@ mod tests {
             false,
         );
 
-        let assistants: Vec<_> = messages.iter().filter(|m| m["role"] == "assistant").collect();
+        let assistants: Vec<_> = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .collect();
         assert_eq!(
             assistants.len(),
             2,
@@ -1309,7 +1319,10 @@ mod tests {
             Some(2),
             "the first reply's two calls belong to one turn"
         );
-        assert_eq!(assistants[1]["tool_calls"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            assistants[1]["tool_calls"].as_array().map(Vec::len),
+            Some(1)
+        );
 
         // Every call still gets its result, whatever the grouping did.
         assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 3);
@@ -1619,7 +1632,13 @@ mod tests {
             "no chosen effort must send no field, not a fabricated default"
         );
 
-        let chosen = request_body("claude-opus-5", Some(ModelEffort::Xhigh), Vec::new(), &[], None);
+        let chosen = request_body(
+            "claude-opus-5",
+            Some(ModelEffort::Xhigh),
+            Vec::new(),
+            &[],
+            None,
+        );
         assert_eq!(chosen["reasoning_effort"], "xhigh");
 
         let explicit_none = request_body("gpt-5.4", Some(ModelEffort::None), Vec::new(), &[], None);
@@ -1675,7 +1694,10 @@ mod tests {
         match answer.reply {
             Reply::Acts(acts) => {
                 assert_eq!(
-                    acts.calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>(),
+                    acts.calls
+                        .iter()
+                        .map(|c| c.tool.as_str())
+                        .collect::<Vec<_>>(),
                     vec!["bash", "search"],
                     "every choice's calls are gathered, in the order the gateway listed them"
                 );
@@ -1895,8 +1917,14 @@ mod tests {
         let messages = messages(&brief, false);
         let last = messages.last().expect("the aside is sent last");
 
-        assert_eq!(last["role"], "system", "the King did not say this: {last:#?}");
-        assert_eq!(last["content"], "Your previous reply arrived with no content.");
+        assert_eq!(
+            last["role"], "system",
+            "the King did not say this: {last:#?}"
+        );
+        assert_eq!(
+            last["content"],
+            "Your previous reply arrived with no content."
+        );
         assert_eq!(
             messages.iter().filter(|m| m["role"] == "user").count(),
             1,
@@ -1968,8 +1996,15 @@ mod tests {
     /// sending `copilot/claude-opus-5` as the model name earns a 404.
     #[test]
     fn the_recorded_id_is_namespaced_and_the_wire_name_is_not() {
-        let model =
-            CopilotModel::new("t".into(), "copilot/claude-opus-5", None, true, true, 0, None);
+        let model = CopilotModel::new(
+            "t".into(),
+            "copilot/claude-opus-5",
+            None,
+            true,
+            true,
+            0,
+            None,
+        );
         assert_eq!(model.id(), "copilot/claude-opus-5");
         assert_eq!(model.api_name(), "claude-opus-5");
     }

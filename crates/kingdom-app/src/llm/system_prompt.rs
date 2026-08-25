@@ -499,7 +499,10 @@ mod tests {
         let kingdom = bodies.iter().position(|b| *b == "kingdom rules");
         let city_at = bodies.iter().position(|b| *b == "city rules");
         assert!(kingdom.is_some() && city_at.is_some(), "{found:#?}");
-        assert!(kingdom < city_at, "specific guidance must read last: {found:#?}");
+        assert!(
+            kingdom < city_at,
+            "specific guidance must read last: {found:#?}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -577,7 +580,11 @@ mod tests {
     /// wording.
     #[test]
     fn the_remit_is_the_last_thing_the_model_reads() {
-        for permissions in [Permissions::ReadOnly, Permissions::Propose, Permissions::Full] {
+        for permissions in [
+            Permissions::ReadOnly,
+            Permissions::Propose,
+            Permissions::Full,
+        ] {
             let mut prompt = prompt_with(permissions, false);
             prompt.guidance = vec![Guidance {
                 path: "/somewhere/AGENTS.md".to_string(),
@@ -710,7 +717,10 @@ mod tests {
             id: Some("abc".to_string()),
             ..kingdom_core::Workspace::in_place("/dev/city/.kingdom/abc")
         };
-        assert!(isolated.is_isolated(), "the worktree arm must be the one taken");
+        assert!(
+            isolated.is_isolated(),
+            "the worktree arm must be the one taken"
+        );
 
         for workspace in [isolated, kingdom_core::Workspace::in_place("/dev/city")] {
             let block = workspace_block(&workspace);
@@ -736,4 +746,3 @@ mod tests {
         assert!(!permissions_block(Permissions::Full, false).contains("plan the user approved"));
     }
 }
-

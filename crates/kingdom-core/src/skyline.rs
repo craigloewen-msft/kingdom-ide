@@ -23,7 +23,7 @@
 //!   weight, so a huge folder always looks huge. A map that quietly under-reports
 //!   mass would be worse than no map.
 
-use crate::model::{SourceFile, Folder, Language};
+use crate::model::{Folder, Language, SourceFile};
 use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,12 @@ const NON_CODE_CEILING: u64 = 8_192;
 fn is_code(language: Language) -> bool {
     matches!(
         language,
-        Language::Rust | Language::Web | Language::Python | Language::Go | Language::Systems | Language::Shell
+        Language::Rust
+            | Language::Web
+            | Language::Python
+            | Language::Go
+            | Language::Systems
+            | Language::Shell
     )
 }
 
@@ -465,7 +470,11 @@ fn lay_source_files(folder: &Trimmed, cell: Rect, radius: f64, tallest: f64, out
             y: foot.cy(),
             width: foot.w,
             depth: foot.h,
-            height: height_for(mass(source_file.language, source_file.bytes), tallest, radius),
+            height: height_for(
+                mass(source_file.language, source_file.bytes),
+                tallest,
+                radius,
+            ),
             language: source_file.language,
             kind: LotKind::Tower,
             files: 1,
@@ -763,7 +772,10 @@ impl Trimmed {
 }
 
 fn language_index(language: Language) -> usize {
-    Language::ALL.iter().position(|w| *w == language).unwrap_or(0)
+    Language::ALL
+        .iter()
+        .position(|w| *w == language)
+        .unwrap_or(0)
 }
 
 /// Applies both caps: depth first, then the building budget.
@@ -808,7 +820,8 @@ fn collapse(folder: &Folder, depth_left: usize) -> Trimmed {
 
 /// Folds an entire subtree's files into one district's own building list.
 fn insert(folder: &Folder, into: &mut Trimmed) {
-    into.source_files.extend(folder.source_files.iter().cloned());
+    into.source_files
+        .extend(folder.source_files.iter().cloned());
     into.extra_files += folder.extra_files;
     into.extra_bytes += folder.extra_bytes;
     for child in &folder.children {
@@ -848,7 +861,11 @@ fn apply_budget(root: &mut Trimmed) {
 
 fn gather(folder: &Trimmed, out: &mut Vec<(bool, u64, String)>) {
     for b in &folder.source_files {
-        out.push((is_code(b.language), mass(b.language, b.bytes), b.path.clone()));
+        out.push((
+            is_code(b.language),
+            mass(b.language, b.bytes),
+            b.path.clone(),
+        ));
     }
     for c in &folder.children {
         gather(c, out);

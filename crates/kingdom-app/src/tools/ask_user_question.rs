@@ -29,8 +29,8 @@
 //!    question is parked, the timeout dies with it. A plan is repaired on load
 //!    instead, which is the only place that can know.
 
-use super::{Refusal, Tool, Sandbox};
-use kingdom_core::{ToolOutcome, PlanId, WaitBudget};
+use super::{Refusal, Sandbox, Tool};
+use kingdom_core::{PlanId, ToolOutcome, WaitBudget};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -270,10 +270,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
 
-        assert_eq!(
-            asking.await.unwrap(),
-            ToolOutcome::done("Left"),
-        );
+        assert_eq!(asking.await.unwrap(), ToolOutcome::done("Left"),);
     }
 
     /// An answer with nothing waiting for it must say so. Reporting success

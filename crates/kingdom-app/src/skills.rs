@@ -374,8 +374,20 @@ mod tests {
     #[test]
     fn finds_skills_in_both_conventions_sorted() {
         let root = temp();
-        write_skill(&root, ".claude/skills", "zebra", "zebra", "last alphabetically");
-        write_skill(&root, ".agents/skills", "alpha", "alpha", "first alphabetically");
+        write_skill(
+            &root,
+            ".claude/skills",
+            "zebra",
+            "zebra",
+            "last alphabetically",
+        );
+        write_skill(
+            &root,
+            ".agents/skills",
+            "alpha",
+            "alpha",
+            "first alphabetically",
+        );
 
         let found = discover_with_home(&root, None);
 
@@ -389,13 +401,19 @@ mod tests {
     /// The nearest definition of a name wins, which is what lets a project
     /// override a skill it inherits from the directory above it.
     #[test]
- fn the_nearest_skill_of_a_name_wins() {
+    fn the_nearest_skill_of_a_name_wins() {
         let root = temp();
         let project = root.join("project");
         std::fs::create_dir_all(&project).unwrap();
 
         write_skill(&root, ".claude/skills", "build", "build", "the general one");
-        write_skill(&project, ".claude/skills", "build", "build", "the project's own");
+        write_skill(
+            &project,
+            ".claude/skills",
+            "build",
+            "build",
+            "the project's own",
+        );
 
         let found = discover_with_home(&project, None);
 
@@ -455,7 +473,11 @@ mod tests {
 
         let invocation = invoke("build", "", &skills).unwrap();
 
-        assert!(!invocation.body.contains("description:"), "{}", invocation.body);
+        assert!(
+            !invocation.body.contains("description:"),
+            "{}",
+            invocation.body
+        );
         assert!(invocation.body.contains("# build"));
         assert!(invocation.body.contains(&format!(
             "Base directory for this skill: {}",

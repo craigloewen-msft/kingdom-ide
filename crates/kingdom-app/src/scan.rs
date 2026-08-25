@@ -2,7 +2,7 @@
 //!
 //! Server-only. This is the one place where the metaphor touches the disk.
 
-use kingdom_core::{SourceFile, City, CityId, CityKind, Folder, Language};
+use kingdom_core::{City, CityId, CityKind, Folder, Language, SourceFile};
 use std::path::Path;
 
 /// Directories that are never projects and are expensive to walk.
