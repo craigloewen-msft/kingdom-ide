@@ -60,7 +60,9 @@ libc = { version = "0.2", optional = true }
 # Unified diffs for the `patch` tool: a deed reports where each edit landed, so
 # the model can confirm it without re-reading the file. Not optional: it is a
 # workspace dependency now, because `kingdom-core::proposal` diffs a revised
-# plan against the one it revises and that runs in the browser.
+# plan against the one it revises and that runs in the browser. Its `inline`
+# feature, set in the workspace manifest, is what `review.rs` pairs a changed
+# file's rows with.
 similar.workspace = true
 
 # Encoding an image for a model that can see one, and decoding the base64 JPEG
@@ -103,7 +105,7 @@ pulldown-cmark.workspace = true
 [dev-dependencies]
 # A throwaway git repository for the worktree tests. Nothing in the product
 # needs it: preparing a workspace is only meaningfully testable against a real
-# repo on a real disk.
+# repo on a real disk. The review drawer's git reading is tested the same way.
 tempfile = "3"
 
 [features]

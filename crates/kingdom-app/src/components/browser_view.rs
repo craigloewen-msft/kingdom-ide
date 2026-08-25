@@ -74,7 +74,7 @@ pub fn BrowserView(
     watch_browser(plan, canvas, set_sight, set_url);
 
     view! {
-        <div class="spyglass" style:width=move || format!("{}px", width.get())>
+        <div class="spyglass chamber-aside" style:width=move || format!("{}px", width.get())>
             <div class="spyglass-bar">
                 <span class="spyglass-url">{move || url.get()}</span>
                 // Said plainly rather than shown as a badge: the user is being

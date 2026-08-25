@@ -27,10 +27,9 @@
   min-width: 0;
 }
 
-// The transcript and the spyglass, grouped. The group exists so the files rail
-// is not part of it: on a narrow screen this is what stacks into a column
-// (`_spyglass.scss`), and a rail caught in that stack would become a band of
-// file names across the top rather than a column down the side.
+// The transcript and the focused panel, grouped. The group exists so the files
+// rail is not part of it: the rail is a full-height column down the left, and
+// the panel is always to the *right* of the conversation rather than above it.
 .chamber-body {
   display: flex;
   flex: 1;

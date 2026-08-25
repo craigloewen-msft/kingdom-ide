@@ -36,27 +36,11 @@
   &:hover, &.dragging { background: rgba(212, 175, 55, 0.35); }
 }
 
-// --- Head ------------------------------------------------------------------
+// --- The tree's body ---------------------------------------------------------
 //
-// Matches the cities rail's toolbar height, so the two columns' first rows line
-// up and the left edge reads as one band rather than two panels.
-
-.ward-tree-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex: 0 0 auto;
-  padding: 8px 12px;
-  border-bottom: 1px solid t.$edge;
-}
-
-.ward-tree-label {
-  flex: 0 0 auto;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: t.$ink-faint;
-}
+// The head and the column belong to the rail now (see `city_rail.rs` and the
+// pane rules in `_review.scss`), because the review drawer beneath shares both.
+// What is left here is the tree itself.
 
 // Which city the tree belongs to. Without it a rail showing `src/` and
 // `Cargo.toml` could be any of them.

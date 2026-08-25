@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, PromptBar, KingdomMap, Sidebar};
+use crate::components::{Conversation, KingdomMap, PromptBar, Sidebar};
 use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -46,6 +46,25 @@ pub const DEFAULT_TREE_WIDTH: f64 = 240.0;
 /// end. The strip is wide enough to hold the button that brings it back.
 pub const COLLAPSED_RAIL_WIDTH: f64 = 34.0;
 
+/// Below this window width the cities rail folds itself away.
+///
+/// A plan's chamber can be asking for four columns at once -- the cities rail,
+/// the files rail, the transcript and a focused panel -- and the first of those
+/// is the one the King is *least* likely to be reading while he reviews a diff.
+/// So it is the one that yields. 1250 is where the transcript stops having room
+/// to be a conversation once a panel is open beside it.
+#[cfg(feature = "hydrate")]
+const RAIL_FOLDS_BELOW: f64 = 1250.0;
+
+/// The window's current width, or a width nothing folds at if it cannot be read.
+#[cfg(feature = "hydrate")]
+fn window_width() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|w| w.as_f64())
+        .unwrap_or(f64::MAX)
+}
+
 /// Where the rail's collapsed state is remembered between visits.
 #[cfg(feature = "hydrate")]
 const RAIL_COLLAPSED_KEY: &str = "kingdom.rail_collapsed";
@@ -86,6 +105,21 @@ pub struct KingdomState {
     /// `sidebar.rs` because `ThroneRoom` is what writes the grid track and so
     /// has to read it.
     pub rail_collapsed: RwSignal<bool>,
+    /// What the King last *asked* for, as distinct from what the window can
+    /// currently afford.
+    ///
+    /// The two differ because a narrow window folds the rail on its own (see
+    /// `fold_rail_when_cramped`). Keeping the wish apart from the state is what
+    /// lets widening the window restore what he chose, rather than whatever the
+    /// last resize happened to leave behind -- and it is why the automatic fold
+    /// never writes to storage while [`KingdomState::toggle_rail`] always does.
+    pub rail_preference: RwSignal<bool>,
+    /// How wide the window was when he last worked the rail himself, if he has.
+    ///
+    /// The automatic fold defers to a decision made at the width it is looking
+    /// at, so an explicit choice is not undone by the next incidental resize.
+    /// Crossing the threshold is what makes that decision stale.
+    pub rail_decided_at: RwSignal<Option<f64>>,
     /// False shows only live plans; true also shows settled history.
     pub show_all_plans: RwSignal<bool>,
     /// Set while a folder scan is in flight.
@@ -108,6 +142,8 @@ impl KingdomState {
             sidebar_width: RwSignal::new(DEFAULT_SIDEBAR_WIDTH),
             tree_width: RwSignal::new(DEFAULT_TREE_WIDTH),
             rail_collapsed: RwSignal::new(false),
+            rail_preference: RwSignal::new(false),
+            rail_decided_at: RwSignal::new(None),
             show_all_plans: RwSignal::new(false),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
@@ -129,9 +165,17 @@ impl KingdomState {
     }
 
     /// Folds the cities rail away, or brings it back, remembering which.
+    ///
+    /// Records the wish, and the width he was at when he made it. Both matter:
+    /// the wish is what a widened window gives back, and the width is what
+    /// stops the automatic fold undoing a rail he deliberately opened on a
+    /// screen too narrow to hold one.
     pub fn toggle_rail(&self) {
         let next = !self.rail_collapsed.get_untracked();
         self.rail_collapsed.set(next);
+        self.rail_preference.set(next);
+        #[cfg(feature = "hydrate")]
+        self.rail_decided_at.set(Some(window_width()));
         store_rail_collapsed(next);
     }
 }
@@ -257,18 +301,29 @@ fn store_workspace(mode: &WorkspaceMode) {
 /// Restores whether the rail was left folded away, in an effect for the same
 /// reason and in the same place as [`restore_choice`]: reading storage during
 /// rendering would make the server emit markup hydration then disagrees with.
-fn restore_rail_collapsed(collapsed: RwSignal<bool>) {
+///
+/// Sets the *preference* as well as the state, because what was stored is what
+/// the King asked for -- and the automatic fold below reads the preference to
+/// know what to give back when the room returns.
+fn restore_rail_collapsed(collapsed: RwSignal<bool>, preference: RwSignal<bool>) {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         if let Some(stored) =
             local_storage().and_then(|s| s.get_item(RAIL_COLLAPSED_KEY).ok().flatten())
         {
-            collapsed.set(stored == "1");
+            let wanted = stored == "1";
+            preference.set(wanted);
+            // Only ever folds. A window too narrow to afford the rail has
+            // already folded it by now, and a stored "open" must not override
+            // that -- the fold is about room, and the room has not changed.
+            if wanted {
+                collapsed.set(true);
+            }
         }
     });
 
     #[cfg(not(feature = "hydrate"))]
-    let _ = collapsed;
+    let _ = (collapsed, preference);
 }
 
 fn store_rail_collapsed(collapsed: bool) {
@@ -281,6 +336,77 @@ fn store_rail_collapsed(collapsed: bool) {
     let _ = collapsed;
 }
 
+/// Folds the cities rail away when the window is too narrow to afford it, and
+/// gives it back when the room returns.
+///
+/// A chamber can want four columns at once, and on a laptop there is not room
+/// for all of them. Something has to yield, and the cities rail is the right
+/// one: it is navigation the King has already finished using by the time he is
+/// reading a diff, and it is the only one of the four that can fold to a strip
+/// and still be reopened.
+///
+/// **It never writes to storage.** That is the whole design. The stored flag is
+/// the King's *preference*, and this is a response to the window -- so widening
+/// the window restores whatever he chose rather than whatever the last resize
+/// happened to leave behind. `toggle_rail` still writes, because that is him
+/// deciding, and it updates the preference too -- so a rail he opens on a narrow
+/// screen stays open until the width crosses the threshold again, which is the
+/// honest reading of "he asked for it *here*".
+fn fold_rail_when_cramped(
+    collapsed: RwSignal<bool>,
+    preference: RwSignal<bool>,
+    decided_at: RwSignal<Option<f64>>,
+) {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let apply = move || {
+            let width = window_width();
+            let cramped = width < RAIL_FOLDS_BELOW;
+
+            // A choice the King made on *this* side of the threshold stands.
+            // Without this, opening the rail on a laptop is undone by the very
+            // next resize -- and every window manager sends a flurry of them.
+            // Crossing the threshold is what makes his decision stale, because
+            // that is when the question he answered has genuinely changed.
+            if let Some(at) = decided_at.get_untracked() {
+                if (at < RAIL_FOLDS_BELOW) == cramped {
+                    collapsed.set(preference.get_untracked());
+                    return;
+                }
+                decided_at.set(None);
+            }
+
+            if cramped {
+                collapsed.set(true);
+            } else {
+                // Back to whatever he asked for -- not merely "open", which
+                // would undo a fold he chose himself before the window ever
+                // narrowed.
+                collapsed.set(preference.get_untracked());
+            }
+        };
+
+        // Once on arrival, so a chamber opened on a laptop starts folded rather
+        // than folding itself a moment later.
+        Effect::new(move |_| apply());
+
+        let on_resize = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || apply());
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
+        }
+        // Leaked deliberately: the listener lives as long as the app does, and
+        // `App` is never unmounted. Dropping the closure while the listener is
+        // still registered would call freed memory on the next resize.
+        on_resize.forget();
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = (collapsed, preference, decided_at);
+}
+
 /// Root component: the throne room.
 #[component]
 pub fn App() -> impl IntoView {
@@ -290,7 +416,14 @@ pub fn App() -> impl IntoView {
     provide_context(state);
     restore_choice(state.choice);
     restore_workspace(state.workspace);
-    restore_rail_collapsed(state.rail_collapsed);
+    restore_rail_collapsed(state.rail_collapsed, state.rail_preference);
+    // After the restore, so "enough room again" gives back the King's own
+    // preference rather than the default standing in for it.
+    fold_rail_when_cramped(
+        state.rail_collapsed,
+        state.rail_preference,
+        state.rail_decided_at,
+    );
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the user back to the folder picker.

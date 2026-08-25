@@ -1,4 +1,9 @@
-//! The files rail: the tree of the selected city, as it actually stands on disk.
+//! The files rail's tree: the selected city, as it actually stands on disk.
+//!
+//! The **body** of a rail rather than the rail itself. [`super::city_rail`] owns
+//! the column, its width and its tabs; this is one of the two views inside it,
+//! and the other is the review drawer. It was the whole rail until the drawer
+//! arrived, and the split is why the head and the resizer are no longer here.
 //!
 //! Part of a plan's chamber, not of the throne room. It describes the ground a
 //! *conversation* stands on, so it is rendered by `conversation.rs` as the
@@ -6,10 +11,6 @@
 //! map it had nothing to belong to and nothing to say but an instruction to go
 //! and choose a city, standing next to the screen whose whole job is choosing
 //! one.
-//!
-//! A supporting column, not a peer of the transcript. It is narrower than the
-//! cities rail by default and capped lower (see [`BOUNDS`]), because the King
-//! came to read the conversation.
 //!
 //! # Why it fetches rather than reading the city it already has
 //!
@@ -30,26 +31,10 @@
 //! one cache, one `For`, and turns indentation into arithmetic.
 
 use crate::api::list_directory;
-use crate::app::{KingdomState, DEFAULT_TREE_WIDTH};
-use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
+use crate::app::KingdomState;
 use kingdom_core::{CityId, DirEntry};
 use leptos::prelude::*;
 use std::collections::{HashMap, HashSet};
-
-/// How far the files rail may be dragged.
-///
-/// The ceiling is deliberately below the cities rail's 560: this is the
-/// *second* supporting column on the left, and two columns that could each grow
-/// to the rail's maximum would leave the transcript fighting for the middle of
-/// the screen. A tree of names also needs less room than a rail of titles,
-/// badges and model names.
-const BOUNDS: Bounds = Bounds {
-    min: 180.0,
-    max: 420.0,
-    default: DEFAULT_TREE_WIDTH,
-};
-
-const WIDTH_KEY: &str = "kingdom.tree_width";
 
 /// The root listing's key in the cache. The city root has no name of its own,
 /// and every other path is relative to it.
@@ -79,12 +64,6 @@ pub fn WardTree() -> impl IntoView {
     let fetching = RwSignal::new(HashSet::<String>::new());
 
     let city = Memo::new(move |_| state.selected.get());
-    let city_name = Memo::new(move |_| {
-        let id = city.get()?;
-        state.kingdom.get().city(&id).map(|c| c.name.clone())
-    });
-
-    restore_width(state.tree_width, WIDTH_KEY, BOUNDS);
 
     /// Asks the server for one directory and files the answer.
     ///
@@ -192,123 +171,105 @@ pub fn WardTree() -> impl IntoView {
     let loading_root = Memo::new(move |_| fetching.get().contains(ROOT));
 
     view! {
-        // The width is set inline from the signal, as the spyglass's is: this
-        // is a flex child of the chamber now rather than a grid track, so the
-        // resizer drives the element itself.
-        <aside class="ward-tree" style:width=move || format!("{}px", state.tree_width.get())>
-            <div class="ward-tree-head">
-                <span class="ward-tree-label">"Wards"</span>
-                <span class="ward-tree-city" title=move || city_name.get()>
-                    {move || city_name.get().unwrap_or_default()}
-                </span>
-            </div>
+        // Just the body: the column, its head and its resizer belong to the
+        // rail that holds this, because the review drawer shares all three.
+        <div class="ward-tree-body">
+            <Show when=move || city.get().is_none()>
+                <p class="ward-tree-hint">
+                    "Choose a city to see what stands in it."
+                </p>
+            </Show>
 
-            <div class="ward-tree-body">
-                <Show when=move || city.get().is_none()>
-                    <p class="ward-tree-hint">
-                        "Choose a city to see what stands in it."
-                    </p>
-                </Show>
+            <Show when=move || city.get().is_some() && empty.get()>
+                <p class="ward-tree-hint">
+                    {move || if loading_root.get() { "Surveying\u{2026}" } else { "Nothing here." }}
+                </p>
+            </Show>
 
-                <Show when=move || city.get().is_some() && empty.get()>
-                    <p class="ward-tree-hint">
-                        {move || if loading_root.get() { "Surveying\u{2026}" } else { "Nothing here." }}
-                    </p>
-                </Show>
-
-                <ul class="ward-list">
-                    // Keyed on what the row draws, not the path alone: the same
-                    // path re-renders when it opens or closes, and a key of just
-                    // the path would leave a folder showing a closed chevron
-                    // over its own open children.
-                    <For
-                        each=move || rows.get()
-                        key=|row: &Row| {
-                            (row.entry.path.clone(), row.depth, row.entry.is_dir)
-                        }
-                        let:row
-                    >
-                        {
-                            let path = row.entry.path.clone();
-                            let is_dir = row.entry.is_dir;
-                            let open = {
-                                let path = path.clone();
-                                Memo::new(move |_| expanded.get().contains(&path))
-                            };
-                            let busy = {
-                                let path = path.clone();
-                                Memo::new(move |_| fetching.get().contains(&path))
-                            };
-                            let indent = format!("{}px", 6.0 + row.depth as f64 * INDENT);
-                            let tint = row.entry.language.tint().to_string();
-                            let name = row.entry.name.clone();
-                            let title = row.entry.path.clone();
-                            let on_click = {
-                                let path = path.clone();
-                                move |_| {
-                                    // Only a folder does anything. A file row
-                                    // has no handler at all rather than one that
-                                    // shrugs -- opening a file is not built yet,
-                                    // and a row that looks pressable and is not
-                                    // is worse than one that plainly is not.
-                                    if is_dir {
-                                        toggle(path.clone());
-                                    }
+            <ul class="ward-list">
+                // Keyed on what the row draws, not the path alone: the same
+                // path re-renders when it opens or closes, and a key of just
+                // the path would leave a folder showing a closed chevron
+                // over its own open children.
+                <For
+                    each=move || rows.get()
+                    key=|row: &Row| {
+                        (row.entry.path.clone(), row.depth, row.entry.is_dir)
+                    }
+                    let:row
+                >
+                    {
+                        let path = row.entry.path.clone();
+                        let is_dir = row.entry.is_dir;
+                        let open = {
+                            let path = path.clone();
+                            Memo::new(move |_| expanded.get().contains(&path))
+                        };
+                        let busy = {
+                            let path = path.clone();
+                            Memo::new(move |_| fetching.get().contains(&path))
+                        };
+                        let indent = format!("{}px", 6.0 + row.depth as f64 * INDENT);
+                        let tint = row.entry.language.tint().to_string();
+                        let name = row.entry.name.clone();
+                        let title = row.entry.path.clone();
+                        let on_click = {
+                            let path = path.clone();
+                            move |_| {
+                                // Only a folder does anything. A file row
+                                // has no handler at all rather than one that
+                                // shrugs -- opening a file is not built yet,
+                                // and a row that looks pressable and is not
+                                // is worse than one that plainly is not.
+                                if is_dir {
+                                    toggle(path.clone());
                                 }
-                            };
-
-                            view! {
-                                <li>
-                                    <div
-                                        class="ward-row"
-                                        class:is-dir=is_dir
-                                        style:padding-left=indent
-                                        title=title
-                                        on:click=on_click
-                                    >
-                                        <span class="ward-chevron" class:empty=!is_dir>
-                                            {move || {
-                                                if !is_dir {
-                                                    ""
-                                                } else if busy.get() {
-                                                    "\u{22ef}"
-                                                } else if open.get() {
-                                                    "\u{25be}"
-                                                } else {
-                                                    "\u{25b8}"
-                                                }
-                                            }}
-                                        </span>
-                                        <Show
-                                            when=move || is_dir
-                                            fallback=move || {
-                                                let tint = tint.clone();
-                                                view! {
-                                                    <span
-                                                        class="ward-dot"
-                                                        style:background=tint
-                                                    ></span>
-                                                }
-                                            }
-                                        >
-                                            <span class="ward-folder">"\u{1f5c0}"</span>
-                                        </Show>
-                                        <span class="ward-name">{name.clone()}</span>
-                                    </div>
-                                </li>
                             }
-                        }
-                    </For>
-                </ul>
-            </div>
+                        };
 
-            <Resizer
-                width=state.tree_width
-                grows=Grows::Rightwards
-                bounds=BOUNDS
-                storage_key=WIDTH_KEY
-                class="ward-tree-resizer"
-            />
-        </aside>
+                        view! {
+                            <li>
+                                <div
+                                    class="ward-row"
+                                    class:is-dir=is_dir
+                                    style:padding-left=indent
+                                    title=title
+                                    on:click=on_click
+                                >
+                                    <span class="ward-chevron" class:empty=!is_dir>
+                                        {move || {
+                                            if !is_dir {
+                                                ""
+                                            } else if busy.get() {
+                                                "\u{22ef}"
+                                            } else if open.get() {
+                                                "\u{25be}"
+                                            } else {
+                                                "\u{25b8}"
+                                            }
+                                        }}
+                                    </span>
+                                    <Show
+                                        when=move || is_dir
+                                        fallback=move || {
+                                            let tint = tint.clone();
+                                            view! {
+                                                <span
+                                                    class="ward-dot"
+                                                    style:background=tint
+                                                ></span>
+                                            }
+                                        }
+                                    >
+                                        <span class="ward-folder">"\u{1f5c0}"</span>
+                                    </Show>
+                                    <span class="ward-name">{name.clone()}</span>
+                                </div>
+                            </li>
+                        }
+                    }
+                </For>
+            </ul>
+        </div>
     }
 }

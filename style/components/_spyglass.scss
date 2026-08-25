@@ -13,16 +13,29 @@
 
 @use "../abstracts/tokens" as t;
 
-.spyglass {
-  display: flex;
-  flex-direction: column;
+// What the two panels beside the transcript have in common.
+//
+// The spyglass and the diff are alternatives for one slot (see `Aside` in
+// `conversation.rs`), so everything about being *that slot* lives here and each
+// panel adds only what it draws. Written once because the alternative is a
+// second panel that behaves differently on a narrow screen than the first,
+// which is a bug nobody finds until they own a laptop.
+//
+// It is always the *right-hand* column. See the narrow-screen rules at the foot
+// of this file for why it never stacks above the conversation.
+.chamber-aside {
   // Width comes from the resizer's signal, set inline. `flex: 0 0 auto` so the
   // transcript yields the room rather than the panel being squeezed out of the
   // width the King dragged it to.
   flex: 0 0 auto;
   min-width: 0;
-  background: t.$void;
   border-left: 1px solid t.$edge;
+}
+
+.spyglass {
+  display: flex;
+  flex-direction: column;
+  background: t.$void;
 }
 
 .spyglass-bar {
@@ -146,24 +159,21 @@
   }
 }
 
-// --- Too narrow to sit beside anything ---------------------------------------
+// --- Narrow screens ----------------------------------------------------------
 //
-// Below this there is no width that leaves both a readable page and a readable
-// transcript, so the panel goes back over the top of the column — the layout
-// this replaced, kept as the small-screen branch rather than deleted.
+// The panel stays **beside** the conversation at every width. It used to stack
+// above it below 1100px, which put a browser or a diff between the King and the
+// chamber header and pushed the transcript off the bottom of the screen -- the
+// panel is something read *against* the conversation, so covering the
+// conversation with it defeats the point.
+//
+// Instead it gives up width. The cap is a *share of the chamber* rather than a
+// pixel count, because what is left over is what the transcript gets, and the
+// two left rails have already taken their own room by this point. Half each is
+// the honest split when there is not enough for the width the King dragged;
+// above the breakpoint his width is honoured untouched.
 
-@media (max-width: 1100px) {
-  .chamber-body { flex-direction: column; }
-
-  .spyglass {
-    // The dragged width is meaningless once the panel is full-bleed.
-    width: auto !important;
-    max-height: 45%;
-    border-left: none;
-    border-bottom: 1px solid t.$edge;
-    order: -1;  // above the column, where it used to be
-  }
-
-  // A vertical divider between two stacked panels would drag the wrong axis.
-  .spyglass-resizer { display: none; }
+@media (max-width: 1400px) {
+  .chamber-aside { max-width: 50%; }
 }
+

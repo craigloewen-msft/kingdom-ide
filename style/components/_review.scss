@@ -1,0 +1,251 @@
+// The review drawer: the rail's lower pane, beneath the city's tree.
+//
+// The tree above answers "what is in this project?". This answers the question
+// the King opened the plan to ask -- what did my agent do? -- so it is the
+// louder of the two: the tree's rows are deliberately quiet, and these carry a
+// status mark and a pair of counts.
+//
+// Every row here is pressable, unlike the tree where only a folder is, so the
+// hover and the cursor say so on all of them rather than on some.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+// --- The rail's two panes ----------------------------------------------------
+//
+// A split rather than tabs, because the tree and the changed files are read
+// *together*: "what did my agent change?" is answered against "what is in this
+// project?", and a tab hides half of that behind a click.
+//
+// Only the top pane is measured. The bottom takes the remainder, so the two
+// always add up to the rail exactly, at any window height, with one number
+// behind the divider instead of two that could disagree.
+
+.rail-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+// The tree. Its height is set inline from the split's signal; `flex: 0 0 auto`
+// so it keeps the height the King dragged rather than being stretched.
+.rail-wards { flex: 0 0 auto; }
+
+// The drawer. Takes whatever the tree does not.
+.rail-review {
+  flex: 1 1 auto;
+  border-top: 1px solid t.$edge;
+}
+
+// --- The divider between them ------------------------------------------------
+//
+// The rail's own edge handle drags width; this one drags height. Same component
+// (see `resizer.rs`), and the row cursor is what says which.
+
+.rail-split {
+  flex: 0 0 auto;
+  height: 7px;
+  margin-bottom: -4px;  // straddle the drawer's border, as the other handles do
+  z-index: 5;
+  cursor: row-resize;
+  background: transparent;
+
+  &:hover, &.dragging { background: rgba(212, 175, 55, 0.35); }
+}
+
+// --- Each pane's own head ----------------------------------------------------
+//
+// Two heads now rather than one for the rail, because with both panes on screen
+// at once each needs to say which it is. The top one matches the cities rail's
+// toolbar height, so the left edge still reads as one band.
+
+.rail-pane-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid t.$edge;
+}
+
+.rail-pane-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: t.$ink-faint;
+}
+
+// How many files there are to look at. The count and not the line total: the
+// decision being made here is whether to look, and a four-digit number in a
+// badge is noise.
+.rail-pane-count {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  background: t.$gold-dim;
+  border-radius: 9px;
+  color: t.$void;
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.rail-pane-spacer { flex: 1 1 auto; }
+
+// The King's own way to ask again. The automatic refetch follows the court
+// acting, so a settled plan -- or one whose files he changed himself -- has
+// nothing else to press.
+.rail-refresh {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  background: transparent;
+  border: none;
+  color: t.$ink-faint;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover { color: t.$ink; }
+
+  // Turning while a fetch is in flight, so pressing it visibly does something
+  // even when the answer comes back identical.
+  &.looking {
+    color: t.$gold;
+    animation: rail-refresh-spin 0.9s linear infinite;
+  }
+}
+
+@keyframes rail-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+// --- The drawer --------------------------------------------------------------
+
+.review-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+// What the comparison is against, said once at the top. Without it a list of
+// files is an assertion with no subject.
+.review-against {
+  padding: 7px 12px;
+  border-bottom: 1px solid t.$edge;
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
+.review-base {
+  color: t.$ink-dim;
+  font-family: t.$font-mono;
+}
+
+.review-hint,
+.review-note {
+  margin: 0;
+  padding: 14px 12px;
+  font-size: 12px;
+  color: t.$ink-faint;
+  line-height: 1.5;
+}
+
+// A note is the server explaining an empty list -- not a repository, workspace
+// gone, comparison narrowed. It is information rather than a failure, so it is
+// quiet rather than red.
+.review-note {
+  border-bottom: 1px solid t.$edge;
+  font-style: italic;
+}
+
+.review-list { list-style: none; margin: 0; padding: 4px 0; }
+.review-list li { list-style: none; }
+
+.review-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px 4px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { background: t.$panel-2; }
+
+  // The file whose diff is in the panel. The gold edge is the same "you are
+  // looking at this" mark the rail's own selection uses.
+  &.selected {
+    background: t.$panel-2;
+    box-shadow: inset 2px 0 0 t.$gold;
+  }
+}
+
+// git's own letter. A reminder rather than a label -- the full word is on the
+// row's title.
+.review-mark {
+  flex-shrink: 0;
+  width: 10px;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 10px;
+  text-align: center;
+
+  &.added { color: t.$working; }
+  &.deleted { color: t.$blocked; }
+  &.untracked { color: t.$review; }
+}
+
+// The same language colours the skyline tints a building with, so a `.rs` file
+// reads the same here as it does in the tree above it and on the map.
+.review-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.review-name {
+  display: flex;
+  align-items: baseline;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+// Dimmed folder, bright name. In a column this narrow the name is the thing
+// being read, and the path is only there to disambiguate it -- so the folder is
+// what gives way when there is not enough room, and the name never does.
+.review-folder {
+  @include m.truncate;
+  min-width: 0;
+  color: t.$ink-faint;
+}
+
+.review-file {
+  flex-shrink: 0;
+  color: t.$ink;
+}
+
+.review-count {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: t.$font-mono;
+  font-size: 10px;
+
+  // A binary file says a word rather than `+0 -0`, which would read as
+  // "unchanged" when it means "not countable".
+  &.binary {
+    color: t.$ink-faint;
+    font-style: italic;
+  }
+}
+
+.count-added { color: t.$working; }
+.count-removed { color: t.$blocked; }

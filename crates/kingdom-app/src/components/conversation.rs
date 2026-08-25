@@ -13,14 +13,52 @@ use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use crate::components::BrowserView;
+use crate::components::CityRail;
+use crate::components::DiffView;
 use crate::components::Prose;
+// `WardTree` is no longer named here: the files rail is `CityRail` now, which
+// stacks the tree over the review drawer and mounts both itself.
 use crate::components::ProposalCard;
-use crate::components::WardTree;
 use kingdom_core::{
     Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Speaker, Timestamp, ToolCall,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
+
+/// What is showing in the panel beside the transcript.
+///
+/// **One focused panel at a time**, and this type is why. The spyglass and the
+/// diff both want the full-height column right of the conversation, and both
+/// are things the King reads *against* the transcript rather than instead of
+/// it. Two of them side by side would leave three columns fighting over a
+/// screen the transcript is supposed to be the middle of, so opening either one
+/// closes the other -- not by two booleans watching each other, which is how
+/// they end up both true, but because there is only one signal and it holds one
+/// value.
+///
+/// The transcript is deliberately *outside* this decision. It is not one of the
+/// alternatives; it is the thing they are alternatives beside.
+#[derive(Clone, PartialEq, Eq)]
+enum Aside {
+    Hidden,
+    Browser,
+    /// A file under review, named relative to the plan's workspace.
+    Diff(String),
+}
+
+impl Aside {
+    fn is_browser(&self) -> bool {
+        matches!(self, Aside::Browser)
+    }
+
+    /// The file being read, if a diff is what is showing.
+    fn file(&self) -> Option<String> {
+        match self {
+            Aside::Diff(path) => Some(path.clone()),
+            _ => None,
+        }
+    }
+}
 
 /// How wide the spyglass may be dragged. Narrower than the minimum and the
 /// court's 1024-wide page is scaled past reading; wider and the transcript
@@ -32,6 +70,20 @@ const SPYGLASS_BOUNDS: Bounds = Bounds {
 };
 
 const SPYGLASS_WIDTH_KEY: &str = "kingdom.spyglass_width";
+
+/// How wide the diff may be dragged.
+///
+/// Its own bounds and its own key, deliberately not shared with the spyglass's.
+/// Two columns of code need more room than a screencast of a 1024-wide page,
+/// and the width the King drags for one should still be there when he comes
+/// back to it rather than having been overwritten by the other.
+const DIFF_BOUNDS: Bounds = Bounds {
+    min: 380.0,
+    max: 1200.0,
+    default: 640.0,
+};
+
+const DIFF_WIDTH_KEY: &str = "kingdom.diff_width";
 
 /// The browser deed the panel should caption itself with, if any.
 ///
@@ -538,10 +590,14 @@ fn ConversationBody(
     });
     let sending = Signal::derive(move || send.pending().get());
 
-    // Closed by default. Opening it is what attaches a viewer and starts the
-    // screencast, and closing it is what stops one -- so this signal is the
-    // user's direct control over whether Chrome is painting for an audience.
-    let (watching, set_watching) = signal(false);
+    // What is showing beside the transcript. One signal holding one value, so
+    // the browser and the diff cannot both be open -- see [`Aside`].
+    //
+    // Hidden by default. For the browser that is load-bearing rather than
+    // tidy: opening it is what attaches a viewer and starts the screencast, and
+    // closing it is what stops one, so this is the King's direct control over
+    // whether Chrome is painting for an audience.
+    let aside = RwSignal::new(Aside::Hidden);
 
     // The system prompt this plan's model is given, once it has been asked for.
     // `None` means it has never been fetched: the panel opening is what fetches
@@ -572,11 +628,47 @@ fn ConversationBody(
     });
     on_cleanup(move || escape.remove());
 
-    // How wide the panel is, in pixels. A plain local signal rather than
-    // something on `KingdomState`: like the rail's collapse set, it is a view
-    // preference and nothing outside this view reads it.
+    // How wide each panel is, in pixels. Plain local signals rather than
+    // something on `KingdomState`: like the rail's collapse set, they are view
+    // preferences and nothing outside this view reads them. One each, because
+    // a screencast and a two-column diff do not want the same room.
     let spyglass_width = RwSignal::new(SPYGLASS_BOUNDS.default);
     restore_width(spyglass_width, SPYGLASS_WIDTH_KEY, SPYGLASS_BOUNDS);
+    let diff_width = RwSignal::new(DIFF_BOUNDS.default);
+    restore_width(diff_width, DIFF_WIDTH_KEY, DIFF_BOUNDS);
+
+    // The file the panel is reading, for the rail's selected row and for the
+    // panel's own fetch.
+    let open_file = Memo::new(move |_| aside.get().file());
+
+    // A change signal for the review drawer, free from the watch socket: every
+    // transcript entry is a moment the court may have touched a file.
+    let activity = Memo::new(move |_| live.get().map(|p| p.transcript.len()).unwrap_or(0));
+
+    // Opening a file is the one thing that can *replace* what is in the panel
+    // rather than merely closing it, so the rail hands the path here and this
+    // is where the browser gives way to the diff.
+    let review_file = Callback::new(move |path: String| aside.set(Aside::Diff(path)));
+
+    // What the plan has changed. Held here rather than in the rail because two
+    // views read it: the drawer's rows and its badge, and the diff panel, which
+    // uses a file's line counts as a version stamp to know when to refetch.
+    let summary = RwSignal::new(None::<kingdom_core::ChangeSummary>);
+    let looking = RwSignal::new(false);
+
+    // The open file's counts, as a stamp. When the court edits the file the
+    // King is reading, these move and the panel fetches again -- at no cost,
+    // because the rail has already asked the question.
+    let diff_version = Memo::new(move |_| {
+        let Some(path) = open_file.get() else {
+            return (0, 0);
+        };
+        summary
+            .get()
+            .and_then(|s| s.files.into_iter().find(|f| f.path == path))
+            .map(|f| (f.added, f.removed))
+            .unwrap_or((0, 0))
+    });
 
     // What the court is doing to the page right now, for the panel's caption.
     // Read off the live plan, so it moves during a turn like everything else
@@ -585,20 +677,25 @@ fn ConversationBody(
 
     view! {
         // A flex row: the city's files, then everything that is read against
-        // them. The tree is a sibling of that whole group rather than of the
-        // transcript alone, because the group is what collapses into a stack on
-        // a narrow screen -- see `.chamber-body` in `_spyglass.scss`. A tree
-        // inside that stack would stop being a rail and become a band of file
-        // names wedged between the header and the conversation.
+        // them. The rail is a sibling of that whole group rather than of the
+        // transcript alone, so it stays a full-height column down the left
+        // whatever the group beside it is doing.
         <div class="chamber-frame">
             // The files of the city this plan works in. Part of the chamber and
             // not of the throne room: it describes the ground a *conversation*
             // stands on, so on the map it was an orphan telling the King to go
             // and choose a city, beside the screen whose whole job is choosing
             // one.
-            <WardTree/>
-            // The transcript and the spyglass: side by side rather than
-            // stacked, because the transcript and the page it describes are
+            <CityRail
+                plan=id.get_value()
+                summary=summary
+                looking=looking
+                activity=activity
+                open_file=open_file
+                on_open=review_file
+            />
+            // The transcript and the panel beside it: side by side rather than
+            // stacked, because the transcript and the thing it describes are
             // read together -- stacking them made each one shorter to make room
             // for the other.
             <div class="chamber-body">
@@ -712,9 +809,13 @@ fn ConversationBody(
                         // "no browser" state answers the question honestly for the rest.
                         <button
                             class="spyglass-toggle"
-                            class:open=move || watching.get()
+                            class:open=move || aside.get().is_browser()
                             title="Watch this plan's browser"
-                            on:click=move |_| set_watching.update(|w| *w = !*w)
+                            on:click=move |_| aside.update(|a| {
+                                // Toggles, and in doing so closes a diff: there
+                                // is one panel, and this is asking for it.
+                                *a = if a.is_browser() { Aside::Hidden } else { Aside::Browser };
+                            })
                         >
                             "\u{1F50D}"
                         </button>
@@ -1027,9 +1128,15 @@ fn ConversationBody(
                     </Show>
                 </div>
 
-                // The handle exists only while the panel does: a divider with
+                // The panel beside the transcript, and the handle that sizes
+                // it. The handle exists only while a panel does: a divider with
                 // nothing on one side of it is a control that does nothing.
-                <Show when=move || watching.get()>
+                //
+                // Two `Show`s over one `Aside` rather than two independent
+                // flags, which is what makes "only one focused panel" true by
+                // construction rather than by two handlers remembering to close
+                // each other.
+                <Show when=move || aside.get().is_browser()>
                     <Resizer
                         width=spyglass_width
                         grows=Grows::Leftwards
@@ -1041,6 +1148,23 @@ fn ConversationBody(
                         plan=id.get_value()
                         deed=browser_deed
                         width=spyglass_width
+                    />
+                </Show>
+
+                <Show when=move || open_file.get().is_some()>
+                    <Resizer
+                        width=diff_width
+                        grows=Grows::Leftwards
+                        bounds=DIFF_BOUNDS
+                        storage_key=DIFF_WIDTH_KEY
+                        class="spyglass-resizer"
+                    />
+                    <DiffView
+                        plan=id.get_value()
+                        path=open_file
+                        version=diff_version
+                        width=diff_width
+                        on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
                 </Show>
             </div>

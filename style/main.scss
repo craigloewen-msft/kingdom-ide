@@ -20,6 +20,7 @@
 @use "components/choose-kingdom";
 @use "components/sidebar";
 @use "components/ward-tree";
+@use "components/review";
 @use "components/map";
 @use "components/skyline";
 @use "components/decree-bar";
@@ -27,6 +28,7 @@
 @use "components/proposal";
 @use "components/prose";
 @use "components/spyglass";
+@use "components/diff";
 @use "components/orders";
 
 @use "status";
