@@ -210,31 +210,41 @@ impl MockModel {
             ))),
 
             Scenario::Ask => Ok(match done_already(brief) {
-                None => Reply::Acts(Acts::plain(vec![Act {
-                    id: "mock-question-1".to_string(),
-                    tool: "ask_user_question".to_string(),
-                    input: serde_json::json!({
-                        "questions": [{
-                            "question": format!(
-                                "There are two ways to go about {}. Which do you want?",
-                                city.name
-                            ),
-                            "header": "Approach",
-                            "options": [
-                                {
-                                    "label": "The careful way",
-                                    "description": "Read everything first, change one thing, \
-                                                    and check it before going further."
-                                },
-                                {
-                                    "label": "The quick way",
-                                    "description": "Make the obvious change and see whether \
-                                                    it builds."
-                                }
-                            ]
-                        }]
-                    }),
-                }])),
+                None => Reply::Acts(
+                    Acts::plain(vec![Act {
+                        id: "mock-question-1".to_string(),
+                        tool: "ask_user_question".to_string(),
+                        input: serde_json::json!({
+                            "questions": [{
+                                "question": format!(
+                                    "There are two ways to go about {}. Which do you want?",
+                                    city.name
+                                ),
+                                "header": "Approach",
+                                "options": [
+                                    {
+                                        "label": "The careful way",
+                                        "description": "Read everything first, change one thing, \
+                                                        and check it before going further."
+                                    },
+                                    {
+                                        "label": "The quick way",
+                                        "description": "Make the obvious change and see whether \
+                                                        it builds."
+                                    }
+                                ]
+                            }]
+                        }),
+                    }])
+                    // A remark above a question the King has to answer: the
+                    // sentence that says why he is being asked, which is the
+                    // moment it is worth the most.
+                    .saying(format!(
+                        "Before I go further on {}, there's a fork here I'd rather not \
+                         guess at.",
+                        city.name
+                    )),
+                ),
                 Some(chosen) => Reply::Spoke(Draft {
                     summary: format!("Asked the King, and he chose: {}", chosen.trim()),
                     body: format!(
@@ -251,17 +261,38 @@ impl MockModel {
             // the model is asked afresh each time, so a mock that remembered
             // would be rehearsing something the real loop does not do.
             Scenario::Work => Ok(match done_already(brief) {
-                None => Reply::Acts(Acts::plain(vec![Act {
-                    id: "mock-call-1".to_string(),
-                    tool: "think".to_string(),
-                    input: serde_json::json!({
-                        "thoughts": format!(
-                            "The decree is {prompt:?}. {} is a {} project of {} files, so I \
-                             should start by reading what is already there.",
-                            city.name, city.stack, city.file_count
-                        )
-                    }),
-                }])),
+                None => Reply::Acts(
+                    Acts::plain(vec![Act {
+                        id: "mock-call-1".to_string(),
+                        tool: "think".to_string(),
+                        input: serde_json::json!({
+                            "thoughts": format!(
+                                "The decree is {prompt:?}. {} is a {} project of {} files, so I \
+                                 should start by reading what is already there.",
+                                city.name, city.stack, city.file_count
+                            )
+                        }),
+                    }])
+                    // The words a real reply carries alongside its calls. Here
+                    // so the chamber's remark is reachable offline: without a
+                    // provider saying anything, the one state that view exists
+                    // to draw could not be seen in a proving ground at all.
+                    .saying(format!(
+                        "I'll start by working out the shape of {} before I touch anything \
+                         \u{2014} it's a {} project, and I don't yet know what calls what.",
+                        city.name, city.stack
+                    ))
+                    .thinking(format!(
+                        "The decree is {prompt:?}.\n\
+                         Two ways at this: read the entry point and follow it outwards, or \
+                         search for the names in the decree and work back from there.\n\
+                         {} has {} files, which is small enough that following the entry \
+                         point costs little, and it gives me the call graph rather than a \
+                         pile of matches.\n\
+                         Starting there.",
+                        city.name, city.file_count
+                    )),
+                ),
                 Some(result) => Reply::Spoke(Draft {
                     summary: format!("Used a tool, then reported on {}.", city.name),
                     body: format!(
@@ -281,28 +312,38 @@ impl MockModel {
             // task text hashes to an ordinary speaking scenario, which is
             // exactly the behaviour being rehearsed.
             Scenario::Subagents => Ok(match done_already(brief) {
-                None => Reply::Acts(Acts::plain(vec![Act {
-                    id: "mock-errand-1".to_string(),
-                    tool: "spawn_agents".to_string(),
-                    input: serde_json::json!({
-                        "tasks": [
-                            {
-                                "task": format!(
-                                    "Survey the shape of {}: what kind of project is \
-                                     it, and what are its largest parts?",
-                                    city.name
-                                )
-                            },
-                            {
-                                "task": format!(
-                                    "Look for anything in {} that looks unfinished \
-                                     or inconsistent, and say where it is.",
-                                    city.name
-                                )
-                            }
-                        ]
-                    }),
-                }])),
+                None => Reply::Acts(
+                    Acts::plain(vec![Act {
+                        id: "mock-errand-1".to_string(),
+                        tool: "spawn_agents".to_string(),
+                        input: serde_json::json!({
+                            "tasks": [
+                                {
+                                    "task": format!(
+                                        "Survey the shape of {}: what kind of project is \
+                                         it, and what are its largest parts?",
+                                        city.name
+                                    )
+                                },
+                                {
+                                    "task": format!(
+                                        "Look for anything in {} that looks unfinished \
+                                         or inconsistent, and say where it is.",
+                                        city.name
+                                    )
+                                }
+                            ]
+                        }),
+                    }])
+                    // A remark on a call the chamber draws as something other
+                    // than a deed line -- which is the case the view's grouping
+                    // has to get right, and the one nothing else rehearses.
+                    .saying(format!(
+                        "Two questions about {} that don't depend on each other, so I'll \
+                         send them out together rather than answer them in turn.",
+                        city.name
+                    )),
+                ),
                 Some(reports) => Reply::Spoke(Draft {
                     summary: format!("Sent two errands into {} and read them back.", city.name),
                     body: format!(
@@ -388,21 +429,30 @@ impl MockModel {
                     city.file_count
                 );
 
-                Ok(Reply::Acts(Acts::plain(vec![
-                    Act {
-                        id: format!("mock-draft-{nth}"),
-                        tool: "patch".to_string(),
-                        input: serde_json::json!({
-                            "path": draft,
-                            "patches": [{ "operation": "overwrite", "newText": body }]
-                        }),
-                    },
-                    Act {
-                        id: format!("mock-proposal-{nth}"),
-                        tool: "propose_plan".to_string(),
-                        input: serde_json::json!({ "draft": draft }),
-                    },
-                ])))
+                Ok(Reply::Acts(
+                    Acts::plain(vec![
+                        Act {
+                            id: format!("mock-draft-{nth}"),
+                            tool: "patch".to_string(),
+                            input: serde_json::json!({
+                                "path": draft,
+                                "patches": [{ "operation": "overwrite", "newText": body }]
+                            }),
+                        },
+                        Act {
+                            id: format!("mock-proposal-{nth}"),
+                            tool: "propose_plan".to_string(),
+                            input: serde_json::json!({ "draft": draft }),
+                        },
+                    ])
+                    // Two calls, one reply, one remark. The chamber must draw
+                    // this sentence above the first deed and not above both,
+                    // which is the whole of what `remark` is guarding.
+                    .saying(
+                        "I'll write the plan down and then put it to you \u{2014} it's easier \
+                         to argue with on the page than in a paragraph.",
+                    ),
+                ))
             }
 
             Scenario::Propose => Ok(match done_since_approval(brief) {

@@ -299,6 +299,78 @@
   &.prose { white-space: normal; }
 }
 
+// --- What the court said as it worked ----------------------------------------
+//
+// The prose that arrived in the same reply as the deeds below it — the court's
+// statement of intent, and usually the most useful line in the round.
+//
+// Not a bubble: nobody was addressed. It is the preamble of an action, so it is
+// drawn as the header of the block it belongs to. Flush left and full width so
+// it reads as belonging *downwards*, with the gap beneath it much smaller than
+// the gap above — which is the whole of what says "this explains what follows"
+// rather than "this is a separate thing the court said".
+.chat-remark {
+  align-self: stretch;
+  flex-shrink: 0;
+  // The deeds it explains follow immediately; whatever came before does not.
+  // The log's own 14px row gap supplies the space above, and this pulls the
+  // space below down to a third of it.
+  margin-bottom: -9px;
+  // Bound to the deeds beneath by a rule rather than a border, so it reads as
+  // one block with them without competing with the deed's own frame.
+  padding-left: 10px;
+  border-left: 2px solid t.$edge-bright;
+  color: t.$ink-dim;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+// What the court was thinking on the way to those deeds — folded away until the
+// King asks for it.
+//
+// Quieter than the remark above it, because it is a lesser thing: a remark is
+// what the court chose to say, and this is what it happened to think. Sharing
+// the remark's left rule keeps the whole reply reading as one block; the smaller
+// type and the fainter ink are what rank the two within it.
+.chat-thought {
+  align-self: stretch;
+  flex-shrink: 0;
+  margin-bottom: -9px;
+  padding-left: 10px;
+  border-left: 2px solid t.$edge;
+}
+
+.thought-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  opacity: 0.75;
+
+  &:hover { opacity: 1; }
+}
+
+.thought-chevron { opacity: 0.6; }
+
+// Read as it was thought: the model's own line breaks, monospaced, and never
+// through the markdown renderer — a stray `#` mid-thought was not a heading.
+.thought-body {
+  margin-top: 6px;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 // --- What the court did ------------------------------------------------------
 //
 // A tool call is neither counsel nor a notice: it is the court *working*, which
