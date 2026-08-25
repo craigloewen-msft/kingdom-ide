@@ -182,7 +182,10 @@ pub fn waits_for(tool: &str, input: &Value, shop: &Sandbox) -> Option<WaitBudget
 /// the tool exists and is not available *yet* points at the actual next move,
 /// which for a proposing plan is to put a plan to the user.
 pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
-    if let Some(t) = all(shop.permissions()).into_iter().find(|t| t.name() == tool) {
+    if let Some(t) = all(shop.permissions())
+        .into_iter()
+        .find(|t| t.name() == tool)
+    {
         return t.run(input, shop).await;
     }
 
@@ -244,8 +247,10 @@ pub struct Sandbox {
 /// of exactly the same call.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("{path} is outside this plan's workspace. Everything this plan may \
-             touch is under {root}; use a path inside it.")]
+    #[error(
+        "{path} is outside this plan's workspace. Everything this plan may \
+             touch is under {root}; use a path inside it."
+    )]
     OutsideWorkspace { path: String, root: String },
 
     #[error("{tool} was called with arguments it cannot read: {detail}")]
@@ -496,10 +501,7 @@ mod tests {
             "src/./../../..",
         ] {
             assert!(
-                matches!(
-                    shop.resolve(escape),
-                    Err(Refusal::OutsideWorkspace { .. })
-                ),
+                matches!(shop.resolve(escape), Err(Refusal::OutsideWorkspace { .. })),
                 "{escape:?} leaves the workspace and must be refused"
             );
         }
@@ -581,9 +583,17 @@ mod tests {
     async fn a_survey_cannot_reach_the_tools_that_touch_the_world() {
         let surveying = sandbox().under(Permissions::ReadOnly);
 
-        for forbidden in ["bash", "patch", "tmux_run", "browser_navigate", "spawn_agents"] {
+        for forbidden in [
+            "bash",
+            "patch",
+            "tmux_run",
+            "browser_navigate",
+            "spawn_agents",
+        ] {
             assert!(
-                !all(Permissions::ReadOnly).iter().any(|t| t.name() == forbidden),
+                !all(Permissions::ReadOnly)
+                    .iter()
+                    .any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered to a survey"
             );
             assert!(
@@ -599,7 +609,9 @@ mod tests {
         // report, and it must still be able to.
         for allowed in ["think", "read_file", "search"] {
             assert!(
-                all(Permissions::ReadOnly).iter().any(|t| t.name() == allowed),
+                all(Permissions::ReadOnly)
+                    .iter()
+                    .any(|t| t.name() == allowed),
                 "{allowed} is how a survey does its job"
             );
         }
@@ -627,7 +639,9 @@ mod tests {
 
         for forbidden in ["spawn_agents"] {
             assert!(
-                !all(Permissions::Propose).iter().any(|t| t.name() == forbidden),
+                !all(Permissions::Propose)
+                    .iter()
+                    .any(|t| t.name() == forbidden),
                 "{forbidden} must not be offered while drawing up a plan"
             );
             assert!(
@@ -643,7 +657,9 @@ mod tests {
         // the plan down -- see the note on `all`. What must still hold is that
         // it cannot reach the project.
         assert!(
-            all(Permissions::Propose).iter().any(|t| t.name() == "patch"),
+            all(Permissions::Propose)
+                .iter()
+                .any(|t| t.name() == "patch"),
             "a proposing plan drafts with `patch`; without it there is nowhere \
              to put the plan and it never stops investigating"
         );
@@ -684,7 +700,9 @@ mod tests {
             "propose_plan",
         ] {
             assert!(
-                all(Permissions::Propose).iter().any(|t| t.name() == allowed),
+                all(Permissions::Propose)
+                    .iter()
+                    .any(|t| t.name() == allowed),
                 "{allowed} is how a proposing plan does its job"
             );
         }
@@ -719,7 +737,11 @@ mod tests {
             "nothing is killed when a shell's wait elapses, so it is never a deadline"
         );
         assert_eq!(
-            waits_for("browser_click", &serde_json::json!({ "selector": ".btn" }), &shop),
+            waits_for(
+                "browser_click",
+                &serde_json::json!({ "selector": ".btn" }),
+                &shop
+            ),
             Some(WaitBudget::Deadline { seconds: 30 }),
             "a browser call that runs out of time has failed, and nothing is left running"
         );
@@ -783,7 +805,11 @@ mod tests {
         let shop = sandbox();
 
         assert_eq!(
-            waits_for("read_file", &serde_json::json!({ "path": "src/lib.rs" }), &shop),
+            waits_for(
+                "read_file",
+                &serde_json::json!({ "path": "src/lib.rs" }),
+                &shop
+            ),
             None
         );
         assert_eq!(
@@ -796,7 +822,11 @@ mod tests {
             "a peek answers from what is already known and returns at once"
         );
         assert_eq!(
-            waits_for("tmux_run", &serde_json::json!({ "cmd": "npm run dev" }), &shop),
+            waits_for(
+                "tmux_run",
+                &serde_json::json!({ "cmd": "npm run dev" }),
+                &shop
+            ),
             None,
             "without `readiness` a tmux window is opened and not waited on"
         );

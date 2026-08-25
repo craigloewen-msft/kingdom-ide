@@ -203,11 +203,7 @@ impl Folder {
     pub fn total_files(&self) -> usize {
         self.source_files.len()
             + self.extra_files
-            + self
-                .children
-                .iter()
-                .map(Folder::total_files)
-                .sum::<usize>()
+            + self.children.iter().map(Folder::total_files).sum::<usize>()
     }
 
     /// Total bytes beneath this district, including pruned remainders.
@@ -2704,7 +2700,11 @@ mod proposal_tests {
             .annotate(1, "# Fix the off-by-one", "Call it what it is.")
             .expect("a standing proposal can be annotated");
         let second = plan
-            .annotate(3, "Change `lex.rs` line 42.", "Which line, in today's file?")
+            .annotate(
+                3,
+                "Change `lex.rs` line 42.",
+                "Which line, in today's file?",
+            )
             .expect("more than one note may stand at a time");
         assert_ne!(first, second, "each note is separately withdrawable");
         assert_eq!(plan.notes().len(), 2);
@@ -2902,11 +2902,7 @@ mod transcript_tests {
 
         assert_eq!(
             turns,
-            vec![
-                "said:Run the tests",
-                "did:bash:ok",
-                "said:The tests pass.",
-            ],
+            vec!["said:Run the tests", "did:bash:ok", "said:The tests pass.",],
             "a deed reaches the model, in place; a note does not reach it at all"
         );
     }
@@ -3167,7 +3163,10 @@ mod transcript_tests {
         };
 
         assert_eq!(
-            kingdom.plans_in(&city).map(|p| p.id.clone()).collect::<Vec<_>>(),
+            kingdom
+                .plans_in(&city)
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>(),
             vec![PlanId::new("plan-1")],
             "the map must draw the decreed plan only: errands share its worktree, \
              so drawing them too would count one piece of work four times"
@@ -3219,7 +3218,10 @@ mod transcript_tests {
 
         assert!(plan.settle_tool_call("call-1", ToolOutcome::done("ok")));
         let settled = tool_call(&plan, "call-1");
-        assert!(settled.settled_at.is_some(), "a settled call knows when it ended");
+        assert!(
+            settled.settled_at.is_some(),
+            "a settled call knows when it ended"
+        );
         assert!(
             settled.elapsed_ms().is_some_and(|ms| ms >= 0),
             "and can say how long it took"
@@ -3489,4 +3491,3 @@ mod transcript_tests {
         );
     }
 }
-

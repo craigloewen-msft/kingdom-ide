@@ -487,7 +487,11 @@ fn notable_paths(city: &City, want: usize) -> Vec<String> {
         for b in &d.source_files {
             let is_source = matches!(
                 b.language,
-                Language::Rust | Language::Web | Language::Python | Language::Go | Language::Systems
+                Language::Rust
+                    | Language::Web
+                    | Language::Python
+                    | Language::Go
+                    | Language::Systems
             );
             out.push((is_source, b.bytes, b.path.clone()));
         }

@@ -119,7 +119,14 @@ crates/
                     Shared deliberately — the browser splits to offer a target
                     and the server splits to quote it back, and two answers to
                     "where does a block begin" is how those come to disagree
+    review.rs       What a plan changed, and how one file differs, as pure
+                    data. The rows arrive already paired for a side-by-side
+                    view; every decision needing a repository is made in
+                    kingdom-app::review
+    naming.rs       slugify — a plan's title turned into its branch name
     layout.rs       Deterministic map placement (pure maths)
+    terrain.rs      The ground the kingdom stands on — the map's landmass,
+                    coastline and roads (pure maths)
     skyline.rs      Deterministic per-city building placement (pure maths)
     sample.rs       Placeholder starter plans
     mockdata/       The Proving Grounds: synthetic fixtures, in Rust
@@ -171,16 +178,6 @@ crates/
                     of the worktree before it is destroyed),
                     spawn_agents (subagents), ask_user_question
 
-  kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
-                    per-plan session manager. Native only — never in the wasm
-                    bundle. The Tool impls over it live in kingdom-app.
-    session.rs      Per-plan Chrome, finding one on the machine, and the
-                    operations the tools call
-    screencast.rs   CDP screencast, relayed to the spyglass's viewers
-                    (the panel is components/browser_view.rs)
-    profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
-    perf.rs         The in-page helper injected before any page script
-
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, prompt_bar.rs, conversation.rs,
                     markdown.rs (the court's prose rendered: markdown, and
@@ -201,6 +198,16 @@ crates/
                     is one note and the gathered margin, diff.rs reads a
                     revision against the plan it revises),
                     map/ (mod.rs + city.rs)
+
+  kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
+                    per-plan session manager. Native only — never in the wasm
+                    bundle. The Tool impls over it live in kingdom-app.
+    session.rs      Per-plan Chrome, finding one on the machine, and the
+                    operations the tools call
+    screencast.rs   CDP screencast, relayed to the spyglass's viewers
+                    (the panel is components/browser_view.rs)
+    profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
+    perf.rs         The in-page helper injected before any page script
 
 style/main.scss     All styling
 ```

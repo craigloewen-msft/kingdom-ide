@@ -62,7 +62,10 @@ impl Tool for Skill {
             .into();
         }
 
-        let args = input.get("args").and_then(Value::as_str).unwrap_or_default();
+        let args = input
+            .get("args")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
 
         // Discovered fresh rather than carried on the sandbox: a skill added
         // while a plan is running should be invocable without restarting the

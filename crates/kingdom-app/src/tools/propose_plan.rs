@@ -375,7 +375,10 @@ mod tests {
     #[tokio::test]
     async fn the_plan_is_read_off_the_draft() {
         let dir = tempfile::tempdir().unwrap();
-        draft(dir.path(), "# Remember the folder\n\nStore it in localStorage.\n");
+        draft(
+            dir.path(),
+            "# Remember the folder\n\nStore it in localStorage.\n",
+        );
 
         let shop = shop(Permissions::Propose, dir.path());
         let (title, body) = proposed(&json!({ "draft": DRAFT }), &shop).expect("a titled draft");
@@ -415,7 +418,10 @@ mod tests {
         let shop = shop(Permissions::Propose, dir.path());
         let outcome = ProposePlan.run(json!({ "draft": DRAFT }), &shop).await;
 
-        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ToolOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
         assert!(proposed(&json!({ "draft": DRAFT }), &shop).is_none());
     }
 
@@ -446,7 +452,10 @@ mod tests {
         };
         assert!(isolated.is_isolated());
         discard_draft(&isolated);
-        assert!(here.exists(), "an isolated plan's draft is not this function's");
+        assert!(
+            here.exists(),
+            "an isolated plan's draft is not this function's"
+        );
 
         // In place: nothing else will ever remove it.
         let in_place = Workspace::in_place(dir.path().to_str().unwrap());

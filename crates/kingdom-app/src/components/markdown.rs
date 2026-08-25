@@ -73,9 +73,7 @@ pub fn render(text: &str) -> Rendered {
             Event::Html(html) => events.push(Event::Text(html)),
             Event::InlineHtml(html) => events.push(Event::Text(html)),
 
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(ref info)))
-                if is_mermaid(info) =>
-            {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(ref info))) if is_mermaid(info) => {
                 has_diagram = true;
                 in_diagram += 1;
                 events.push(Event::Html("<pre class=\"mermaid\">".into()));
@@ -323,7 +321,11 @@ mod tests {
     fn other_fences_stay_code_blocks() {
         let out = render("```rust\nfn main() {}\n```");
         assert!(!out.has_diagram);
-        assert!(out.html.contains("<code class=\"language-rust\">"), "{}", out.html);
+        assert!(
+            out.html.contains("<code class=\"language-rust\">"),
+            "{}",
+            out.html
+        );
     }
 
     #[test]

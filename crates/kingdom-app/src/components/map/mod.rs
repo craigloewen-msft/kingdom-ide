@@ -21,7 +21,7 @@ use city::{CityGlyph, Detail};
 use kingdom_core::layout::{realm_bounds, settle_kingdom, Realm};
 use kingdom_core::skyline::iso;
 use kingdom_core::terrain::{contours, Band, BANDS};
-use kingdom_core::{City, CityId, PlanStatus, Language};
+use kingdom_core::{City, CityId, Language, PlanStatus};
 use leptos::ev;
 use leptos::prelude::*;
 

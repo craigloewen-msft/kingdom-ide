@@ -262,7 +262,7 @@ pub fn load(root: &Path) -> Vec<Plan> {
 /// This matters far more than it used to. A turn was one HTTP call and the
 /// window was a second or two; a turn is now a loop that can run for minutes.
 fn reconcile(mut plan: Plan) -> Plan {
-    use kingdom_core::{ToolOutcome, Entry, NoteKind, PlanStatus, Speaker};
+    use kingdom_core::{Entry, NoteKind, PlanStatus, Speaker, ToolOutcome};
 
     if plan.status != PlanStatus::Drafting {
         return plan;
@@ -364,7 +364,10 @@ fn without_images(plan: &Plan) -> Plan {
     let mut plan = plan.clone();
     for entry in &mut plan.transcript {
         if let Entry::Tool(tool_call) = entry {
-            tool_call.outcome = tool_call.outcome.take().map(kingdom_core::ToolOutcome::without_images);
+            tool_call.outcome = tool_call
+                .outcome
+                .take()
+                .map(kingdom_core::ToolOutcome::without_images);
         }
     }
     plan
@@ -449,7 +452,10 @@ mod tests {
         let root = root.as_path();
 
         let mut p = plan("plan-1");
-        p.propose("Remember the folder", "# Remember the folder\n\nStore the root.");
+        p.propose(
+            "Remember the folder",
+            "# Remember the folder\n\nStore the root.",
+        );
         assert!(p.approve());
 
         let path = file_plan(root, &p, "# Remember the folder\n\nStore the root.\n")
@@ -466,8 +472,14 @@ mod tests {
 
         assert!(body.contains("Remember the folder"), "{body}");
         assert!(body.contains("Store the root."), "the plan itself: {body}");
-        assert!(body.contains("Do the thing"), "the decree that led to it: {body}");
-        assert!(body.contains("plan-1") && body.contains("testburg"), "{body}");
+        assert!(
+            body.contains("Do the thing"),
+            "the decree that led to it: {body}"
+        );
+        assert!(
+            body.contains("plan-1") && body.contains("testburg"),
+            "{body}"
+        );
     }
 
     /// A plan whose record predates slugs is still filed, under a plain name.
@@ -617,7 +629,7 @@ mod tests {
     /// would break every plan the user opens just before a restart.
     #[test]
     fn an_interrupted_turn_is_repaired_but_an_unstarted_one_is_left_alone() {
-        use kingdom_core::{ToolCall, NoteKind, PlanStatus};
+        use kingdom_core::{NoteKind, PlanStatus, ToolCall};
 
         let (_dir, _profile, root) = kingdom();
         let root = root.as_path();
@@ -647,13 +659,16 @@ mod tests {
             "the busy mark must be cleared, or the plan stays stuck forever"
         );
         assert!(
-            repaired.transcript.iter().any(
-                |e| matches!(e, kingdom_core::Entry::Note(n) if n.kind == NoteKind::Failed)
-            ),
+            repaired
+                .transcript
+                .iter()
+                .any(|e| matches!(e, kingdom_core::Entry::Note(n) if n.kind == NoteKind::Failed)),
             "the King must be told why, not just find a plan that failed silently"
         );
         assert!(
-            repaired.turns().all(|t| !matches!(t, kingdom_core::Turn::Tool(d) if d.in_flight())),
+            repaired
+                .turns()
+                .all(|t| !matches!(t, kingdom_core::Turn::Tool(d) if d.in_flight())),
             "a call left in flight would be replayed to the model as still running, forever"
         );
     }
@@ -762,7 +777,11 @@ mod tests {
         assert!(tool_call.shown().is_empty());
         assert_eq!(tool_call.report(), "Looked at shot.png (3 bytes).");
         assert_eq!(
-            tool_call.artifacts().iter().map(|a| a.path.as_str()).collect::<Vec<_>>(),
+            tool_call
+                .artifacts()
+                .iter()
+                .map(|a| a.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["shot.png"],
             "the path must survive the round trip, or a reloaded chamber has \
              nothing to point an <img> at"
@@ -878,7 +897,9 @@ mod tests {
             })
             .expect("its deed must survive the upgrade");
         assert_eq!(tool_call.report(), "ok");
-        assert!(tool_call.shown().is_empty(), "absent means no pictures, not a parse failure");
+        assert!(
+            tool_call.shown().is_empty(),
+            "absent means no pictures, not a parse failure"
+        );
     }
 }
-

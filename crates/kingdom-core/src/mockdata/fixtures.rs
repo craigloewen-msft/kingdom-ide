@@ -66,7 +66,10 @@ fn kingdom_mirror() -> FixtureSpec {
                     fill("module_{i}.rs", 24, 1_500..12_000, Language::Rust),
                 ],
             )
-            .dir("tests", [fill("case_{i}.rs", 6, 800..3_000, Language::Rust)])
+            .dir(
+                "tests",
+                [fill("case_{i}.rs", 6, 800..3_000, Language::Rust)],
+            )
             .dir("docs", [file("design.md", 6_400), file("api.md", 3_100)])
             .dirty(3),
         node_city("lantern")
@@ -75,7 +78,10 @@ fn kingdom_mirror() -> FixtureSpec {
                 [
                     file("index.ts", 2_400),
                     fill("component_{i}.tsx", 32, 900..8_000, Language::Web),
-                    dir("styles", [fill("_{i}.scss", 8, 400..2_500, Language::Style)]),
+                    dir(
+                        "styles",
+                        [fill("_{i}.scss", 8, 400..2_500, Language::Style)],
+                    ),
                 ],
             )
             .dir(
@@ -91,9 +97,15 @@ fn kingdom_mirror() -> FixtureSpec {
                     fill("task_{i}.py", 18, 1_200..7_000, Language::Python),
                 ],
             )
-            .dir("tests", [fill("test_{i}.py", 9, 600..2_800, Language::Python)]),
+            .dir(
+                "tests",
+                [fill("test_{i}.py", 9, 600..2_800, Language::Python)],
+            ),
         docs_city("chronicle")
-            .dir("notes", [fill("{i}-entry.md", 40, 800..9_000, Language::Docs)])
+            .dir(
+                "notes",
+                [fill("{i}-entry.md", 40, 800..9_000, Language::Docs)],
+            )
             .dir("assets", [file("diagram.excalidraw", 88_000)]),
         // No git, so `has_git: false` is reachable -- it changes what the map
         // draws, and would otherwise never be seen in development.
@@ -129,13 +141,22 @@ fn crowded() -> FixtureSpec {
         // exercised.
         let count = 2 + (i * 3) % 60;
         let city: CitySpec = match i % 4 {
-            0 => rust_city(name).dir("src", [fill("mod_{i}.rs", count, 400..20_000, Language::Rust)]),
-            1 => node_city(name).dir("src", [fill("part_{i}.ts", count, 300..15_000, Language::Web)]),
+            0 => rust_city(name).dir(
+                "src",
+                [fill("mod_{i}.rs", count, 400..20_000, Language::Rust)],
+            ),
+            1 => node_city(name).dir(
+                "src",
+                [fill("part_{i}.ts", count, 300..15_000, Language::Web)],
+            ),
             2 => python_city(name).dir(
                 "pkg",
                 [fill("unit_{i}.py", count, 300..12_000, Language::Python)],
             ),
-            _ => go_city(name).dir("cmd", [fill("step_{i}.go", count, 400..10_000, Language::Go)]),
+            _ => go_city(name).dir(
+                "cmd",
+                [fill("step_{i}.go", count, 400..10_000, Language::Go)],
+            ),
         };
         if i % 5 == 0 {
             city.dirty(i % 7)
@@ -197,7 +218,10 @@ fn monorepo() -> FixtureSpec {
     .city(
         node_city("leviathan")
             .files([deep])
-            .dir("src", [fill("core_{i}.ts", 240, 800..40_000, Language::Web)])
+            .dir(
+                "src",
+                [fill("core_{i}.ts", 240, 800..40_000, Language::Web)],
+            )
             .dir(
                 "assets",
                 [

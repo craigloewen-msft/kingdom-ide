@@ -54,9 +54,10 @@ call on the client and a direct call on the server from a single signature, so
 there is no API client to hand-write and no schema to keep in sync.
 
 ```
-crates/kingdom-core   domain model (no I/O; compiles to native + wasm)
-crates/kingdom-app    Axum server + Leptos UI, split by feature flag
-style/main.scss       styling
+crates/kingdom-core     domain model (no I/O; compiles to native + wasm)
+crates/kingdom-app      Axum server + Leptos UI, split by feature flag
+crates/kingdom-browser  headless Chrome over CDP (native only)
+style/main.scss         styling
 ```
 
 ## Status

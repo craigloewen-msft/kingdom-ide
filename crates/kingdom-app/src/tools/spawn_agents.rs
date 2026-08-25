@@ -23,7 +23,7 @@
 //! impossible. Give subagents hands and this file needs a lease before it needs
 //! anything else.
 
-use super::{Refusal, Permissions, Tool, Sandbox};
+use super::{Permissions, Refusal, Sandbox, Tool};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 

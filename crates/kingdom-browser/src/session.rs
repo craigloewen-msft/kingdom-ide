@@ -5,7 +5,6 @@
 //! persistent in one call and vanish in the next, breaking login and any other
 //! flow whose meaning spans multiple browser actions.
 
-
 use crate::profile::{PerfReading, ProfilingState};
 use crate::screencast::{ScreencastBroker, ScreencastEvent};
 use chromiumoxide::{
@@ -176,8 +175,10 @@ impl BrowserSession {
         //
         // Best effort and bounded: the browser is perfectly usable without it,
         // and a wedged socket here must not hang the launch.
-        let helper = chromiumoxide::cdp::browser_protocol::page::
-            AddScriptToEvaluateOnNewDocumentParams::new(crate::perf::HELPER_SCRIPT.to_string());
+        let helper =
+            chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams::new(
+                crate::perf::HELPER_SCRIPT.to_string(),
+            );
         let _ = tokio::time::timeout(INIT_TIMEOUT, page.execute(helper)).await;
 
         let console = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_CONSOLE_LOGS)));

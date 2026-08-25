@@ -15,7 +15,7 @@
 //! channel with a different lifetime -- see [`kingdom_core::ToolArtifact`] --
 //! and [`crate::artifact`] is what serves it back.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use kingdom_core::{ToolArtifact, ToolImage, ToolOutcome};
 use serde::Deserialize;
@@ -218,7 +218,10 @@ mod tests {
             "the payload must not be duplicated into the text: {output}"
         );
         assert_eq!(
-            artifacts.iter().map(|a| a.path.as_str()).collect::<Vec<_>>(),
+            artifacts
+                .iter()
+                .map(|a| a.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["shot.png"],
             "the file is named too, so the King sees what the court was looking at"
         );

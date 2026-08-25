@@ -44,8 +44,8 @@
 //! `Vec<City>` above it.
 
 pub mod build;
-pub mod starter_plans;
 pub mod fixtures;
+pub mod starter_plans;
 
 use crate::model::{City, CityKind, Language, Plan};
 use std::ops::Range;
@@ -584,16 +584,17 @@ mod tests {
     /// the sandbox, so the escaping cases specifically must be caught.
     #[test]
     fn validate_rejects_paths_that_would_escape_the_city() {
-        let fixture = FixtureSpec::new("t", "", 1).city(CitySpec::new("c", CityKind::Unknown).files([
-            TreeSpec::File {
-                path: "../../etc/passwd".into(),
-                content: FileContent::Bulk(1),
-            },
-            TreeSpec::File {
-                path: "/etc/hosts".into(),
-                content: FileContent::Bulk(1),
-            },
-        ]));
+        let fixture =
+            FixtureSpec::new("t", "", 1).city(CitySpec::new("c", CityKind::Unknown).files([
+                TreeSpec::File {
+                    path: "../../etc/passwd".into(),
+                    content: FileContent::Bulk(1),
+                },
+                TreeSpec::File {
+                    path: "/etc/hosts".into(),
+                    content: FileContent::Bulk(1),
+                },
+            ]));
 
         let errors = fixture
             .validate()

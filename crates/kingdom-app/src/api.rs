@@ -201,9 +201,7 @@ pub fn open_last_kingdom() -> Result<Option<Kingdom>, String> {
     }
 
     enforce_sandbox(&root).map_err(|e| e.to_string())?;
-    assemble(&root, None)
-        .map(Some)
-        .map_err(|e| e.to_string())
+    assemble(&root, None).map(Some).map_err(|e| e.to_string())
 }
 
 /// Closes the kingdom, returning the King to the opening screen.
@@ -1381,9 +1379,7 @@ pub(crate) async fn converse(
                 // takes the direct path, starting a fresh one). There is no
                 // third case.
                 let mut kingdom = lock()?;
-                let waiting = kingdom
-                    .plan(&plan_id)
-                    .is_some_and(|p| !p.queued.is_empty());
+                let waiting = kingdom.plan(&plan_id).is_some_and(|p| !p.queued.is_empty());
 
                 // Going round again costs a round, so a drain on the last one
                 // would fall through to the out-of-rope branch below and report
@@ -1631,8 +1627,7 @@ pub(crate) async fn spawn_subagents(
         let mut subagents = Vec::new();
         for errand in tasks {
             let id = PlanId::new(format!("plan-{}", next_plan_number()));
-            let mut subagent =
-                Plan::spawned(id.clone(), &parent, tool_call, errand.task.clone());
+            let mut subagent = Plan::spawned(id.clone(), &parent, tool_call, errand.task.clone());
             let root = std::path::PathBuf::from(&kingdom.root);
             remember(&root, &mut subagent);
             // Pushed as well as recorded, so the parent's conversation can draw
@@ -1643,11 +1638,7 @@ pub(crate) async fn spawn_subagents(
             subagents.push((id, errand));
         }
 
-        (
-            subagents,
-            city_brief,
-            city.name,
-        )
+        (subagents, city_brief, city.name)
     };
 
     // All at once. The permissions are what make this safe: they share one
@@ -1672,15 +1663,7 @@ pub(crate) async fn spawn_subagents(
                 let Some((workspace, choice)) = found else {
                     return Err(ServerFnError::new("That errand vanished before it began."));
                 };
-                converse(
-                    id,
-                    city_brief,
-                    workspace,
-                    city_name,
-                    choice,
-                    cap,
-                )
-                .await
+                converse(id, city_brief, workspace, city_name, choice, cap).await
             })
         })
         .collect();
@@ -2908,7 +2891,9 @@ mod tests {
             "a note in the margin is not yet addressed to anyone"
         );
         assert!(
-            !plan.turns().any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+            !plan
+                .turns()
+                .any(|t| matches!(&t, kingdom_core::Turn::Message(m)
                 if m.body.contains("Which thing?"))),
             "the note's text must not reach a model before it is sent"
         );
@@ -2918,7 +2903,8 @@ mod tests {
         receive(&mut plan, notes_as_decree(&notes), false);
 
         assert!(
-            plan.turns().any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+            plan.turns()
+                .any(|t| matches!(&t, kingdom_core::Turn::Message(m)
                 if m.body.contains("Which thing?"))),
             "once sent, it is an ordinary thing the King said"
         );
@@ -2954,8 +2940,8 @@ mod tests {
         assert!(approved.approve());
 
         crate::store::file_plan(&root, &approved, "# The terms\n\nAs agreed.\n").unwrap();
-        let path = crate::store::file_plan(&root, &approved, "# Drifted\n\nSomething else.\n")
-            .unwrap();
+        let path =
+            crate::store::file_plan(&root, &approved, "# Drifted\n\nSomething else.\n").unwrap();
 
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("As agreed."), "{body}");
@@ -2975,7 +2961,9 @@ mod tests {
         let path =
             crate::store::file_plan(&root, &abandoned, "# Never accepted\n\nSet aside.\n").unwrap();
         assert!(
-            std::fs::read_to_string(&path).unwrap().contains("Set aside."),
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Set aside."),
             "a plan that ended without approval is still worth keeping"
         );
 
@@ -3328,7 +3316,10 @@ mod tests {
             PlanStatus::AwaitingReview,
             "the King stopped this on purpose -- it did not fail"
         );
-        assert!(!plan.is_busy(), "the busy mark must go, or nothing can restart");
+        assert!(
+            !plan.is_busy(),
+            "the busy mark must go, or nothing can restart"
+        );
         assert!(
             plan.turns()
                 .all(|t| !matches!(t, Turn::Tool(d) if d.in_flight())),

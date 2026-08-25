@@ -109,7 +109,13 @@ impl ScreencastBroker {
             *last_url.lock().await = Some(url);
         }
 
-        let listener = listen(page.clone(), tx.clone(), Arc::clone(&last_url), frames, navigations);
+        let listener = listen(
+            page.clone(),
+            tx.clone(),
+            Arc::clone(&last_url),
+            frames,
+            navigations,
+        );
 
         Ok(Arc::new(Self {
             tx,

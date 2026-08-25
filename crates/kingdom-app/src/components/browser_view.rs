@@ -217,7 +217,9 @@ impl Watch {
     /// Derived from the page's own origin, so it follows the server wherever it
     /// is served from and upgrades to `wss` when the page is secure.
     fn url(plan: &kingdom_core::PlanId) -> String {
-        let location = web_sys::window().expect("a browser has a window").location();
+        let location = web_sys::window()
+            .expect("a browser has a window")
+            .location();
         let secure = location.protocol().map(|p| p == "https:").unwrap_or(false);
         let host = location.host().unwrap_or_default();
         let scheme = if secure { "wss" } else { "ws" };
@@ -247,7 +249,6 @@ fn paint(canvas: NodeRef<leptos::html::Canvas>, jpeg: &[u8]) {
     let Some(canvas) = canvas.get_untracked() else {
         return;
     };
-    let canvas: web_sys::HtmlCanvasElement = canvas.into();
 
     let array = js_sys::Uint8Array::from(jpeg);
     let parts = js_sys::Array::new();

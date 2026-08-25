@@ -35,7 +35,7 @@
 //! would be worse than the crash: the model would reason from output it thinks
 //! is complete.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use kingdom_core::{ToolOutcome, WaitBudget};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -281,7 +281,12 @@ fn op(input: &Value) -> Result<Op, Refusal> {
 }
 
 fn wait_seconds(input: &Value) -> Duration {
-    Duration::from_secs(input.get("wait_seconds").and_then(Value::as_u64).unwrap_or(30))
+    Duration::from_secs(
+        input
+            .get("wait_seconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(30),
+    )
 }
 
 /// Looks a handle up, refusing when it is not there.
@@ -506,7 +511,11 @@ impl Job {
     }
 
     fn signal(&self, signal: i32) -> String {
-        let name = if signal == libc::SIGKILL { "KILL" } else { "TERM" };
+        let name = if signal == libc::SIGKILL {
+            "KILL"
+        } else {
+            "TERM"
+        };
 
         if let Some(end) = self.finished() {
             return format!(
@@ -754,7 +763,10 @@ mod tests {
         match outcome {
             ToolOutcome::Done { output, .. } => {
                 assert!(output.contains("exit code: 3"), "{output}");
-                assert!(output.contains("nope"), "stderr belongs in the output: {output}");
+                assert!(
+                    output.contains("nope"),
+                    "stderr belongs in the output: {output}"
+                );
             }
             ToolOutcome::Refused { reason } => panic!("a non-zero exit is not a refusal: {reason}"),
         }
@@ -878,7 +890,10 @@ mod tests {
             .run(json!({"op": "peek", "handle": "b-nosuch"}), &shop)
             .await;
 
-        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ToolOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
     }
 
     /// A command with no `op` runs, rather than costing a round to be told off.
@@ -915,7 +930,10 @@ mod tests {
             .run(json!({"op": "exec", "cmd": "echo hello"}), &shop)
             .await;
 
-        assert!(matches!(outcome, ToolOutcome::Refused { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ToolOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
     }
 
     /// Process groups earn their keep here: a command's children must die with
@@ -950,7 +968,11 @@ mod tests {
         .await
         .expect("the grandchild should have recorded its pid");
 
-        bash(dir.path(), json!({"op": "kill", "handle": handle, "signal": "KILL"})).await;
+        bash(
+            dir.path(),
+            json!({"op": "kill", "handle": handle, "signal": "KILL"}),
+        )
+        .await;
         bash(
             dir.path(),
             json!({"op": "wait", "handle": handle, "wait_seconds": 5}),

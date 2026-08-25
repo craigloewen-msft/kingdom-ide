@@ -31,7 +31,12 @@ pub fn text(path: impl Into<String>, content: impl Into<String>) -> TreeSpec {
 }
 
 /// `count` generated files from a pattern containing `{i}`.
-pub fn fill(pattern: impl Into<String>, count: usize, bytes: Range<u64>, language: Language) -> TreeSpec {
+pub fn fill(
+    pattern: impl Into<String>,
+    count: usize,
+    bytes: Range<u64>,
+    language: Language,
+) -> TreeSpec {
     TreeSpec::Fill {
         pattern: pattern.into(),
         count,

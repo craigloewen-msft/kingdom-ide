@@ -10,7 +10,7 @@
 //! filesystem, so a failure here is a failure in the machinery rather than in
 //! anything it drives.
 
-use super::{Tool, Sandbox};
+use super::{Sandbox, Tool};
 use kingdom_core::ToolOutcome;
 use serde_json::{json, Value};
 

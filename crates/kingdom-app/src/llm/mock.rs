@@ -521,9 +521,7 @@ fn latest_prompt(brief: &Brief) -> String {
         .iter()
         .rev()
         .find_map(|t| match t {
-            Turn::Message(u)
-                if u.speaker == Speaker::User && u.body != kingdom_core::APPROVAL =>
-            {
+            Turn::Message(u) if u.speaker == Speaker::User && u.body != kingdom_core::APPROVAL => {
                 Some(u.body.clone())
             }
             _ => None,
@@ -663,7 +661,9 @@ mod tests {
         );
         assert_eq!(first.body, second.body);
 
-        let refused = model.take_turn(&brief("anything [[scenario:refuse]]")).await;
+        let refused = model
+            .take_turn(&brief("anything [[scenario:refuse]]"))
+            .await;
         assert!(matches!(refused, Err(ModelError::Refused(_))));
 
         let failed = model.take_turn(&brief("anything [[scenario:error]]")).await;

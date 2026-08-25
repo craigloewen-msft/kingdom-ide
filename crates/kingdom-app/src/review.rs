@@ -19,6 +19,14 @@
 //! files it never touched. The merge base is the point the two histories
 //! actually parted, and the diff from there is exactly "what this plan did".
 //!
+//! # Which `main`
+//!
+//! The King's own, not the remote's. `default_branch` tries local refs before
+//! remote-tracking ones, because `origin/main` is only as fresh as the last
+//! `git fetch` -- and measuring against a stale one re-introduces the very
+//! false attribution the merge base is here to prevent. See the reasoning on
+//! that function.
+//!
 //! # What counts as changed
 //!
 //! Committed work, uncommitted work and files never added to the repository at
@@ -96,7 +104,7 @@ pub async fn changes(workspace: &Workspace) -> ChangeSummary {
 
     // One order for the whole list, so a file does not move when it stops being
     // untracked and starts being a commit.
-    files.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    files.sort_by_key(|a| a.path.to_lowercase());
 
     let mut note = against.note;
     if capped {
@@ -214,37 +222,67 @@ struct Against {
 /// Finds the branch this repository considers its default, and the point this
 /// plan's history parted from it.
 ///
-/// The order is deliberate. `origin/HEAD` is what the *remote* declares, which
-/// is the only authoritative answer; `main` and `master` are the conventions
-/// that cover everything else; the workspace's own `base` is what the plan was
-/// actually cut from, which is right for a repository whose default is called
-/// something else entirely. Failing all of those, `HEAD` narrows the drawer to
-/// uncommitted work and says so, which is a smaller true answer rather than a
-/// larger false one.
+/// **Local refs are tried before remote-tracking ones, and that is the whole
+/// point.** A remote-tracking ref is only as fresh as the last `git fetch`,
+/// while local `main` is what the King actually merges into. Preferring
+/// `origin/main` measures a plan against the last fetch, so every commit that
+/// has landed on local `main` since then renders as the plan's own work -- the
+/// same false attribution the merge base exists to prevent, arriving by way of
+/// the ref rather than the comparison. A test pins it.
+///
+/// So the order is: the local branch `origin/HEAD` names (with the `origin/`
+/// stripped, so a repository whose default is `develop` still gets local
+/// `develop`), then the `main`/`master` conventions, then the branch this
+/// workspace was actually cut from.
+///
+/// The remote-tracking refs are kept *beneath* all of those rather than
+/// dropped. A clone that only ever checked out a feature branch has no local
+/// default at all, and there `origin/main` is the best answer available --
+/// stale by a fetch, but far better than narrowing the drawer to uncommitted
+/// work. Failing everything, `HEAD` does exactly that and says so, which is a
+/// smaller true answer rather than a larger false one.
 async fn default_branch(root: &Path, workspace: &Workspace) -> Option<Against> {
-    let mut candidates: Vec<String> = Vec::new();
-
-    if let Ok(declared) = git(
+    // What the remote declares its default to be, e.g. `origin/main`. Used for
+    // the *name* first and only as a ref later.
+    let declared = git(
         root,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .await
-    {
-        let declared = declared.trim();
-        if !declared.is_empty() {
-            candidates.push(declared.to_string());
-        }
+    .ok()
+    .map(|d| d.trim().to_string())
+    .filter(|d| !d.is_empty());
+
+    let mut candidates: Vec<String> = Vec::new();
+
+    // -- Local, in order of authority ----------------------------------------
+    if let Some(declared) = &declared {
+        // `origin/main` -> `main`: the local branch the remote's default names.
+        let local = declared.strip_prefix("origin/").unwrap_or(declared);
+        candidates.push(local.to_string());
     }
     for usual in ["main", "master"] {
         candidates.push(usual.to_string());
-        candidates.push(format!("origin/{usual}"));
     }
     if let Some(base) = &workspace.base {
         candidates.push(base.clone());
+    }
+
+    // -- Remote-tracking, only once no local ref answered --------------------
+    if let Some(declared) = &declared {
+        candidates.push(declared.clone());
+    }
+    for usual in ["main", "master"] {
+        candidates.push(format!("origin/{usual}"));
+    }
+    if let Some(base) = &workspace.base {
         candidates.push(format!("origin/{base}"));
     }
 
     for name in candidates {
+        // `refs/heads/` and `refs/remotes/` both resolve here, but a local
+        // branch is verified as a branch rather than as any object that happens
+        // to share the name.
         let Ok(resolved) = git(root, &["rev-parse", "--verify", "--quiet", &name]).await else {
             continue;
         };
@@ -768,6 +806,60 @@ mod tests {
         );
     }
 
+    /// The King's own `main`, not the last fetch.
+    ///
+    /// `origin/HEAD` names `origin/main` in any ordinary clone, and a
+    /// remote-tracking ref is only as fresh as the last `git fetch`. Measuring
+    /// against it attributes every commit that has landed on local `main` since
+    /// then to whichever plan the King opens -- the same false-attribution
+    /// failure the merge base exists to prevent, arriving by way of the ref
+    /// instead of the comparison.
+    #[tokio::test]
+    async fn a_stale_remote_ref_does_not_become_the_comparison() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        // A remote-tracking ref pinned to the first commit, as a clone that has
+        // not fetched in a while would have. No network: the refs are written
+        // directly, which is all a real fetch would have left behind.
+        git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"])
+            .await
+            .unwrap();
+        git(
+            root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Work lands on local main afterwards -- a merge by the King, or a pull.
+        std::fs::write(root.join("elsewhere.rs"), "somebody else's\n").unwrap();
+        commit(root, "landed on main since the last fetch").await;
+
+        git(root, &["checkout", "-q", "-b", "kingdom/work"])
+            .await
+            .unwrap();
+        std::fs::write(root.join("keep.rs"), "a\nB\nc\n").unwrap();
+        commit(root, "the plan's work").await;
+
+        let summary = changes(&workspace(root)).await;
+        let touched: Vec<&str> = summary.files.iter().map(|f| f.path.as_str()).collect();
+
+        assert_eq!(
+            summary.base, "main",
+            "the local branch is what the King merges into"
+        );
+        assert_eq!(
+            touched,
+            vec!["keep.rs"],
+            "work already on local main is not this plan's, however stale the remote is"
+        );
+    }
+
     /// `master` is found when there is no `main`, and what the drawer calls the
     /// comparison is the branch's real name.
     #[tokio::test]
@@ -917,7 +1009,15 @@ mod tests {
     /// misreading either shape shifts every later file by one.
     #[test]
     fn a_rename_does_not_shift_the_files_after_it() {
-        let raw = "1\t1\t\0old/name.rs\0new/name.rs\0-\t-\tseal.png\03\t0\tafter.rs\0";
+        // One record per line, each NUL-terminated. Split at the record
+        // boundaries rather than written as one run: `\03` reads as an octal
+        // escape at a glance, when it is a NUL terminator followed by the digit
+        // that opens the next record.
+        let raw = concat!(
+            "1\t1\t\0old/name.rs\0new/name.rs\0",
+            "-\t-\tseal.png\0",
+            "3\t0\tafter.rs\0",
+        );
         let rows = numstat_rows(raw);
 
         assert_eq!(rows.len(), 3);

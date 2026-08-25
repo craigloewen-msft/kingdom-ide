@@ -11,7 +11,7 @@
 //! unresolved `path` here leaks a neighbouring city one line at a time -- the
 //! quietest possible version of crossing the boundary.
 
-use super::{Refusal, Tool, Sandbox};
+use super::{Refusal, Sandbox, Tool};
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use kingdom_core::ToolOutcome;
@@ -410,7 +410,10 @@ mod tests {
         let out = search(dir.path(), json!({"pattern": "needle"})).await;
 
         assert!(out.contains("real.rs"), "{out}");
-        assert!(!out.contains("out.rs"), "gitignored output must not appear: {out}");
+        assert!(
+            !out.contains("out.rs"),
+            "gitignored output must not appear: {out}"
+        );
     }
 
     /// Truncation has to be *said*. A model handed exactly the cap in silence
@@ -435,7 +438,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "nothing of interest\n").unwrap();
 
-        assert_eq!(search(dir.path(), json!({"pattern": "needle"})).await, "No matches.");
+        assert_eq!(
+            search(dir.path(), json!({"pattern": "needle"})).await,
+            "No matches."
+        );
     }
 
     /// The boundary, exercised through `path` -- a search reads every file it
