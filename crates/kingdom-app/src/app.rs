@@ -392,7 +392,7 @@ fn fold_rail_when_cramped(
         // than folding itself a moment later.
         Effect::new(move |_| apply());
 
-        let on_resize = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || apply());
+        let on_resize = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(apply);
         if let Some(window) = web_sys::window() {
             let _ = window
                 .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());

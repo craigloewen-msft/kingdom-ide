@@ -249,7 +249,6 @@ fn paint(canvas: NodeRef<leptos::html::Canvas>, jpeg: &[u8]) {
     let Some(canvas) = canvas.get_untracked() else {
         return;
     };
-    let canvas: web_sys::HtmlCanvasElement = canvas.into();
 
     let array = js_sys::Uint8Array::from(jpeg);
     let parts = js_sys::Array::new();

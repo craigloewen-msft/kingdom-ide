@@ -96,7 +96,7 @@ pub async fn changes(workspace: &Workspace) -> ChangeSummary {
 
     // One order for the whole list, so a file does not move when it stops being
     // untracked and starts being a commit.
-    files.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    files.sort_by_key(|a| a.path.to_lowercase());
 
     let mut note = against.note;
     if capped {
@@ -917,7 +917,15 @@ mod tests {
     /// misreading either shape shifts every later file by one.
     #[test]
     fn a_rename_does_not_shift_the_files_after_it() {
-        let raw = "1\t1\t\0old/name.rs\0new/name.rs\0-\t-\tseal.png\03\t0\tafter.rs\0";
+        // One record per line, each NUL-terminated. Split at the record
+        // boundaries rather than written as one run: `\03` reads as an octal
+        // escape at a glance, when it is a NUL terminator followed by the digit
+        // that opens the next record.
+        let raw = concat!(
+            "1\t1\t\0old/name.rs\0new/name.rs\0",
+            "-\t-\tseal.png\0",
+            "3\t0\tafter.rs\0",
+        );
         let rows = numstat_rows(raw);
 
         assert_eq!(rows.len(), 3);
