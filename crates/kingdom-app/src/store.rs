@@ -26,6 +26,7 @@
 //! plan rather than the whole model.
 
 use kingdom_core::{Plan, PlanId};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Folder under the kingdom root holding everything Kingdom records.
@@ -45,6 +46,120 @@ fn plans_dir(root: &Path) -> PathBuf {
 /// so the user can find it later without knowing this module's layout.
 pub fn archive_patch(root: &Path, id: &PlanId) -> PathBuf {
     state_dir(root).join("archive").join(format!("{id}.patch"))
+}
+
+/// Where the record of an approved plan is kept.
+///
+/// Markdown rather than JSON because this one is written for a person. Its
+/// neighbour `plans/<id>.json` is the machine's copy and the read path; this is
+/// the King's ledger of what he agreed to.
+pub fn approved_plan(root: &Path, id: &PlanId) -> PathBuf {
+    state_dir(root).join("approved").join(format!("{id}.md"))
+}
+
+/// Records a plan at the moment the user approved it.
+///
+/// # Why this is not already covered by `plans/<id>.json`
+///
+/// That document is the plan as it is *now*, rewritten on every update -- and a
+/// plan keeps moving after approval. Revisions replace the standing proposal,
+/// the transcript grows, the status settles, and archiving may eventually take
+/// the whole thing away. None of that is wrong, but it means the JSON cannot
+/// answer "what exactly did I agree to, and when?" once the plan has moved on.
+///
+/// This can, because it is written once and never touched again. Approval is
+/// the one moment in a plan's life where the user commits to something, so it
+/// is the one worth freezing: the proposal as it read when he pressed the
+/// button, the decree that led to it, and the branch the work will land on.
+///
+/// Write-once is enforced rather than assumed. A second approval of the same
+/// plan -- a stale tab, a revised proposal accepted twice -- must not overwrite
+/// the first record, or the ledger silently loses the entry it exists to keep.
+pub fn record_approval(root: &Path, plan: &Plan) -> std::io::Result<PathBuf> {
+    let Some(proposal) = plan.proposal.as_ref() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a plan with no proposal cannot have been approved",
+        ));
+    };
+
+    let path = approved_plan(root, &plan.id);
+    if path.exists() {
+        return Ok(path);
+    }
+
+    let dir = path.parent().unwrap_or(root);
+    std::fs::create_dir_all(dir)?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "# {}", proposal.title);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- **Plan**: `{}`", plan.id);
+    let _ = writeln!(out, "- **City**: {}", plan.city);
+    let _ = writeln!(out, "- **Approved**: {}", stamp(proposal.at));
+    let _ = writeln!(out, "- **Model**: {}{}", plan.model, effort(plan));
+    let _ = writeln!(out, "- **Workspace**: `{}`", plan.workspace.path);
+    if let Some(branch) = &plan.workspace.branch {
+        let _ = writeln!(out, "- **Branch**: `{branch}`");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## The decree");
+    let _ = writeln!(out);
+    for line in plan.prompt.trim().lines() {
+        let _ = writeln!(out, "> {line}");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## The plan, as approved");
+    let _ = writeln!(out);
+    out.push_str(proposal.body.trim());
+    out.push('\n');
+
+    // Same temp-then-rename as `save`: a reader must never catch this file
+    // half-written, and the ledger is exactly the thing nobody re-derives.
+    let tmp = dir.join(format!(".{}.tmp", plan.id));
+    std::fs::write(&tmp, out.as_bytes())?;
+    std::fs::rename(&tmp, &path)?;
+
+    Ok(path)
+}
+
+/// A timestamp as a person reads it, or a plain marker when there is none.
+///
+/// `Timestamp` is milliseconds since the epoch and `kingdom-core` deliberately
+/// carries no date formatting, so this does the arithmetic rather than pulling
+/// in a calendar crate for one line in one file.
+fn stamp(at: Option<kingdom_core::Timestamp>) -> String {
+    let Some(kingdom_core::Timestamp(ms)) = at else {
+        return "time unrecorded".to_string();
+    };
+
+    let secs = ms / 1000;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+
+    // Civil-from-days (Howard Hinnant's algorithm), shifted to a 0000-03-01 era.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = era * 400 + yoe + i64::from(m <= 2);
+
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3_600,
+        (rem % 3_600) / 60
+    )
+}
+
+/// The effort suffix, where the user asked for one.
+fn effort(plan: &Plan) -> String {
+    plan.effort
+        .map(|e| format!(" · {}", e.wire_name()))
+        .unwrap_or_default()
 }
 
 /// Every plan recorded for this kingdom, oldest id first.
@@ -248,6 +363,68 @@ mod tests {
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
         )
+    }
+
+    /// The ledger keeps what the King agreed to, in the words he read.
+    ///
+    /// The plan's own JSON cannot answer this later: it is rewritten on every
+    /// update, so a revision after approval replaces the proposal and the
+    /// original terms are gone. This pins that the record carries the decree,
+    /// the approved body, and where the work will land.
+    #[test]
+    fn an_approved_plan_is_written_down_for_the_king() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let mut p = plan("plan-1");
+        p.propose("Remember the folder", "# Remember the folder\n\nStore the root.");
+        assert!(p.approve());
+
+        let path = record_approval(root, &p).expect("the ledger entry is written");
+        let body = std::fs::read_to_string(&path).unwrap();
+
+        assert!(path.starts_with(root.join(".kingdom").join("approved")), "{path:?}");
+        assert!(body.contains("Remember the folder"), "{body}");
+        assert!(body.contains("Store the root."), "the approved plan itself: {body}");
+        assert!(body.contains("Do the thing"), "the decree that led to it: {body}");
+        assert!(body.contains("plan-1") && body.contains("testburg"), "{body}");
+    }
+
+    /// Approving twice must not rewrite the first entry.
+    ///
+    /// Reachable without doing anything strange: a stale tab, or a proposal
+    /// revised and accepted again. The ledger's whole value is that an entry,
+    /// once written, still says what it said -- so the second approval is a
+    /// no-op rather than an overwrite.
+    #[test]
+    fn the_first_approval_is_the_one_that_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let mut p = plan("plan-2");
+        p.propose("First terms", "# First terms\n\nAs originally agreed.");
+        assert!(p.approve());
+        record_approval(root, &p).unwrap();
+
+        // The court revises, and the King accepts again.
+        p.propose("Second terms", "# Second terms\n\nSomething else entirely.");
+        assert!(p.approve());
+        let path = record_approval(root, &p).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("As originally agreed."), "{body}");
+        assert!(
+            !body.contains("Something else entirely."),
+            "a later approval must not rewrite the record of the first: {body}"
+        );
+    }
+
+    /// A plan with nothing standing cannot have been approved, and saying so
+    /// beats writing a record with an empty body in it.
+    #[test]
+    fn a_plan_with_no_proposal_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(record_approval(dir.path(), &plan("plan-3")).is_err());
     }
 
     /// A plan owns a worktree with commits in it, so forgetting a plan orphans

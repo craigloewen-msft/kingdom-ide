@@ -1180,6 +1180,7 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
 
     let plan_id = PlanId::new(plan);
     let mut kingdom = lock()?;
+    let root = std::path::PathBuf::from(&kingdom.root);
 
     // Checked before the grant rather than inside it, so the refusal can say
     // *why*. A stale tab is the ordinary case here: the King left a proposal
@@ -1205,10 +1206,41 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
         // said, so it is a note. The King must be able to see the moment his
         // agent gained the ability to change his files -- and see it in the log
         // rather than only in a header that reflects the present.
-        p.note(
-            NoteKind::Workspace,
-            "Approved. The court may now change the project.",
-        );
+        //
+        // The ledger entry is written in the same breath, at the one moment it
+        // is unambiguously true. `plans/<id>.json` keeps changing as the plan
+        // works; that record does not -- see `store::record_approval`. Doing it
+        // inside this closure means there is no path that widens the
+        // permissions without also writing the record.
+        match crate::store::record_approval(&root, p) {
+            Ok(path) => {
+                let kept = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+                p.note(
+                    NoteKind::Workspace,
+                    format!(
+                        "Approved. The court may now change the project. \
+                         Recorded at {kept}."
+                    ),
+                );
+            }
+            // The approval stands: the King said yes and the permissions
+            // widened. Refusing that over a bookkeeping failure would be the
+            // worse outcome, so this reports the loss the way `remember` does.
+            Err(e) => {
+                p.note(
+                    NoteKind::Workspace,
+                    "Approved. The court may now change the project.",
+                );
+                p.note(
+                    NoteKind::Failed,
+                    format!(
+                        "Could not record this approval under {}: {e}. The plan is \
+                         approved regardless; only the ledger entry was lost.",
+                        root.display()
+                    ),
+                );
+            }
+        }
 
         // The grant reaches the model as an ordinary King turn. It could have
         // been a new kind of message with its own handling on the wire; making
