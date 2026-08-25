@@ -298,14 +298,29 @@ KINGDOM_MODEL=copilot/claude-opus-5";
             .map(|o| o.efforts)
     });
 
+    // Changing model keeps the user's standing effort, even when this model
+    // cannot honour it. Whether a level is sendable is `resolve`'s decision --
+    // made on the `choice` memo above and again server-side in `begin_plan` --
+    // so dropping it here would protect nothing and would mean that merely
+    // passing through the mock erases a preference set weeks ago.
+    //
+    // Read from `state.choice` rather than from `chosen`, and that distinction
+    // is the whole fix: `chosen` is the *resolved* view, already stripped of any
+    // level the currently selected model does not declare. Carrying that across
+    // would lose the wish on the way out of an effortless model instead of on
+    // the way in -- the same bug, one click later.
     let pick_model = move |option: &ModelOption| {
-        let keep = chosen
-            .get_untracked()
-            .and_then(|c| c.effort)
-            .filter(|e| option.efforts.contains(e));
-        state.choose_model(ModelChoice::new(option.id.clone(), keep));
+        let next = match state.choice.get_untracked() {
+            Some(wish) => wish.with_model(option.id.clone()),
+            // Nothing chosen yet, so there is no wish to carry.
+            None => ModelChoice::new(option.id.clone(), None),
+        };
+        state.choose_model(next);
     };
 
+    // The one caller for which `None` is itself a choice: the user asking for
+    // the model's own default, which is what clears the remembered level. Takes
+    // the model from the resolved `chosen`, which is the one actually selected.
     let pick_effort = move |effort: Option<ModelEffort>| {
         if let Some(current) = chosen.get_untracked() {
             state.choose_model(ModelChoice::new(current.model, effort));

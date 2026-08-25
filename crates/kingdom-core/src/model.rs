@@ -1935,6 +1935,25 @@ impl ModelChoice {
         }
     }
 
+    /// The same standing wish, aimed at another model.
+    ///
+    /// The effort is carried across **unfiltered**, on purpose. Whether a level
+    /// can actually be sent is [`ModelCatalogue::resolve`]'s decision, and it
+    /// makes it on every path that reaches a provider -- the chip's own memo and
+    /// `api::begin_plan`. Filtering a second time here would not make the wire
+    /// any safer; it would only mean that passing through a model with no effort
+    /// control destroys a preference the user set deliberately.
+    ///
+    /// So the stored effort is a *standing wish*, not a promise about the model
+    /// currently selected: forgotten when the user asks for the model's own
+    /// default, and at no other time.
+    pub fn with_model(&self, model: impl Into<String>) -> ModelChoice {
+        ModelChoice {
+            model: model.into(),
+            effort: self.effort,
+        }
+    }
+
     /// How the choice reads in the rail and on the map, e.g.
     /// `claude-opus-5 · high`.
     pub fn label(&self) -> String {
@@ -2148,6 +2167,40 @@ mod tests {
         assert_eq!(
             catalogue.resolve(None),
             ModelChoice::new("copilot/claude-opus-5", None)
+        );
+    }
+
+    /// A level the user set is a *standing wish*, not a promise about whichever
+    /// model happens to be selected. Passing through a model that declares no
+    /// efforts at all -- the offline mock, which is exactly where a user lands
+    /// whenever no credential works -- must not destroy it.
+    ///
+    /// This pins the division of labour the bug came from: the picker
+    /// **remembers**, `resolve` **decides**. Re-adding a filter to the
+    /// remembering half looks like belt-and-braces and is actually the whole
+    /// defect, because the wish is stored and outlives the round trip.
+    #[test]
+    fn a_standing_effort_survives_a_model_that_cannot_honour_it() {
+        let catalogue = catalogue();
+        let wish = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::High));
+
+        // Onto the mock, which declares nothing. The wish is kept...
+        let on_mock = wish.with_model("mock");
+        assert_eq!(on_mock.effort, Some(ModelEffort::High));
+
+        // ...and yet never reaches the wire, because resolving still drops it.
+        assert_eq!(
+            catalogue.resolve(Some(&on_mock)),
+            ModelChoice::new("mock", None),
+            "a level the resolved model does not declare is still never sent"
+        );
+
+        // Back to a model that does declare it, and the wish is honoured again.
+        let back = on_mock.with_model("copilot/claude-opus-5");
+        assert_eq!(
+            catalogue.resolve(Some(&back)),
+            ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::High)),
+            "the round trip through an effortless model must not have erased it"
         );
     }
 
