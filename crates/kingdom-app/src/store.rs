@@ -677,6 +677,64 @@ mod tests {
         );
     }
 
+    /// What the court said as it worked survives disk.
+    ///
+    /// The failure this guards is worse than the feature being absent: a chamber
+    /// that draws the remark live and loses it on reload teaches the King not to
+    /// trust the record. Narration is also the one thing on a deed that is
+    /// *deliberately* not stripped -- `without_images` reaches into the same
+    /// tool call to strip the picture, and a stray broadening of it here would
+    /// silently take the words with it.
+    #[test]
+    fn the_words_the_court_said_while_working_survive_the_round_trip() {
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
+
+        let said = "I'll read the two callers before I change the signature.";
+        let mut spoke = plan("plan-1");
+        spoke.begin_tool_call(
+            kingdom_core::ToolCall::started(
+                "call-1",
+                "read_file",
+                serde_json::json!({ "path": "src/lib.rs" }),
+            )
+            .in_reply(
+                "reply-1",
+                Some(kingdom_core::Reasoning {
+                    text: Some("Two callers, so the signature is the risk.".to_string()),
+                    opaque: Default::default(),
+                }),
+                Some(said.to_string()),
+            ),
+        );
+        spoke.settle_tool_call(
+            "call-1",
+            kingdom_core::ToolOutcome::done("pub fn open() {}"),
+        );
+
+        save(root, &spoke).unwrap();
+
+        let reloaded = load(root);
+        let tool_call = reloaded[0]
+            .turns()
+            .find_map(|t| match t {
+                kingdom_core::Turn::Tool(d) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("the deed itself is still recorded");
+
+        assert_eq!(
+            tool_call.narration.as_deref(),
+            Some(said),
+            "the court's own words are the reason for the deed and must outlive a restart"
+        );
+        assert_eq!(
+            tool_call.reasoning.and_then(|r| r.text).as_deref(),
+            Some("Two callers, so the signature is the risk."),
+            "and so must the thinking, which the chamber folds away rather than drops"
+        );
+    }
+
     /// A plan document written before tool calls could carry images -- no
     /// `images` key anywhere -- must still load. Written as literal JSON rather
     /// than by round-tripping today's types, because a round trip would

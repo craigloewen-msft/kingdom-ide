@@ -1014,25 +1014,145 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     // is the thing the user most wants to watch, so it gets its
                     // own shape rather than a note's.
                     //
+                    // What the court *said* while asking rides above whichever
+                    // of the three shapes below the call takes. Drawn here and
+                    // not inside `ToolCallLine` because two of those shapes are
+                    // not that component, and a batch's first call -- the one
+                    // carrying the remark -- can be any of them. See `remark`.
+                    //
                     // A question still waiting on him is the exception: that is
                     // not something to watch, it is something to do, so it is
                     // rendered as the thing to do.
-                    Entry::Tool(d) if is_open_question(&d) => {
-                        view! { <Question tool_call=d plan=plan_id/> }.into_any()
-                    }
-                    // Subagents are not a line of output either: the call's own
-                    // text result is a summary, and the thing the user wants is
-                    // the list of agents it sent and a way into each one.
-                    Entry::Tool(d) if d.tool == "spawn_agents" => {
-                        view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
-                    }
                     Entry::Tool(d) => {
-                        view! { <ToolCallLine tool_call=d plan=plan_id now=now/> }.into_any()
+                        let said = remark(&d);
+                        let thought = thinking(&d);
+                        let deed = if is_open_question(&d) {
+                            view! { <Question tool_call=d plan=plan_id/> }.into_any()
+                        } else if d.tool == "spawn_agents" {
+                            // Subagents are not a line of output either: the
+                            // call's own text result is a summary, and the thing
+                            // the user wants is the list of agents it sent and a
+                            // way into each one.
+                            view! { <Subagents tool_call=d plan=plan_id/> }.into_any()
+                        } else {
+                            view! { <ToolCallLine tool_call=d plan=plan_id now=now/> }.into_any()
+                        };
+                        view! { <Thinking thought=thought/> <Remark said=said/> {deed} }.into_any()
                     }
                 }
             }
         </For>
     }
+}
+
+/// What the court said in the reply that asked for this deed.
+///
+/// Carried on the first call of a batch and `None` on the rest, so a reply that
+/// asked for six things draws one remark and not six. That grouping is not a
+/// decision being made here -- `api.rs` records it that way, for the same reason
+/// the model is replayed it that way.
+///
+/// Blank is nothing. [`kingdom_core::ToolCall::in_reply`] already filters an
+/// empty narration out before it is stored, so this is the second lock on the
+/// same door: a record written by an older build can still hold `"  "`, and an
+/// empty remark is a stripe of padding above a deed with no words in it.
+fn remark(tool_call: &ToolCall) -> Option<String> {
+    tool_call
+        .narration
+        .as_deref()
+        .map(str::trim)
+        .filter(|said| !said.is_empty())
+        .map(str::to_string)
+}
+
+/// The court's own words about the deed beneath it.
+///
+/// Deliberately not a `chat-msg`. A bubble carries a speaker column and a clock,
+/// which would present the sentence as an utterance of its own -- something the
+/// court said, followed by some unrelated commands. It was not: it is the
+/// preamble *of* those commands, and the log should say so without the King
+/// having to work it out. So it is drawn as the header of the block it belongs
+/// to, with the deed's own timestamp doing for both.
+///
+/// Rendered as markdown for the same reason every other piece of the court's
+/// writing is: it is model prose, with backticked paths and the occasional list
+/// in it. [`Prose`] already settles the escaping.
+#[component]
+fn Remark(said: Option<String>) -> impl IntoView {
+    said.map(|said| {
+        view! {
+            <div class="chat-remark">
+                <Prose text=said class="remark-body"/>
+            </div>
+        }
+    })
+}
+
+/// The court's own thinking, as it arrived with this deed.
+///
+/// Grouped exactly as [`remark`] is, and for the same reason: one reply produced
+/// one piece of reasoning however many things it asked for.
+///
+/// Only the prose half. [`kingdom_core::Reasoning::opaque`] is a signature or an
+/// encrypted trace -- carried for the provider, meaningless to a reader, and
+/// several kilobytes of base64 if it were ever drawn.
+fn thinking(tool_call: &ToolCall) -> Option<String> {
+    tool_call
+        .reasoning
+        .as_ref()?
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|thought| !thought.is_empty())
+        .map(str::to_string)
+}
+
+/// What the court was thinking, folded away until asked for.
+///
+/// Kept apart from [`Remark`] because they are not the same thing. A remark is
+/// what the court chose to say; reasoning is what it happened to think on the
+/// way there -- longer, unaddressed, and sometimes a provider's own summary of
+/// itself. Drawing them alike would tell the King that a model's musing carries
+/// the weight of its stated intent.
+///
+/// Collapsed by default, for the reason [`ToolCallLine`] is: a chamber that
+/// renders every reasoning block in full is unreadable at precisely the moment
+/// it becomes interesting.
+///
+/// Deliberately *not* markdown. Reasoning arrives as a stream of thought with
+/// stray `#` and `*` in it that was never meant as formatting, and rendering it
+/// as prose would turn a half-finished sentence into a heading.
+#[component]
+fn Thinking(thought: Option<String>) -> impl IntoView {
+    let (open, set_open) = signal(false);
+
+    thought.map(|thought| {
+        // Lines rather than characters: it is the depth of the fold the King is
+        // judging, and it is the figure Phoenix's own aside reports.
+        let lines = thought.lines().count();
+        let label = format!(
+            "thinking ({lines} {})",
+            if lines == 1 { "line" } else { "lines" }
+        );
+        let thought = StoredValue::new(thought);
+
+        view! {
+            <div class="chat-thought" class:is-open=move || open.get()>
+                <button
+                    class="thought-line"
+                    on:click=move |_| set_open.update(|o| *o = !*o)
+                >
+                    <span class="thought-chevron">
+                        {move || if open.get() { "\u{2303}" } else { "\u{2304}" }}
+                    </span>
+                    <span class="thought-label">{label}</span>
+                </button>
+                <Show when=move || open.get()>
+                    <div class="thought-body">{move || thought.get_value()}</div>
+                </Show>
+            </div>
+        }
+    })
 }
 
 /// The subagents one call sent, each a way into its own conversation.
@@ -2190,6 +2310,94 @@ mod tests {
         // A plan that has never browsed has nothing to caption, and a running
         // non-browser deed is not evidence that it has.
         assert!(browsing(&[call("bash", false)]).is_none());
+    }
+
+    /// The remark is a property of the *reply*, not of the call, and `api.rs`
+    /// records it on the first call of a batch and nowhere else. This is what
+    /// fails if that is ever "tidied" into copying the narration onto every
+    /// call: the King would read the same sentence three times and take it for
+    /// three separate decisions.
+    #[test]
+    fn one_reply_draws_one_remark_however_many_deeds_it_asked_for() {
+        let said = "I'll read all three of these before I change anything.";
+        let batch: Vec<ToolCall> = ["read_file", "read_file", "search"]
+            .iter()
+            .enumerate()
+            .map(|(i, tool)| {
+                // Exactly as `api.rs` writes it: the words ride on the first.
+                ToolCall::started(format!("call-{i}"), *tool, json!({})).in_reply(
+                    "reply-1",
+                    None,
+                    (i == 0).then(|| said.to_string()),
+                )
+            })
+            .collect();
+
+        let drawn: Vec<String> = batch.iter().filter_map(remark).collect();
+
+        assert_eq!(
+            drawn,
+            vec![said.to_string()],
+            "three deeds from one reply must carry one remark between them"
+        );
+    }
+
+    /// `in_reply` already refuses to store a blank narration, so this is the
+    /// second lock on the same door -- a record written by an older build can
+    /// still hold whitespace, and an empty remark is a bordered stripe of
+    /// padding above a deed with no words in it.
+    #[test]
+    fn a_deed_the_court_said_nothing_about_draws_nothing() {
+        let silent = ToolCall::started("call-1", "bash", json!({}));
+        assert_eq!(
+            remark(&silent),
+            None,
+            "a call with no narration says nothing"
+        );
+
+        let mut blank = ToolCall::started("call-2", "bash", json!({}));
+        blank.narration = Some("   \n  ".to_string());
+        assert_eq!(
+            remark(&blank),
+            None,
+            "whitespace is not something the court said"
+        );
+
+        let mut padded = ToolCall::started("call-3", "bash", json!({}));
+        padded.narration = Some("  Checking the tests first.  ".to_string());
+        assert_eq!(
+            remark(&padded).as_deref(),
+            Some("Checking the tests first."),
+            "the words survive; the padding around them does not"
+        );
+    }
+
+    /// The thinking is grouped exactly as the remark is, and only its prose half
+    /// is ever drawn: the opaque half is a provider's signature, meaningless to
+    /// a reader and kilobytes of base64 on the page.
+    #[test]
+    fn only_the_readable_half_of_the_thinking_is_drawn() {
+        let signed = kingdom_core::Reasoning {
+            text: None,
+            opaque: [("signature".to_string(), json!("c2lnbmF0dXJl"))]
+                .into_iter()
+                .collect(),
+        };
+        let carried =
+            ToolCall::started("call-1", "bash", json!({})).in_reply("reply-1", Some(signed), None);
+        assert_eq!(
+            thinking(&carried),
+            None,
+            "a signature is carried for the provider, not shown to the King"
+        );
+
+        let thought = kingdom_core::Reasoning {
+            text: Some("  Two ways at this.  ".to_string()),
+            opaque: Default::default(),
+        };
+        let mused =
+            ToolCall::started("call-2", "bash", json!({})).in_reply("reply-2", Some(thought), None);
+        assert_eq!(thinking(&mused).as_deref(), Some("Two ways at this."));
     }
 
     /// A deed that left a picture behind offers one to render, and an ordinary

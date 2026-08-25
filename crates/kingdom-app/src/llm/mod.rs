@@ -220,6 +220,28 @@ impl Acts {
         self.calls.is_empty()
     }
 
+    /// The same calls, with what the model said in words as it asked for them.
+    ///
+    /// A builder rather than a fourth constructor because a provider reads the
+    /// two halves from different places in the same payload, and the mock adds
+    /// them one at a time to whichever scenario is worth rehearsing.
+    pub fn saying(mut self, narration: impl Into<String>) -> Self {
+        self.narration = Some(narration.into());
+        self
+    }
+
+    /// The same calls, with the thinking that produced them.
+    ///
+    /// Only the prose half: the opaque half is a provider's signature, and
+    /// nothing but a provider can produce one.
+    pub fn thinking(mut self, text: impl Into<String>) -> Self {
+        self.reasoning = Some(kingdom_core::Reasoning {
+            text: Some(text.into()),
+            opaque: Default::default(),
+        });
+        self
+    }
+
     pub fn len(&self) -> usize {
         self.calls.len()
     }

@@ -396,6 +396,30 @@ beside the existing `can_act` narrowing). The vision flag is read from three
 places in Copilot's `/models` payload because the catalogue is not ours; if it
 ever reads as blind for everything, that is where to look.
 
+**The King reads what the court said, not only what it ran.** A model narrates
+the move it is about to make in the *same reply* as the tool calls, and that
+sentence is the reason for the deeds under it. `ToolCall::narration` has carried
+it since task 00110 and `copilot.rs::messages()` replayed it to the model, but
+the chamber drew only the commands until 00200. It renders above the deed now, as
+the header of the block rather than as a `chat-msg`: a bubble carries a speaker
+column and a clock, which would present the preamble of an action as a separate
+thing the court said.
+
+The grouping is the part to keep straight. **Narration belongs to a reply, not to
+a call** — `api.rs` records it on the first call of a batch and `None` on the
+rest, so a reply asking for six things replays as one decision rather than six
+deliberations. `conversation.rs::remark` honours that same shape, and it is drawn
+in `Transcript`'s `<For>` body rather than inside `ToolCallLine`, because
+`Question` and `Subagents` render tool calls too and a batch's first call can be
+any of the three. Putting it in `ToolCallLine` would lose the sentence exactly
+when the court explains *why it is stopping to ask you something*.
+
+`Reasoning::text` rides beside it, collapsed to `thinking (N lines)` and not
+rendered as markdown — reasoning is a stream of thought with stray `#` in it that
+was never meant as formatting. It is deliberately ranked below the remark: a
+remark is what the court chose to say, and reasoning is what it happened to think
+on the way there.
+
 **And so can the King.** A screenshot renders in the chamber, under the deed
 that took it. The picture is *not* carried on the plan: `ToolOutcome::Done`
 gained `artifacts` — workspace-relative **paths** beside the base64 `images` —

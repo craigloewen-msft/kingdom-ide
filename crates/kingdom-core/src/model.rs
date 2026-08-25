@@ -2727,6 +2727,35 @@ mod transcript_tests {
         );
     }
 
+    /// Nothing said is not the same as saying nothing, and only one of them is
+    /// worth recording.
+    ///
+    /// A gateway that returns `""` or a stray newline beside its tool calls is
+    /// not a court that chose its words carefully. Stored, it would serialise
+    /// into every plan document for no gain, replay to the model as an assistant
+    /// turn that spoke to say nothing, and draw the King a bordered stripe of
+    /// padding above a deed with no words in it.
+    #[test]
+    fn a_reply_that_said_nothing_records_nothing() {
+        let blank = ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
+            "reply-1",
+            None,
+            Some("  \n ".to_string()),
+        );
+        assert_eq!(blank.narration, None, "whitespace is not a statement");
+
+        let said = ToolCall::started("call-2", "bash", serde_json::json!({})).in_reply(
+            "reply-1",
+            None,
+            Some("Running the tests before I touch anything.".to_string()),
+        );
+        assert_eq!(
+            said.narration.as_deref(),
+            Some("Running the tests before I touch anything."),
+            "words the court actually wrote are kept exactly as it wrote them"
+        );
+    }
+
     /// An outcome that names a file round-trips, and the two channels stay
     /// apart on the way through.
     ///
