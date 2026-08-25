@@ -327,6 +327,32 @@
   animation: deed-pulse 1.4s ease-in-out infinite;
 }
 
+// How long the deed took, or has been taking. Tabular numerals so a column of
+// running deeds does not jitter sideways once a second as the digits change —
+// the pulse is the movement worth noticing, and a twitching line beside it is
+// noise the King has to learn to ignore.
+.deed-took {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+
+  // A settled deed's figure is history and stays quiet; a running one is the
+  // live line and pulses with the same rhythm the word it replaced did.
+  &.is-running {
+    color: t.$working;
+    opacity: 1;
+    animation: deed-pulse 1.4s ease-in-out infinite;
+  }
+
+  // Past a wait that was a real deadline. Only ever set on those — a shell
+  // command outliving `wait_seconds` is the design working, and colouring it
+  // would cry alarm over every cold build until he stopped reading the colour.
+  &.is-overrun {
+    color: t.$failed;
+    opacity: 1;
+  }
+}
+
 @keyframes deed-pulse {
   0%, 100% { opacity: 0.45; }
   50%      { opacity: 1; }

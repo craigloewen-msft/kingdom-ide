@@ -836,7 +836,16 @@ pub(crate) async fn converse(
                                     act.tool.clone(),
                                     act.input.clone(),
                                 )
-                                .in_reply(batch.clone(), reasoning.clone(), narration.clone()),
+                                .in_reply(batch.clone(), reasoning.clone(), narration.clone())
+                                // Asked of the tool itself, from the same
+                                // arguments the deed is being recorded with, so
+                                // what the chamber tells the King it is waiting
+                                // for and what the tool actually waits for
+                                // cannot disagree. Read here rather than when
+                                // the line is drawn, because a budget that
+                                // arrives with the result would appear only
+                                // once it no longer mattered.
+                                .waiting(crate::tools::waits_for(&act.tool, &act.input, &shop)),
                             );
                         });
                     }

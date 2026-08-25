@@ -935,10 +935,27 @@ impl Plan {
     /// something never recorded as started, and the log the user reads is
     /// missing an event the model believes happened.
     pub fn settle_tool_call(&mut self, id: &str, outcome: ToolOutcome) -> bool {
+        self.close_tool_call(id, outcome, Timestamp::now())
+    }
+
+    /// Settles a call whose end time is not known.
+    ///
+    /// The one caller is `store::reconcile`, closing a call the server died
+    /// during. It reaches for this rather than [`Plan::settle_tool_call`]
+    /// because *now* is the moment the server came back, not the moment the
+    /// work stopped: stamping it would report the length of the outage as the
+    /// length of the command, and a plan interrupted overnight would read as a
+    /// nine-hour `cargo build`.
+    pub fn settle_tool_call_at_an_unknown_time(&mut self, id: &str, outcome: ToolOutcome) -> bool {
+        self.close_tool_call(id, outcome, None)
+    }
+
+    fn close_tool_call(&mut self, id: &str, outcome: ToolOutcome, at: Option<Timestamp>) -> bool {
         for entry in self.transcript.iter_mut().rev() {
             if let Entry::Tool(tool_call) = entry {
                 if tool_call.id == id && tool_call.in_flight() {
                     tool_call.outcome = Some(outcome);
+                    tool_call.settled_at = at;
                     return true;
                 }
             }
@@ -989,6 +1006,15 @@ fn title_from_prompt(prompt: &str) -> String {
 /// log now holds three kinds of thing and exactly two of them are addressed to
 /// a model; see [`Plan::turns`], which is the only door between this log and
 /// one.
+// A tool call is several times the size of a message -- it carries the model's
+// own JSON arguments and everything that came back -- so a transcript of mostly
+// messages pays for the largest variant on every entry. That has always been
+// true; adding the two timing fields is only what pushed the gap past clippy's
+// threshold. Boxing the variant is the fix, and it is deliberately not done
+// here: it changes every `Entry::Tool(d)` and `Turn::Tool(d)` match across both
+// crates, which is a refactor of its own rather than a rider on a UI change.
+// The cost until then is tens of kilobytes on a long transcript.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Entry {
     /// Words a participant produced.
@@ -1032,6 +1058,27 @@ pub struct ToolCall {
     /// When the call was made. See [`Timestamp`].
     #[serde(default)]
     pub at: Option<Timestamp>,
+    /// When the result came back. See [`Timestamp`].
+    ///
+    /// Written down rather than derived, because nothing else can tell us
+    /// again: a settled call's duration is not recoverable from a plan document
+    /// that only records when it began, so a reload would lose every figure the
+    /// user had been watching.
+    ///
+    /// `None` while the call is in flight, and also `None` on one settled by
+    /// `store::reconcile` -- a server that died mid-call genuinely does not know
+    /// when the work stopped, and stamping the moment of *loading* would report
+    /// the length of the outage as the length of the command.
+    #[serde(default)]
+    pub settled_at: Option<Timestamp>,
+    /// How long this call said it would wait, where it said anything.
+    ///
+    /// Recorded on the call rather than worked out when the conversation draws
+    /// it, because the answer comes from the tool's own arguments and defaults
+    /// -- see `Tool::waits_for`. Read once, where the call is recorded, so what
+    /// the chamber claims and what the tool actually does cannot drift apart.
+    #[serde(default)]
+    pub waits: Option<WaitBudget>,
     /// Which reply this call arrived in, if the provider told us.
     ///
     /// A model routinely asks for several things at once -- read these three
@@ -1111,6 +1158,8 @@ impl ToolCall {
             input,
             outcome: None,
             at: Timestamp::now(),
+            settled_at: None,
+            waits: None,
             batch: None,
             reasoning: None,
             narration: None,
@@ -1151,9 +1200,50 @@ impl ToolCall {
         }
     }
 
+    /// Says how long this call will wait before it stops waiting.
+    ///
+    /// Builder rather than a parameter on [`ToolCall::started`] for the same
+    /// reason as [`ToolCall::in_reply`]: every caller records a call, and only
+    /// the one that has just asked a tool about its own arguments has this to
+    /// say.
+    pub fn waiting(mut self, waits: Option<WaitBudget>) -> Self {
+        self.waits = waits;
+        self
+    }
+
     /// True while this call is still running.
     pub fn in_flight(&self) -> bool {
         self.outcome.is_none()
+    }
+
+    /// How long this call took, in milliseconds, where both ends are known.
+    ///
+    /// `None` covers three genuinely different things -- still running, a record
+    /// written before the end was kept, and a call the server died during -- and
+    /// they collapse to one answer on purpose: the honest rendering of all three
+    /// is to show nothing. A `0` would be a claim, and a wrong one.
+    ///
+    /// A negative span is `None` too. It should be impossible, but the two
+    /// stamps are wall-clock readings taken minutes apart, and a clock that
+    /// steps backwards between them must not produce a deed that took less than
+    /// no time.
+    ///
+    /// **Two wall-clock stamps rather than a monotonic reading.** Phoenix times
+    /// its tool calls with `Instant::elapsed`, which no clock adjustment can
+    /// disturb, and reports the figure rather than the endpoints. That is
+    /// strictly more accurate and was not copied, for a reason worth stating: an
+    /// `Instant` cannot be serialised, so it would be a *third* field carrying
+    /// the duration alongside the two stamps -- and the stamps have to stay,
+    /// because the conversation counts up from `at` while the call is still
+    /// running. The exposure that buys is narrow. Both stamps are taken by the
+    /// same process, so nothing here cares what any other machine's clock says;
+    /// only a step *during* a single call distorts anything, and the guard above
+    /// keeps the worst case to a missing figure rather than a wrong one.
+    pub fn elapsed_ms(&self) -> Option<i64> {
+        let (Some(Timestamp(from)), Some(Timestamp(to))) = (self.at, self.settled_at) else {
+            return None;
+        };
+        (to >= from).then_some(to - from)
     }
 
     /// What the model should be told this call produced.
@@ -1196,6 +1286,48 @@ pub struct ToolImage {
     pub media_type: String,
     /// The image, base64-encoded.
     pub data: String,
+}
+
+/// How long a tool call is prepared to wait, and what happens when that runs
+/// out.
+///
+/// **Why this is a type rather than a number.** The tools mean two genuinely
+/// different things by "wait". A browser call that reaches its timeout has
+/// failed and there is nothing left to come back to; a `bash` call that reaches
+/// `wait_seconds` has not failed at all -- the command runs on and the model is
+/// handed a handle for it, which is the whole design of that module. One number
+/// for both would put the same figure on the King's line for "this is about to
+/// go wrong" and "this is working exactly as intended", and he would learn to
+/// ignore it.
+///
+/// Seconds, because every tool that has one of these states it in seconds and
+/// nothing here is finer-grained than the once-a-second tick that draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaitBudget {
+    /// The call gives up at this point and the deed fails. A call still running
+    /// past a deadline is worth the King's attention.
+    Deadline { seconds: u64 },
+    /// The call stops *watching* at this point, but the work carries on and can
+    /// be returned to. Passing it is ordinary, not a problem.
+    Patience { seconds: u64 },
+}
+
+impl WaitBudget {
+    /// How long, whichever kind this is.
+    pub fn seconds(&self) -> u64 {
+        match self {
+            WaitBudget::Deadline { seconds } | WaitBudget::Patience { seconds } => *seconds,
+        }
+    }
+
+    /// True when running past this budget means something has gone wrong.
+    ///
+    /// The one question the conversation asks of this type, kept here so the
+    /// view never matches on the variants itself -- a third kind of waiting
+    /// would otherwise need finding in the components as well as here.
+    pub fn overrunning_is_a_problem(&self) -> bool {
+        matches!(self, WaitBudget::Deadline { .. })
+    }
 }
 
 /// How a tool call ended.
@@ -1284,6 +1416,8 @@ impl ToolOutcome {
 /// a detached task that outlives the lock the plan was read under. Cloning a
 /// transcript costs a handful of small allocations on the way into an HTTP call
 /// to a language model, which is not a cost worth a lifetime parameter.
+/// See the note on [`Entry`]: the same size gap, for the same reason.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Turn {
     Message(Message),
@@ -2267,6 +2401,115 @@ mod transcript_tests {
         );
     }
 
+    /// A settled call must know when it ended, and a call the server died
+    /// during must admit that it does not.
+    ///
+    /// The second half is the one worth pinning. Both paths settle a call and
+    /// both look right in the transcript, but only one of them was actually
+    /// watching a clock -- and the failure is silent: a plan interrupted
+    /// overnight would report a nine-hour deed, which is wrong in a way that
+    /// reads as information.
+    #[test]
+    fn a_settled_call_records_when_it_ended_unless_nobody_was_watching() {
+        let mut plan = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Run the tests",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+
+        plan.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
+        plan.begin_tool_call(ToolCall::started("call-2", "bash", serde_json::json!({})));
+
+        let in_flight = tool_call(&plan, "call-1");
+        assert!(
+            in_flight.settled_at.is_none() && in_flight.elapsed_ms().is_none(),
+            "a call still running has not taken any length of time yet"
+        );
+
+        assert!(plan.settle_tool_call("call-1", ToolOutcome::done("ok")));
+        let settled = tool_call(&plan, "call-1");
+        assert!(settled.settled_at.is_some(), "a settled call knows when it ended");
+        assert!(
+            settled.elapsed_ms().is_some_and(|ms| ms >= 0),
+            "and can say how long it took"
+        );
+
+        assert!(plan.settle_tool_call_at_an_unknown_time("call-2", ToolOutcome::done("ok")));
+        let reconciled = tool_call(&plan, "call-2");
+        assert!(
+            reconciled.settled_at.is_none() && reconciled.elapsed_ms().is_none(),
+            "a call the server died during must not claim to have been timed: \
+             stamping the moment of recovery would report the outage as the deed"
+        );
+    }
+
+    /// A record written before deeds were timed must still load, and must not
+    /// have a duration invented for it. Both fields are `#[serde(default)]`,
+    /// which is a claim rather than a fact until something checks.
+    #[test]
+    fn a_deed_recorded_before_it_was_timed_still_loads() {
+        let before_timing = r#"{
+            "id": "plan-old",
+            "city": "c1",
+            "title": "An older plan",
+            "summary": "Drawn up before anyone was counting",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [
+                { "Tool": {
+                    "id": "call-1",
+                    "tool": "bash",
+                    "input": { "cmd": "cargo test" },
+                    "outcome": { "Done": { "output": "ok" } },
+                    "at": 1
+                } }
+            ],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan =
+            serde_json::from_str(before_timing).expect("an older plan record must still load");
+
+        let call = tool_call(&plan, "call-1");
+        assert!(call.settled_at.is_none() && call.waits.is_none());
+        assert!(
+            call.elapsed_ms().is_none(),
+            "a deed nobody timed shows nothing, rather than a figure of zero"
+        );
+    }
+
+    /// The distinction the whole rendering rests on: overrunning is a problem
+    /// for a deadline and ordinary for patience. Inverting this is a one-word
+    /// edit that no other test would catch, and it would have the chamber cry
+    /// alarm over every long-running build.
+    #[test]
+    fn only_a_deadline_makes_overrunning_a_problem() {
+        assert!(WaitBudget::Deadline { seconds: 15 }.overrunning_is_a_problem());
+        assert!(!WaitBudget::Patience { seconds: 30 }.overrunning_is_a_problem());
+        assert_eq!(WaitBudget::Patience { seconds: 30 }.seconds(), 30);
+    }
+
+    /// The one deed with a given id, for the tests above.
+    fn tool_call<'a>(plan: &'a Plan, id: &str) -> &'a ToolCall {
+        plan.transcript
+            .iter()
+            .find_map(|e| match e {
+                Entry::Tool(d) if d.id == id => Some(d),
+                _ => None,
+            })
+            .expect("the deed is in the log")
+    }
+
     /// Plans are the one thing disk cannot tell us again, and `spawned_by` is a
     /// new field on a type that is already recorded. Additive-serde is a claim,
     /// not a fact, and the cost of being wrong is a kingdom that will not open.
@@ -2303,3 +2546,4 @@ mod transcript_tests {
         );
     }
 }
+

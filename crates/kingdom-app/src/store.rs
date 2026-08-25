@@ -126,7 +126,7 @@ fn reconcile(mut plan: Plan) -> Plan {
         })
         .collect();
     for id in orphans {
-        plan.settle_tool_call(
+        plan.settle_tool_call_at_an_unknown_time(
             &id,
             ToolOutcome::Refused {
                 reason: "The server stopped while this was running. Whether it \

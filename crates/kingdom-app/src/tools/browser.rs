@@ -17,7 +17,7 @@
 
 use super::{Refusal, Tool, Sandbox};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
-use kingdom_core::ToolOutcome;
+use kingdom_core::{ToolOutcome, WaitBudget};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
@@ -37,6 +37,16 @@ pub(crate) fn browsers() -> &'static BrowserSessionManager {
 fn plan(shop: &Sandbox) -> String {
     shop.plan().to_string()
 }
+
+/// The wait a browser call is given when the model does not say.
+///
+/// Two figures rather than one, because the tools split into two honest
+/// groups: an operation on a page that is already there should be quick, while
+/// one that waits for the page to *become* something needs room for the app to
+/// do its work. Named because the deed line reports these back to the King --
+/// see `Tool::waits_for` -- and an inline `Duration::from_secs(30)` in each
+/// `run` would leave the two halves free to disagree about the same call.
+const DEFAULT_SETTLE: Duration = Duration::from_secs(30);
 
 fn duration(value: Option<&str>, default: Duration) -> Result<Duration, String> {
     let Some(value) = value else {
@@ -91,6 +101,24 @@ async fn write_artifact(path: &PathBuf, bytes: &[u8]) -> Result<(), BrowserError
     })
 }
 
+/// The wait every browser call reports, and the one place that reads a
+/// `timeout` argument for the chamber rather than for the browser.
+///
+/// Always a [`WaitBudget::Deadline`]: when a browser call runs out of time it
+/// has failed, and there is nothing left running to come back to. That is the
+/// opposite of `bash`, and the reason the King can read one figure differently
+/// from the other.
+///
+/// A `timeout` that will not parse reports the default rather than nothing. The
+/// call is about to be refused for exactly that reason, and the line is better
+/// showing the wait that was meant than showing silence.
+fn deadline(input: &Value, default: Duration) -> Option<WaitBudget> {
+    let asked = input.get("timeout").and_then(Value::as_str);
+    Some(WaitBudget::Deadline {
+        seconds: duration(asked, default).unwrap_or(default).as_secs(),
+    })
+}
+
 #[derive(Deserialize)]
 struct NavigateInput {
     url: String,
@@ -123,6 +151,10 @@ impl Tool for BrowserNavigate {
                 .await
                 .map(|_| format!("Navigated to {}.", input.url)),
         )
+    }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_TIMEOUT)
     }
 }
 
@@ -174,6 +206,10 @@ impl Tool for BrowserEval {
             ),
         }
     }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_TIMEOUT)
+    }
 }
 
 #[derive(Deserialize)]
@@ -217,6 +253,10 @@ impl Tool for BrowserTakeScreenshot {
             Err(error) => outcome(Err(error)),
         }
     }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_TIMEOUT)
+    }
 }
 
 #[derive(Deserialize)]
@@ -256,6 +296,10 @@ impl Tool for BrowserResize {
                 .map(|_| format!("Viewport resized to {}x{}.", i.width, i.height)),
         )
     }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_TIMEOUT)
+    }
 }
 
 #[derive(Deserialize)]
@@ -282,7 +326,7 @@ impl Tool for BrowserWaitForSelector {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let t = match duration(i.timeout.as_deref(), Duration::from_secs(30)) {
+        let t = match duration(i.timeout.as_deref(), DEFAULT_SETTLE) {
             Ok(v) => v,
             Err(e) => return bad(self.name(), e),
         };
@@ -298,6 +342,10 @@ impl Tool for BrowserWaitForSelector {
                     )
                 }),
         )
+    }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_SETTLE)
     }
 }
 
@@ -325,7 +373,7 @@ impl Tool for BrowserClick {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let t = match duration(i.timeout.as_deref(), Duration::from_secs(30)) {
+        let t = match duration(i.timeout.as_deref(), DEFAULT_SETTLE) {
             Ok(v) => v,
             Err(e) => return bad(self.name(), e),
         };
@@ -335,6 +383,10 @@ impl Tool for BrowserClick {
                 .await
                 .map(|_| format!("Clicked `{}`.", i.selector)),
         )
+    }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_SETTLE)
     }
 }
 
@@ -363,7 +415,7 @@ impl Tool for BrowserType {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let t = match duration(i.timeout.as_deref(), Duration::from_secs(30)) {
+        let t = match duration(i.timeout.as_deref(), DEFAULT_SETTLE) {
             Ok(v) => v,
             Err(e) => return bad(self.name(), e),
         };
@@ -374,6 +426,10 @@ impl Tool for BrowserType {
                 .await
                 .map(|_| format!("Typed {count} characters into `{}`.", i.selector)),
         )
+    }
+
+    fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
+        deadline(input, DEFAULT_SETTLE)
     }
 }
 
