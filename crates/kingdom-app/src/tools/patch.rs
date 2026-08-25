@@ -193,33 +193,43 @@ impl Tool for Patch {
     }
 
     fn description(&self) -> String {
-        r#"Edit a file by naming the text to change, not the line number.
+        r"File modification tool for precise text edits.
 
 Operations:
-- replace: substitute `oldText` with `newText`
-- insert_before / insert_after: place `newText` beside the `oldText` anchor, leaving the anchor itself untouched
-- append_eof / prepend_bof: add `newText` at the end or the start of the file
-- overwrite: replace the whole file (creates it if it does not exist)
+- replace: Substitute unique text with new content
+- insert_before: Insert newText immediately before a unique oldText anchor, leaving the anchor unchanged
+- insert_after: Insert newText immediately after a unique oldText anchor, leaving the anchor unchanged
+- append_eof: Append new text at the end of the file
+- prepend_bof: Insert new text at the beginning of the file
+- overwrite: Replace the entire file with new content (automatically creates the file)
 
-`oldText` must appear EXACTLY ONCE. If it does not, widen it with surrounding \
-lines until it does -- an ambiguous anchor is refused, never guessed at. Set \
-`replaceAll` (replace only) to change every exact occurrence deliberately.
+To add code next to existing code (e.g. a new test beside its siblings), prefer insert_before/insert_after with a unique anchor over append_eof — append_eof drops content at the very end of the file, where it is often syntactically wrong.
 
-All patches in one call are resolved against the ORIGINAL file at once, not one \
-after another. So a later patch cannot anchor on text an earlier one wrote, and \
-two patches covering the same span are refused. For edits that must build on \
-each other, make separate calls.
+replaceAll (replace only): substitute every exact occurrence of oldText instead of requiring a unique match. Use for mechanical refactors of repeated identical blocks. Exact matches only (no fuzzy recovery).
 
-Clipboards (`toClipboard` / `fromClipboard`) carry the file's own bytes between \
-patches and between calls. Always use them to move or copy code rather than \
-retyping it: retyped code is where silent transcription errors come from.
-- cut: replace with empty `newText` and `toClipboard`
-- paste: any operation with `fromClipboard`
+Clipboard:
+- toClipboard: Store oldText to a named clipboard before the operation
+- fromClipboard: Use clipboard content as newText (ignores provided newText)
+- Clipboards persist across patch calls
+- Always use clipboards when moving/copying code (within or across files), even when the moved/copied code will also have edits.
+  This prevents transcription errors and distinguishes intentional changes from unintentional changes.
 
-`reindent` adjusts whatever is being inserted: `strip` comes off the front of \
-each non-empty line, then `add` goes on. Use it when moved code changes nesting.
+Indentation adjustment:
+- reindent applies to whatever text is being inserted
+- First strips the specified prefix from each line, then adds the new prefix
+- Useful when moving code from one indentation to another
 
-Everything is literal: no newline is added or trimmed for you."#
+Recipes:
+- cut: replace with empty newText and toClipboard
+- copy: replace with toClipboard and fromClipboard using the same clipboard name
+- paste: replace with fromClipboard
+- in-place indentation change: same as copy, but add indentation adjustment
+
+Usage notes:
+- All inputs are interpreted literally (no automatic newline or whitespace handling)
+- For replace, insert_before, and insert_after, oldText must appear EXACTLY ONCE in the file (unless replaceAll is set)
+- All patches in a single call resolve against the original file content simultaneously, not sequentially. Repeating the same oldText across patches cannot disambiguate sites, and two patches whose ranges overlap are rejected. For sequential edits where each step sees the prior result, use separate patch tool calls.
+- On success the applied unified diff is returned so you can confirm where each edit landed without re-reading the file."
             .to_string()
     }
 

@@ -498,28 +498,6 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
 #[cfg(feature = "ssr")]
 const MOST_ROUNDS: usize = 500;
 
-/// The note left when Kingdom sends a preamble back round rather than parking
-/// it in front of the user.
-///
-/// Doubles as the record that it has happened: [`converse`] looks for this in
-/// the transcript, so a plan is nudged once and never again, whatever restarts
-/// or re-drafts happen in between. That is why the marker is a note rather than
-/// a local flag -- the loop's state is the plan's state, and a local would
-/// forget across a `say`.
-#[cfg(feature = "ssr")]
-const NUDGED: &str = "The court announced what it was about to do without doing it, which would \
-     have ended its turn. Sent back round once to get on with it.";
-
-/// What is sent back to a model that narrated instead of acting.
-///
-/// Phrased as an instruction rather than as the user speaking, because it is
-/// not the user: it is never written to the transcript, only appended to the
-/// brief for the one round that follows.
-#[cfg(feature = "ssr")]
-const NUDGE: &str = "That reply had no tool call, which ends your turn and hands the plan back \
-     to the user with nothing done. Carry on now: make the calls you just described. Reply with \
-     words only when you have an answer, a blocking question, or `propose_plan`.";
-
 /// Draws up the plan: marks it busy, then takes turns with the model until it
 /// has something to say.
 ///
@@ -534,7 +512,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
 
     let plan_id = PlanId::new(plan);
 
-    let (city_brief, workspace, city_name, choice, root) = {
+    let (city_brief, workspace, city_name, choice) = {
         let mut kingdom = lock()?;
 
         let Some(existing) = kingdom.plan(&plan_id).cloned() else {
@@ -586,9 +564,6 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
             existing.workspace.clone(),
             city.name,
             existing.choice(),
-            // Bounds the walk for project guidance: everything from the
-            // workspace up to here, and nothing above it.
-            std::path::PathBuf::from(&kingdom.root),
         )
     };
 
@@ -608,7 +583,6 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
                 workspace,
                 city_name,
                 choice,
-                root,
                 MOST_ROUNDS,
             )
             .await
@@ -664,7 +638,6 @@ pub(crate) async fn converse(
     workspace: kingdom_core::Workspace,
     city_name: String,
     choice: kingdom_core::ModelChoice,
-    root: std::path::PathBuf,
     cap: usize,
 ) -> Result<Plan, ServerFnError> {
     use crate::llm::{Brief, Reply, SystemPrompt, ToolSpec};
@@ -677,9 +650,6 @@ pub(crate) async fn converse(
         // retry, rather than an error attached to nothing.
         Err(e) => return settle(plan_id, Err(e)),
     };
-
-    // Set for the single round that follows a narration-only reply. See `NUDGE`.
-    let mut nudge_next = false;
 
     for round in 0..cap {
         // The conversation is rebuilt from the plan each pass rather than
@@ -706,23 +676,10 @@ pub(crate) async fn converse(
             )
         };
 
-        // Whether this plan has already been sent back round for narrating, and
-        // whether the court has actually done anything yet. Both are read off
-        // the transcript for the same reason everything else here is: the log is
-        // the state, and a local would not survive the `say` that revives a
-        // plan.
-        let nudged = {
-            let kingdom = lock()?;
-            kingdom
-                .plan(&plan_id)
-                .map(|p| {
-                    p.transcript.iter().any(
-                        |e| matches!(e, kingdom_core::Entry::Note(n) if n.body == NUDGED),
-                    )
-                })
-                .unwrap_or(false)
-        };
-        let has_acted = turns.iter().any(|t| matches!(t, kingdom_core::Turn::Tool(_)));
+        // Whether the court has actually done anything yet is no longer asked:
+        // a reply with prose and no tool call ends the turn, full stop.
+        // A model that narrates instead of acting is answering the user early,
+        // and the user can say so.
 
         // A model that cannot call tools still drafts perfectly good prose, so
         // it gets a prose-only turn rather than an error; one that cannot see is
@@ -736,22 +693,10 @@ pub(crate) async fn converse(
             .under(permissions);
 
         let brief = Brief {
-            system_prompt: SystemPrompt::assemble(&city, &workspace, permissions, approved, &root),
+            system_prompt: SystemPrompt::assemble(&city, &workspace, permissions, approved),
             turns,
             tools: tools.clone(),
         };
-
-        // The nudge rides on the brief for exactly the round that follows a
-        // preamble, and is never recorded as a turn -- see `NUDGE`. Appending it
-        // to the system prompt rather than faking a user message is deliberate:
-        // the transcript is what the user reads, and a instruction they never
-        // gave has no business appearing there as though they had.
-        let mut brief = brief;
-        if nudge_next {
-            brief.system_prompt.permissions =
-                format!("{}\n\n{NUDGE}", brief.system_prompt.permissions);
-            nudge_next = false;
-        }
 
         let answer = match model.take_turn(&brief).await {
             Ok(answer) => answer,
@@ -780,26 +725,10 @@ pub(crate) async fn converse(
 
         match answer.reply {
             Reply::Spoke(draft) => {
-                // A model that has done nothing at all and replies with prose
-                // has almost always written a preamble -- "I'll start by
-                // reading the router" -- rather than counsel. Settling here
-                // would park the plan in front of the user with an empty
-                // workspace and make them type "Keep going", which is exactly
-                // what happened to every real plan before this.
-                //
-                // Bounded to once per plan, and only while it has no tool calls
-                // to its name: a model that has worked and then speaks is
-                // reporting, and a second nudge would be Kingdom arguing with an
-                // answer it asked for. `propose_plan` is unaffected -- that ends
-                // the turn through its own path, not through `Spoke`.
-                if !has_acted && !nudged {
-                    let mut kingdom = lock()?;
-                    update(&mut kingdom, &plan_id, |p| {
-                        p.note(NoteKind::Failed, NUDGED);
-                    });
-                    nudge_next = true;
-                    continue;
-                }
+                // Prose with no tool call ends the turn, as it does in Phoenix.
+                // Kingdom used to intercept a narration-only first reply and
+                // send it back round with an instruction appended; that was a
+                // Kingdom invention and it is gone.
                 return settle(plan_id, Ok(draft));
             }
 
@@ -961,15 +890,13 @@ pub(crate) async fn converse(
 pub(crate) async fn spawn_subagents(
     parent_id: &PlanId,
     tool_call: &str,
-    tasks: Vec<String>,
+    tasks: Vec<crate::tools::spawn_agents::Errand>,
     patience: std::time::Duration,
 ) -> Result<String, String> {
-    use crate::tools::spawn_agents::MOST_SUBAGENT_ROUNDS;
-
     // Everything the subagents need is read once, under one lock: the parent
     // they are cut from, and the city they work in. Holding it across the model
     // calls below would freeze every other plan in the kingdom.
-    let (subagents, city_brief, city_name, root) = {
+    let (subagents, city_brief, city_name) = {
         let mut kingdom = lock().map_err(|e| e.to_string())?;
 
         let Some(parent) = kingdom.plan(parent_id).cloned() else {
@@ -986,9 +913,10 @@ pub(crate) async fn spawn_subagents(
         let city_brief = crate::llm::CityBrief::from_city(&city, &parent.workspace);
 
         let mut subagents = Vec::new();
-        for task in tasks {
+        for errand in tasks {
             let id = PlanId::new(format!("plan-{}", next_plan_number()));
-            let mut subagent = Plan::spawned(id.clone(), &parent, tool_call, task.clone());
+            let mut subagent =
+                Plan::spawned(id.clone(), &parent, tool_call, errand.task.clone());
             let root = std::path::PathBuf::from(&kingdom.root);
             remember(&root, &mut subagent);
             // Pushed as well as recorded, so the parent's conversation can draw
@@ -996,14 +924,13 @@ pub(crate) async fn spawn_subagents(
             // speaks.
             crate::events::publish(&subagent);
             kingdom.plans.push(subagent);
-            subagents.push((id, task));
+            subagents.push((id, errand));
         }
 
         (
             subagents,
             city_brief,
             city.name,
-            std::path::PathBuf::from(&kingdom.root),
         )
     };
 
@@ -1013,11 +940,15 @@ pub(crate) async fn spawn_subagents(
     // invariant travels with the plan rather than with this call site.
     let running: Vec<_> = subagents
         .iter()
-        .map(|(id, _)| {
+        .map(|(id, errand)| {
             let id = id.clone();
             let city_brief = city_brief.clone();
             let city_name = city_name.clone();
-            let root = root.clone();
+            // How many rounds this one gets: what the model asked for, or the
+            // default. Per subagent rather than one figure for the batch, so a
+            // cheap lookup can be capped short without shortening the survey
+            // running beside it.
+            let cap = errand.max_turns;
             // Read back rather than carried down, so a subagent is drafted by
             // what its own record says -- the same rule `draft_plan` follows.
             let found = snapshot(&id).map(|p| (p.workspace.clone(), p.choice()));
@@ -1031,8 +962,7 @@ pub(crate) async fn spawn_subagents(
                     workspace,
                     city_name,
                     choice,
-                    root,
-                    MOST_SUBAGENT_ROUNDS,
+                    cap,
                 )
                 .await
             })
@@ -1066,17 +996,21 @@ pub(crate) async fn spawn_subagents(
 /// to one in its own reply -- and what lets the user find the same conversation
 /// the parent read.
 #[cfg(feature = "ssr")]
-fn report(subagents: &[(PlanId, String)], outcomes: &[Option<Plan>]) -> String {
+fn report(
+    subagents: &[(PlanId, crate::tools::spawn_agents::Errand)],
+    outcomes: &[Option<Plan>],
+) -> String {
     use kingdom_core::Speaker;
 
     let mut out = String::new();
-    for (i, (id, task)) in subagents.iter().enumerate() {
+    for (i, (id, errand)) in subagents.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
         out.push_str(&format!(
-            "--- errand {} ({id}) ---\nTask: {task}\n\n",
-            i + 1
+            "--- errand {} ({id}) ---\nTask: {}\n\n",
+            i + 1,
+            errand.task
         ));
 
         // Read from the record rather than from the returned plan: a subagent

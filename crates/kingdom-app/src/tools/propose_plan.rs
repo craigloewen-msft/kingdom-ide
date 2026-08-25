@@ -61,14 +61,21 @@ impl Tool for ProposePlan {
     }
 
     fn description(&self) -> String {
-        "Put a plan to the user for review. This is how you get the ability to change \
-         anything: you have no hands until he accepts one.\n\n\
+        // Phoenix's `propose_task` framing, with its file-path mechanics
+        // dropped: Phoenix has the model write a task file and point the tool
+        // at it, while a Kingdom plan is already a document and takes its title
+        // and body inline. What carries over is the part that matters -- that
+        // this is the gateway between the two modes, and that it must be the
+        // only call in the response.
+        "Propose a plan for the user to review and approve. This is the gateway from Propose \
+         mode (read-only) to Work mode (write access): you have no ability to change \
+         anything until they accept one.\n\n\
          Say what you would change, in which files, and why. Say what you checked and \
          what you are still assuming. Be concrete -- name real paths you have actually \
          looked at, not plausible ones.\n\n\
-         Your turn ends here. They will either start you on this plan or send back \
-         changes, and either way you will be asked again with their answer in front of \
-         you."
+         The user will review and can approve, request revisions, or reject. Your turn ends \
+         here either way, and you will be asked again with their answer in front of you. \
+         This must be the only tool call in the response."
             .to_string()
     }
 

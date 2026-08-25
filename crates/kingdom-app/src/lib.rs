@@ -23,6 +23,8 @@ pub mod scan;
 #[cfg(feature = "ssr")]
 pub mod screencast;
 #[cfg(feature = "ssr")]
+pub mod skills;
+#[cfg(feature = "ssr")]
 pub mod store;
 #[cfg(feature = "ssr")]
 pub mod tools;

@@ -49,9 +49,7 @@ impl Tool for ReadFile {
     }
 
     fn description(&self) -> String {
-        "Read a file's contents. Returns numbered lines. Use `offset` and \
-         `limit` to read a window of a large file rather than re-reading the \
-         whole of it."
+        "Read a file's contents. Returns numbered lines. Use offset and limit for large files."
             .to_string()
     }
 

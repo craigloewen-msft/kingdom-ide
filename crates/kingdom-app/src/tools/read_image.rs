@@ -70,9 +70,10 @@ impl Tool for ReadImage {
     }
 
     fn description(&self) -> String {
-        "Look at an image file: a screenshot, a diagram, a mockup. Required \
-         after browser_take_screenshot, which saves a PNG but cannot show it to \
-         you. Reads PNG, JPEG, GIF and WebP."
+        "View an image file (PNG, JPG, etc.). Required after browser_take_screenshot to see \
+         the screenshot content — the screenshot is saved to a temp file but not \
+         automatically visible until you call read_image on that path. Also use for any \
+         image file in the working directory."
             .into()
     }
 

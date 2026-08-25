@@ -425,6 +425,23 @@ fn request_body(
                 }
             }))
             .collect::<Vec<_>>());
+
+        // The model chooses whether to call anything. Sent explicitly rather
+        // than left to the gateway's default so the wire shape is the same
+        // whichever backend answers.
+        body["tool_choice"] = json!("auto");
+
+        // Lets one reply ask for several tools at once. Kingdom runs them
+        // serially either way, so this buys no parallelism -- what it saves is
+        // (N-1) round trips whenever the model recognises a batch as
+        // independent ("read these four files"). That matters more here than it
+        // might elsewhere: every round resends the entire transcript, so a
+        // round avoided is the whole conversation not re-sent.
+        //
+        // Both halves are already handled downstream: `Acts::calls` is a list,
+        // and `messages` regroups a batch back into the single assistant
+        // message it arrived as -- see `ToolCall::batch`.
+        body["parallel_tool_calls"] = json!(true);
     }
     body
 }
@@ -1098,6 +1115,37 @@ mod tests {
             2,
             "unbatched calls must not be grouped on the strength of both being None"
         );
+    }
+
+    /// Tool settings ride with the tools, and are absent without them.
+    ///
+    /// The presence half is what stops the model taking one round per call: it
+    /// may batch independent reads into a single reply, and every round it
+    /// skips is one whole transcript not resent.
+    ///
+    /// The absence half is not tidiness. A gateway handed `tool_choice` with no
+    /// `tools` to choose from rejects the request, which would take out exactly
+    /// the models that cannot call tools -- the ones already getting a
+    /// prose-only turn.
+    #[test]
+    fn tool_settings_are_sent_with_tools_and_never_without() {
+        let spec = ToolSpec {
+            name: "read_file".to_string(),
+            description: "reads a file".to_string(),
+            schema: json!({"type": "object"}),
+        };
+
+        let armed = request_body("m", None, Vec::new(), &[spec], None);
+        assert_eq!(armed["tool_choice"], "auto");
+        assert_eq!(armed["parallel_tool_calls"], true);
+
+        let unarmed = request_body("m", None, Vec::new(), &[], None);
+        assert!(unarmed.get("tools").is_none());
+        assert!(
+            unarmed.get("tool_choice").is_none(),
+            "a gateway given tool_choice with no tools rejects the request"
+        );
+        assert!(unarmed.get("parallel_tool_calls").is_none());
     }
 
     /// The budget must come from the model, not from a constant.

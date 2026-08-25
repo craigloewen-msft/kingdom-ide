@@ -84,12 +84,11 @@ impl Tool for AskUserQuestion {
     }
 
     fn description(&self) -> String {
-        "Ask the user a question and wait for their answer. Use when there are \
-         several reasonable ways to proceed and which one is right depends on \
-         what they want, not on anything you could discover by looking. Do not \
-         use it for things you can find out yourself -- read the code instead. \
-         The work pauses until they reply, so ask everything you need in one \
-         call rather than several."
+        "Ask the user clarifying questions when you need input to proceed. \
+         Use when there are multiple valid approaches and user preference \
+         matters. Provide 1-4 questions with 2-4 options each. Users can \
+         also type custom answers. This must be the only tool call in \
+         the response (do not combine with other tool calls)."
             .to_string()
     }
 

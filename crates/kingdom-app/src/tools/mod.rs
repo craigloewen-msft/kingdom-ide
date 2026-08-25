@@ -29,6 +29,7 @@ pub mod propose_plan;
 pub mod read_file;
 pub mod read_image;
 pub mod search;
+pub mod skill;
 pub mod spawn_agents;
 pub mod think;
 pub mod tmux;
@@ -74,11 +75,18 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     // sits with the other reads rather than with the browser tools it was built
     // to pair with -- a subagent surveying a project may legitimately want to
     // look at a screenshot somebody already took; it still cannot take one.
+    //
+    // `skill` is here for the same reason: invoking one returns instructions and
+    // changes nothing. Whether those instructions can then be *carried out* is
+    // decided by the rest of this list, which is the boundary that already
+    // exists -- so a proposing plan may read a deployment skill and still not be
+    // able to deploy.
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(think::Think),
         Box::new(read_file::ReadFile),
         Box::new(search::Search),
         Box::new(read_image::ReadImage),
+        Box::new(skill::Skill),
     ];
 
     // Acting on the world without changing the project: Propose and above.

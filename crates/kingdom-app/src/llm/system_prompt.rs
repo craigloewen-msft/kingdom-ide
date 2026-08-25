@@ -7,12 +7,28 @@
 //! content, not transport, so it is assembled once here and every provider
 //! renders the same words.
 //!
-//! It tells the model where it is standing, what it may touch, and what the
-//! project expects of it.
+//! # Ported from Phoenix IDE
+//!
+//! The wording and the block order are Phoenix's
+//! (`crates/phoenix-ide/src/system_prompt.rs` and the `PhoenixNative` arms of
+//! `crates/phoenix-core/src/llm_language.rs`), because its agents demonstrably
+//! work better. Kingdom previously carried several blocks of its own -- advice
+//! on ending a turn, on the cost of re-reading, on writing tests, on
+//! screenshots -- each written in response to a real failure. They are gone.
+//! Phoenix sends none of them and does better regardless, and a prompt that is
+//! *nearly* Phoenix's plus four house paragraphs is neither.
+//!
+//! **The order carries the reasoning.** The remit lands last, after project
+//! guidance, because it is what the model must be holding when it starts work.
+//! Kingdom used to put it near the top and then bury it under up to 64 KB of
+//! `AGENTS.md`. Adding anything after the mode block puts that same distance
+//! back.
 
 use super::CityBrief;
+use crate::skills::Skill;
 use kingdom_core::Permissions;
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 /// Guidance filenames, in order of preference within one directory.
@@ -32,17 +48,24 @@ const MOST_GUIDANCE: usize = 64 * 1024;
 /// as its own API prefers -- and so the pieces stay testable individually.
 #[derive(Debug, Clone, Default)]
 pub struct SystemPrompt {
-    /// The project. Kept as the brief rather than as rendered prose because a
-    /// provider occasionally needs a *fact* from it -- the city's name for a
-    /// fallback headline -- and re-parsing it out of the rendering would be
-    /// absurd.
+    /// The project.
+    ///
+    /// **Not rendered into the prompt.** Phoenix sends no project summary and no
+    /// file listing; Kingdom used to spend up to 40 paths on every round of
+    /// every turn, which is a large recurring bill for something `search` answers
+    /// on demand and more accurately. It is still carried because a provider
+    /// occasionally needs a *fact* from it -- the city's name for a fallback
+    /// headline -- and the offline mock builds its replies out of it.
     pub city: CityBrief,
     /// Where the model is standing, and whether it is isolated.
     pub workspace: String,
-    /// What it may do, and what it must not.
+    /// What it may do, and what it must not. Rendered last. See the module note.
     pub permissions: String,
     /// Every `AGENTS.md` found on the way up from the workspace.
     pub guidance: Vec<Guidance>,
+    /// Every skill the workspace can reach, as a catalogue of names and
+    /// descriptions. Bodies are fetched on demand by the `skill` tool.
+    pub skills: Vec<Skill>,
 }
 
 /// One guidance file, and where it came from.
@@ -54,54 +77,33 @@ pub struct Guidance {
 
 impl SystemPrompt {
     /// Assembles the prompt for one turn.
-    ///
-    /// `root` bounds the walk: guidance is gathered from the workspace up to
-    /// the kingdom root and no further, so a stray `AGENTS.md` in the user's
-    /// home directory cannot silently instruct every plan in every project.
     pub fn assemble(
         city: &CityBrief,
         workspace: &kingdom_core::Workspace,
         permissions: Permissions,
         approved: bool,
-        root: &Path,
     ) -> Self {
+        let root = Path::new(&workspace.path);
         Self {
             city: city.clone(),
             workspace: workspace_block(workspace),
             permissions: permissions_block(permissions, approved),
-            guidance: discover_guidance(Path::new(&workspace.path), root),
+            guidance: discover_guidance(root),
+            skills: crate::skills::discover(root),
         }
     }
 
     /// The prompt as one system prompt.
     ///
-    /// Order carries reasoning and is not arbitrary. The remit comes first,
-    /// then the standing advice -- how to look things up, and how to think
-    /// about tests -- and project guidance comes last: a project's own rules
-    /// are the most specific thing here, so they arrive last and win any
-    /// disagreement with the generic advice above them.
+    /// Phoenix's order exactly. The remit is last: it is the most specific
+    /// instruction here and the one the model must still be holding when it
+    /// picks its first tool. Anything appended after it re-creates the problem
+    /// this order was adopted to fix.
     pub fn render(&self) -> String {
-        let mut out = String::from(PREAMBLE);
+        let mut out = String::from(BASE);
 
         out.push_str("\n\n");
-        out.push_str(&self.city.render());
-
-        if !self.workspace.is_empty() {
-            out.push('\n');
-            out.push_str(&self.workspace);
-        }
-
-        out.push('\n');
-        out.push_str(&self.permissions);
-
-        out.push_str("\n\n");
-        out.push_str(ENDING_A_TURN);
-
-        out.push_str("\n\n");
-        out.push_str(ECONOMY);
-
-        out.push_str("\n\n");
-        out.push_str(TESTING);
+        out.push_str(MERMAID);
 
         if !self.guidance.is_empty() {
             out.push_str("\n\n<project_guidance>\n");
@@ -109,7 +111,7 @@ impl SystemPrompt {
                 if i > 0 {
                     out.push_str("\n---\n\n");
                 }
-                out.push_str(&format!("<!-- From: {} -->\n", file.path));
+                let _ = writeln!(out, "<!-- From: {} -->", file.path);
                 out.push_str(&file.body);
                 if !file.body.ends_with('\n') {
                     out.push('\n');
@@ -118,84 +120,74 @@ impl SystemPrompt {
             out.push_str("</project_guidance>");
         }
 
-        out.push_str("\n\n");
-        out.push_str(MERMAID);
+        if !self.skills.is_empty() {
+            out.push_str("\n\n<available_skills>\n");
+            out.push_str(SKILLS_PREAMBLE);
+            for skill in &self.skills {
+                let _ = writeln!(
+                    out,
+                    "\n- **{}** — {} {}",
+                    skill.name,
+                    skill.description,
+                    skill.display_location()
+                );
+            }
+            out.push_str("</available_skills>");
+        }
+
+        if !self.workspace.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&self.workspace);
+        }
 
         out.push_str("\n\n");
-        out.push_str(SCREENSHOTS);
+        out.push_str(self.permissions.trim_start());
 
         out
     }
 }
 
-const PREAMBLE: &str = "You are a senior software engineer helping with one project.";
+/// Phoenix's base prompt, verbatim.
+const BASE: &str = "You are a helpful AI assistant with access to tools for executing code, \
+     editing files, and searching codebases. Use tools when appropriate to accomplish tasks.\n\n\
+     Be concise in your responses. When using tools, explain what you're doing briefly.";
 
-/// What ending a turn means, told plainly because the model cannot infer it.
+/// Phoenix's mermaid hint, with its one Kingdom noun swapped.
 ///
-/// Kingdom ends the turn the moment a reply arrives carrying prose and no tool
-/// call: [`crate::llm::Reply::Spoke`] settles the plan and hands control back to
-/// the user. Models are trained to *narrate* before acting -- "I'll start by
-/// reading the router" -- and in most harnesses that preamble is followed by
-/// tool calls in the same reply. Here it silently finishes the job.
-///
-/// Three real plans died on their opening sentence this way, each parked in
-/// front of the user having done nothing, and the only way on was for them to
-/// type "Keep going". The model was behaving reasonably; nothing had told it
-/// what prose costs. So this says it.
-const ENDING_A_TURN: &str = "How a turn ends. Replying with prose and no tool call ends your turn \
-     and hands control back to the user -- so narration is not free here. If you mean to keep \
-     working, put the tool call in the same reply as the words; do not announce what you are \
-     about to do and stop. Speak only when you have something for them: an answer, a question \
-     you cannot proceed without, or a report that the work is done.";
+/// The quoting advice pre-empts the most common render failure: unquoted
+/// parentheses in a node label, which Mermaid reads as shape syntax.
+const MERMAID: &str = "Kingdom renders Markdown mermaid code fences as diagrams; prefer them \
+     for diagrams when useful. When a node label contains parentheses, quotes, or other \
+     punctuation, wrap the label text in double quotes (e.g. `A[\"svc.Get(\\\"x\\\")\"]`) so \
+     Mermaid does not read the punctuation as diagram syntax.";
 
-/// Counters the model's "more tests is better" prior with a cost model.
+/// Phoenix's catalogue preamble, verbatim.
 ///
-/// Placed before `<project_guidance>` so a project with stricter rules of its
-/// own overrides this rather than arguing with it.
-const TESTING: &str = "Tests are a liability as well as an asset: every test costs review \
-     time, runtime, and future maintenance. Add the minimal set that earns its place -- a \
-     test for behaviour a caller depends on, a regression test pinning a bug you just fixed, \
-     or a non-obvious edge case. Do not add tests that restate the implementation, assert \
-     trivial accessors, or duplicate coverage that already exists. If a change needs no new \
-     test, say so instead of inventing one.";
-
-const MERMAID: &str = "The conversation view renders Markdown mermaid code fences as diagrams; prefer \
-     them when a diagram would help. Wrap a node label in double quotes when it contains \
-     parentheses or quotes, so Mermaid does not read the punctuation as syntax.";
-
-/// That a screenshot is *seen*, not merely saved.
-///
-/// Without this a model reasonably narrates "I've saved a screenshot you can
-/// open at /home/...", which was true when only `read_image` could look at one
-/// and is now simply false -- the chamber renders it under the deed that took
-/// it (`components/conversation.rs`, served by `artifact.rs`). Left unsaid, the
-/// model also keeps calling `read_image` purely to describe a page back to a
-/// user who is already looking at it, which spends a turn and a slice of
-/// context on prose nobody needs.
-const SCREENSHOTS: &str = "On screenshots. browser_take_screenshot is shown to the user in the \
-     conversation, under the call that took it -- so it is evidence you can point at rather than \
-     a file they have to go and open. Do not tell them where it was saved. Call read_image on it \
-     only when *you* need to see the page to decide what to do next; if the picture is for them, \
-     taking it is enough.";
+/// The last sentence is load-bearing: without it a model reads the paths in the
+/// catalogue as an invitation to `cat` the file, which bypasses the argument
+/// substitution and the base-directory line that make a skill usable.
+const SKILLS_PREAMBLE: &str = "The following skills are available. Invoke them with the \
+     `skill` tool (e.g. skill(skill_name=\"build\")). Do not cat SKILL.md files directly.\n";
 
 /// Where the model is standing.
 ///
-/// The model is not told this anywhere else. `begin_plan` records the workspace
-/// as a [`kingdom_core::NoteKind::Workspace`] note, and `Plan::turns`
-/// deliberately withholds notes from the model -- so without this block an
-/// agent working in a worktree at `<city>/.kingdom/<uuid>` has no idea it is
-/// not in the project's own checkout, and will happily describe its work as
-/// having changed the user's files.
+/// Kingdom's counterpart to the worktree grounding note Phoenix emits from
+/// `repo_root_from_phoenix_worktree`. The model is not told this anywhere else:
+/// `begin_plan` records the workspace as a [`kingdom_core::NoteKind::Workspace`]
+/// note, and `Plan::turns` deliberately withholds notes from the model -- so
+/// without this an agent in a worktree at `<city>/.kingdom/<uuid>` has no idea
+/// it is not in the project's own checkout, and will describe its work as having
+/// changed the user's files.
 fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
     let mut out = format!("Working directory: {}\n", workspace.path);
     match (&workspace.branch, workspace.is_isolated()) {
         (Some(branch), true) => out.push_str(&format!(
             "This is an isolated worktree on branch {branch}. It is yours: the user's own \
-             checkout is elsewhere and is not affected by what you do here.\n"
+             checkout is elsewhere and is not affected by what you do here."
         )),
         _ => out.push_str(
             "This is the project directory itself, with no isolation. Anything you change \
-             here changes the user's own checkout.\n",
+             here changes the user's own checkout.",
         ),
     }
     out
@@ -204,71 +196,64 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
 /// What the model may do, in the words it is told it.
 fn permissions_block(permissions: Permissions, approved: bool) -> String {
     match permissions {
-        Permissions::ReadOnly => READ_ONLY.to_string(),
+        Permissions::ReadOnly => SUBAGENT.to_string(),
         Permissions::Propose => PROPOSE.to_string(),
         Permissions::Full if approved => format!("{FULL}\n\n{CARRYING_OUT}"),
         Permissions::Full => FULL.to_string(),
     }
 }
 
-const READ_ONLY: &str = "\nYou were sent to answer one question and report back. You can read \
-     and search, and that is all: you cannot run commands, edit files, or spawn subagents of \
-     your own. Answer what you were asked, concretely, citing the files you looked at.";
-
-/// The proposing block: the heart of this whole arrangement.
+/// Phoenix's `sub_agent_suffix`, adapted.
 ///
-/// Note what it says about `bash`, and why it says it. The tool list is not a
-/// sandbox -- `Sandbox::root` is explicit that the path boundary does not
-/// contain a shell -- so a command that names an absolute path can write
-/// anywhere. Withholding `bash` would buy a guarantee Kingdom cannot keep while
-/// costing the model `git log`, `cargo tree`, and running the failing test it
-/// is proposing to fix. So the limit is stated as what it is: a boundary the
-/// model is trusted to keep. Pretending otherwise would be worse, because the
-/// user would believe in a fence that is not there.
-const PROPOSE: &str = "\nYou are drawing up a plan, not carrying it out. Read, search, and \
-     run whatever you need in order to understand the work -- but change nothing. No edits \
-     to files, no commits, nothing written into the project.\n\n\
-     You have `bash`, and it is not fenced in: a command that names an absolute path can \
-     write anywhere on this machine. That boundary is one you are trusted to keep, not one \
-     Kingdom enforces. Use it to look -- `git log`, `cargo tree`, running the tests to see \
-     which fail -- and never to change.\n\n\
-     When you know what should be done, call `propose_plan` with a title and the plan \
-     itself. Say what you would change, in which files, and why; say what you checked and \
-     what you are assuming. The user reads it and either starts you on it or sends back \
-     changes, and you cannot edit anything until they do.\n\n\
-     If they ask you to change something directly, explain that you must put a plan to them \
-     first.";
+/// Phoenix's names `submit_result` and `submit_error`, which Kingdom's subagents
+/// do not have -- a subagent here simply answers, and the reply *is* the report.
+/// The rest of the framing is Phoenix's: one job, then stop.
+const SUBAGENT: &str = "You are a sub-agent working on a specific task. You can read and \
+     search; you cannot run commands, edit files, or spawn sub-agents of your own. When you \
+     have your answer, reply with it: your reply is the report, and the conversation ends \
+     there. Answer concretely, citing the files you looked at.";
 
-/// Counters the model's instinct to keep looking.
+/// Phoenix's `mode_explore`, adapted to Kingdom's proposal flow.
 ///
-/// Every tool result is resent on every round, so an investigation's cost grows
-/// with the square of its length -- and a model that has lost the thread of its
-/// own plan re-reads what it has already read rather than concluding. The
-/// observed failure was 24 rounds of reading with no proposal at the end of it.
+/// Phoenix's block describes drafting a task *file* under a tasks directory and
+/// pointing `propose_task` at it, with `patch` allowlisted to that directory.
+/// Kingdom has none of that -- `propose_plan` takes a title and a body inline,
+/// and a proposing plan holds no `patch` at all -- so that paragraph is dropped
+/// rather than mapped onto something it does not describe.
 ///
-/// Applies to any remit that can look around, which is every one of them.
-const ECONOMY: &str = "On looking things up. Everything you read stays in front of you for the \
-     rest of the conversation, so reading is not free and re-reading is pure cost. Prefer \
-     `search` to find where something lives, then `read_file` to read just that part -- a \
-     whole large file is rarely what you need. Before opening something, check whether it is \
-     already above: if you have read it, you still have it.\n\n\
-     Stop when you know enough to be useful, not when you have run out of things to look at. \
-     A plan that names what it did not check is worth more than one that checked everything \
-     and arrived too late. State your assumptions instead of eliminating them.";
+/// What is kept is Phoenix's shape: what you may do, what you may not, how to
+/// put work to the user, and what happens on approval.
+const PROPOSE: &str = "You are in Propose mode. This conversation is read-only for source \
+     files -- you can read files, search, run commands, analyse and discuss the codebase, but \
+     you cannot modify code.\n\n\
+     `bash` is available and is not sandboxed: a command naming an absolute path can write \
+     anywhere on this machine. That boundary is one you are trusted to keep, not one Kingdom \
+     enforces. Use it to look -- `git log`, `cargo tree`, running the tests to see which fail \
+     -- and never to change.\n\n\
+     Workflow for proposing work: call `propose_plan` with a title and the plan itself. Say \
+     what you would change, in which files, and why; say what you checked and what you are \
+     assuming. The user will review and can approve, request revisions, or reject. On \
+     approval you gain full write access and carry the plan out in this same conversation.\n\n\
+     If the user asks you to change code directly, explain that you must propose a plan first.";
 
-const FULL: &str = "\nYou have tools and are working in the directory above. Use them: read \
-     before you change, and check your work by running it rather than by assuming. The file \
-     list is a starting point, not the whole project. When you have finished, reply with \
-     what you did and what it means for the reader -- concisely, and without repeating the \
-     output of commands they can already see.";
+/// Phoenix's `mode_work`, adapted.
+///
+/// Phoenix's names a branch, a base branch and a worktree path, and ends with
+/// the taskmd status rename. Kingdom states the worktree in its own block above
+/// and has no task files, so what carries over is the working instruction and
+/// the handoff.
+const FULL: &str = "You are in Work mode: you have full tool access and are working in the \
+     directory above. Use the tools -- read before you change, and check your work by running \
+     it rather than by assuming. When the work is complete, let the user know what you did and \
+     what it means for them, concisely and without repeating output they can already see.";
 
 const CARRYING_OUT: &str = "You are carrying out a plan the user approved. It is above, in \
      the record of your own `propose_plan` call. Follow it; if you find it was wrong, say so \
      rather than quietly doing something else.";
 
-/// Every guidance file from `from` up to and including `root`, root-most first.
+/// Every guidance file from `from` up to the filesystem root, root-most first.
 ///
-/// Two things are load-bearing.
+/// Matches Phoenix's `discover_guidance_files`. Two things are load-bearing.
 ///
 /// **The order.** Root guidance first, project guidance last, so the more
 /// specific file is the one the model reads most recently.
@@ -278,25 +263,15 @@ const CARRYING_OUT: &str = "You are carrying out a plan the user approved. It is
 /// twice -- once in the worktree and once in the city. Deduping on *content*
 /// rather than path is what catches that, because the two copies have different
 /// paths and identical bodies.
-fn discover_guidance(from: &Path, root: &Path) -> Vec<Guidance> {
+fn discover_guidance(from: &Path) -> Vec<Guidance> {
     let mut found: Vec<Guidance> = Vec::new();
     let mut here = Some(from.to_path_buf());
-    let stop = root.parent().map(Path::to_path_buf);
 
     while let Some(dir) = here {
         if let Some(file) = read_guidance(&dir) {
             found.push(file);
         }
-        // The kingdom root is included, then the walk stops: guidance above it
-        // belongs to the user's machine, not to this kingdom.
-        if dir == root {
-            break;
-        }
-        let up = dir.parent().map(Path::to_path_buf);
-        if up == stop {
-            break;
-        }
-        here = up;
+        here = dir.parent().map(Path::to_path_buf);
     }
 
     // Gathered leaf-first; the model should read root-first.
@@ -361,6 +336,16 @@ mod tests {
         dir
     }
 
+    fn prompt_with(permissions: Permissions, approved: bool) -> SystemPrompt {
+        SystemPrompt {
+            city: CityBrief::default(),
+            workspace: String::new(),
+            permissions: permissions_block(permissions, approved),
+            guidance: Vec::new(),
+            skills: Vec::new(),
+        }
+    }
+
     /// The case the content-hash dedup exists for, and the reason it is a
     /// *content* hash rather than a path one.
     ///
@@ -369,79 +354,139 @@ mod tests {
     /// different paths on the way up. Sending it twice would waste tokens on
     /// every round of every turn and, worse, would read to the model as
     /// emphasis.
-    ///
-    /// The ordering half matters for the same reason the walk is bounded: the
-    /// kingdom's rules are general, the city's are specific, and the specific
-    /// one has to arrive last to win.
     #[test]
     fn a_worktrees_copy_of_its_citys_guidance_is_not_sent_twice() {
         let root = temp();
         let city = root.join("city");
         let worktree = city.join(".kingdom/abc123");
 
-        write(&root, "AGENTS.md", "kingdom rules");
         write(&city, "AGENTS.md", "city rules");
         // The worktree is a checkout: the same file, byte for byte.
         write(&worktree, "AGENTS.md", "city rules");
 
-        let found = discover_guidance(&worktree, &root);
+        let found = discover_guidance(&worktree);
 
+        let ours: Vec<&Guidance> = found.iter().filter(|g| g.body == "city rules").collect();
         assert_eq!(
-            found.len(),
-            2,
+            ours.len(),
+            1,
             "the city's guidance appears at two paths and must be sent once: {found:#?}"
         );
-        assert_eq!(found[0].body, "kingdom rules", "root guidance reads first");
-        assert_eq!(found[1].body, "city rules", "the specific file reads last");
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Every remit that can act must be told that prose ends its turn.
-    ///
-    /// This is the whole fix for the failure that killed three real plans on
-    /// their opening sentence: the model wrote "I'll start by reading the
-    /// router", Kingdom read a tool-call-less reply as the finished answer and
-    /// parked the plan in front of the user having done nothing. The model was
-    /// not being lazy -- nothing had told it what prose costs here.
-    ///
-    /// Pinned across remits because the trap is not specific to one: a proposing
-    /// plan and a working plan both end their turn the same way.
+    /// The more specific file reads last, so it wins any disagreement.
     #[test]
-    fn every_acting_remit_is_told_that_prose_ends_the_turn() {
-        for permissions in [Permissions::Propose, Permissions::Full] {
-            let prompt = SystemPrompt {
-                city: CityBrief::default(),
-                workspace: String::new(),
-                permissions: permissions_block(permissions, false),
-                guidance: Vec::new(),
-            };
+    fn specific_guidance_reads_after_general() {
+        let root = temp();
+        let city = root.join("city");
+
+        write(&root, "AGENTS.md", "kingdom rules");
+        write(&city, "AGENTS.md", "city rules");
+
+        let found = discover_guidance(&city);
+        let bodies: Vec<&str> = found.iter().map(|g| g.body.as_str()).collect();
+
+        let kingdom = bodies.iter().position(|b| *b == "kingdom rules");
+        let city_at = bodies.iter().position(|b| *b == "city rules");
+        assert!(kingdom.is_some() && city_at.is_some(), "{found:#?}");
+        assert!(kingdom < city_at, "specific guidance must read last: {found:#?}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The remit is the last thing in the prompt, under every permission level.
+    ///
+    /// This is the whole reason the order was taken from Phoenix. Kingdom used
+    /// to render the remit early and then follow it with up to 64 KB of
+    /// `AGENTS.md`, leaving the instruction that says what the model may do
+    /// right now as the least recent thing it read. Anything appended after the
+    /// remit puts that distance back, so this pins the ordering rather than the
+    /// wording.
+    #[test]
+    fn the_remit_is_the_last_thing_the_model_reads() {
+        for permissions in [Permissions::ReadOnly, Permissions::Propose, Permissions::Full] {
+            let mut prompt = prompt_with(permissions, false);
+            prompt.guidance = vec![Guidance {
+                path: "/somewhere/AGENTS.md".to_string(),
+                body: "project rules".to_string(),
+            }];
+            prompt.skills = vec![Skill {
+                name: "build".to_string(),
+                description: "builds it".to_string(),
+                argument_hint: None,
+                path: PathBuf::from("/somewhere/.claude/skills/build/SKILL.md"),
+            }];
+            prompt.workspace = workspace_block(&kingdom_core::Workspace::in_place("/somewhere"));
+
+            let rendered = prompt.render();
 
             assert!(
-                prompt.render().contains(ENDING_A_TURN),
-                "{permissions:?} must be told that a reply without a tool call hands \
-                 the plan back to the user"
+                rendered.trim_end().ends_with(prompt.permissions.trim()),
+                "{permissions:?}: the remit must be last, not followed by guidance or \
+                 skills. Ends with: {:?}",
+                &rendered[rendered.len().saturating_sub(200)..]
             );
         }
     }
 
-    /// The walk stops at the kingdom root. Guidance above it belongs to the
-    /// user's machine rather than to this kingdom, and picking it up would let
-    /// a file they forgot about instruct every plan in every project.
+    /// Phoenix sends no project summary and no file listing, and neither does
+    /// Kingdom now. The brief is still *carried* -- the mock reads it -- so this
+    /// pins that carrying it does not put it back in the prompt.
     #[test]
-    fn guidance_above_the_kingdom_is_left_alone() {
-        let outer = temp();
-        let root = outer.join("kingdom");
-        let city = root.join("city");
+    fn the_project_file_listing_is_not_sent() {
+        let mut prompt = prompt_with(Permissions::Full, false);
+        prompt.city = CityBrief {
+            name: "somewhere".to_string(),
+            path: "/somewhere".to_string(),
+            stack: "Rust".to_string(),
+            file_count: 3,
+            has_git: true,
+            dirty_files: 0,
+            notable_paths: vec!["src/secret_plans.rs".to_string()],
+        };
 
-        write(&outer, "AGENTS.md", "somebody else's rules");
-        write(&city, "AGENTS.md", "city rules");
+        let rendered = prompt.render();
 
-        let found = discover_guidance(&city, &root);
+        assert!(
+            !rendered.contains("src/secret_plans.rs"),
+            "the file listing costs tokens on every round and `search` answers \
+             better: {rendered}"
+        );
+        assert!(!rendered.contains("Some files in this project"));
+    }
 
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].body, "city rules");
+    /// The catalogue is a heading plus one line per skill, and is absent
+    /// entirely when a project has none -- an empty `<available_skills>` block
+    /// would be a claim that there are skills.
+    #[test]
+    fn skills_are_catalogued_only_when_there_are_some() {
+        let bare = prompt_with(Permissions::Full, false);
+        assert!(!bare.render().contains("<available_skills>"));
 
-        std::fs::remove_dir_all(&outer).ok();
+        let mut with_skill = prompt_with(Permissions::Full, false);
+        with_skill.skills = vec![Skill {
+            name: "build".to_string(),
+            description: "Builds the thing.".to_string(),
+            argument_hint: None,
+            path: PathBuf::from("/p/.claude/skills/build/SKILL.md"),
+        }];
+
+        let rendered = with_skill.render();
+        assert!(rendered.contains("<available_skills>"));
+        assert!(rendered.contains("**build**"));
+        assert!(rendered.contains("Builds the thing."));
+        // The body is fetched on demand; only metadata belongs here.
+        assert!(rendered.contains("Do not cat SKILL.md files directly"));
+    }
+
+    /// An approved plan is told it is carrying out a plan; an unapproved one is
+    /// not. Getting this backwards would have a fresh plan hunting the
+    /// conversation for a proposal that was never made.
+    #[test]
+    fn only_an_approved_plan_is_told_to_follow_one() {
+        assert!(permissions_block(Permissions::Full, true).contains("plan the user approved"));
+        assert!(!permissions_block(Permissions::Full, false).contains("plan the user approved"));
     }
 }

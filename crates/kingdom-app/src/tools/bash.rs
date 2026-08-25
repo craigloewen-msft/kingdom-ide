@@ -88,17 +88,69 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> String {
-        "Run a shell command in the workspace and return its combined output \
-         and exit code.\n\n\
-         `wait_seconds` is how long this call blocks -- it is NOT a kill \
-         timeout. If the command finishes first you get everything. If it does \
-         not, the command keeps running and you get a handle to come back to \
-         with op=peek, op=wait or op=kill. Nothing is ever killed because time \
-         passed.\n\n\
-         op=run    start a command (needs `cmd`)\n\
-         op=peek   read a handle's output so far (needs `handle`)\n\
-         op=wait   block up to `wait_seconds` for a handle to finish\n\
-         op=kill   signal a handle and everything it started (TERM, or KILL)"
+        // Phoenix's wording and, more importantly, Phoenix's *framing*. The
+        // negations (`does NOT detach`, `NOT a kill timeout`, `NEVER killed`,
+        // `EXACTLY ONCE`) are load-bearing: an affirmative description gets
+        // pattern-matched into the POSIX `fork(2)` / `timeout(1)` / `kill PID`
+        // priors a model already holds, and only an explicit negation displaces
+        // them.
+        //
+        // Trimmed where Kingdom genuinely differs, because a description is a
+        // promise about behaviour rather than prose to match: Phoenix's `label`
+        // and `since` arguments and its JSON `status` fields have no
+        // counterpart here, and naming them would earn a stream of calls that
+        // get refused. This tool reports in prose and takes the arguments its
+        // schema lists.
+        r#"Executes shell commands via bash -c, capturing combined stdout/stderr.
+Bash state changes (working dir, variables, aliases) don't persist between calls.
+
+Common patterns:
+  Run synchronously:    op="run", cmd="...", wait_seconds=30
+  Start in background:  op="run", cmd="...", wait_seconds=0   (returns a handle immediately)
+  Inspect progress:     op="peek", handle="..."
+  Wait for completion:  op="wait", handle="...", wait_seconds=60
+
+Pick one operation via `op`:
+
+  op="run"    Run a shell command. If it finishes within wait_seconds you
+              get its full output and exit code — same as if you'd run it
+              in a shell. If wait_seconds elapses first, the process keeps
+              running and you receive a handle to peek/wait/kill later.
+              op="run" does NOT detach: the handle is minted only when
+              wait_seconds elapses; for short commands you'll just get the
+              result. wait_seconds is NOT a process kill timeout: the
+              process is NEVER killed when wait_seconds elapses; it keeps
+              running and you receive a handle. Use op="kill" to actually
+              terminate. Set wait_seconds=0 to start a process and get its
+              handle back immediately without waiting for output.
+
+  op="peek"   Return the output so far for a handle. Required: handle=<id>.
+              Use lines=N for the last N lines. The reply says whether the
+              command is still running or how it ended, and notes when
+              earlier output was dropped because it outgrew the buffer.
+
+  op="wait"   Block up to wait_seconds for an existing handle to exit.
+              Required: handle=<id>. If wait_seconds elapses first, the
+              SAME handle keeps running and is reported as still running —
+              never accumulate handles by repeated waits. If the handle
+              has already finished, returns immediately.
+
+  op="kill"   Terminate a handle and everything it started. Required:
+              handle=<id>. Default signal is TERM; signal=KILL for
+              immediate. The signal is sent EXACTLY ONCE; this tool does
+              not auto-escalate TERM to KILL after a grace period. If your
+              TERM doesn't take effect, call op="kill" again with
+              signal=KILL. (Don't retry with signal=TERM: the kernel
+              doesn't queue duplicate signals; the original TERM is still
+              pending and a second TERM is a no-op.)
+
+If a handle is not found, it was never started or it finished long enough
+ago to have been forgotten; handles do NOT survive a server restart. For
+processes that need to survive a restart, that need a TTY, that need
+stdin, or that are interactive REPLs, use the tmux tool instead.
+
+IMPORTANT: Keep commands concise. For complex scripts, write them to a
+file first and execute the file."#
             .to_string()
     }
 

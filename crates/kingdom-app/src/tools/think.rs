@@ -23,10 +23,10 @@ impl Tool for Think {
     }
 
     fn description(&self) -> String {
-        "Reason through a problem before acting: plan an approach, weigh \
-         trade-offs, or work out what went wrong. Writes nothing and changes \
-         nothing. Use it before a complex change rather than working it out by \
-         running commands."
+        "Reason through a problem before acting: plan multi-step approaches, debug unexpected \
+         results, or evaluate trade-offs. Write freely — no side effects, not shown to the \
+         user. Use before complex commands, before editing files that need careful planning, \
+         or when reconciling conflicting information."
             .to_string()
     }
 

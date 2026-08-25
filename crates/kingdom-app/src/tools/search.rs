@@ -83,10 +83,9 @@ impl Tool for Search {
     }
 
     fn description(&self) -> String {
-        "Search the workspace for a regular expression. Returns matching lines \
-         with their file and line number, skipping anything gitignored. Search \
-         the whole workspace by default; pass `path` only to narrow to a \
-         subdirectory or a single file."
+        "Search for a text pattern across files in the project. Returns matching lines with \
+         file paths and line numbers. Default scope is the conversation's working directory; \
+         only pass `path` to narrow further or to search outside the project (rare)."
             .to_string()
     }
 

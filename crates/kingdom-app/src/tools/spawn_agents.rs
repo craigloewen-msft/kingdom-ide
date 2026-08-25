@@ -29,9 +29,17 @@ use serde_json::{json, Value};
 
 /// The most subagents one call may send.
 ///
-/// Lower than Phoenix's ten: these are concurrent calls to one gateway, and six
-/// is already the point where rate limits start answering instead of models.
-const MOST_SUBAGENTS: usize = 6;
+/// Phoenix's number. Kingdom previously capped at six, justified by concurrent
+/// load on one gateway -- a guess rather than an observation, and Phoenix runs
+/// ten against the same gateways without trouble.
+const MOST_SUBAGENTS: usize = 10;
+
+/// How many rounds a subagent gets when it is not told otherwise.
+///
+/// Phoenix's explore default. This bounds the same failure the parent's cap
+/// does -- an agent burning a paid model quietly -- multiplied by however many
+/// subagents are in flight.
+pub const DEFAULT_SUBAGENT_ROUNDS: usize = 20;
 
 /// How long the whole call may take before it reports what it has.
 ///
@@ -43,6 +51,16 @@ const MOST_SUBAGENTS: usize = 6;
 /// partial answer it can act on beats a turn that never returns.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// One subagent to send: what to ask it, and how long to let it look.
+#[derive(Debug, Clone)]
+pub struct Errand {
+    /// The question, in full. The subagent sees this and the project, not the
+    /// parent's conversation.
+    pub task: String,
+    /// Rounds this one may take before it is stopped.
+    pub max_turns: usize,
+}
+
 pub struct SpawnAgents;
 
 #[async_trait::async_trait]
@@ -52,14 +70,17 @@ impl Tool for SpawnAgents {
     }
 
     fn description(&self) -> String {
-        "Send sub-agents to investigate things in parallel and report back. Each \
-         one works in this same directory, reads with its own tools, and returns \
-         a written answer. They are read-only: they cannot edit files or run \
-         commands, so use them to find things out and then act on what they \
-         find yourself. Good for questions that are independent of each other -- \
-         surveying unfamiliar code from several angles at once, or checking \
-         several places something might be handled. Do not use one for work you \
-         could do with a single read or search."
+        // Phoenix's wording, minus the two clauses that would be false here:
+        // Kingdom has no named personas (`agent_type`) and no work-mode
+        // subagents, so a subagent is always the read-only kind. Saying so
+        // plainly is what stops the model delegating work it will get back
+        // undone.
+        "Spawn sub-agents to execute tasks in parallel. Each sub-agent runs independently \
+         and returns a result. Sub-agents are read-only: they can read, search and look at \
+         images, but cannot run commands or edit files -- so use them to find things out, \
+         then act on what they find yourself. Use for: multiple perspectives on code review, \
+         exploring unfamiliar parts of a codebase, parallel research or analysis tasks, or \
+         divide-and-conquer problem solving."
             .to_string()
     }
 
@@ -72,19 +93,28 @@ impl Tool for SpawnAgents {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": MOST_SUBAGENTS,
-                    "description": "What to send each sub-agent to find out. They \
-                                    run at the same time and cannot see each \
-                                    other, so each task must stand alone.",
+                    "description": format!(
+                        "List of tasks to execute in parallel (max {MOST_SUBAGENTS}). They \
+                         run at the same time and cannot see each other, so each task must \
+                         stand alone."
+                    ),
                     "items": {
                         "type": "object",
                         "required": ["task"],
                         "properties": {
                             "task": {
                                 "type": "string",
-                                "description": "The question to answer, in full. The \
-                                                sub-agent sees only this and the \
-                                                project -- not your conversation \
-                                                -- so include everything it needs."
+                                "description": "Task description for the sub-agent. It sees \
+                                                only this and the project -- not your \
+                                                conversation -- so include everything it needs."
+                            },
+                            "max_turns": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": format!(
+                                    "Maximum LLM turns before forced completion. Defaults to \
+                                     {DEFAULT_SUBAGENT_ROUNDS}."
+                                )
                             }
                         }
                     }
@@ -94,15 +124,28 @@ impl Tool for SpawnAgents {
     }
 
     async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
-        let tasks: Vec<String> = input
+        let tasks: Vec<Errand> = input
             .get("tasks")
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
-            .filter_map(|t| t.get("task").and_then(Value::as_str))
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
+            .filter_map(|t| {
+                let task = t.get("task").and_then(Value::as_str)?.trim();
+                if task.is_empty() {
+                    return None;
+                }
+                Some(Errand {
+                    task: task.to_string(),
+                    // A cap of zero would be a subagent that cannot take a
+                    // single turn, which is a request to do nothing rather than
+                    // an instruction worth honouring.
+                    max_turns: t
+                        .get("max_turns")
+                        .and_then(Value::as_u64)
+                        .map_or(DEFAULT_SUBAGENT_ROUNDS, |n| (n as usize).max(1)),
+                })
+            })
             .take(MOST_SUBAGENTS)
             .collect();
 
@@ -136,12 +179,3 @@ impl Tool for SpawnAgents {
 /// The permissions a subagent works under. Named here rather than at the call
 /// site so the reason travels with the tool that depends on it.
 pub const SUBAGENT_PERMISSIONS: Permissions = Permissions::ReadOnly;
-
-/// How many rounds a subagent may take before it is stopped.
-///
-/// Lower than a user-opened plan's cap, because a subagent has three read-only
-/// tools and a single question: a survey that has not answered in this many
-/// rounds is looping, not thinking. It bounds the same failure the parent's cap
-/// does -- an agent burning a paid model quietly -- multiplied by however many
-/// subagents are in flight.
-pub const MOST_SUBAGENT_ROUNDS: usize = 12;
