@@ -565,6 +565,18 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
         }
     }
 
+    // Last, because it is about the turn being asked for rather than about
+    // anything in the history above it.
+    //
+    // `system` rather than `user`: the King did not say this, and a synthetic
+    // user message is the hazard `Turn`'s doc argues against -- the model would
+    // answer it as though he had. `shown` reaches for `user` only because
+    // chat-completions has no image part on any other role; there is no such
+    // constraint on plain text, so the honest role is available and taken.
+    if let Some(aside) = &brief.aside {
+        out.push(json!({ "role": "system", "content": aside }));
+    }
+
     out
 }
 
@@ -702,19 +714,48 @@ impl Model for CopilotModel {
             .map_err(|e| ModelError::Transport(e.to_string()))?;
 
         if !status.is_success() {
-            // Surface the provider's own words. An opaque "request failed" here
-            // is the fastest way to waste the user's afternoon.
-            return Err(ModelError::Refused(format!(
+            let detail = format!(
                 "Copilot returned {}: {}",
                 status.as_u16(),
                 provider_message(&body).unwrap_or_else(|| truncate(&body, 300))
-            )));
+            );
+
+            // A gateway having a bad minute is not the model refusing the work,
+            // and the difference decides whether the turn is retried. 5xx (and
+            // 429, which is the gateway asking us to come back) are worth asking
+            // again; a 400 or a 401 would fail identically however many times we
+            // tried, and retrying one only spends the user's afternoon.
+            if status.is_server_error() || status.as_u16() == 429 {
+                return Err(ModelError::Transport(detail));
+            }
+
+            // Surface the provider's own words. An opaque "request failed" here
+            // is the fastest way to waste the user's afternoon.
+            return Err(ModelError::Refused(detail));
         }
 
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| ModelError::Transport(format!("unreadable response: {e}")))?;
 
-        answer_from(&parsed)
+        answer_from(&parsed).inspect_err(|e| {
+            // The one place the raw reply is still in hand.
+            //
+            // This module logged nothing at all, and an empty reply cost a full
+            // investigation that ended in "unknowable": `answer_from` parses the
+            // body, returns an error naming a symptom, and the bytes that caused
+            // it are dropped on the way out. The next one should cost a log line.
+            //
+            // Bounded, and on stderr beside the server's other diagnostics --
+            // this crate has no `tracing`, and adding one for a single line is
+            // not the trade. It carries conversation content, so it is bounded
+            // hard and written only on the error path: a reply that parsed
+            // needs no forensics.
+            eprintln!(
+                "  A reply from {} could not be read ({e}). The body began: {}",
+                self.id,
+                truncate(&body, 600)
+            );
+        })
     }
 
     fn id(&self) -> &str {
@@ -780,12 +821,16 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
     // Gathered across choices in the order the gateway listed them, so a split
     // reply is put back together as the single decision it was.
     let mut calls = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     let mut narrations: Vec<String> = Vec::new();
     let mut reasoning: Option<kingdom_core::Reasoning> = None;
     for choice in &choices {
         let message = &choice["message"];
-        calls.extend(parse_acts(&message["tool_calls"]));
-        let said = message["content"].as_str().unwrap_or_default().trim();
+        let asked = parse_acts(&message["tool_calls"]);
+        calls.extend(asked.calls);
+        unreadable.extend(asked.unreadable);
+        let said = content_text(&message["content"]);
+        let said = said.trim();
         if !said.is_empty() {
             narrations.push(said.to_string());
         }
@@ -831,12 +876,36 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
     }
 
     if text.is_empty() {
+        // Before anything is called empty: a reply whose tool calls we could
+        // not read is not a silent model, it is a model we failed to hear.
+        //
+        // `parse_acts` drops a call with no id or no name, because neither can
+        // be answered -- but dropping it *silently* turned "the court asked for
+        // three things in a shape we do not parse" into "the court said
+        // nothing", which sends the reader looking for a model problem when the
+        // problem is ours. The module's promise that a malformed call is still
+        // reported was kept for bad arguments and broken for a bad envelope.
+        if !unreadable.is_empty() {
+            return Err(ModelError::Refused(format!(
+                "Copilot asked for {} tool {} in a shape Kingdom could not read ({}). \
+                 This is a bug in Kingdom or a change in the gateway's wire format, \
+                 not something the model did wrong.",
+                unreadable.len(),
+                if unreadable.len() == 1 { "call" } else { "calls" },
+                unreadable.join(", "),
+            )));
+        }
+
         // An empty reply after a `length` finish is not the model declining to
         // answer -- it is the model spending its entire output budget on
         // reasoning and having nothing left to say with. Those are different
         // problems with different fixes, and reporting both as "empty reply"
         // sends the reader looking in the wrong place. This is how the 4096
         // token budget hid for as long as it did.
+        //
+        // Deliberately *not* transient: the next attempt would spend the same
+        // budget the same way. The fix is a larger cap or a lower effort, and
+        // retrying would only bill the user twice more for the same silence.
         if finish == "length" {
             return Err(ModelError::Refused(
                 "The model used its entire output budget before answering. This usually \
@@ -844,7 +913,21 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
                     .to_string(),
             ));
         }
-        return Err(ModelError::Refused(
+
+        // A reply carrying thinking and nothing else. Named apart from silence
+        // of unknown cause because it is a *known* thing a reasoning model
+        // does -- it spent the round thinking and never got to the answer --
+        // and because the reader who sees this message knows to look at the
+        // effort setting rather than at the gateway.
+        if reasoning.as_ref().is_some_and(|r| !r.is_empty()) {
+            return Err(ModelError::Empty(
+                "The model thought but did not answer: the reply carried its reasoning \
+                 and nothing else."
+                    .to_string(),
+            ));
+        }
+
+        return Err(ModelError::Empty(
             "Copilot returned an empty reply.".to_string(),
         ));
     }
@@ -917,6 +1000,20 @@ fn parse_reasoning(message: &Value) -> Option<kingdom_core::Reasoning> {
     (!reasoning.is_empty()).then_some(reasoning)
 }
 
+/// What one choice's `tool_calls` array yielded: the calls, and the ones we
+/// could not make sense of.
+///
+/// The second half exists because dropping a call silently is how a reply that
+/// asked for three things came to be reported as an empty one. See
+/// [`parse_acts`].
+struct ParsedActs {
+    calls: Vec<Act>,
+    /// One short description per call that could not be read, for the error.
+    /// Never the arguments -- those are conversation content, and this string
+    /// ends up in the user's face and in a log line.
+    unreadable: Vec<String>,
+}
+
 /// Reads the `tool_calls` array into calls we can actually make.
 ///
 /// `arguments` arrives as a *string* of JSON rather than JSON, and a model is
@@ -925,25 +1022,77 @@ fn parse_reasoning(message: &Value) -> Option<kingdom_core::Reasoning> {
 /// nothing recorded -- the raw text is kept as a JSON string. The tool then
 /// refuses it for the honest reason, and the model is told what it actually
 /// sent.
-fn parse_acts(tool_calls: &Value) -> Vec<Act> {
-    tool_calls
+///
+/// A call with no `id` or no `name` is a different matter: neither can be
+/// answered, because the result would have nothing to quote back and nothing to
+/// run. Those are still dropped -- but they are now *counted*, and
+/// [`answer_from`] reports them rather than going on to call the reply empty.
+/// Inventing an id would be worse: it would have Kingdom answer a call the
+/// gateway never made.
+fn parse_acts(tool_calls: &Value) -> ParsedActs {
+    let mut calls = Vec::new();
+    let mut unreadable = Vec::new();
+
+    for call in tool_calls
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
-        .filter_map(|call| {
-            let name = call["function"]["name"].as_str()?;
-            let raw = call["function"]["arguments"].as_str().unwrap_or("{}");
-            Some(Act {
-                // A call with no id cannot be answered -- the result would have
-                // nothing to quote back -- so it is skipped rather than given
-                // one we invented.
-                id: call["id"].as_str()?.to_string(),
-                tool: name.to_string(),
-                input: serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
-            })
+    {
+        let name = call["function"]["name"].as_str();
+        let id = call["id"].as_str();
+
+        let (Some(name), Some(id)) = (name, id) else {
+            // Named by whichever half we did get, so the report says something
+            // more useful than "one call". Never the arguments.
+            unreadable.push(match (name, id) {
+                (Some(name), None) => format!("{name} with no id"),
+                (None, Some(id)) => format!("{id} with no name"),
+                _ => "one with neither id nor name".to_string(),
+            });
+            continue;
+        };
+
+        let raw = call["function"]["arguments"].as_str().unwrap_or("{}");
+        calls.push(Act {
+            id: id.to_string(),
+            tool: name.to_string(),
+            input: serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+        });
+    }
+
+    ParsedActs { calls, unreadable }
+}
+
+/// A message's `content`, however this gateway chose to spell it.
+///
+/// A plain string is the common shape. An **array of parts** is the other one,
+/// and reading only the first is why a reply with prose in it could be recorded
+/// as silence: `as_str()` on an array yields `None`, which became `""`, which
+/// became "Copilot returned an empty reply".
+///
+/// Two spellings for the same reason [`parse_reasoning`] reads several and
+/// `can_see` reads three -- the catalogue is not ours, and the cost of guessing
+/// one and being wrong is a turn that looks like it never happened. Parts of a
+/// type we do not know are skipped rather than stringified: an image part
+/// rendered as its own JSON would put a base64 blob in the transcript.
+fn content_text(content: &Value) -> String {
+    if let Some(said) = content.as_str() {
+        return said.to_string();
+    }
+
+    let Some(parts) = content.as_array() else {
+        return String::new();
+    };
+
+    parts
+        .iter()
+        .filter_map(|part| {
+            // A bare string in the array, or the tagged `{"type":"text"}` part.
+            part.as_str().or_else(|| part["text"].as_str())
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// The system prompt: whatever `system_prompt.rs` assembled.
@@ -1019,6 +1168,7 @@ mod tests {
                 ..Default::default()
             },
             turns: vec![Turn::Tool(tool_call)],
+            aside: None,
             tools: Vec::new(),
         }
     }
@@ -1055,6 +1205,7 @@ mod tests {
         Brief {
             system_prompt: crate::llm::SystemPrompt::default(),
             turns,
+            aside: None,
             tools: Vec::new(),
         }
     }
@@ -1596,6 +1747,160 @@ mod tests {
             reasoning.opaque.get("signature"),
             Some(&serde_json::json!("sig-abc")),
             "the blob authenticating it rides on a later one and must be merged in"
+        );
+    }
+
+    /// A reply whose tool calls could not be read is not an empty reply.
+    ///
+    /// The silent-drop path, and the reason this bug was undiagnosable. A call
+    /// with no id cannot be answered, so it is dropped -- but dropping it
+    /// quietly turned "the court asked for two things in a shape we do not
+    /// parse" into "the court said nothing", which sends the reader hunting for
+    /// a model problem when the problem is ours. The two have entirely
+    /// different fixes and must never share a message.
+    #[test]
+    fn calls_that_could_not_be_read_are_reported_rather_than_called_empty() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        // No id: unanswerable, and previously invisible.
+                        {"type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                        // No name: nothing to run.
+                        {"id": "toolu_2", "type": "function", "function": {"arguments": "{}"}}
+                    ]
+                }
+            }]
+        });
+
+        let err = answer_from(&response).expect_err("unreadable calls are an error");
+        let said = err.to_string();
+
+        assert!(
+            !said.contains("empty reply"),
+            "a reply that asked for two tools must not be reported as silence: {said}"
+        );
+        assert!(
+            said.contains("bash with no id") && said.contains("toolu_2 with no name"),
+            "the report must name what could not be read, or it cannot be fixed: {said}"
+        );
+        assert!(
+            !err.is_transient(),
+            "an envelope Kingdom cannot parse will not parse on the second attempt either"
+        );
+    }
+
+    /// `content` as an array of parts is prose, not silence.
+    ///
+    /// `as_str()` on an array yields `None`, which became `""`, which became
+    /// "Copilot returned an empty reply" -- a reply with words in it recorded
+    /// as a model that said nothing. The catalogue is not ours and has moved
+    /// this sort of shape before, which is why `can_see` reads three spellings
+    /// and `parse_reasoning` several.
+    #[test]
+    fn content_sent_as_parts_is_read_as_what_the_model_said() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "The parser is the culprit. "},
+                        {"type": "text", "text": "Here is what I would change."}
+                    ]
+                }
+            }]
+        });
+
+        let answer = answer_from(&response).expect("a reply with prose in it is not an error");
+        let Reply::Spoke(draft) = answer.reply else {
+            panic!("the court spoke");
+        };
+        assert_eq!(
+            draft.body, "The parser is the culprit. Here is what I would change.",
+            "every part is the one thing the model said, joined in order"
+        );
+    }
+
+    /// A genuinely empty reply is transient, and a considered refusal is not.
+    ///
+    /// The distinction the whole retry rests on. An empty reply is the absence
+    /// of an answer and the same request usually produces one on the next
+    /// attempt; a refusal *is* an answer, and asking again only spends the
+    /// user's quota to be told the same thing.
+    #[test]
+    fn silence_is_worth_asking_again_and_a_refusal_is_not() {
+        let empty = answer_from(&serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        }))
+        .expect_err("an empty reply is an error");
+        assert!(
+            empty.is_transient(),
+            "a plan must not die on the first empty reply: {empty}"
+        );
+
+        // The output budget is spent the same way on every attempt, so this one
+        // is deliberately *not* worth retrying even though it is also empty.
+        let truncated = answer_from(&serde_json::json!({
+            "choices": [{"finish_reason": "length", "message": {"content": ""}}]
+        }))
+        .expect_err("a truncated reply is an error");
+        assert!(
+            !truncated.is_transient(),
+            "retrying spends the same budget on the same silence: {truncated}"
+        );
+    }
+
+    /// A reply carrying only thinking says so, rather than reporting silence.
+    ///
+    /// A real thing a reasoning model does at high effort, and the reader who
+    /// sees this message knows to look at the effort setting rather than at the
+    /// gateway. It is still transient: the next sample usually gets past the
+    /// thinking to an answer.
+    #[test]
+    fn a_reply_that_only_thought_is_named_as_that() {
+        let err = answer_from(&serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "", "reasoning_content": "Let me weigh the options."}
+            }]
+        }))
+        .expect_err("thinking with no answer cannot continue the turn");
+
+        let said = err.to_string();
+        assert!(
+            said.contains("thought but did not answer"),
+            "a model that spent the round thinking is a different diagnosis: {said}"
+        );
+        assert!(err.is_transient());
+    }
+
+    /// The aside goes on the wire and is never attributed to a participant.
+    ///
+    /// It is how the King's own retry differs from the request that came back
+    /// empty. `system` rather than `user` is the load-bearing half: a synthetic
+    /// user message is the hazard `Turn`'s doc argues against, and the model
+    /// would answer it as though he had spoken.
+    #[test]
+    fn an_aside_is_sent_as_kingdom_speaking_not_as_the_king() {
+        let mut brief = brief_with(vec![Turn::Message(kingdom_core::Message::new(
+            Speaker::User,
+            "Keep going",
+        ))]);
+        brief.aside = Some("Your previous reply arrived with no content.".to_string());
+
+        let messages = messages(&brief, false);
+        let last = messages.last().expect("the aside is sent last");
+
+        assert_eq!(last["role"], "system", "the King did not say this: {last:#?}");
+        assert_eq!(last["content"], "Your previous reply arrived with no content.");
+        assert_eq!(
+            messages.iter().filter(|m| m["role"] == "user").count(),
+            1,
+            "the aside must not add a turn the user never took"
         );
     }
 

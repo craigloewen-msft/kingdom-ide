@@ -44,6 +44,23 @@ pub struct Brief {
     /// answering its own tool result, with the user's last words several turns
     /// back.
     pub turns: Vec<Turn>,
+    /// Something Kingdom needs the model to know that nobody said.
+    ///
+    /// Today there is one user: the turn before this one came back empty, and
+    /// this is how the next turn differs from it. Without it a plan whose reply
+    /// arrived empty is stuck -- `settle` records a [`kingdom_core::Note`],
+    /// notes are deliberately excluded from [`Turn`], and so the King saying
+    /// "keep going" rebuilds a byte-identical request and receives a
+    /// byte-identical silence. That loop is what made the failure feel
+    /// unfixable.
+    ///
+    /// **Not a [`Turn`], and that is the point.** A provider renders this on
+    /// the wire only; it is never a `Turn::Message`, never in the transcript,
+    /// and never attributed to the user or the court. Kingdom's plumbing must
+    /// not be replayed to a model as something a participant said -- the doc on
+    /// [`kingdom_core::Turn`] is where that rule is argued, and the images in
+    /// `copilot::shown` are the other place it is kept this same way.
+    pub aside: Option<String>,
     /// What the model may do with its own hands this turn.
     ///
     /// Empty means a prose-only turn, which is what a model that cannot call
@@ -296,6 +313,40 @@ pub enum ModelError {
     Transport(String),
     #[error("{0}")]
     Refused(String),
+    /// The provider answered, and the answer had nothing in it.
+    ///
+    /// Its own variant rather than a [`ModelError::Refused`] because the two
+    /// want opposite handling. A refusal is an answer -- the model considered
+    /// the request and declined -- and asking again changes nothing. An empty
+    /// reply is the *absence* of an answer, and the same request resampled
+    /// usually produces one, which is what makes it worth retrying.
+    ///
+    /// This distinction is the whole reason a plan no longer dies on the first
+    /// one. See [`ModelError::is_transient`].
+    #[error("{0}")]
+    Empty(String),
+}
+
+impl ModelError {
+    /// Whether asking again, unchanged, could plausibly answer differently.
+    ///
+    /// The question a retry has to be able to answer honestly, and the reason
+    /// it is asked of the error rather than of the message: a plan used to die
+    /// on the first empty reply because every failure looked alike to the loop,
+    /// and "Copilot returned an empty reply" was as fatal as a missing
+    /// credential.
+    ///
+    /// Deliberately narrow. A credential that is missing stays missing, a
+    /// refusal is a considered answer, and both would only waste the user's
+    /// time -- and his quota -- three times over. What is left is the reply that
+    /// never arrived and the gateway that was briefly unwell, which are exactly
+    /// the failures a second attempt fixes.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ModelError::Empty(_) | ModelError::Transport(_) => true,
+            ModelError::Credential(_) | ModelError::Refused(_) => false,
+        }
+    }
 }
 
 #[async_trait::async_trait]

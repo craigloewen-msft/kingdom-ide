@@ -270,6 +270,39 @@ every update, so a revision after approval replaces the standing proposal and
 the agreed terms are gone. The entry is write-once for that reason, and a failed
 write costs the entry rather than the approval.
 
+**An empty reply is not the end of a plan.** A reply that arrives with no
+content and no tool calls is the *absence* of an answer rather than an answer,
+and `converse` now asks again -- up to `MOST_ATTEMPTS`, with a short backoff,
+raced against the halt like every other long await. Only failures a retry could
+fix are retried: `ModelError::is_transient` says yes to `Empty` and `Transport`
+(which a 5xx and a 429 now route to) and no to a refusal or a missing
+credential, because those are considered answers and asking again only spends
+the user's quota to be told the same thing.
+
+The half that made this feel unfixable was never the first failure, though — it
+was that **nothing the King did could change the request.** `settle` records a
+failure as a `Note`, notes are deliberately excluded from `Plan::turns`, so
+"keep going" rebuilt a byte-identical payload and got a byte-identical silence.
+A real plan died this way three times in ninety seconds with its window 10%
+full. So an empty reply is noted as `NoteKind::EmptyReply` specifically, and
+`follows_silence` finds it — walking *past* the King's own words, because
+`receive` appends them after the note and reading `transcript.last()` would
+answer `false` on precisely the turn this exists to catch. A test pins that
+sequence. What it yields is `Brief::aside`: rendered on the wire as a `system`
+message, never as a `Turn`, never in the transcript, and never in the King's
+voice — the same containment `copilot::shown` gives an image, for the same
+reason.
+
+**And the reply is no longer called empty when it was not.** Three paths funnelled
+into that one message: tool calls dropped silently for want of an `id` or a
+`name` (now counted and reported, naming what was unreadable), `content` sent as
+an array of parts rather than a string (now read — `as_str()` on an array is
+`None`, which became `""`, which became "empty reply"), and a reply carrying only
+reasoning (now named as that, since the fix is the effort setting rather than the
+gateway). `answer_from` also logs a bounded slice of the body on any parse
+failure: this module logged *nothing*, which is why diagnosing the original bug
+ended in "unknowable".
+
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
 deliberately *out* of the transcript and therefore out of `Plan::turns`) and
