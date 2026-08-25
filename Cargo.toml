@@ -19,6 +19,22 @@ serde = { version = "1", features = ["derive"] }
 # domain stores them as JSON. Pure Rust and no I/O, so it still compiles to wasm.
 serde_json = "1"
 
+# Markdown, parsed. `kingdom-app` renders it and `kingdom-core` splits a
+# proposal into the blocks the King annotates -- both from this one parser, so
+# "where does a block begin" is answered identically on each side of the wire.
+# `default-features = false` keeps it pure Rust with no I/O, which is what lets
+# it into a crate that must compile to wasm.
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+
+# Diffing. `tools/patch.rs` reports where an edit landed with it; `kingdom-core`
+# reads one proposal against the one it revises; and `kingdom-app::review` pairs
+# a changed file into side-by-side rows. Its only use of `std::time` is a
+# deadline path documented as a no-op on wasm, so it crosses to the browser.
+#
+# `inline` is what emphasises the words *within* a changed line rather than only
+# the line -- the review drawer's diff panel is built on it.
+similar = { version = "2", features = ["inline"] }
+
 # Release profile for the wasm bundle: optimise for size, since this ships to a browser.
 [profile.wasm-release]
 inherits = "release"

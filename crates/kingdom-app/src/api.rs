@@ -941,6 +941,86 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
 #[cfg(feature = "ssr")]
 const MOST_ROUNDS: usize = 500;
 
+/// How many times one round may ask the model before the turn gives up.
+///
+/// Three: the first ask and two more. Unrelated to [`MOST_ROUNDS`], which
+/// bounds how many times the court may *act*; this bounds how many times a
+/// single round may be *asked for*, and only when the failure is one that
+/// asking again could fix.
+///
+/// Small on purpose. A retry is a bet that the failure was a hiccup, and the
+/// bet is paid for in the user's time and quota. Two extra attempts clear the
+/// empty reply that killed a real plan three times in ninety seconds; a
+/// dozen would turn a genuinely broken conversation into a long silence with a
+/// large bill at the end of it.
+#[cfg(feature = "ssr")]
+const MOST_ATTEMPTS: usize = 3;
+
+/// What the model is told when the turn before this one came back empty.
+///
+/// Sent as [`crate::llm::Brief::aside`] -- on the wire only, never as a `Turn`
+/// and never in the transcript. It exists because the King's own retry would
+/// otherwise resend the exact request that produced the silence: the note the
+/// failure left is deliberately not part of what a model is handed, so without
+/// this the second attempt is indistinguishable from the first.
+///
+/// Written as a fact rather than an instruction. "Your last reply was empty" is
+/// something the model can act on; "do not send an empty reply" is a rule it
+/// cannot check it is following, and prompts that scold tend to be argued with
+/// rather than obeyed -- the mermaid hint in `system_prompt` is Kingdom's
+/// standing lesson on that.
+#[cfg(feature = "ssr")]
+const AFTER_SILENCE: &str = "Your previous reply arrived with no content and no tool calls, so \
+     the turn could not continue. Nothing you intended to say or do was recorded. Pick up where \
+     the conversation above leaves off: if you were mid-investigation, carry on with the next \
+     tool call; if you had reached an answer, give it.";
+
+/// Whether a failed attempt is worth making again.
+///
+/// Split from [`converse`] so the judgement can be tested without a kingdom, a
+/// credential or a running turn -- the same reason [`halted`] is split from
+/// [`stopped`], and the same reason it matters: this decides whether a plan
+/// recovers from a hiccup or dies on it, and that is not something a reader can
+/// check by eye from inside a `tokio::select!`.
+#[cfg(feature = "ssr")]
+fn worth_asking_again(error: &crate::llm::ModelError, attempt: usize) -> bool {
+    error.is_transient() && attempt < MOST_ATTEMPTS - 1
+}
+
+/// Whether the last thing the *court* did was return an empty reply.
+///
+/// Not simply the last entry, and that distinction is the whole correctness of
+/// this function. The sequence a real plan produces is `Note(EmptyReply)` and
+/// then `Message(User, "Keep going")` -- [`receive`] appends the King's words
+/// after the note -- so testing `transcript.last()` would answer `false` on
+/// exactly the turn this exists to catch, and the whole fix would silently
+/// never fire.
+///
+/// So the walk skips what the King said, because prodding a silent court does
+/// not change what it last did, and stops at the first thing anything *else*
+/// put in the log. A deed or a reply means the model has answered since, and
+/// the silence is history rather than the current state -- telling it about
+/// that now would report old news as current.
+///
+/// This is what makes the King's own retry differ from the request that failed.
+/// Everything else about the two is identical -- the note the failure left is
+/// deliberately not a [`kingdom_core::Turn`] -- so without this, "keep going"
+/// resends the exact bytes that came back empty and receives the same silence.
+#[cfg(feature = "ssr")]
+fn follows_silence(plan: &Plan) -> bool {
+    use kingdom_core::{Entry, NoteKind, Speaker};
+
+    plan.transcript.iter().rev().find_map(|entry| match entry {
+        // The King prodding a court that said nothing. Skipped: it is what
+        // *caused* this turn, not evidence the silence was answered.
+        Entry::Message(m) if m.speaker == Speaker::User => None,
+        Entry::Note(n) if n.kind == NoteKind::EmptyReply => Some(true),
+        // Anything else -- a deed, a reply, another sort of notice -- means the
+        // conversation moved on.
+        _ => Some(false),
+    }) == Some(true)
+}
+
 /// Draws up the plan: marks it busy, then takes turns with the model until it
 /// has something to say.
 ///
@@ -1135,7 +1215,7 @@ pub(crate) async fn converse(
         // the remit, and the very next pass must offer the tools that grant
         // implies. Resolving the tools once before the loop -- as this used to
         // -- would have left an approved plan holding a counsellor's toolbox.
-        let (turns, permissions, approved) = {
+        let (turns, permissions, approved, after_silence) = {
             let mut kingdom = lock()?;
 
             // The user spoke while the court was working. Their words join the
@@ -1163,6 +1243,7 @@ pub(crate) async fn converse(
                 plan.turns().collect::<Vec<_>>(),
                 plan.permissions,
                 plan.approved_proposal().is_some(),
+                follows_silence(plan),
             )
         };
 
@@ -1191,6 +1272,9 @@ pub(crate) async fn converse(
                 &kingdom_root,
             ),
             turns,
+            // Set only on the first round of a turn that follows a silent one.
+            // Later rounds have a reply behind them and nothing to explain.
+            aside: (after_silence && round == 0).then(|| AFTER_SILENCE.to_string()),
             tools: tools.clone(),
         };
 
@@ -1202,13 +1286,48 @@ pub(crate) async fn converse(
         //
         // `biased` so a halt already signalled wins deterministically instead
         // of by coin-flip against a reply that happened to arrive at once.
-        let answer = tokio::select! {
-            biased;
-            _ = halt.halted() => return stopped(plan_id, None),
-            answer = model.take_turn(&brief) => match answer {
-                Ok(answer) => answer,
+        //
+        // Retried, but only for the failures a retry can actually fix. A reply
+        // that came back empty is the absence of an answer rather than an
+        // answer, and the same request resampled usually produces one -- yet
+        // this loop used to return `settle(Err)` on the first of them, killing
+        // a plan mid-investigation over a hiccup. A refusal or a missing
+        // credential still fails at once: see `ModelError::is_transient`.
+        let mut attempt = 0;
+        let answer = loop {
+            let outcome = tokio::select! {
+                biased;
+                _ = halt.halted() => return stopped(plan_id, None),
+                answer = model.take_turn(&brief) => answer,
+            };
+
+            match outcome {
+                Ok(answer) => break answer,
+                Err(e) if worth_asking_again(&e, attempt) => {
+                    attempt += 1;
+                    // Told while it is happening rather than afterwards: a turn
+                    // that goes quiet for a few seconds should say why, and this
+                    // is the same channel `working_on` uses for everything else.
+                    {
+                        let mut kingdom = lock()?;
+                        update(&mut kingdom, &plan_id, |p| {
+                            p.working_on =
+                                Some(format!("Asking again ({attempt} of {})", MOST_ATTEMPTS - 1));
+                        });
+                    }
+                    // Raced against the halt for the same reason as the call
+                    // itself: a Stop during the pause must not wait it out.
+                    tokio::select! {
+                        biased;
+                        _ = halt.halted() => return stopped(plan_id, None),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(
+                            500 * (1 << (attempt - 1)),
+                        )) => {}
+                    }
+                }
+                // Out of attempts, or never worth one.
                 Err(e) => return settle(plan_id, Err(e)),
-            },
+            }
         };
 
         // Recorded before the reply is acted on, and in a write of its own.
@@ -1714,7 +1833,16 @@ fn settle(
                 let message = e.to_string();
                 plan.status = PlanStatus::Failed;
                 plan.summary = message.clone();
-                plan.note(NoteKind::Failed, message);
+                // An empty reply is noted as *itself*, so the next turn can
+                // find it and tell the model what happened. Every other failure
+                // stays a plain `Failed`: a refusal or a missing credential is
+                // not something to explain to a model, it is something for the
+                // King to fix. See `AFTER_SILENCE` and `converse`.
+                let kind = match &e {
+                    crate::llm::ModelError::Empty(_) => NoteKind::EmptyReply,
+                    _ => NoteKind::Failed,
+                };
+                plan.note(kind, message);
             }
         }
     });
@@ -1928,6 +2056,173 @@ pub async fn set_aside_plan(plan: String) -> Result<Plan, ServerFnError> {
 
     update(&mut kingdom, &plan_id, |p| p.set_aside_proposal())
         .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+}
+
+/// The King writes a note against one part of a standing proposal.
+///
+/// Recorded on the plan rather than held in the browser, for the same reason
+/// queued words are: a note typed and not sent must survive a reload, a second
+/// tab and a server restart. Going through [`update`] means it is stored and
+/// pushed to every watcher like everything else, so a note written in one tab
+/// appears in the other.
+///
+/// `line` and `quote` both travel because they answer different questions.
+/// The line puts the note beside the right block while the card is open; the
+/// quote is what is actually put to the model, and is the half that cannot go
+/// stale -- see [`kingdom_core::ProposalNote::quote`].
+#[server(AnnotateProposal, "/api")]
+pub async fn annotate_proposal(
+    plan: String,
+    line: usize,
+    quote: String,
+    note: String,
+) -> Result<Plan, ServerFnError> {
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Err(ServerFnError::new("An empty note says nothing."));
+    }
+
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut written = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        written = p.annotate(line, quote, note).is_some();
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    // The ordinary case here is a stale tab: the King left a card open and the
+    // court revised it, or he accepted it elsewhere. Reported rather than
+    // swallowed, because a note silently written onto nothing is one he
+    // believes he has made.
+    if !written {
+        return Err(ServerFnError::new(
+            "There is no plan awaiting your word here. The court may have revised it \
+             since, or it may have been accepted in another tab.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The King takes a note back before the court has been told of it.
+///
+/// The sibling of [`unqueue`], and it loses its race the same way: the notes may
+/// have been sent while this request was in flight. Saying so is the point --
+/// quietly doing nothing would leave him believing he had withdrawn something
+/// the model is already reading.
+#[server(WithdrawNote, "/api")]
+pub async fn withdraw_note(plan: String, note_id: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut withdrawn = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        withdrawn = p.unannotate(&note_id);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    if !withdrawn {
+        return Err(ServerFnError::new(
+            "That note is no longer in the margin. It may already have gone to the court.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The King sends his notes back for the court to answer.
+///
+/// The margin is drained and becomes **one** [`kingdom_core::Speaker::User`]
+/// turn, composed by [`notes_as_decree`]. One turn rather than one per note
+/// because they are one review: a model handed five separate messages would
+/// answer the last one and treat the rest as history.
+///
+/// Deliberately reuses [`receive`], which [`say`] already splits out for exactly
+/// this decision -- whether a turn is genuinely running, and therefore whether
+/// the words go into the queue or straight into the log. Notes sent into a
+/// working chamber are heard at the next round boundary with no second branch to
+/// get wrong, and a plan wedged by a stale busy mark is un-wedged by the same
+/// line that un-wedges it for `say`.
+///
+/// Makes no model call. The chamber dispatches `draft_plan` afterwards, exactly
+/// as it does after speaking -- which is what lets the King watch his notes land
+/// rather than watching a spinner for the first round of work.
+#[server(SendNotes, "/api")]
+pub async fn send_notes(plan: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    // Checked before the drain rather than inside it, so a refusal can say why
+    // and the notes are still there to try again with.
+    match kingdom.plan(&plan_id) {
+        None => return Err(ServerFnError::new("That plan is no longer in the records.")),
+        Some(existing) if existing.notes().is_empty() => {
+            return Err(ServerFnError::new(
+                "There are no notes to send. Write against a part of the plan first.",
+            ))
+        }
+        Some(_) => {}
+    }
+
+    update(&mut kingdom, &plan_id, |p| {
+        let notes = p.take_notes();
+        if notes.is_empty() {
+            return;
+        }
+        // Asked inside the closure, under the same lock `converse` deregisters
+        // under -- see `say` for why sampling it at the call site would leave a
+        // window where words are queued for a turn that has already gone.
+        let running = crate::turns::is_running(&plan_id);
+        receive(p, notes_as_decree(&notes), running);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan vanished as its notes were sent."))
+}
+
+/// The King's marginal notes as one thing he said.
+///
+/// Ordinary prose in his own voice, blockquoting the part each note is against.
+/// No new message kind and nothing for a provider to learn -- the same call
+/// [`kingdom_core::APPROVAL`] makes, and true in the same way: he did write
+/// these.
+///
+/// The quote is what makes a note answerable. "This is wrong" against nothing is
+/// an objection the model has to guess the target of; against the paragraph it
+/// is about, it is an instruction.
+///
+/// Split out and tested because the shape is the whole payload: a decree that
+/// separated a note from its quote would be read by the model as two unrelated
+/// remarks.
+#[cfg(feature = "ssr")]
+fn notes_as_decree(notes: &[kingdom_core::ProposalNote]) -> String {
+    let mut decree = String::new();
+    decree.push_str(match notes.len() {
+        1 => {
+            "I have read the plan and written a note against part of it. \
+             Revise the draft to answer it, then propose again.\n"
+        }
+        _ => {
+            "I have read the plan and written notes against parts of it. \
+             Revise the draft to answer them, then propose again.\n"
+        }
+    });
+
+    for note in notes {
+        decree.push('\n');
+        // Every line of the quote is prefixed, not just the first: a wrapped
+        // paragraph quoted with one `>` reads as a quote that ends after its
+        // first line, with the rest apparently the King speaking.
+        for line in note.quote.lines() {
+            decree.push_str("> ");
+            decree.push_str(line);
+            decree.push('\n');
+        }
+        decree.push('\n');
+        decree.push_str(note.body.trim());
+        decree.push('\n');
+    }
+
+    decree
 }
 
 /// Closes a plan: lands its work, or sets it aside.
@@ -2540,6 +2835,95 @@ mod tests {
         );
     }
 
+    /// The King's notes reach the court as one review, each against its own quote.
+    ///
+    /// The pairing is the whole payload. A decree that let a note drift from the
+    /// text it answers gives the model an objection with no target -- and the
+    /// failure would be silent, because a plausible revision of the wrong
+    /// paragraph looks exactly like work.
+    #[test]
+    fn notes_reach_the_court_as_one_review_beside_what_they_answer() {
+        use kingdom_core::ProposalNote;
+
+        let note = |line: usize, quote: &str, body: &str| ProposalNote {
+            id: format!("n{line}"),
+            line,
+            quote: quote.to_string(),
+            body: body.to_string(),
+            at: None,
+        };
+
+        let decree = notes_as_decree(&[
+            note(1, "## The domain", "This should not touch `Plan::approve`."),
+            note(9, "- `annotate(line, quote, body)`", "Why an Option?"),
+        ]);
+
+        assert!(
+            decree.contains("> ## The domain\n\nThis should not touch `Plan::approve`."),
+            "each note follows the text it is against: {decree}"
+        );
+        assert!(
+            decree.contains("> - `annotate(line, quote, body)`\n\nWhy an Option?"),
+            "{decree}"
+        );
+        assert!(
+            decree.starts_with("I have read the plan and written notes"),
+            "the notes arrive as one review, not as five separate remarks: {decree}"
+        );
+
+        // A wrapped quote is prefixed on every line. With only the first
+        // prefixed, the quote reads as ending after one line and the rest reads
+        // as the King speaking -- which is the model's cue to act on it.
+        let wrapped = notes_as_decree(&[note(3, "One line.\nAnd its second.", "Shorten this.")]);
+        assert!(
+            wrapped.contains("> One line.\n> And its second.\n"),
+            "{wrapped}"
+        );
+        assert!(
+            wrapped.starts_with("I have read the plan and written a note"),
+            "one note is not addressed in the plural: {wrapped}"
+        );
+    }
+
+    /// A note is not something the King has said until he sends it.
+    ///
+    /// The same exclusion `queued` has, and for the same reason: `Plan::turns`
+    /// is the one door between a plan's log and a model, so a half-written note
+    /// reaching it would put the King's private second thoughts to the court
+    /// while he was still deciding whether to make them.
+    #[test]
+    fn a_note_is_not_a_turn_until_it_is_sent() {
+        let mut plan = a_plan();
+        plan.status = kingdom_core::PlanStatus::AwaitingReview;
+        plan.permissions = kingdom_core::Permissions::Propose;
+        plan.propose("A plan", "# A plan\n\nDo the thing.");
+
+        let before = plan.turns().count();
+        plan.annotate(3, "Do the thing.", "Which thing?")
+            .expect("a standing proposal can be annotated");
+
+        assert_eq!(
+            plan.turns().count(),
+            before,
+            "a note in the margin is not yet addressed to anyone"
+        );
+        assert!(
+            !plan.turns().any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+                if m.body.contains("Which thing?"))),
+            "the note's text must not reach a model before it is sent"
+        );
+
+        // Sent, by the path `send_notes` takes: drained, composed, received.
+        let notes = plan.take_notes();
+        receive(&mut plan, notes_as_decree(&notes), false);
+
+        assert!(
+            plan.turns().any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+                if m.body.contains("Which thing?"))),
+            "once sent, it is an ordinary thing the King said"
+        );
+    }
+
     /// A plan is filed once, whichever way it ends.
     ///
     /// The two moments a plan can be filed -- approval, and merge or archive --
@@ -2700,6 +3084,133 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The regression this whole task exists for: a plan must not die on a
+    /// reply that simply never arrived.
+    ///
+    /// A real plan was killed three times in ninety seconds by
+    /// `Copilot returned an empty reply`, and every retry failed identically
+    /// because the loop returned `settle(Err)` on the first failure of any
+    /// kind. An empty reply is the absence of an answer, and the same request
+    /// resampled usually produces one.
+    ///
+    /// The bound matters as much as the retry: this must give up, or a
+    /// genuinely broken conversation becomes a long silence with a large bill.
+    #[test]
+    fn silence_is_asked_again_and_then_given_up_on() {
+        let empty = crate::llm::ModelError::Empty("Copilot returned an empty reply.".into());
+
+        assert!(
+            worth_asking_again(&empty, 0),
+            "the first empty reply must not kill the plan"
+        );
+        assert!(worth_asking_again(&empty, MOST_ATTEMPTS - 2));
+        assert!(
+            !worth_asking_again(&empty, MOST_ATTEMPTS - 1),
+            "the retry must be bounded, or a broken conversation never stops costing"
+        );
+    }
+
+    /// A failure that asking again cannot fix must fail at once.
+    ///
+    /// The other half of the judgement, and the one that keeps the retry
+    /// honest. A missing credential stays missing and a refusal is a considered
+    /// answer; retrying either spends the user's time and quota three times to
+    /// be told the same thing, and delays the message he actually needs to act
+    /// on.
+    #[test]
+    fn a_failure_that_will_not_change_is_not_asked_again() {
+        let refused = crate::llm::ModelError::Refused("This decree cannot be drafted.".into());
+        assert!(
+            !worth_asking_again(&refused, 0),
+            "a refusal is an answer, not a hiccup"
+        );
+
+        let no_credential = crate::llm::ModelError::Credential(
+            crate::llm::credential::CredentialError::NotConfigured,
+        );
+        assert!(
+            !worth_asking_again(&no_credential, 0),
+            "a credential that is missing stays missing"
+        );
+    }
+
+    /// The King's own retry has to reach the model as a different request.
+    ///
+    /// This is the half that made the bug feel unfixable. `settle` records the
+    /// failure as a note, notes are deliberately excluded from `Plan::turns`,
+    /// and so "keep going" rebuilt a byte-identical payload and received a
+    /// byte-identical silence. Finding the note is what lets the next turn say
+    /// something the failed one did not.
+    #[test]
+    fn a_turn_after_silence_knows_it_is_following_silence() {
+        use kingdom_core::NoteKind;
+
+        let mut plan = a_plan();
+        assert!(!follows_silence(&plan), "a fresh plan follows nothing");
+
+        plan.note(NoteKind::EmptyReply, "Copilot returned an empty reply.");
+        assert!(follows_silence(&plan));
+
+        // The sequence a real plan actually produces, and the one that nearly
+        // shipped broken: `receive` appends the King's words *after* the note,
+        // so the note is never the last entry by the time the next turn starts.
+        // Reading `transcript.last()` answers `false` here -- on precisely the
+        // turn this exists to catch.
+        plan.say(kingdom_core::Speaker::User, "Keep going");
+        assert!(
+            follows_silence(&plan),
+            "prodding a silent court does not change what it last did"
+        );
+
+        // And again, exactly as plan-15 recorded it.
+        plan.note(NoteKind::EmptyReply, "Copilot returned an empty reply.");
+        plan.say(kingdom_core::Speaker::User, "Keep going!");
+        assert!(follows_silence(&plan));
+
+        // Answered since: the silence is history, not the current state, and
+        // telling the model about it now would report old news as current.
+        plan.say(kingdom_core::Speaker::Assistant, "Here is what I found.");
+        assert!(!follows_silence(&plan));
+    }
+
+    /// Only silence earns the explanation. Every other failure is something for
+    /// the King to fix, not something to explain to a model -- and a plan that
+    /// failed on a bad credential must not open its next turn apologising for a
+    /// reply that was never empty.
+    #[test]
+    fn an_ordinary_failure_is_not_mistaken_for_silence() {
+        use kingdom_core::NoteKind;
+
+        let mut plan = a_plan();
+        plan.note(NoteKind::Failed, "no credential: none configured");
+        assert!(!follows_silence(&plan));
+
+        plan.say(kingdom_core::Speaker::User, "try again");
+        assert!(
+            !follows_silence(&plan),
+            "the walk past the King's words must not reach past an ordinary failure"
+        );
+    }
+
+    /// A deed between the silence and now means the court has since acted, so
+    /// there is nothing to explain. Pins the other end of the walk: stopping
+    /// only at a user message is what keeps this from reporting an empty reply
+    /// from ten rounds ago as though it had just happened.
+    #[test]
+    fn silence_the_court_has_already_moved_past_is_not_reported() {
+        use kingdom_core::{NoteKind, ToolCall, ToolOutcome};
+
+        let mut plan = a_plan();
+        plan.note(NoteKind::EmptyReply, "Copilot returned an empty reply.");
+        plan.say(kingdom_core::Speaker::User, "Keep going");
+
+        // The retry worked: the court acted.
+        plan.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
+        plan.settle_tool_call("call-1", ToolOutcome::done("ok"));
+
+        assert!(!follows_silence(&plan));
     }
 
     /// While a turn is running, the user's words wait rather than landing in a

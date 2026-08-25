@@ -6,8 +6,8 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    approve_plan, draft_plan, finish_plan, get_kingdom, plan_briefing, say, set_aside_plan,
-    stop_plan, unqueue,
+    annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom, plan_briefing, say,
+    send_notes, set_aside_plan, stop_plan, unqueue, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -16,9 +16,11 @@ use crate::components::BrowserView;
 use crate::components::CityRail;
 use crate::components::DiffView;
 use crate::components::Prose;
+// `WardTree` is no longer named here: the files rail is `CityRail` now, which
+// stacks the tree over the review drawer and mounts both itself.
+use crate::components::ProposalCard;
 use kingdom_core::{
-    Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Proposal, Speaker, Timestamp,
-    ToolCall,
+    Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Speaker, Timestamp, ToolCall,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
@@ -122,6 +124,26 @@ pub fn Conversation() -> impl IntoView {
         let id = plan_id.get()?;
         state.kingdom.get().plan(&id).cloned()
     });
+
+    // Which plan is open, by identity rather than by value.
+    //
+    // This is what the chamber's body is built from, and the distinction is
+    // load-bearing. Branching on `plan` itself rebuilds `ConversationBody` on
+    // every watch-socket push, because a growing transcript makes the memo's
+    // value differ every round. Leptos reuses the DOM nodes, so it never looked
+    // like a remount -- but each rebuild constructs the component afresh, and
+    // every signal declared in its body is born empty again: the files rail's
+    // cache of listings, the folders the King had opened, whether the spyglass
+    // is watching, and the half-written decree in the composer. A turn running
+    // anywhere -- including one the King is not watching -- collapsed his tree
+    // and wiped his textarea twice per exchange.
+    //
+    // `PlanId` is `PartialEq`, so this fires only when the conversation
+    // genuinely becomes a different one: navigating between plans, or a plan
+    // leaving the kingdom. Those *should* rebuild, because the snapshot the
+    // body takes describes that plan and not this one. Everything that moves
+    // during a turn is read through `live` by the body itself.
+    let open_plan = Memo::new(move |_| plan.get().map(|p| p.id));
 
     let city_name = Memo::new(move |_| {
         let plan = plan.get()?;
@@ -253,19 +275,32 @@ pub fn Conversation() -> impl IntoView {
 
     view! {
         <div class="chamber">
-            {move || match plan.get() {
-                Some(p) => view! {
-                    <ConversationBody
-                        plan=p
-                        live=plan
-                        city=city_name
-                        drafting=drafting
-                        on_say=speak
-                        on_draft=redraft
-                        finish=finish
-                    />
+            {move || match open_plan.get() {
+                Some(_) => {
+                    // Read untracked: this closure must depend on the plan's
+                    // identity alone. A tracked `get()` here would subscribe it
+                    // to every field of the plan again, reinstating the
+                    // rebuild-per-push that `open_plan` exists to prevent.
+                    let Some(snapshot) = plan.get_untracked() else {
+                        // `open_plan` was `Some`, so the plan was there when
+                        // the memo last ran. Unreachable in practice, and
+                        // rendering nothing beats an `expect` that would take
+                        // the chamber down over a race.
+                        return ().into_any();
+                    };
+                    view! {
+                        <ConversationBody
+                            plan=snapshot
+                            live=plan
+                            city=city_name
+                            drafting=drafting
+                            on_say=speak
+                            on_draft=redraft
+                            finish=finish
+                        />
+                    }
+                    .into_any()
                 }
-                .into_any(),
                 None => view! {
                     <div class="empty-chamber">
                         <p>"No such plan in the records."</p>
@@ -489,6 +524,71 @@ fn ConversationBody(
             }
         });
     });
+
+    // What the King has written in the margin and not yet sent. Read live for
+    // the same reason the proposal itself is: a note written in another tab
+    // arrives over the watch socket, and the margin must empty here the moment
+    // the notes are sent from anywhere.
+    let notes = Memo::new(move |_| live.get().map(|p| p.notes().to_vec()).unwrap_or_default());
+
+    // Writing one. The whole card is presentational -- every call in this view
+    // is owned here, as it was before annotation existed -- so the components
+    // hand the note up and this decides what happens to it.
+    let annotate = Callback::new(move |(line, quote, note): (usize, String, String)| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match annotate_proposal(plan_id.to_string(), line, quote, note).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // Taking one back. Losing the race is reported rather than swallowed, for
+    // the same reason withdrawing queued words is -- see `api::withdraw_note`.
+    let withdraw_a_note = Callback::new(move |note_id: String| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match withdraw_note(plan_id.to_string(), note_id).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // Putting them to the court. An `Action` so the button can read its own
+    // pending state and a second click while the first is in flight does
+    // nothing -- a double send would drain the margin once and then report a
+    // confusing failure for notes that in fact landed.
+    //
+    // Sending and drafting are split for exactly the reason accepting and
+    // drafting are: the King's words land in the chamber immediately rather
+    // than behind the first round of the court's reply.
+    let send = Action::new(move |_: &()| {
+        let plan_id = id.get_value();
+        async move {
+            match send_notes(plan_id.to_string()).await {
+                Ok(_) => {
+                    state.error.set(None);
+                    if let Ok(k) = get_kingdom().await {
+                        state.kingdom.set(k);
+                    }
+                    on_draft.run(plan_id);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        }
+    });
+    let send_the_notes = Callback::new(move |_: ()| {
+        send.dispatch(());
+    });
+    let sending = Signal::derive(move || send.pending().get());
 
     // What is showing beside the transcript. One signal holding one value, so
     // the browser and the diff cannot both be open -- see [`Aside`].
@@ -810,8 +910,13 @@ fn ConversationBody(
                             <ProposalCard
                                 proposal=put
                                 busy=drafting
+                                notes=notes
+                                sending=sending
                                 on_accept=accept
                                 on_set_aside=set_aside
+                                on_note=annotate
+                                on_withdraw_note=withdraw_a_note
+                                on_send_notes=send_the_notes
                             />
                         })}
                     </Show>
@@ -1252,9 +1357,10 @@ fn thinking(tool_call: &ToolCall) -> Option<String> {
 /// itself. Drawing them alike would tell the King that a model's musing carries
 /// the weight of its stated intent.
 ///
-/// Collapsed by default, for the reason [`ToolCallLine`] is: a chamber that
-/// renders every reasoning block in full is unreadable at precisely the moment
-/// it becomes interesting.
+/// Collapsed by default, and deliberately *unlike* [`ToolCallLine`], which is
+/// now open. A deed is what the court chose to do and the King is watching for
+/// it; reasoning is what it happened to think on the way, and a chamber that
+/// renders every block of it in full buries the deeds under the musing.
 ///
 /// Deliberately *not* markdown. Reasoning arrives as a stream of thought with
 /// stray `#` and `*` in it that was never meant as formatting, and rendering it
@@ -1423,102 +1529,6 @@ fn subagent_status(status: PlanStatus) -> &'static str {
         PlanStatus::AwaitingReview => "reported",
         PlanStatus::Failed => "could not finish",
         PlanStatus::Merged | PlanStatus::Archived => status.label(),
-    }
-}
-
-/// A plan the model has put to the user, and the two things they can do with it.
-///
-/// Follows the `.chat-question` idiom deliberately: that card already means
-/// "this is not something to watch, it is something to do", and a proposal is
-/// the same kind of thing at a larger scale. What differs is the stakes, so the
-/// accepting button is the loud one and the setting-aside is quiet.
-///
-/// The body is **rendered markdown** -- headings, lists, tables, code fences and
-/// mermaid diagrams -- through [`crate::components::Prose`]. A proposal is the
-/// one artefact the King is asked to read and judge in full, so it is the place
-/// where structure earns its keep most; the renderer was built for it.
-#[component]
-fn ProposalCard(
-    proposal: Proposal,
-    /// True while a turn is in flight. The buttons go dead rather than
-    /// disappearing, so the card does not jump under the user's cursor.
-    busy: Memo<bool>,
-    on_accept: Callback<()>,
-    on_set_aside: Callback<()>,
-) -> impl IntoView {
-    // Locked the instant they decide, so a double-click cannot grant twice or
-    // race a set-aside against an acceptance. The same guard `Question` uses,
-    // and for the same reason -- except that here the thing being handed over
-    // is the ability to change their files.
-    let (decided, set_decided) = signal(false);
-    let deciding = move || decided.get() || busy.get();
-
-    // A proposal is the one thing in the chamber that is *his* to do, so it
-    // takes the whole column and the log goes behind it: nothing else in view
-    // to read while he is judging it. Collapsible rather than absolute, because
-    // the reasoning that led to the plan is often what he wants to check before
-    // deciding, and hiding it with no way back would make the card a wall.
-    let (full, set_full) = signal(true);
-
-    let accept = move |_| {
-        if deciding() {
-            return;
-        }
-        set_decided.set(true);
-        on_accept.run(());
-    };
-    let set_aside = move |_| {
-        if deciding() {
-            return;
-        }
-        set_decided.set(true);
-        on_set_aside.run(());
-    };
-
-    view! {
-        <div
-            class="chat-proposal"
-            class:decided=move || decided.get()
-            class:full=move || full.get()
-        >
-            <div class="proposal-head">
-                <span class="proposal-mark">"\u{1F4DC}"</span>
-                <span class="proposal-who">"The court proposes"</span>
-                <span class="proposal-at">{clock(proposal.at)}</span>
-                <button
-                    class="proposal-expand"
-                    title="Show the conversation behind this proposal"
-                    on:click=move |_| set_full.update(|f| *f = !*f)
-                >
-                    {move || if full.get() { "Show conversation" } else { "Read in full" }}
-                </button>
-            </div>
-
-            <p class="proposal-title">{proposal.title}</p>
-            <Prose text=proposal.body class="proposal-body"/>
-
-            <div class="proposal-actions">
-                <button
-                    class="proposal-accept"
-                    title="Let the court carry out this plan"
-                    disabled=deciding
-                    on:click=accept
-                >
-                    {move || if decided.get() { "Starting\u{2026}" } else { "Start with this" }}
-                </button>
-                <button
-                    class="proposal-aside"
-                    title="Put this plan aside and say what you want instead"
-                    disabled=deciding
-                    on:click=set_aside
-                >
-                    "Set aside"
-                </button>
-                <span class="proposal-hint">
-                    "Or say what you would change below."
-                </span>
-            </div>
-        </div>
     }
 }
 
@@ -1713,14 +1723,17 @@ fn entry_version(entry: &Entry) -> u8 {
     }
 }
 
-/// One tool call, collapsed to a line the user can skim and expand when it
-/// matters.
+/// One tool call: a summary line the user can skim, and the detail beneath it.
 ///
-/// Collapsed by default because a transcript that renders every command's full
-/// output inline is unreadable at exactly the moment it becomes interesting:
-/// the user is watching for *what the model is doing*, and a thousand lines of
-/// build log buries that. The summary line is the answer; the detail is one
-/// click away for when it is not.
+/// **Open by default.** The King is here to watch the court work, and the
+/// output *is* the work -- a chamber of closed lines makes him click through
+/// every one of them to learn what happened, which is the opposite of the
+/// question this product exists to answer. What kept them shut was the fear of
+/// a thousand-line build log burying the conversation, and that is answered by
+/// capping the panes' height (`.deed-input`, `.deed-output` in
+/// `_conversation.scss`) rather than by hiding them: a deed is a small scroll
+/// box, not a truncation. The chevron still folds one away for when a
+/// particular deed is not worth the room.
 #[component]
 fn ToolCallLine(
     tool_call: kingdom_core::ToolCall,
@@ -1733,7 +1746,7 @@ fn ToolCallLine(
 ) -> impl IntoView {
     use kingdom_core::ToolOutcome;
 
-    let (open, set_open) = signal(false);
+    let (open, set_open) = signal(true);
 
     let running = tool_call.in_flight();
     let state = match &tool_call.outcome {
@@ -2095,7 +2108,11 @@ fn browser_now() -> Option<Timestamp> {
 /// only the browser knows what the user's clock reads. Under SSR this is the
 /// empty string, which never reaches him -- the whole app is gated behind a
 /// kingdom being open, and that only becomes true on the client.
-fn clock(at: Option<Timestamp>) -> String {
+///
+/// Shared with the proposal card rather than spelled twice: a proposal's clock
+/// and a message's clock must read identically, and two implementations is how
+/// they come to differ by an hour on one side of a daylight-saving change.
+pub(crate) fn clock(at: Option<Timestamp>) -> String {
     #[cfg(feature = "hydrate")]
     {
         let Some(Timestamp(ms)) = at else {
@@ -2287,6 +2304,77 @@ mod tests {
             c.outcome = Some(ToolOutcome::done("ok"));
         }
         Entry::Tool(c)
+    }
+
+    /// What the chamber rebuilds its body on.
+    ///
+    /// Mirrors the `open_plan` memo in [`Conversation`]. The memo itself needs
+    /// a reactive runtime and a DOM to observe, but the decision it encodes is
+    /// this pure one -- which part of a plan is allowed to trigger a rebuild --
+    /// and that is the part a regression would get wrong.
+    fn rebuild_key(plan: Option<&Plan>) -> Option<PlanId> {
+        plan.map(|p| p.id.clone())
+    }
+
+    fn a_plan(id: &str) -> Plan {
+        Plan::opened(
+            PlanId::new(id),
+            kingdom_core::CityId::new("forge"),
+            "Do the thing",
+            &kingdom_core::ModelChoice::new("mock", None),
+            kingdom_core::Workspace::in_place("forge"),
+        )
+    }
+
+    /// A turn moving must not rebuild the chamber.
+    ///
+    /// `ConversationBody` is constructed from this key, and constructing it
+    /// again makes every signal in its body afresh: the files rail's cache of
+    /// listings and the folders the King had opened, whether the spyglass is
+    /// watching, and whatever he has half-typed into the composer. Keying on
+    /// the plan's *value* rebuilt on every watch-socket push -- so a turn
+    /// running anywhere collapsed his file tree to "Surveying..." and erased
+    /// his textarea, twice per exchange, without him touching the tab.
+    ///
+    /// Everything that moves during a turn is read through the `live` memo
+    /// instead, which is why the body does not need rebuilding to stay current.
+    #[test]
+    fn a_plan_that_merely_moved_does_not_rebuild_the_chamber() {
+        let before = a_plan("plan-foundations");
+
+        // The three ways a plan changes mid-turn: it speaks, it acts, and its
+        // status moves. None of them is a different conversation.
+        let mut after = before.clone();
+        after.transcript.push(call("read_file", true));
+        let spoke = kingdom_core::Message::new(Speaker::Assistant, "Here is what I found.");
+        after.transcript.push(Entry::Message(spoke));
+        after.status = PlanStatus::AwaitingReview;
+        after.title = "A better title".to_string();
+
+        assert_ne!(
+            before, after,
+            "the guard is worthless if the plan is unchanged"
+        );
+        assert_eq!(
+            rebuild_key(Some(&before)),
+            rebuild_key(Some(&after)),
+            "a plan whose transcript, status or title moved is the same conversation",
+        );
+    }
+
+    /// The other half: a rebuild is *required* when the conversation genuinely
+    /// changes, because the body snapshots the fields that cannot change while
+    /// one plan is open -- its id, workspace, prompt and errand parentage. Left
+    /// standing, those would describe the plan the King navigated away from.
+    #[test]
+    fn a_different_plan_does_rebuild_the_chamber() {
+        let one = a_plan("plan-foundations");
+        let two = a_plan("plan-aqueduct");
+
+        assert_ne!(rebuild_key(Some(&one)), rebuild_key(Some(&two)));
+        // And a plan leaving the kingdom must fall back to "no such plan"
+        // rather than leave the last one on screen.
+        assert_ne!(rebuild_key(Some(&one)), rebuild_key(None));
     }
 
     /// The formatter has to serve a `read_file` and a `cargo build` on the same

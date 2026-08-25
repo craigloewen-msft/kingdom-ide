@@ -1,0 +1,530 @@
+// The plan put to the King: reading it, writing in its margin, and reading a
+// revision against the version he annotated.
+//
+// One file per component module, as `main.scss` promises — these rules moved
+// here verbatim from `_conversation.scss` when `components/proposal/` was split
+// out of `conversation.rs`. The one proposal rule left behind there is the
+// `:has(.chat-proposal.full)` on `.chamber-log`, because that is a rule about
+// the *chamber's* layout rather than about the card.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+// --- The plan put to the King ----------------------------------------------
+//
+// The loudest thing in the chamber, and it has earned it: this is the one
+// moment where the King's judgement is the only thing standing between an
+// agent and his files. It borrows `.chat-question`'s gold entirely -- that
+// colour already means "this is yours to decide" here -- and differs by
+// sitting outside the log, above the composer, rather than inline.
+//
+// Outside the log because a proposal is not a line of history. It is the
+// current question, and it must not scroll away from him while he reads the
+// work that led to it.
+//
+// And when it stands, it stands alone. `.full` gives the card the whole column
+// and takes the log out of the flow entirely (the `:has` above) -- a proposal
+// is the King's one job at that moment, and half a screen of scrollback beside
+// it is half his attention spent reading what has already happened. He can put
+// the log back with the one button in the card's head; the composer stays, so
+// "say what you would change" is still the third option it claims to be.
+.chat-proposal {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex-shrink: 0;
+  margin: 0 16px 10px;
+  padding: 16px;
+  border: 1px solid rgba(t.$gold, 0.5);
+  border-radius: t.$radius;
+  background: rgba(t.$gold, 0.05);
+
+  &.full {
+    flex: 1;
+    margin: 16px;
+    padding: 24px 28px;
+
+    .proposal-title { font-size: 20px; }
+
+    // The frame, not the cap: filling the column is the whole point, so the
+    // body takes what is left and scrolls inside it.
+    .proposal-body {
+      flex: 1;
+      min-height: 0;
+      max-height: none;
+      font-size: 14px;
+    }
+  }
+
+  // Decided and waiting on the server. Dimmed rather than removed, exactly as
+  // an answered question is: he should still see what he chose.
+  &.decided {
+    opacity: 0.55;
+    border-color: t.$edge;
+    background: t.$panel;
+  }
+}
+
+.proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: t.$gold;
+  font-size: 11px;
+}
+
+.proposal-mark { opacity: 0.8; }
+
+// The way back to the conversation. Quiet: it is an escape hatch from the
+// full-column reading, not a third decision.
+.proposal-expand {
+  padding: 3px 8px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+}
+
+.proposal-at {
+  margin-left: auto;
+  margin-right: 2px;
+  color: t.$ink-faint;
+  font-variant-numeric: tabular-nums;
+}
+
+.proposal-title {
+  margin: 0 0 10px;
+  color: t.$ink;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+// Capped and scrollable. A long proposal must not push the buttons that answer
+// it below the fold -- the decision has to stay reachable from wherever he is
+// in the reading.
+//
+// The body is rendered markdown (`components/markdown.rs`), so structure comes
+// from real blocks and `.prose` sizes them; this rule only sets the frame.
+.proposal-body {
+  max-height: 320px;
+  margin: 0 0 14px;
+  overflow-y: auto;
+  color: t.$ink-dim;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.proposal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+// Gold and filled: the one action here that hands over real authority, so it
+// looks like the decision it is rather than like a link.
+.proposal-accept {
+  padding: 9px 18px;
+  border: 1px solid t.$gold;
+  border-radius: t.$radius;
+  background: rgba(t.$gold, 0.15);
+  color: t.$gold;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover:not(:disabled) { background: rgba(t.$gold, 0.25); }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+// Quiet on purpose. Setting a plan aside is not destructive -- the plan stays,
+// the composer stays -- so it must not carry the weight of the danger colour,
+// which belongs to archiving.
+.proposal-aside {
+  padding: 9px 14px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$panel;
+  color: t.$ink-dim;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+// Names the third option, which is not a button: typing. Without this the card
+// reads as a binary, and "say what you would change" is the most useful thing
+// the King can usually do.
+.proposal-hint {
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
+
+// --- Writing in the margin --------------------------------------------------
+//
+// The King's half of the review. Until this existed the only way to answer a
+// plan was to type a paragraph into the composer and hope the court worked out
+// which sentence was meant; a note carries its own target, so it cannot be
+// misread.
+//
+// The pencil is in the gutter rather than on the prose. Making the text itself
+// clickable would take selecting a sentence to copy it — which is most of what
+// the King does while reading a plan — and turn it into opening a box he did
+// not ask for.
+.proposal-body.annotatable {
+  // The blocks carry their own spacing, so the wrapper stops setting the line
+  // height the `.prose` rules inside each block now own.
+  display: flex;
+  flex-direction: column;
+}
+
+.proposal-block {
+  position: relative;
+  // Room for the pencil, which sits in the gutter and never reflows the prose:
+  // text that shifted sideways on hover would be text that moved under the
+  // cursor about to select it.
+  padding: 2px 0 2px 26px;
+  border-radius: t.$radius;
+
+  &:hover,
+  &.writing {
+    background: rgba(t.$gold, 0.04);
+
+    .block-annotate { opacity: 1; }
+  }
+
+  // Marked while its note is being written, so the King can see which block he
+  // is talking about once the composer has pushed it up the page.
+  &.writing {
+    background: rgba(t.$gold, 0.07);
+    box-shadow: inset 2px 0 0 t.$gold;
+  }
+}
+
+// Hidden until the block is under the cursor. A pencil on every paragraph at
+// rest would turn a document into a form.
+.block-annotate {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  width: 20px;
+  padding: 2px 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: t.$gold-dim;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+
+  &:hover {
+    background: rgba(t.$gold, 0.15);
+    color: t.$gold;
+  }
+
+  // Reachable by keyboard even though it is invisible at rest: the affordance
+  // being a hover effect must not make the feature mouse-only.
+  &:focus-visible {
+    opacity: 1;
+    outline: 1px solid t.$gold;
+  }
+}
+
+// The prose inside a block. Margins are collapsed away because the block itself
+// now owns the rhythm — otherwise every paragraph would carry both its own
+// spacing and the block's.
+.block-prose {
+  > :first-child { margin-top: 0; }
+  > :last-child { margin-bottom: 0; }
+}
+
+// --- Writing one note -------------------------------------------------------
+//
+// Inline, under the block it is about, for the reason `.chat-question` is
+// inline rather than modal: the text being objected to has to stay on screen
+// while the objection is written.
+.note-composer {
+  margin: 8px 0 4px;
+  padding: 10px;
+  border: 1px solid rgba(t.$gold, 0.4);
+  border-radius: t.$radius;
+  background: t.$panel;
+}
+
+.note-input {
+  width: 100%;
+  max-height: 160px;
+  padding: 6px 8px;
+  border: 1px solid t.$edge;
+  border-radius: 6px;
+  background: t.$panel-2;
+  color: t.$ink;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+
+  &:focus {
+    outline: none;
+    border-color: t.$gold-dim;
+  }
+}
+
+.note-composer-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.note-write {
+  padding: 5px 12px;
+  border: 1px solid t.$gold-dim;
+  border-radius: 6px;
+  background: rgba(t.$gold, 0.12);
+  color: t.$gold;
+  font-size: 12px;
+
+  &:hover:not(:disabled) { background: rgba(t.$gold, 0.2); }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+.note-cancel {
+  padding: 5px 12px;
+  border: 1px solid t.$edge;
+  border-radius: 6px;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 12px;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+}
+
+// --- The gathered margin ----------------------------------------------------
+//
+// Between the plan and the two decisions, because that is the order the King
+// works in: read, object, then decide. Drawn only when there is something in
+// it — an empty list beside a dead "send" button would be a standing invitation
+// to press something that does nothing.
+.note-margin {
+  flex-shrink: 0;
+  margin: 12px 0 14px;
+  padding: 12px;
+  border: 1px solid rgba(t.$gold, 0.3);
+  border-radius: t.$radius;
+  background: rgba(t.$gold, 0.04);
+}
+
+.note-margin-head {
+  margin-bottom: 8px;
+  color: t.$gold;
+  font-size: 11px;
+}
+
+.note-list {
+  max-height: 180px;
+  margin: 0 0 10px;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.note-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 6px 0;
+  border-top: 1px solid t.$edge;
+
+  &:first-child { border-top: none; }
+}
+
+// What the note is against. Clamped to one line: this is a label saying where
+// the note landed, not the passage itself, which is a scroll away above.
+.note-quote {
+  grid-column: 1;
+  overflow: hidden;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.note-body {
+  grid-column: 1;
+  color: t.$ink;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.note-withdraw {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 14px;
+  line-height: 1;
+
+  &:hover {
+    background: rgba(t.$failed, 0.15);
+    color: t.$failed;
+  }
+}
+
+// Gold-edged but not filled: sending notes back is a real act, but it is not
+// the act of handing over the ability to change files. `.proposal-accept` keeps
+// that weight to itself.
+.note-send {
+  padding: 7px 14px;
+  border: 1px solid t.$gold-dim;
+  border-radius: t.$radius;
+  background: transparent;
+  color: t.$gold;
+  font-size: 12px;
+  font-weight: 600;
+
+  &:hover:not(:disabled) { background: rgba(t.$gold, 0.12); }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+// --- What a revision changed ------------------------------------------------
+//
+// Monospaced source with gutters, and deliberately so: rendered markdown has no
+// lines to mark, so a diff of the *output* could say that something changed
+// without ever saying what. See `components/proposal/diff.rs`.
+//
+// It shares `.proposal-body`'s frame — same cap, same scrolling — so switching
+// between the two readings does not resize the card under the King's cursor.
+.proposal-diff {
+  flex: 1;
+  min-height: 0;
+  max-height: 320px;
+  margin: 0 0 14px;
+  overflow-y: auto;
+  font-family: t.$font-mono;
+  font-size: 12px;
+  line-height: 1.6;
+
+  .chat-proposal.full & { max-height: none; }
+}
+
+.diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 6px;
+  color: t.$ink-dim;
+  white-space: pre-wrap;
+  word-break: break-word;
+
+  &.added {
+    background: rgba(t.$merged, 0.1);
+    color: t.$ink;
+
+    .diff-mark { color: t.$merged; }
+  }
+
+  &.removed {
+    background: rgba(t.$failed, 0.1);
+    color: t.$ink-faint;
+
+    .diff-mark { color: t.$failed; }
+  }
+}
+
+// Fixed width so the text of every line begins in the same column, changed or
+// not — a gutter that reflowed would make the diff harder to read than the
+// document it describes.
+.diff-mark {
+  flex: 0 0 10px;
+  color: t.$edge-bright;
+  text-align: center;
+  user-select: none;
+}
+
+.diff-text { flex: 1; }
+
+// A stretch this revision left alone. Quiet and full-width so it reads as a
+// gap in the document rather than as a line of it.
+.diff-fold {
+  display: block;
+  width: 100%;
+  margin: 4px 0;
+  padding: 3px 6px;
+  border: 1px dashed t.$edge;
+  border-radius: 4px;
+  background: transparent;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  text-align: left;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink-dim;
+  }
+}
+
+// Said in a sentence rather than drawn as forty identical lines, which would
+// leave the King hunting for a difference that is not there.
+.diff-unchanged {
+  margin: 0;
+  padding: 12px;
+  color: t.$ink-faint;
+  font-family: t.$font-sans;
+  font-size: 13px;
+}
+
+// The switch between the two readings. Quiet, beside `.proposal-expand`: it
+// changes how the plan is shown, not what is being decided.
+.proposal-diff-toggle {
+  padding: 3px 8px;
+  border: 1px solid rgba(t.$gold, 0.35);
+  border-radius: t.$radius;
+  background: rgba(t.$gold, 0.06);
+  color: t.$gold;
+  font-size: 11px;
+
+  &:hover {
+    background: rgba(t.$gold, 0.14);
+  }
+}
