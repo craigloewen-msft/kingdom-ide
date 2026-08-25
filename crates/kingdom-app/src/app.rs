@@ -141,6 +141,12 @@ fn store_choice(choice: &ModelChoice) {
             }
             // "The model's own default" must be remembered as an absence, not
             // as the `none` level, which is a different request.
+            //
+            // This arm is reached only when the user presses `default` on the
+            // effort row -- never from a change of model, which carries the
+            // standing wish across untouched (`ModelChoice::with_model`). A
+            // remembered level is therefore forgotten when he says so and at no
+            // other time.
             None => {
                 let _ = storage.remove_item(EFFORT_KEY);
             }

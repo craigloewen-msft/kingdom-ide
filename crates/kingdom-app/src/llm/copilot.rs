@@ -517,22 +517,17 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                     })).collect::<Vec<_>>(),
                 });
 
-                // The reasoning is written back under the key it was read from
-                // where we know it, and the opaque half verbatim. Merged rather
-                // than replacing the message, so a signed blob that arrived as
-                // several fields goes back as several fields.
+                // The reasoning is written back under the keys it was read
+                // from, and the opaque half verbatim. Merged rather than
+                // replacing the message, so a signed blob that arrived as
+                // several fields goes back as several fields -- each under its
+                // own name, because the name is part of what must survive.
                 if let Some(reasoning) = &first.reasoning {
                     if let Some(text) = &reasoning.text {
                         assistant["reasoning_content"] = json!(text);
                     }
-                    match &reasoning.opaque {
-                        Some(Value::Object(fields)) => {
-                            for (key, value) in fields {
-                                assistant[key] = value.clone();
-                            }
-                        }
-                        Some(other) => assistant["reasoning_opaque"] = other.clone(),
-                        None => {}
+                    for (key, value) in &reasoning.opaque {
+                        assistant[key.as_str()] = value.clone();
                     }
                 }
 
@@ -859,8 +854,10 @@ fn tokens_used(response: &Value) -> Option<usize> {
 /// of thought on every round, silently -- which is the failure this whole
 /// change exists to fix, and it left no error behind while it was happening.
 ///
-/// The opaque half is copied verbatim and never inspected -- see
-/// [`kingdom_core::Reasoning::opaque`].
+/// The opaque half is copied verbatim, never inspected, and -- critically --
+/// keyed by the field it arrived in, so [`messages`] can put it back under that
+/// same name. Reading `signature` and writing `reasoning_opaque` is not a round
+/// trip; see [`kingdom_core::Reasoning::opaque`].
 fn parse_reasoning(message: &Value) -> Option<kingdom_core::Reasoning> {
     let text = ["reasoning_content", "reasoning_text"]
         .iter()
@@ -869,18 +866,22 @@ fn parse_reasoning(message: &Value) -> Option<kingdom_core::Reasoning> {
         .or_else(|| message["reasoning"]["content"].as_str())
         .map(str::to_string);
 
-    let opaque = ["reasoning_opaque", "encrypted_content", "signature"]
-        .iter()
-        .find_map(|key| {
-            let found = &message[*key];
-            (!found.is_null()).then(|| found.clone())
-        })
-        .or_else(|| {
-            // Where reasoning came as an object rather than a string, anything
-            // beyond the prose we already read may need echoing back.
-            let found = &message["reasoning"];
-            found.is_object().then(|| found.clone())
-        });
+    let mut opaque = std::collections::BTreeMap::new();
+    // Every opaque field present, not the first one found: a provider that
+    // sends both a signature and an encrypted trace needs both back, and
+    // stopping at the first would silently drop the rest.
+    for key in ["reasoning_opaque", "encrypted_content", "signature"] {
+        let found = &message[key];
+        if !found.is_null() {
+            opaque.insert(key.to_string(), found.clone());
+        }
+    }
+    // Where reasoning came as an object rather than a string, anything beyond
+    // the prose we already read may need echoing back. Kept whole and under its
+    // own key so it goes back as the object it was.
+    if opaque.is_empty() && message["reasoning"].is_object() {
+        opaque.insert("reasoning".to_string(), message["reasoning"].clone());
+    }
 
     let reasoning = kingdom_core::Reasoning { text, opaque };
     (!reasoning.is_empty()).then_some(reasoning)
@@ -1011,7 +1012,7 @@ mod tests {
                 batch,
                 reasoning.map(|text| kingdom_core::Reasoning {
                     text: Some(text.to_string()),
-                    opaque: None,
+                    opaque: Default::default(),
                 }),
                 None,
             );
@@ -1057,6 +1058,44 @@ mod tests {
             assistant["reasoning_content"],
             "The title is read in sidebar.rs, so that is where to look.",
             "the model's thinking must survive the round trip: {assistant:#?}"
+        );
+    }
+
+    /// The signed half of the thinking must go back under its own key.
+    ///
+    /// The sharper edge of the regression above, and the one that survived it.
+    /// A gateway that signs a thinking block rejects -- or silently discards --
+    /// one whose signature arrived under a name it does not know, so reading
+    /// `signature` and writing `reasoning_opaque` loses the reasoning just as
+    /// completely as dropping it, while looking entirely correct on the wire.
+    /// Every opaque blob observed in a real plan was a bare string, so this is
+    /// the path that actually runs, not an exotic one.
+    #[test]
+    fn a_signed_thinking_block_goes_back_under_the_key_it_arrived_under() {
+        // What a gateway actually sends: prose beside a signature.
+        let reasoning = parse_reasoning(&json!({
+            "reasoning_content": "the title is read in sidebar.rs",
+            "signature": "c2lnbmVkLWJsb2I=",
+        }))
+        .expect("a signed thinking block is reasoning worth keeping");
+
+        let mut tool_call = kingdom_core::ToolCall::started("call-1", "read_file", json!({}));
+        tool_call = tool_call.in_reply("reply-1", Some(reasoning), None);
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::done("contents"));
+
+        let messages = messages(&brief_with(vec![Turn::Tool(tool_call)]), false);
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("the call must still be replayed");
+
+        assert_eq!(
+            assistant["signature"], "c2lnbmVkLWJsb2I=",
+            "the blob must go back under the key it came in on: {assistant:#?}"
+        );
+        assert!(
+            assistant["reasoning_opaque"].is_null(),
+            "re-keying the blob is what broke this: {assistant:#?}"
         );
     }
 

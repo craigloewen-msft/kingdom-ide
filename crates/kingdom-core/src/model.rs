@@ -1124,23 +1124,61 @@ pub struct ToolCall {
 /// or the next request is rejected. We can read the first and must not touch
 /// the second, and a shape that conflated them would invite something to
 /// normalise a value whose whole purpose is to survive unchanged.
+///
+/// **Why the opaque half is a map and not a bare value.** "Echoed back
+/// unmodified" includes *the key it arrived under*. A blob read from
+/// `signature` and written back as `reasoning_opaque` is as unusable to the
+/// gateway as one whose bytes were rewritten: it looks like an unknown field,
+/// the thinking block it signs is discarded, and the model is handed its own
+/// tool results with its reasoning stripped. That failure is silent -- the
+/// request stays well-formed and the gateway keeps accepting it -- and it is
+/// what made long investigations wander and repeat themselves. Keeping the key
+/// beside the value makes the round trip total: whatever came in goes back out
+/// under the same name, and there is no branch left that can invent one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Reasoning {
     /// The thinking as prose, where the provider gave us prose.
     #[serde(default)]
     pub text: Option<String>,
     /// Provider-opaque fields that must be quoted back exactly as they came --
-    /// a signature, an encrypted trace. Never parsed, never rewritten: it is
-    /// carried, not understood.
-    #[serde(default)]
-    pub opaque: Option<serde_json::Value>,
+    /// a signature, an encrypted trace -- each under the key it arrived under.
+    /// Never parsed, never rewritten, never re-keyed: it is carried, not
+    /// understood.
+    #[serde(default, deserialize_with = "opaque_fields")]
+    pub opaque: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Reads the opaque half, tolerating the shape that came before it had keys.
+///
+/// Records written earlier hold a bare value here rather than a map. That is
+/// not a curiosity to be tidied later: [`crate::Plan`] documents are loaded with
+/// `serde_json::from_str(..).ok()` and a document that will not parse is
+/// **skipped**, so rejecting the old shape would not surface as an error the
+/// user could act on -- it would silently empty his rail of every plan that ever
+/// thought with a signed model.
+///
+/// The stale value is dropped rather than given an invented key. It cannot be
+/// replayed whatever we do -- nothing recorded which field it belonged to, which
+/// is precisely the bug this map exists to fix -- and guessing `signature` would
+/// hand a gateway a blob under a name it may never have used. The prose half
+/// still loads, so the plan keeps the part of its thinking that can be shown.
+fn opaque_fields<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Object(fields) => fields.into_iter().collect(),
+        _ => std::collections::BTreeMap::new(),
+    })
 }
 
 impl Reasoning {
     /// True when there is nothing here worth sending, so a caller can skip it
     /// rather than emit an empty object a gateway may reject.
     pub fn is_empty(&self) -> bool {
-        self.text.as_ref().is_none_or(|t| t.trim().is_empty()) && self.opaque.is_none()
+        self.text.as_ref().is_none_or(|t| t.trim().is_empty()) && self.opaque.is_empty()
     }
 }
 
@@ -1897,6 +1935,25 @@ impl ModelChoice {
         }
     }
 
+    /// The same standing wish, aimed at another model.
+    ///
+    /// The effort is carried across **unfiltered**, on purpose. Whether a level
+    /// can actually be sent is [`ModelCatalogue::resolve`]'s decision, and it
+    /// makes it on every path that reaches a provider -- the chip's own memo and
+    /// `api::begin_plan`. Filtering a second time here would not make the wire
+    /// any safer; it would only mean that passing through a model with no effort
+    /// control destroys a preference the user set deliberately.
+    ///
+    /// So the stored effort is a *standing wish*, not a promise about the model
+    /// currently selected: forgotten when the user asks for the model's own
+    /// default, and at no other time.
+    pub fn with_model(&self, model: impl Into<String>) -> ModelChoice {
+        ModelChoice {
+            model: model.into(),
+            effort: self.effort,
+        }
+    }
+
     /// How the choice reads in the rail and on the map, e.g.
     /// `claude-opus-5 · high`.
     pub fn label(&self) -> String {
@@ -2110,6 +2167,40 @@ mod tests {
         assert_eq!(
             catalogue.resolve(None),
             ModelChoice::new("copilot/claude-opus-5", None)
+        );
+    }
+
+    /// A level the user set is a *standing wish*, not a promise about whichever
+    /// model happens to be selected. Passing through a model that declares no
+    /// efforts at all -- the offline mock, which is exactly where a user lands
+    /// whenever no credential works -- must not destroy it.
+    ///
+    /// This pins the division of labour the bug came from: the picker
+    /// **remembers**, `resolve` **decides**. Re-adding a filter to the
+    /// remembering half looks like belt-and-braces and is actually the whole
+    /// defect, because the wish is stored and outlives the round trip.
+    #[test]
+    fn a_standing_effort_survives_a_model_that_cannot_honour_it() {
+        let catalogue = catalogue();
+        let wish = ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::High));
+
+        // Onto the mock, which declares nothing. The wish is kept...
+        let on_mock = wish.with_model("mock");
+        assert_eq!(on_mock.effort, Some(ModelEffort::High));
+
+        // ...and yet never reaches the wire, because resolving still drops it.
+        assert_eq!(
+            catalogue.resolve(Some(&on_mock)),
+            ModelChoice::new("mock", None),
+            "a level the resolved model does not declare is still never sent"
+        );
+
+        // Back to a model that does declare it, and the wish is honoured again.
+        let back = on_mock.with_model("copilot/claude-opus-5");
+        assert_eq!(
+            catalogue.resolve(Some(&back)),
+            ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::High)),
+            "the round trip through an effortless model must not have erased it"
         );
     }
 
@@ -2483,6 +2574,32 @@ mod transcript_tests {
         assert!(
             tool_call.artifacts().is_empty(),
             "absent means nothing was left behind, not a parse failure"
+        );
+    }
+
+    /// Thinking recorded before opaque fields carried their key must still load.
+    ///
+    /// Older records hold `opaque` as a bare string, and `store::load` *skips a
+    /// plan it cannot parse* rather than failing loudly -- so a deserialiser
+    /// that rejected the old shape would not raise an error, it would quietly
+    /// empty the King's rail. The stale blob itself is unreplayable (nothing
+    /// recorded which field it arrived in, which is the whole bug this shape
+    /// fixes) but losing a signature must not mean losing the plan.
+    #[test]
+    fn thinking_recorded_before_opaque_fields_were_keyed_still_loads() {
+        let before_keys = r#"{ "text": "the title is read in sidebar.rs", "opaque": "c2lnbmVk" }"#;
+
+        let reasoning: Reasoning =
+            serde_json::from_str(before_keys).expect("an older record must still load");
+
+        assert_eq!(
+            reasoning.text.as_deref(),
+            Some("the title is read in sidebar.rs"),
+            "the prose is the half that can still be replayed, so it must survive"
+        );
+        assert!(
+            reasoning.opaque.is_empty(),
+            "an unkeyed blob cannot go back under a key it never recorded"
         );
     }
 

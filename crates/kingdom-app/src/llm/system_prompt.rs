@@ -18,6 +18,14 @@
 //! Phoenix sends none of them and does better regardless, and a prompt that is
 //! *nearly* Phoenix's plus four house paragraphs is neither.
 //!
+//! **Phoenix wins on wording, never on facts about Kingdom.** Two blocks depart
+//! from it deliberately, and both are marked where they sit: Phoenix's mermaid
+//! hint is *false here* and is not ported, and [`SHARED_MACHINE`] has no Phoenix
+//! counterpart because sharing one machine between agents is Kingdom's own
+//! subject. A description is a promise about behaviour; matching prose that
+//! promises something Kingdom does not do is the one way this port can make the
+//! agents worse rather than better.
+//!
 //! **The order carries the reasoning.** The remit lands last, after project
 //! guidance, because it is what the model must be holding when it starts work.
 //! Kingdom used to put it near the top and then bury it under up to 64 KB of
@@ -103,7 +111,7 @@ impl SystemPrompt {
         let mut out = String::from(BASE);
 
         out.push_str("\n\n");
-        out.push_str(MERMAID);
+        out.push_str(SHARED_MACHINE);
 
         if !self.guidance.is_empty() {
             out.push_str("\n\n<project_guidance>\n");
@@ -152,14 +160,43 @@ const BASE: &str = "You are a helpful AI assistant with access to tools for exec
      editing files, and searching codebases. Use tools when appropriate to accomplish tasks.\n\n\
      Be concise in your responses. When using tools, explain what you're doing briefly.";
 
-/// Phoenix's mermaid hint, with its one Kingdom noun swapped.
+// Phoenix's mermaid hint is deliberately NOT ported, and this note is here so it
+// does not get "restored" by the next person comparing the two prompts.
+//
+// Phoenix tells the model its conversation view renders mermaid fences as
+// diagrams. That is true of Phoenix and false of Kingdom: there is no markdown
+// renderer here, and `components/conversation.rs` prints every message verbatim.
+// Kingdom shipped the claim once anyway, and it cost a real plan its whole turn
+// -- asked to make proposals render markdown, the model found the contradiction
+// and spent 25 of its 30 reasoning blocks litigating it instead of proposing
+// anything. It was deleted for that reason before this port began.
+//
+// The rule the port follows: Phoenix's wording wins on style, never on facts
+// about Kingdom. Restore this the day a renderer exists.
+
+/// That the machine has other tenants, the King's own server among them.
 ///
-/// The quoting advice pre-empts the most common render failure: unquoted
-/// parentheses in a node label, which Mermaid reads as shape syntax.
-const MERMAID: &str = "Kingdom renders Markdown mermaid code fences as diagrams; prefer them \
-     for diagrams when useful. When a node label contains parentheses, quotes, or other \
-     punctuation, wrap the label text in double quotes (e.g. `A[\"svc.Get(\\\"x\\\")\"]`) so \
-     Mermaid does not read the punctuation as diagram syntax.";
+/// Kingdom arbitrates no resources yet (AGENTS.md §4), so nothing detects two
+/// plans binding one port -- or a plan binding the port the user is reading the
+/// chamber on. That last one is observed, not hypothetical: a plan ran `cargo
+/// leptos serve` with no override and collided with the King's own server on
+/// 3000. It recovered unaided, having reasoned that the occupant was probably
+/// the user's and should not be killed, which is the right instinct and one
+/// nothing had told it to have.
+///
+/// Saying it costs a sentence and is not a substitute for arbitration. It only
+/// makes the good outcome the likely one instead of the lucky one.
+///
+/// Kept through the Phoenix port when its neighbours were dropped: Phoenix has
+/// no equivalent because Phoenix does not have several agents sharing one
+/// machine as its whole subject. This is Kingdom's own problem, and the one
+/// place where having no Phoenix counterpart is a reason to keep something
+/// rather than to delete it.
+const SHARED_MACHINE: &str = "On ports and long-running processes. This machine is shared -- \
+     the user's own Kingdom server is very likely on port 3000, and other plans may be \
+     working alongside you. Never kill a process you did not start. If you need to run a \
+     server, pick an unusual free port explicitly rather than taking a project's default, \
+     and stop it when you are done with it.";
 
 /// Phoenix's catalogue preamble, verbatim.
 ///
@@ -479,6 +516,41 @@ mod tests {
         assert!(rendered.contains("Builds the thing."));
         // The body is fetched on demand; only metadata belongs here.
         assert!(rendered.contains("Do not cat SKILL.md files directly"));
+    }
+
+    /// Kingdom must not tell a model its output is rendered when it is not.
+    ///
+    /// Phoenix's prompt says its conversation renders mermaid fences as
+    /// diagrams, and porting that verbatim would have been wrong: Kingdom has
+    /// no markdown renderer. The claim was shipped once and cost a real plan
+    /// its entire turn -- asked to make proposals render markdown, the model
+    /// found the contradiction and spent 25 of its 30 reasoning blocks arguing
+    /// with the prompt instead of proposing anything.
+    ///
+    /// This guards the whole class rather than the one string: nothing in the
+    /// prompt may promise rendering until something renders.
+    #[test]
+    fn the_prompt_does_not_claim_output_is_rendered() {
+        let rendered = prompt_with(Permissions::Full, false).render();
+
+        assert!(
+            !rendered.to_lowercase().contains("mermaid"),
+            "Kingdom prints messages verbatim (components/conversation.rs); \
+             promising a renderer derails the plans that notice: {rendered}"
+        );
+    }
+
+    /// The court is told the machine has other tenants on it.
+    ///
+    /// Phoenix has no equivalent, so the port's default -- delete what Phoenix
+    /// lacks -- would have dropped it. It is kept because Kingdom's whole
+    /// subject is several agents on one machine, and this is observed rather
+    /// than hypothetical: a plan took the King's own port 3000.
+    #[test]
+    fn the_court_is_warned_about_the_shared_machine() {
+        let rendered = prompt_with(Permissions::Full, false).render();
+        assert!(rendered.contains("Never kill a process you did not start"));
+        assert!(rendered.contains("3000"));
     }
 
     /// An approved plan is told it is carrying out a plan; an unapproved one is
