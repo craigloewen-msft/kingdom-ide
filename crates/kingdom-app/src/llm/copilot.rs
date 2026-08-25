@@ -759,9 +759,15 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
     // Read once, before any ending: how full the window is is true of the turn,
     // not of the way it happened to end.
     let tokens = tokens_used(parsed);
+    // `length` beats whatever the first choice happened to say. A split reply
+    // can finish `tool_calls` on `choices[0]` and `length` on a later one --
+    // the model was cut off mid-thought, and taking the first non-null answer
+    // would report a clean ending for a truncated turn. That is the exact
+    // misdiagnosis the empty-reply branch below exists to avoid making.
     let finish = choices
         .iter()
-        .find_map(|c| c["finish_reason"].as_str())
+        .filter_map(|c| c["finish_reason"].as_str())
+        .max_by_key(|reason| u8::from(*reason == "length"))
         .unwrap_or_default();
 
     // Tool calls take precedence over any prose alongside them. A model often
@@ -775,7 +781,7 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
     // reply is put back together as the single decision it was.
     let mut calls = Vec::new();
     let mut narrations: Vec<String> = Vec::new();
-    let mut reasoning = None;
+    let mut reasoning: Option<kingdom_core::Reasoning> = None;
     for choice in &choices {
         let message = &choice["message"];
         calls.extend(parse_acts(&message["tool_calls"]));
@@ -783,8 +789,32 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
         if !said.is_empty() {
             narrations.push(said.to_string());
         }
-        if reasoning.is_none() {
-            reasoning = parse_reasoning(message);
+        // Merged across every choice, not taken from the first that has any.
+        //
+        // This is the same split as the tool calls above, and it bites harder.
+        // The signature or encrypted trace that authenticates a thinking block
+        // may ride on a *later* choice than the prose -- or each choice may
+        // carry its own. Keeping only the first meant `messages()` replayed an
+        // assistant turn whose signature did not cover its tool calls, which
+        // gateways either reject outright or silently discard the reasoning
+        // from. See `parse_reasoning` on why the opaque half is echoed back
+        // verbatim and under its own key.
+        //
+        // Earlier keys win on collision, matching the order the gateway listed
+        // the choices in: a blob is echoed back under the key it arrived under,
+        // and the first arrival is the one the rest of the reply was built on.
+        if let Some(found) = parse_reasoning(message) {
+            match &mut reasoning {
+                None => reasoning = Some(found),
+                Some(have) => {
+                    if have.text.is_none() {
+                        have.text = found.text;
+                    }
+                    for (key, value) in found.opaque {
+                        have.opaque.entry(key).or_insert(value);
+                    }
+                }
+            }
         }
     }
     let text = narrations.join("\n\n");
@@ -1509,6 +1539,94 @@ mod tests {
                  turn having done nothing: {draft:?}"
             ),
         }
+    }
+
+    /// A signed thinking block riding on a later choice than the prose must
+    /// still come back.
+    ///
+    /// The same split that scattered the tool calls scatters the reasoning, and
+    /// this half is worse: the signature authenticates the thinking block, so
+    /// keeping only `choices[0]`'s meant `messages()` replayed an assistant
+    /// turn whose signature did not cover its own tool calls. Gateways either
+    /// reject that outright or silently drop the reasoning -- and a silently
+    /// dropped trace is a model made to think the same thoughts again next
+    /// round, at full price, which is exactly what the sibling test
+    /// `a_signed_thinking_block_goes_back_under_the_key_it_arrived_under`
+    /// exists to prevent on the single-choice path.
+    #[test]
+    fn a_signature_on_a_later_choice_is_not_lost() {
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Let me look.",
+                        "reasoning_content": "The parser is the likely culprit."
+                    }
+                },
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        // The blob authenticating the block above, on the
+                        // choice that carries the call rather than the prose.
+                        "signature": "sig-abc",
+                        "tool_calls": [{
+                            "id": "toolu_1", "type": "function",
+                            "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}
+                        }]
+                    }
+                }
+            ]
+        });
+
+        let answer = answer_from(&response).expect("a reply asking for a tool is not an error");
+
+        let Reply::Acts(acts) = answer.reply else {
+            panic!("the court asked to run a command");
+        };
+        let reasoning = acts.reasoning.expect("the thinking block must survive");
+        assert_eq!(
+            reasoning.text.as_deref(),
+            Some("The parser is the likely culprit."),
+            "the prose half rides on the first choice"
+        );
+        assert_eq!(
+            reasoning.opaque.get("signature"),
+            Some(&serde_json::json!("sig-abc")),
+            "the blob authenticating it rides on a later one and must be merged in"
+        );
+    }
+
+    /// A later choice reporting `length` must not be masked by an earlier one
+    /// that finished cleanly.
+    ///
+    /// The model was cut off mid-thought. Reporting `tool_calls` because
+    /// `choices[0]` said so hands the user a truncation dressed as a clean
+    /// ending -- the same misdiagnosis the empty-reply branch exists to avoid.
+    #[test]
+    fn a_truncated_later_choice_is_not_masked_by_an_earlier_clean_one() {
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": ""}
+                },
+                {
+                    "finish_reason": "length",
+                    "message": {"role": "assistant", "content": ""}
+                }
+            ]
+        });
+
+        let err = answer_from(&response).expect_err("an empty reply is an error");
+        let said = err.to_string();
+        assert!(
+            said.contains("output budget"),
+            "a turn cut off by the output cap must be reported as that rather than as \
+             an empty reply of unknown cause -- they have different fixes: {said}"
+        );
     }
 
     /// The `usage` block is the only honest source of how full the window is,
