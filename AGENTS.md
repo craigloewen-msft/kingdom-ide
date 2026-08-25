@@ -134,6 +134,8 @@ crates/
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
+    profile.rs      The King's own ~/.kingdom: durable settings, and where each
+                    kingdom's records are kept (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)
@@ -419,13 +421,35 @@ during development. A test pins this.
 
 ### Where state lives
 
-Plans are kept as one JSON document each under the kingdom root:
+Everything Kingdom records about itself lives in the King's own profile —
+`~/.kingdom/`, or wherever `KINGDOM_HOME` points — rather than inside the folder
+he opened:
 
 ```
-<kingdom_root>/.kingdom/
-  plans/<plan-id>.json      one document per plan
-  archive/<plan-id>.patch   the work an archived plan set aside
+~/.kingdom/
+  settings.json                  durable IDE settings; today, the last kingdom opened
+  kingdoms/<key>/
+    kingdom.json                 which root this folder is for
+    plans/<plan-id>.json         one document per plan
+    archive/<plan-id>.patch      the work an archived plan set aside
+    approved/<plan-id>.md        what the King agreed to
+  realms/<name>/                 the proving grounds
 ```
+
+`<key>` is the folder's own name plus a hash of its resolved path, so two
+projects both called `dev` do not share a drawer. It is derived and never
+authoritative: `kingdom.json` holds the real root.
+
+**Why out here.** Which folder was last opened is the one fact that cannot be
+read from inside a kingdom not yet opened, so it has nowhere else to live — and
+that is what lets the server come up on the map instead of the folder picker.
+The rest followed it: a plan record is Kingdom's bookkeeping, not the user's
+repository's, and `realms/` used to default to a *relative* path, so which
+proving grounds existed depended on where the server was launched from.
+
+A kingdom recorded under the old layout is migrated on open. It **copies** and
+never deletes — a plan record is the one thing disk cannot tell us again, so a
+bug in that path must be survivable.
 
 Cities are **not** stored — they are rescanned every open, because disk is their
 source of truth. Plans are the one thing disk cannot tell us again, which is
@@ -437,9 +461,12 @@ the store is a write-through behind `api.rs::update`. Swapping in SQLite when
 there are genuinely concurrent writers touches only that module — the reasoning
 for files over a database is written up at the top of it.
 
-Note the collision of names: `<kingdom_root>/.kingdom/` holds Kingdom's records,
-while `<city>/.kingdom/` holds worktrees. A worktree is *derived* and disposable;
-a plan record is not.
+The two `.kingdom` directories used to be a collision worth warning about. They
+are now a division: `<city>/.kingdom/` still holds worktrees and a plan's draft,
+which are derived from that repository and disposable, while the durable records
+have left the tree entirely. The worktree deliberately stayed — it is a checkout
+*of that project*, and its path is named in the system prompt and resolved by
+each plan's `Sandbox`.
 
 ## 5. Running it
 
@@ -493,8 +520,8 @@ KINGDOM_REALM=kingdom-mirror KINGDOM_SANDBOX=1 cargo leptos watch
 ```
 
 `KINGDOM_REALM` opens that realm at boot, so the server comes up on a populated
-map instead of the folder picker — which matters under `watch`, where every save
-restarts the server and would otherwise send you back to it. It seeds the realm
+map instead of whichever kingdom was last opened — which matters under `watch`,
+where every save restarts the server. It seeds the realm
 on first use and is instant thereafter.
 
 `KINGDOM_SANDBOX=1` makes "I meant to open the fake one" a rule the server

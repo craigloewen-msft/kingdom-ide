@@ -103,7 +103,7 @@ fn usage() {
         "Raise a proving ground: a synthetic dev folder, safe to work against.\n\n\
          USAGE:\n  kingdom-seed [REALM] [--into DIR] [--force]\n  kingdom-seed --list\n\n\
          OPTIONS:\n\
-         \x20 --into DIR   Where to seed it. Defaults to .kingdom/realms/REALM\n\
+         \x20 --into DIR   Where to seed it. Defaults to ~/.kingdom/realms/REALM\n\
          \x20 --force      Raze and rebuild a realm that already stands\n\
          \x20 --list       Show every realm\n"
     );

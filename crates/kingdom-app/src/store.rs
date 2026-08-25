@@ -1,18 +1,25 @@
 //! Where the kingdom's own records live.
 //!
-//! Server-only. Plans are kept as one JSON document each under the kingdom root:
+//! Server-only. Plans are kept as one JSON document each, in the King's profile
+//! ([`crate::profile`]) under a folder of that kingdom's own:
 //!
 //! ```text
-//! <kingdom_root>/.kingdom/
+//! ~/.kingdom/kingdoms/<key>/
 //!   plans/<plan-id>.json      one document per plan
 //!   archive/<plan-id>.patch   the work an archived plan set aside
+//!   approved/<plan-id>.md     what the King agreed to
 //! ```
 //!
-//! **Why here and not in each project.** The rail and the map read every plan at
-//! once, so sharding them across cities would mean walking every repository on
-//! each load -- and losing a plan outright when its city is renamed. More to the
-//! point, the user's repository is not ours to write to; `worktree.rs` already
-//! made that call when it chose `.git/info/exclude` over `.gitignore`.
+//! **Why not in each project.** The rail and the map read every plan at once, so
+//! sharding them across cities would mean walking every repository on each load
+//! -- and losing a plan outright when its city is renamed. More to the point,
+//! the user's repository is not ours to write to; `worktree.rs` already made
+//! that call when it chose `.git/info/exclude` over `.gitignore`.
+//!
+//! **Why not in the kingdom root either.** These are records of Kingdom's own
+//! work, not the dev folder's, and they should outlive any one checkout of it.
+//! [`crate::profile`] has the rest of that reasoning, and the migration for
+//! kingdoms written under the old layout.
 //!
 //! **Why files and not a database.** There is exactly one writer, the whole
 //! dataset already lives in memory, and the most demanding query in the codebase
@@ -29,11 +36,13 @@ use kingdom_core::{Plan, PlanId};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// Folder under the kingdom root holding everything Kingdom records.
-const STATE_DIR: &str = ".kingdom";
-
+/// Where everything recorded for `root` is kept.
+///
+/// The single seam between this module and the profile's layout: `plans_dir`,
+/// [`archive_patch`] and [`approved_plan`] all hang off it, so moving the
+/// records again is this one function.
 fn state_dir(root: &Path) -> PathBuf {
-    root.join(STATE_DIR)
+    crate::profile::kingdom_dir(root)
 }
 
 fn plans_dir(root: &Path) -> PathBuf {
@@ -353,7 +362,26 @@ fn plan_number(id: &PlanId) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::testing::Profile;
     use kingdom_core::{CityId, ModelChoice, Outcome, Speaker, Workspace};
+
+    /// A kingdom root, and a profile to record it in.
+    ///
+    /// The records no longer live under the root, so a test needs both: a
+    /// folder to *be* the kingdom, and somewhere disposable for the profile.
+    /// The guard also serialises these tests against each other, because the
+    /// profile location is process-global.
+    ///
+    /// That every assertion below still passes with the profile pointed at a
+    /// directory of its own is itself the check that nothing writes into the
+    /// kingdom root any more.
+    fn kingdom() -> (tempfile::TempDir, Profile, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = Profile::at(&dir.path().join("profile"));
+        let root = dir.path().join("dev");
+        std::fs::create_dir_all(&root).unwrap();
+        (dir, guard, root)
+    }
 
     fn plan(id: &str) -> Plan {
         Plan::opened(
@@ -373,8 +401,8 @@ mod tests {
     /// the approved body, and where the work will land.
     #[test]
     fn an_approved_plan_is_written_down_for_the_king() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
 
         let mut p = plan("plan-1");
         p.propose("Remember the folder", "# Remember the folder\n\nStore the root.");
@@ -383,7 +411,7 @@ mod tests {
         let path = record_approval(root, &p).expect("the ledger entry is written");
         let body = std::fs::read_to_string(&path).unwrap();
 
-        assert!(path.starts_with(root.join(".kingdom").join("approved")), "{path:?}");
+        assert!(path.starts_with(state_dir(root).join("approved")), "{path:?}");
         assert!(body.contains("Remember the folder"), "{body}");
         assert!(body.contains("Store the root."), "the approved plan itself: {body}");
         assert!(body.contains("Do the thing"), "the decree that led to it: {body}");
@@ -398,8 +426,8 @@ mod tests {
     /// no-op rather than an overwrite.
     #[test]
     fn the_first_approval_is_the_one_that_is_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
 
         let mut p = plan("plan-2");
         p.propose("First terms", "# First terms\n\nAs originally agreed.");
@@ -423,8 +451,8 @@ mod tests {
     /// beats writing a record with an empty body in it.
     #[test]
     fn a_plan_with_no_proposal_records_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(record_approval(dir.path(), &plan("plan-3")).is_err());
+        let (_dir, _profile, root) = kingdom();
+        assert!(record_approval(&root, &plan("plan-3")).is_err());
     }
 
     /// A plan owns a worktree with commits in it, so forgetting a plan orphans
@@ -435,8 +463,8 @@ mod tests {
     /// with it.
     #[test]
     fn plans_survive_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
 
         assert!(
             load(root).is_empty(),
@@ -499,8 +527,8 @@ mod tests {
     fn an_interrupted_turn_is_repaired_but_an_unstarted_one_is_left_alone() {
         use kingdom_core::{ToolCall, NoteKind, PlanStatus};
 
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
 
         // Opened a moment before the server stopped: nothing has happened yet.
         let unstarted = plan("plan-1");
@@ -550,8 +578,8 @@ mod tests {
     /// the next turn drains them.
     #[test]
     fn words_waiting_to_be_heard_survive_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
 
         let mut waiting = plan("plan-1");
         waiting.status = kingdom_core::PlanStatus::AwaitingReview;
@@ -581,8 +609,8 @@ mod tests {
     /// whose model vanishes after an upgrade.
     #[test]
     fn a_picture_is_shown_but_never_filed() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
 
         let mut seen = plan("plan-1");
         seen.status = kingdom_core::PlanStatus::AwaitingReview;
@@ -621,7 +649,7 @@ mod tests {
             "saving must not strip the plan the caller still holds"
         );
 
-        let raw = std::fs::read_to_string(root.join(".kingdom/plans/plan-1.json")).unwrap();
+        let raw = std::fs::read_to_string(plans_dir(root).join("plan-1.json")).unwrap();
         assert!(
             !raw.contains("QUJD"),
             "image payloads must never reach disk"
@@ -655,9 +683,9 @@ mod tests {
     /// serialise the *current* shape and prove nothing about the old one.
     #[test]
     fn a_plan_recorded_before_images_existed_still_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join(".kingdom/plans")).unwrap();
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
+        std::fs::create_dir_all(plans_dir(root)).unwrap();
 
         let old = r#"{
             "id": "plan-1",
@@ -688,7 +716,7 @@ mod tests {
             },
             "working_on": null
         }"#;
-        std::fs::write(root.join(".kingdom/plans/plan-1.json"), old).unwrap();
+        std::fs::write(plans_dir(root).join("plan-1.json"), old).unwrap();
 
         let loaded = load(root);
         assert_eq!(loaded.len(), 1, "an older document must not be skipped");

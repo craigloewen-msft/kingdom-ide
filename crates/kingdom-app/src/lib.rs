@@ -19,6 +19,8 @@ pub mod llm;
 #[cfg(feature = "ssr")]
 pub mod mock;
 #[cfg(feature = "ssr")]
+pub mod profile;
+#[cfg(feature = "ssr")]
 pub mod scan;
 #[cfg(feature = "ssr")]
 pub mod screencast;
