@@ -454,6 +454,65 @@ fn normalise(path: &Path) -> PathBuf {
     out
 }
 
+/// The environment a plan's child processes run under, beyond what this
+/// server inherited.
+///
+/// Empty for an ordinary project: a plan working on somebody else's repository
+/// gets the machine as it is, and imposing variables on it would be Kingdom
+/// reaching into work that is none of its business.
+///
+/// It is *not* empty when the workspace is a Kingdom checkout, because that is
+/// the one case where a child process is another Kingdom -- a rehearsal server
+/// the plan starts to look at its own work -- and the two collide in ways only
+/// this side can see:
+///
+/// - **`KINGDOM_HOME`.** Unset, `profile::home()` resolves to the King's real
+///   `~/.kingdom`, so a rehearsal writes its throwaway plan records into the
+///   King's own drawer. Pointed inside the workspace they arrive and depart
+///   with it. This is the resource collision this product exists to surface,
+///   happening inside the product.
+/// - **`KINGDOM_MODEL`.** The child inherits whatever credential this server
+///   has, so its picker opens on a *recommended* paid model and a plan testing
+///   a button spends the King's quota to do it. `mock` is the honest default
+///   for a rehearsal. A default rather than a restriction -- the picker still
+///   offers everything, and a plan that genuinely needs a real model can
+///   choose one or override this in the command it runs.
+///
+/// Neither is forced: these are applied to the child before it runs, so a
+/// command that names its own `KINGDOM_MODEL` inline still wins.
+pub fn child_environment(shop: &Sandbox) -> Vec<(String, String)> {
+    if !runs_a_kingdom(shop.root()) {
+        return Vec::new();
+    }
+    vec![
+        (
+            crate::profile::HOME_VAR.to_string(),
+            shop.root()
+                .join(".kingdom")
+                .join("profile")
+                .display()
+                .to_string(),
+        ),
+        ("KINGDOM_MODEL".to_string(), "mock".to_string()),
+    ]
+}
+
+/// Whether this workspace is a checkout of Kingdom itself.
+///
+/// Asked of a file only Kingdom has, rather than of the directory's name: a
+/// worktree is named for a plan id, and a fork or a rename would answer wrongly
+/// either way.
+///
+/// Public because two things need the same answer and must not disagree about
+/// it: [`child_environment`], which points a rehearsal server at the mock, and
+/// the system prompt, which tells the plan that has been done for it.
+pub fn runs_a_kingdom(root: &Path) -> bool {
+    root.join("crates")
+        .join("kingdom-app")
+        .join("Cargo.toml")
+        .is_file()
+}
+
 /// One thing the model can do.
 ///
 /// Stateless: every tool is a singleton and all per-call context arrives in the
@@ -509,6 +568,54 @@ mod tests {
 
     fn sandbox() -> Sandbox {
         Sandbox::new(Workspace::in_place("/dev/city"))
+    }
+
+    /// An ordinary project is handed the machine as it is.
+    ///
+    /// Kingdom imposing variables on a repository that is not its own would be
+    /// reaching into work that is none of its business, and would be invisible
+    /// to whoever later wondered why their build behaved differently here.
+    #[test]
+    fn a_project_that_is_not_kingdom_gets_no_environment_of_ours() {
+        let dir = tempfile::tempdir().expect("a temporary workspace");
+        let shop = Sandbox::new(Workspace::in_place(dir.path().display().to_string()));
+
+        assert!(child_environment(&shop).is_empty());
+    }
+
+    /// A Kingdom checkout gets both, and `KINGDOM_HOME` lands *inside* the
+    /// workspace.
+    ///
+    /// That last part is the point of the variable rather than a detail: left
+    /// unset the child resolves the King's real `~/.kingdom` and a rehearsal
+    /// writes throwaway plan records into his own drawer. A value outside the
+    /// workspace would be the same fault with extra steps.
+    #[test]
+    fn a_kingdom_checkout_is_pointed_at_the_mock_and_its_own_profile() {
+        let dir = tempfile::tempdir().expect("a temporary workspace");
+        let crates = dir.path().join("crates").join("kingdom-app");
+        std::fs::create_dir_all(&crates).expect("the marker's directory");
+        std::fs::write(crates.join("Cargo.toml"), "[package]\n").expect("the marker");
+
+        let shop = Sandbox::new(Workspace::in_place(dir.path().display().to_string()));
+        let environment = child_environment(&shop);
+
+        let home = environment
+            .iter()
+            .find(|(key, _)| key == crate::profile::HOME_VAR)
+            .map(|(_, value)| value.clone())
+            .expect("a rehearsal keeps its own records");
+        assert!(
+            Path::new(&home).starts_with(dir.path()),
+            "{home} is not inside the workspace"
+        );
+
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| key == "KINGDOM_MODEL" && value == "mock"),
+            "a rehearsal must not open on a model that costs the King money"
+        );
     }
 
     /// The invariant the whole tool surface rests on. It is tested here, at the

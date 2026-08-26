@@ -6,9 +6,9 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    annotate_file, annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom,
-    plan_briefing, say, send_file_notes, send_notes, set_aside_plan, stop_plan, unqueue,
-    withdraw_file_note, withdraw_note,
+    annotate_file, annotate_proposal, approve_plan, delete_entry, draft_plan, finish_plan,
+    get_kingdom, plan_briefing, plan_delete_file, plan_write_file, say, send_file_notes,
+    send_notes, set_aside_plan, stop_plan, unqueue, withdraw_file_note, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -534,18 +534,16 @@ fn ConversationBody(
         .unwrap_or_else(|| "This plan is closed.".to_string())
     });
 
-    // Keeps the newest line in view. A conversation longer than the viewport
-    // otherwise leaves the reply the user is waiting for below the fold.
-    let log_ref = NodeRef::<leptos::html::Div>::new();
-    stick_to_bottom(
-        log_ref,
-        Signal::derive(move || {
-            (
-                live.with(|p| p.as_ref().map(|p| p.transcript.len()).unwrap_or(0)),
-                drafting.get(),
-            )
-        }),
-    );
+    // Keeps the newest line in view -- but only while the King is reading the
+    // newest line. If he has scrolled up to read something, a reply landing
+    // leaves him where he is and raises the pill at the foot of the log
+    // instead. See [`Follow`].
+    let follow = Follow::new(Signal::derive(move || {
+        (
+            live.with(|p| p.as_ref().map(|p| p.transcript.len()).unwrap_or(0)),
+            drafting.get(),
+        )
+    }));
 
     // Same composer behaviour as the decree bar: it grows with the reply and
     // shrinks back once it is sent.
@@ -570,6 +568,11 @@ fn ConversationBody(
             return;
         }
         set_reply.set(String::new());
+        // Sending is an act that says "show me what happens next", so it takes
+        // him back to the newest line however far up he had scrolled to write
+        // it. Deliberately not done for the two margins -- a review and a note
+        // on a proposal are answered above the composer, where he is looking.
+        follow.to_the_newest();
         on_say.run((id.get_value(), text));
     };
 
@@ -852,6 +855,63 @@ fn ConversationBody(
         },
     );
 
+    // The King's own edits, saved and deleted. The panel is presentational --
+    // every call in this view is owned here, as the note above it is -- so it
+    // hands up what was typed and this decides what happens to it.
+    //
+    // The path is read here rather than passed up, for `annotate_line`'s reason:
+    // the panel knows the buffer and the chamber knows which file is open, and a
+    // path carried through the panel would be a second copy to keep in step with
+    // `Aside`.
+    //
+    // `saved_stamp` is the answer coming back. A `Callback` cannot return the
+    // result of a server call, and the panel needs the new stamp -- without it
+    // the second save of a session is checked against the stamp of the file
+    // before the first, and refused as stale by the King's own edit.
+    let saved_stamp = RwSignal::new(None::<kingdom_core::FileStamp>);
+    let save_file = Callback::new(move |(content, stamp): (String, kingdom_core::FileStamp)| {
+        let Some(path) = open_file.get_untracked() else {
+            return;
+        };
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match plan_write_file(plan_id.to_string(), path, content, stamp).await {
+                Ok(written) => {
+                    state.error.set(None);
+                    saved_stamp.set(Some(written.stamp));
+                    // The plan is not updated from here: the save appended a
+                    // note server-side, and the watch socket delivers the
+                    // whole plan back. Inserting a stale copy would race it.
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // How many times a file has been deleted. Not read for its value: the files
+    // tree caches every listing and deliberately never refetches, so a deleted
+    // file would sit in it forever. Bumping this clears that cache. On delete
+    // only -- a save changes no listing.
+    let tree_revision = RwSignal::new(0usize);
+    let delete_file = Callback::new(move |stamp: kingdom_core::FileStamp| {
+        let Some(path) = open_file.get_untracked() else {
+            return;
+        };
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match plan_delete_file(plan_id.to_string(), path, stamp).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                    tree_revision.update(|r| *r += 1);
+                    // The panel was showing a file that no longer exists.
+                    aside.set(Aside::Hidden);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
     // Taking one back. Losing the race is reported rather than swallowed, for
     // the reason `api::withdraw_file_note` gives.
     let withdraw_line_note = Callback::new(move |note_id: String| {
@@ -914,6 +974,7 @@ fn ConversationBody(
                 summary=summary
                 looking=looking
                 activity=activity
+                revision=tree_revision
                 open_file=open_file
                 on_read=read_file
                 on_diff=review_file
@@ -1099,7 +1160,11 @@ fn ConversationBody(
                     // nothing else. Plan *state* -- the summary, the status -- lives in the
                     // header or the rail; mixing it into this column put blocks derived
                     // from the newest reply above the prompt that opened the plan.
-                    <div class="chamber-log" node_ref=log_ref>
+                    <div
+                        class="chamber-log"
+                        node_ref=follow.log
+                        on:scroll=move |_| follow.saw_scroll()
+                    >
                         <Transcript live=live/>
 
                         <Show when={move || drafting.get()}>
@@ -1143,6 +1208,25 @@ fn ConversationBody(
                                 }
                             }
                         </For>
+
+                        // Something landed while he was reading further up. It
+                        // rides at the foot of the log rather than beside it, so
+                        // that the rule taking the whole log out of the flow for
+                        // a standing proposal takes this with it -- and so it
+                        // sits over the newest line, which is where it points.
+                        //
+                        // Quiet, and deliberately not gold: gold in this chamber
+                        // means "this is yours to decide", and this decides
+                        // nothing. It is a way back to the bottom.
+                        <Show when=move || follow.missed.get()>
+                            <button
+                                class="log-jump"
+                                title="Go to the newest line"
+                                on:click=move |_| follow.to_the_newest()
+                            >
+                                "\u{2193} New words below"
+                            </button>
+                        </Show>
                     </div>
 
                     // Outside the log, because an error is not something anybody said. A
@@ -1455,6 +1539,9 @@ fn ConversationBody(
                         notes=notes_on_source
                         width=source_width
                         on_note=annotate_line
+                        on_save=save_file
+                        on_delete=delete_file
+                        saved=saved_stamp
                         on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
                 </Show>
@@ -1471,6 +1558,7 @@ fn ConversationBody(
 /// the transcript as it was when the user walked in.
 #[component]
 fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
     let plan_id = Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.id.clone())));
 
     // The chamber's one clock. It runs only while some deed is actually in
@@ -1486,6 +1574,29 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
         })
     });
     let now = ticking_clock(anything_running);
+
+    // Removing one line of the record. An index rather than an id, because a
+    // message carries none and giving it one only for this would be a field
+    // that exists solely to be deleted by -- see `api::delete_entry` on why a
+    // position in the transcript as last drawn is honest enough to act on.
+    //
+    // Refused server-side for the reasons `kingdom_core::Plan::delete_entry`
+    // gives; this callback only reports what came back; it does not repeat the
+    // guesswork of which entries are removable.
+    let delete_at = Callback::new(move |index: usize| {
+        let Some(plan_id) = plan_id.get_untracked() else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match delete_entry(plan_id.to_string(), index).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
 
     view! {
         <For
@@ -1511,7 +1622,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
             let:entry
         >
             {
-                let (_, line) = entry;
+                let (index, line) = entry;
                 match line {
                     Entry::Message(u) => {
                         let is_user = u.speaker == Speaker::User;
@@ -1536,6 +1647,13 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                                     }
                                     .into_any()
                                 }}
+                                <button
+                                    class="entry-delete"
+                                    title="Remove this message from the record"
+                                    on:click=move |_| delete_at.run(index)
+                                >
+                                    "\u{00d7}"
+                                </button>
                             </div>
                         }
                         .into_any()
@@ -1566,6 +1684,12 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Tool(d) => {
                         let said = remark(&d);
                         let thought = thinking(&d);
+                        // A call still running has no result yet to judge, and
+                        // the server refuses it for exactly that reason -- see
+                        // `Plan::delete_entry`. Hidden here rather than shown
+                        // and left to fail, since a button that always errors
+                        // teaches the King to stop trusting it.
+                        let removable = !d.in_flight();
                         let deed = if is_open_question(&d) {
                             view! { <Question tool_call=d plan=plan_id/> }.into_any()
                         } else if d.tool == "spawn_agents" {
@@ -1577,7 +1701,23 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                         } else {
                             view! { <ToolCallLine tool_call=d plan=plan_id now=now/> }.into_any()
                         };
-                        view! { <Thinking thought=thought/> <Remark said=said/> {deed} }.into_any()
+                        view! {
+                            <Thinking thought=thought/>
+                            <Remark said=said/>
+                            <div class="chat-deed-row">
+                                {deed}
+                                <Show when=move || removable>
+                                    <button
+                                        class="entry-delete"
+                                        title="Remove this call from the record"
+                                        on:click=move |_| delete_at.run(index)
+                                    >
+                                        "\u{00d7}"
+                                    </button>
+                                </Show>
+                            </div>
+                        }
+                        .into_any()
                     }
                 }
             }
@@ -2681,22 +2821,130 @@ pub(crate) fn clock(at: Option<Timestamp>) -> String {
     }
 }
 
-/// Scrolls the log to the bottom whenever `watch` changes.
+/// How far short of the bottom still counts as being at the bottom, in pixels.
 ///
-/// Browser-only: under SSR there is nothing laid out to scroll.
-fn stick_to_bottom(element: NodeRef<leptos::html::Div>, watch: Signal<(usize, bool)>) {
+/// Slack rather than an equality, because the browser's own numbers do not land
+/// exactly: sub-pixel layout and a zoomed page leave a scrolled-to-the-end
+/// element reporting a pixel or two short, and a King who is plainly at the
+/// bottom must not be told there is something below him.
+///
+/// Only the browser measures, so this is dead weight in the server binary --
+/// the tests below still read it, which is why it is allowed rather than cut.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+const BOTTOM_SLACK: i32 = 24;
+
+/// Whether a scroll container is at its bottom, given the three numbers the DOM
+/// reports for it.
+///
+/// Pure so the decision can be tested without a browser -- the measurement is
+/// the DOM's, but which measurements mean "he is watching the newest line" is
+/// ours. Content shorter than the viewport reads as at the bottom, which is what
+/// makes a short conversation follow along at all.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn is_at_bottom(scroll_top: i32, client_height: i32, scroll_height: i32) -> bool {
+    scroll_height - (scroll_top + client_height) <= BOTTOM_SLACK
+}
+
+/// The chamber log's scroll behaviour: follow the newest line while the King is
+/// reading the newest line, and otherwise leave him where he is and say that
+/// something landed.
+///
+/// This used to be unconditional -- every new entry set `scroll_top` to
+/// `scroll_height` -- which threw a King reading twenty deeds back to the bottom
+/// every few seconds on a busy plan.
+///
+/// **Whether he was at the bottom is measured on scroll, never in the effect,
+/// and that is the whole trick.** By the time the effect runs the new line is
+/// already laid out, so `scroll_height` includes it: a King who was pinned
+/// measures as a screenful adrift and would never be followed again. So the flag
+/// is written by the log's own scroll handler and only read when something
+/// lands. A programmatic jump fires `scroll` too, so our own scrolling re-arms
+/// it, and the flag starts pinned -- which is what makes opening a plan land on
+/// the newest line as it always did.
+///
+/// `Copy` in all three fields, so the one value can be handed to the effect, the
+/// scroll handler, the pill and the composer alike.
+#[derive(Clone, Copy)]
+struct Follow {
+    /// The scrolling element itself.
+    log: NodeRef<leptos::html::Div>,
+    /// Whether the King is reading the newest line. Not a signal: nothing
+    /// renders from it, and it is written on every scroll event.
+    pinned: StoredValue<bool>,
+    /// Whether something landed while he was reading further up -- what the pill
+    /// at the foot of the log is drawn from.
+    missed: RwSignal<bool>,
+}
+
+impl Follow {
+    /// Starts following, and re-decides every time `watch` moves.
+    fn new(watch: Signal<(usize, bool)>) -> Self {
+        let follow = Self {
+            log: NodeRef::new(),
+            pinned: StoredValue::new(true),
+            missed: RwSignal::new(false),
+        };
+
+        #[cfg(feature = "hydrate")]
+        Effect::new(move |_| {
+            // Tracked so a new line or a draft starting re-runs this.
+            let _ = watch.get();
+            if follow.pinned.get_value() {
+                follow.scroll_to_bottom();
+                follow.missed.set(false);
+            } else {
+                // Measured *after* the change, and only to suppress a pill with
+                // nothing under it: the drafting line disappearing shrinks the
+                // log, which can leave him at the bottom without having moved.
+                // The decision above is never taken this way -- see the note on
+                // the type.
+                follow.missed.set(!follow.at_bottom());
+            }
+        });
+
+        #[cfg(not(feature = "hydrate"))]
+        let _ = watch;
+
+        follow
+    }
+
+    /// The King moved the log himself -- or our own jump did. Either way this is
+    /// the one place the pinned flag is written from a measurement.
+    fn saw_scroll(self) {
+        #[cfg(feature = "hydrate")]
+        {
+            let at_bottom = self.at_bottom();
+            self.pinned.set_value(at_bottom);
+            // Scrolling back down himself answers the pill as well as the button
+            // does.
+            if at_bottom {
+                self.missed.set(false);
+            }
+        }
+    }
+
+    /// Take him to the newest line. The pill's click, and the composer's send.
+    fn to_the_newest(self) {
+        self.pinned.set_value(true);
+        self.missed.set(false);
+        #[cfg(feature = "hydrate")]
+        self.scroll_to_bottom();
+    }
+
     #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        // Tracked so a new line or a draft starting re-runs this.
-        let _ = watch.get();
-        if let Some(el) = element.get() {
+    fn scroll_to_bottom(self) {
+        if let Some(el) = self.log.get_untracked() {
             el.set_scroll_top(el.scroll_height());
         }
-    });
+    }
 
-    #[cfg(not(feature = "hydrate"))]
-    {
-        let _ = (element, watch);
+    /// Whether the log is showing its newest line right now. `true` when there
+    /// is no element yet: nothing has been scrolled away from.
+    #[cfg(feature = "hydrate")]
+    fn at_bottom(self) -> bool {
+        self.log
+            .get_untracked()
+            .is_none_or(|el| is_at_bottom(el.scroll_top(), el.client_height(), el.scroll_height()))
     }
 }
 
@@ -2878,6 +3126,34 @@ mod tests {
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("forge"),
         )
+    }
+
+    /// The whole of the scroll decision, tested without a DOM.
+    ///
+    /// The measurement is the browser's; which measurements mean "he is
+    /// watching the newest line" is ours, and that is the half a regression
+    /// would get wrong -- wrong in one direction throws a reading King to the
+    /// bottom every few seconds, and in the other leaves a watching one staring
+    /// at a stale screen with a pill he has to keep pressing.
+    #[test]
+    fn being_at_the_bottom_allows_for_the_browsers_own_rounding() {
+        // Exactly at the bottom: 600px of content, a 200px window, scrolled 400.
+        assert!(is_at_bottom(400, 200, 600));
+
+        // A pixel or two short is still at the bottom. Sub-pixel layout and a
+        // zoomed page both land here, and a King plainly at the bottom must not
+        // be told there is something below him.
+        assert!(is_at_bottom(398, 200, 600));
+        assert!(is_at_bottom(400 - BOTTOM_SLACK, 200, 600));
+
+        // Past the slack he has genuinely scrolled up, and is left alone.
+        assert!(!is_at_bottom(400 - BOTTOM_SLACK - 1, 200, 600));
+        assert!(!is_at_bottom(0, 200, 600));
+
+        // Content shorter than the window: there is no scrolling to do, so he
+        // is at the bottom by definition. Reading this as "scrolled up" would
+        // mean a short conversation never followed a reply at all.
+        assert!(is_at_bottom(0, 200, 120));
     }
 
     /// A turn moving must not rebuild the chamber.

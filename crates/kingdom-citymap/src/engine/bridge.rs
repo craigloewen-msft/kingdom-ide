@@ -8,8 +8,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use bevy::prelude::*;
 use crate::map::{MapManifest, MapPresence};
+use bevy::prelude::*;
 
 /// How far the camera is zoomed in, and therefore how much detail is drawn.
 ///
@@ -126,6 +126,70 @@ pub struct TownActivity {
     pub working: usize,
 }
 
+/// One stage of raising a world, in the order they are built.
+///
+/// This is the unit the loading bar counts in, which is why it is a public
+/// enum rather than an implementation detail of the spawner: the interface
+/// names the stage it is watching, so the King reads "Laying the roads" rather
+/// than a bare percentage.
+///
+/// The order here is the order [`super::raise`] walks them, and [`Self::ALL`]
+/// is what pins that -- a stage added to one and not the other would silently
+/// never be built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RaiseStage {
+    /// The disk, its underside, the towns, the folders and the plazas.
+    Ground,
+    /// Every path and road.
+    Roads,
+    /// Every file, as a building.
+    Holdings,
+    /// Trees and rim posts.
+    Groves,
+    /// Folder names painted onto the ground.
+    Names,
+}
+
+impl RaiseStage {
+    /// Every stage, in build order.
+    pub const ALL: [Self; 5] = [
+        Self::Ground,
+        Self::Roads,
+        Self::Holdings,
+        Self::Groves,
+        Self::Names,
+    ];
+
+    /// What the loading card calls this stage.
+    ///
+    /// The King's vocabulary rather than the code's -- and on this map the
+    /// metaphor is also the literal subject matter, so no translation is being
+    /// invented here.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ground => "Laying the ground",
+            Self::Roads => "Laying the roads",
+            Self::Holdings => "Raising the holdings",
+            Self::Groves => "Planting the groves",
+            Self::Names => "Painting the names",
+        }
+    }
+}
+
+/// How far through building a world the engine is.
+///
+/// Published on every slice so the loading card can draw a bar that actually
+/// moves. See [`super::raise`] for why a world is built in slices at all:
+/// built in one go it blocks the main thread for seconds, and a bar that
+/// cannot be repainted is worse than no bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Raising {
+    /// Which stage is going up right now.
+    pub stage: RaiseStage,
+    /// How much of the whole world is standing, from 0.0 to 1.0.
+    pub fraction: f32,
+}
+
 /// What the engine is currently showing.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
@@ -136,8 +200,30 @@ pub struct ViewerStatus {
     /// manifest arriving is not the same moment as the settlement standing up,
     /// and building one of a few thousand holdings blocks a frame.
     pub built: bool,
+    /// How far through raising a world, while one is going up.
+    ///
+    /// `None` before the first [`ViewerCommand::Load`] and again once the world
+    /// stands, so "nothing is being built" and "a build has just started" stay
+    /// different answers -- the card shows an indeterminate bar for the first
+    /// and a bar at its start for the second.
+    pub raising: Option<Raising>,
     /// The holding under the pointer.
     pub hovered: Option<String>,
+    /// The holding the pointer last *clicked*, and which click that was.
+    ///
+    /// A click is reported by the engine rather than reconstructed outside it,
+    /// and that is the whole point. Selection used to be a DOM `click` handler
+    /// on the canvas paired with whatever [`Self::hovered`] happened to say --
+    /// but that hover reaches the interface through a 50 ms poll, so a click
+    /// arriving sooner than one poll after the pointer moved selected the wrong
+    /// thing or nothing at all. A person clicking quickly hit it; a synthetic
+    /// click, which moves and presses in the same instant, hit it every time.
+    ///
+    /// The serial is what makes clicking the *same* holding twice two events.
+    /// Without it the second click leaves the status identical, `status_matches`
+    /// reports no change, and the revision never moves -- so the interface
+    /// never hears about it.
+    pub clicked: Option<(String, u64)>,
     /// The innermost ward under the pointer, whether that came from the ground
     /// itself or from a holding standing on it.
     pub hovered_ward: Option<String>,
@@ -227,7 +313,9 @@ fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
     // a field the interface never hears about, because this is the only thing
     // that moves `Bridge::revision` and the poll skips an unmoved revision.
     left.built == right.built
+        && raising_matches(left.raising, right.raising)
         && left.hovered == right.hovered
+        && left.clicked == right.clicked
         && left.hovered_ward == right.hovered_ward
         && left.selected_ward == right.selected_ward
         && left.lod == right.lod
@@ -238,6 +326,30 @@ fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
             .iter()
             .zip(right.camera_rect.iter())
             .all(|(a, b)| (a - b).abs() < 0.5)
+}
+
+/// How far the raise fraction must move before the interface is woken.
+///
+/// A world is tens of thousands of entities and the bar is at most a few
+/// hundred pixels wide, so a slice that advanced it by a thousandth would
+/// repaint nothing. This is the same bargain the camera rect's tolerance
+/// strikes above, in the units this field is measured in.
+const RAISE_STEP: f32 = 0.005;
+
+/// Whether two raise readings say the same thing.
+///
+/// Starting and finishing are always a change, whatever the fractions were:
+/// `None` is what the card reads as "nothing is going up", and rounding that
+/// together with a build at 0% would leave the bar indeterminate for the whole
+/// of the first slice.
+fn raising_matches(left: Option<Raising>, right: Option<Raising>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.stage == right.stage && (left.fraction - right.fraction).abs() < RAISE_STEP
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +395,94 @@ mod tests {
         bridge.update_status(|status| status.built = true);
         assert_ne!(start, bridge.revision());
         assert!(bridge.status().built);
+    }
+
+    /// Clicking the same holding twice must read as two clicks.
+    ///
+    /// The interface only sees a status whose revision moved, so without the
+    /// serial the second click leaves `clicked` byte-identical, the revision
+    /// stands still, and the click is never delivered. That is not a corner
+    /// case: re-selecting the city you just cleared is the ordinary way to use
+    /// the map.
+    #[test]
+    fn clicking_the_same_holding_again_is_a_new_click() {
+        let bridge = Bridge::new();
+
+        let click = |id: &str| {
+            let id = id.to_owned();
+            bridge.update_status(|status| {
+                let serial = status.clicked.as_ref().map_or(0, |(_, n)| n + 1);
+                status.clicked = Some((id, serial));
+            });
+            bridge.revision()
+        };
+
+        let first = click("file-3");
+        let again = click("file-3");
+
+        assert_ne!(first, again, "the second click was never delivered");
+        assert_eq!(bridge.status().clicked, Some(("file-3".to_owned(), 1)));
+    }
+
+    #[test]
+    fn a_raise_wakes_the_interface_when_it_actually_moves() {
+        let bridge = Bridge::new();
+        assert!(bridge.status().raising.is_none(), "nothing goes up at boot");
+
+        // Starting is always a change: `None` reads as "nothing is being
+        // built", and a build at 0% is a different thing to say.
+        let start = bridge.revision();
+        bridge.update_status(|status| {
+            status.raising = Some(Raising {
+                stage: RaiseStage::Ground,
+                fraction: 0.0,
+            });
+        });
+        let begun = bridge.revision();
+        assert_ne!(start, begun);
+
+        // One entity out of twenty thousand moves nothing on screen.
+        bridge.update_status(|status| {
+            status.raising = Some(Raising {
+                stage: RaiseStage::Ground,
+                fraction: 0.0005,
+            });
+        });
+        assert_eq!(bridge.revision(), begun);
+
+        bridge.update_status(|status| {
+            status.raising = Some(Raising {
+                stage: RaiseStage::Ground,
+                fraction: 0.08,
+            });
+        });
+        let moved = bridge.revision();
+        assert_ne!(begun, moved);
+
+        // The stage names what the King is reading, so a new one is a change
+        // even if the bar has barely advanced.
+        bridge.update_status(|status| {
+            status.raising = Some(Raising {
+                stage: RaiseStage::Roads,
+                fraction: 0.0801,
+            });
+        });
+        let staged = bridge.revision();
+        assert_ne!(moved, staged);
+
+        // And finishing must be heard, or the bar would stop at whatever
+        // fraction the last slice left it showing.
+        bridge.update_status(|status| status.raising = None);
+        assert_ne!(staged, bridge.revision());
+    }
+
+    #[test]
+    fn every_stage_has_something_to_call_itself() {
+        // The card renders this string, so an unnamed stage would be a blank
+        // line where the King is told what is happening.
+        for stage in RaiseStage::ALL {
+            assert!(!stage.label().trim().is_empty(), "{stage:?} has no name");
+        }
     }
 
     #[test]

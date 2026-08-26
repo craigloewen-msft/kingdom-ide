@@ -293,6 +293,19 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
              here changes the user's own checkout.",
         ),
     }
+    // Said only where it is true. A plan working on Kingdom itself will start a
+    // rehearsal server, and `crate::tools::child_environment` has already
+    // pointed that child at the offline model and at its own profile. Without
+    // this sentence the plan discovers a picker on a paid model and "fixes" it
+    // by choosing one, which is the cost the mechanism exists to avoid.
+    if crate::tools::runs_a_kingdom(std::path::Path::new(&workspace.path)) {
+        out.push_str(
+            "\n\nThis is a checkout of Kingdom itself. A server you start here already \
+             runs against the offline `mock` model and keeps its records inside this \
+             workspace, so rehearsing costs the user nothing and leaves nothing behind \
+             -- you do not need to choose a model in the picker.",
+        );
+    }
     out
 }
 

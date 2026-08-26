@@ -1300,6 +1300,38 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
             )));
         }
 
+        // A `content_filter` finish is a considered refusal by the provider's
+        // safety classifier, not a reply that failed to arrive. Folding it into
+        // `Empty` is what made a real plan unrecoverable: every automatic retry
+        // and every manual "keep going" resent the identical transcript and
+        // was filtered identically, burning the retry budget on a request that
+        // was never going to answer differently.
+        //
+        // Deliberately *not* transient, for the same reason `TooLarge` is not:
+        // the fix is a *different* request -- rephrasing the ask, or dropping
+        // whatever in the transcript tripped the classifier -- not the same one
+        // resent.
+        if finish == "content_filter" {
+            let filtered_choice = choices
+                .iter()
+                .find(|c| c["finish_reason"].as_str() == Some("content_filter"));
+            let why = filtered_choice.and_then(|c| content_filter_reason(c, parsed));
+            return Err(ModelError::Refused(match why {
+                Some(why) => format!(
+                    "The model's safety filter blocked this reply (finish_reason: \
+                     content_filter) -- {why}. Retrying the same request will not help \
+                     -- rephrase the request, or continue from a point before whatever \
+                     in the conversation tripped the filter."
+                ),
+                None => "The model's safety filter blocked this reply (finish_reason: \
+                     content_filter). The gateway gave no further detail. Retrying the \
+                     same request will not help -- rephrase the request, or continue \
+                     from a point before whatever in the conversation tripped the \
+                     filter."
+                    .to_string(),
+            }));
+        }
+
         // An empty reply after a `length` finish is not the model declining to
         // answer -- it is the model spending its entire output budget on
         // reasoning and having nothing left to say with. Those are different
@@ -1363,6 +1395,65 @@ fn tokens_used(response: &Value) -> Option<usize> {
         .as_u64()
         .or_else(|| usage["prompt_tokens"].as_u64())
         .map(|t| t as usize)
+}
+
+/// Whatever the gateway said about *why* a `content_filter` finish happened,
+/// if it said anything.
+///
+/// Spelled several ways because no one shape is authoritative here either:
+/// some gateways put a refusal sentence on the message itself (`message.refusal`,
+/// the same field OpenAI uses for a model-level refusal), others attach
+/// per-category results to the choice (`content_filter_results`, Azure's
+/// shape), and others attach them to the request as a whole
+/// (`prompt_filter_results`, keyed by which choice's prompt they judged).
+/// Reading all three costs a few branches; reporting none of them is the thing
+/// this exists to fix -- "the safety filter blocked this" with no further word
+/// is as unhelpful as "empty reply" was before it had a name.
+///
+/// `None` when the gateway truly said nothing beyond the bare finish reason,
+/// which is the common case today: the reader is told that plainly rather than
+/// being shown an empty parenthetical.
+fn content_filter_reason(choice: &Value, response: &Value) -> Option<String> {
+    if let Some(refusal) = choice["message"]["refusal"].as_str() {
+        let refusal = refusal.trim();
+        if !refusal.is_empty() {
+            return Some(format!("the model said: \"{refusal}\""));
+        }
+    }
+
+    let mut categories = flagged_categories(&choice["content_filter_results"]);
+    if categories.is_empty() {
+        categories = flagged_categories(&response["prompt_filter_results"]);
+    }
+    if categories.is_empty() {
+        return None;
+    }
+    categories.sort();
+    Some(format!("flagged: {}", categories.join(", ")))
+}
+
+/// The categories a `content_filter_results`-shaped object marked `filtered`.
+///
+/// Azure's own shape is `{"hate": {"filtered": true, "severity": "medium"}, ...}`,
+/// and `prompt_filter_results` is the same shape nested one level under an
+/// array of `{"prompt_index": N, "content_filter_results": {...}}`. Both are
+/// tried here rather than assuming which one arrived, so a category is read
+/// wherever the gateway put it.
+fn flagged_categories(results: &Value) -> Vec<String> {
+    let object = results
+        .as_object()
+        .or_else(|| results.as_array()?.first()?["content_filter_results"].as_object());
+    let Some(object) = object else {
+        return Vec::new();
+    };
+    object
+        .iter()
+        .filter(|(_, v)| v["filtered"].as_bool() == Some(true))
+        .map(|(name, v)| match v["severity"].as_str() {
+            Some(severity) => format!("{name} ({severity})"),
+            None => name.clone(),
+        })
+        .collect()
 }
 
 /// Reads whatever thinking the gateway returned alongside a reply.
@@ -2667,6 +2758,87 @@ mod tests {
         assert!(
             !truncated.is_transient(),
             "retrying spends the same budget on the same silence: {truncated}"
+        );
+    }
+
+    /// A reply the safety filter blocked is named as that, and is not retried.
+    ///
+    /// Folded into `Empty` this used to be indistinguishable from a reply that
+    /// merely failed to arrive, so a plan retried the identical transcript
+    /// against the same classifier three times, then again on every manual
+    /// "keep going" -- always for the same result.
+    #[test]
+    fn a_filtered_reply_is_named_as_that_and_is_not_retried() {
+        let err = answer_from(&serde_json::json!({
+            "choices": [{"finish_reason": "content_filter", "message": {"role": "assistant"}}]
+        }))
+        .expect_err("a filtered reply is an error");
+
+        let said = err.to_string();
+        assert!(
+            said.contains("content_filter"),
+            "the reader needs to know this is the safety classifier, not silence: {said}"
+        );
+        assert!(
+            !err.is_transient(),
+            "resending the same transcript is filtered identically: {err}"
+        );
+        assert!(
+            said.contains("gave no further detail"),
+            "nothing in this reply said why, and that must be admitted rather \
+             than shown as an empty parenthetical: {said}"
+        );
+    }
+
+    /// When the gateway names the categories it flagged, the reader is told
+    /// which ones -- not just that "the safety filter blocked this".
+    #[test]
+    fn a_filtered_reply_names_the_categories_the_gateway_flagged() {
+        let err = answer_from(&serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {"role": "assistant"},
+                "content_filter_results": {
+                    "violence": {"filtered": true, "severity": "medium"},
+                    "hate": {"filtered": false, "severity": "safe"}
+                }
+            }]
+        }))
+        .expect_err("a filtered reply is an error");
+
+        let said = err.to_string();
+        assert!(
+            said.contains("violence (medium)"),
+            "the flagged category and its severity are the whole point of asking why: {said}"
+        );
+        assert!(
+            !said.contains("hate ("),
+            "a category the gateway did not flag must not be reported as though it was: {said}"
+        );
+    }
+
+    /// When the gateway hands back a refusal sentence, that is the most
+    /// specific "why" available and is shown ahead of anything else.
+    #[test]
+    fn a_filtered_reply_prefers_the_models_own_refusal_text() {
+        let err = answer_from(&serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "role": "assistant",
+                    "refusal": "I can't help with detecting or evading automation."
+                },
+                "content_filter_results": {
+                    "violence": {"filtered": true, "severity": "medium"}
+                }
+            }]
+        }))
+        .expect_err("a filtered reply is an error");
+
+        let said = err.to_string();
+        assert!(
+            said.contains("I can't help with detecting or evading automation."),
+            "the model's own words are more specific than a category name: {said}"
         );
     }
 

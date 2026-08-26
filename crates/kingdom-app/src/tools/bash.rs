@@ -319,7 +319,11 @@ async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
         .into();
     };
 
-    let job = match Job::spawn(cmd, shop.root().to_path_buf()) {
+    let job = match Job::spawn(
+        cmd,
+        shop.root().to_path_buf(),
+        super::child_environment(shop),
+    ) {
         Ok(job) => job,
         // A shell that would not start is not a command that failed -- there is
         // no exit code to report, so this is the one place a run refuses.
@@ -417,12 +421,21 @@ struct Ending {
 }
 
 impl Job {
-    fn spawn(cmd: &str, cwd: PathBuf) -> std::io::Result<Arc<Self>> {
+    /// `environment` is what this plan's children get beyond what the server
+    /// inherited -- see [`super::child_environment`]. Applied here rather than
+    /// prepended to the command string, so nothing has to be shell-quoted and
+    /// a command naming its own value inline still overrides it.
+    fn spawn(
+        cmd: &str,
+        cwd: PathBuf,
+        environment: Vec<(String, String)>,
+    ) -> std::io::Result<Arc<Self>> {
         let mut command = std::process::Command::new("bash");
         command
             .arg("-c")
             .arg(cmd)
             .current_dir(&cwd)
+            .envs(environment)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -893,6 +906,35 @@ mod tests {
         assert!(
             matches!(outcome, ToolOutcome::Refused { .. }),
             "{outcome:?}"
+        );
+    }
+
+    /// A command in a Kingdom checkout inherits the rehearsal environment.
+    ///
+    /// The `bash` half of what `tmux.rs` pins for a pane. Both matter because
+    /// a plan starts a server with whichever it reaches for, and an
+    /// environment applied to only one of them is a collision that appears at
+    /// random.
+    #[tokio::test]
+    async fn a_command_in_a_kingdom_checkout_is_pointed_at_the_mock() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("crates").join("kingdom-app");
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(marker.join("Cargo.toml"), "[package]\n").unwrap();
+        let shop = Sandbox::new(Workspace::in_place(dir.path().to_str().unwrap()));
+
+        let outcome = Bash
+            .run(
+                json!({"cmd": "echo model=$KINGDOM_MODEL home=$KINGDOM_HOME"}),
+                &shop,
+            )
+            .await;
+
+        let said = format!("{outcome:?}");
+        assert!(said.contains("model=mock"), "{said}");
+        assert!(
+            said.contains(&format!("home={}", dir.path().display())),
+            "the command kept its records outside the workspace: {said}"
         );
     }
 
