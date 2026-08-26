@@ -8,8 +8,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use bevy::prelude::*;
 use crate::map::MapManifest;
+use bevy::prelude::*;
 
 /// How far the camera is zoomed in, and therefore how much detail is drawn.
 ///
@@ -134,6 +134,21 @@ pub struct ViewerStatus {
     pub built: bool,
     /// The holding under the pointer.
     pub hovered: Option<String>,
+    /// The holding the pointer last *clicked*, and which click that was.
+    ///
+    /// A click is reported by the engine rather than reconstructed outside it,
+    /// and that is the whole point. Selection used to be a DOM `click` handler
+    /// on the canvas paired with whatever [`Self::hovered`] happened to say --
+    /// but that hover reaches the interface through a 50 ms poll, so a click
+    /// arriving sooner than one poll after the pointer moved selected the wrong
+    /// thing or nothing at all. A person clicking quickly hit it; a synthetic
+    /// click, which moves and presses in the same instant, hit it every time.
+    ///
+    /// The serial is what makes clicking the *same* holding twice two events.
+    /// Without it the second click leaves the status identical, `status_matches`
+    /// reports no change, and the revision never moves -- so the interface
+    /// never hears about it.
+    pub clicked: Option<(String, u64)>,
     /// The innermost ward under the pointer, whether that came from the ground
     /// itself or from a holding standing on it.
     pub hovered_ward: Option<String>,
@@ -224,6 +239,7 @@ fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
     // that moves `Bridge::revision` and the poll skips an unmoved revision.
     left.built == right.built
         && left.hovered == right.hovered
+        && left.clicked == right.clicked
         && left.hovered_ward == right.hovered_ward
         && left.selected_ward == right.selected_ward
         && left.lod == right.lod
@@ -279,6 +295,33 @@ mod tests {
         bridge.update_status(|status| status.built = true);
         assert_ne!(start, bridge.revision());
         assert!(bridge.status().built);
+    }
+
+    /// Clicking the same holding twice must read as two clicks.
+    ///
+    /// The interface only sees a status whose revision moved, so without the
+    /// serial the second click leaves `clicked` byte-identical, the revision
+    /// stands still, and the click is never delivered. That is not a corner
+    /// case: re-selecting the city you just cleared is the ordinary way to use
+    /// the map.
+    #[test]
+    fn clicking_the_same_holding_again_is_a_new_click() {
+        let bridge = Bridge::new();
+
+        let click = |id: &str| {
+            let id = id.to_owned();
+            bridge.update_status(|status| {
+                let serial = status.clicked.as_ref().map_or(0, |(_, n)| n + 1);
+                status.clicked = Some((id, serial));
+            });
+            bridge.revision()
+        };
+
+        let first = click("file-3");
+        let again = click("file-3");
+
+        assert_ne!(first, again, "the second click was never delivered");
+        assert_eq!(bridge.status().clicked, Some(("file-3".to_owned(), 1)));
     }
 
     #[test]

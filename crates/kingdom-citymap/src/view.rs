@@ -175,29 +175,50 @@ pub fn CityMap(
 
     // Clicking a building selects its city; clicking empty space clears it.
     //
-    // The engine observes `Pointer<Over>`/`Pointer<Out>` but has no click
-    // handler of its own, so the DOM's click is paired with whatever the engine
-    // last reported as hovered. Now that the engine is Kingdom's own source a
-    // real `Pointer<Click>` observer in `engine::spawn` is available and is the
-    // tidier answer; this stays as the smaller change until something needs the
-    // difference.
-    let select = move |_| {
-        let hovered = status.with(|state| state.hovered.clone());
-        let Some(id) = hovered else {
-            selected.set(None);
+    // The engine reports the click itself (`ViewerStatus::clicked`), and the
+    // DOM handler now only handles the *absence* of one. It used to pair its
+    // own click with whatever hover the 50 ms poll had last delivered, which
+    // lost every click that arrived less than one poll after the pointer
+    // moved -- a fast human click, and a synthetic one every single time,
+    // since a driven pointer moves and presses in the same instant.
+    //
+    // Reading the click out of an effect rather than out of the handler is
+    // what makes that work: the engine may publish it *after* the DOM event
+    // has already been and gone.
+    let last_click = RwSignal::new(None::<(String, u64)>);
+    Effect::new(move |_| {
+        let Some(click) = status.with(|state| state.clicked.clone()) else {
             return;
         };
+        // The same click, seen again on a later poll, is not a new one.
+        if last_click.get_untracked().as_ref() == Some(&click) {
+            return;
+        }
+        last_click.set(Some(click.clone()));
         // A feature's `repository` is the project's directory name, which is
         // exactly what `CityId::new` is built from in `kingdom_app::scan`.
-        let city = manifest.with(|map| {
+        let city = manifest.with_untracked(|map| {
             map.as_ref().and_then(|map| {
                 map.features
                     .iter()
-                    .find(|feature| feature.id == id)
+                    .find(|feature| feature.id == click.0)
                     .map(|feature| CityId::new(feature.repository.clone()))
             })
         });
-        selected.set(city);
+        if city.is_some() {
+            selected.set(city);
+        }
+    });
+
+    // Empty space clears the selection. Nothing in the engine reports a click
+    // on *nothing*, so this is still the DOM's job -- and `hovered` is a sound
+    // reading here in a way it was not for selection: it asks whether the
+    // pointer is over a holding at all, which a stale poll answers correctly
+    // for a pointer that has been resting.
+    let clear = move |_| {
+        if status.with(|state| state.hovered.is_none()) {
+            selected.set(None);
+        }
     };
 
     view! {
@@ -205,7 +226,7 @@ pub fn CityMap(
             <canvas
                 id="repo-city-canvas"
                 class="city-map-canvas"
-                on:click=select
+                on:click=clear
                 aria-label="The kingdom: every project, drawn as a disk of towns in space"
             ></canvas>
             <Survey manifest=manifest status=status failed=load_error/>

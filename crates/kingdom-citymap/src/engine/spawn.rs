@@ -4,10 +4,10 @@
 //! arrives as a footprint, a height, and an archetype, and the geometry is
 //! generated here — once per distinct shape, then shared.
 
+use crate::map::{MapBuilding, MapManifest, MapScenery, MapWard, MapWorld};
 use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use crate::map::{MapBuilding, MapManifest, MapScenery, MapWard, MapWorld};
 
 use super::activity;
 use super::bridge::{Bridge, LodLevel};
@@ -578,6 +578,7 @@ fn spawn_building(
         // catches hits on its walls, roof, and trim alike.
         .observe(on_hover)
         .observe(on_unhover)
+        .observe(on_click)
         .id();
 
     let trim_material = material_cache.get(materials, building.palette.trim, Surface::Polished);
@@ -695,6 +696,23 @@ fn on_hover(event: On<Pointer<Over>>, holdings: Query<&Holding>, bridge: Res<Bri
     if let Ok(holding) = holdings.get(event.entity) {
         let id = holding.feature_id.clone();
         bridge.update_status(|status| status.hovered = Some(id));
+    }
+}
+
+/// Publishes the holding that was clicked.
+///
+/// The engine is the only thing that knows what is under the pointer at the
+/// instant of a press, so it is the only thing that can answer this without a
+/// race -- see [`crate::engine::bridge::ViewerStatus::clicked`] for the one it
+/// replaces. The serial makes a second click on the same holding a second
+/// event rather than an unchanged status nobody hears about.
+fn on_click(event: On<Pointer<Click>>, holdings: Query<&Holding>, bridge: Res<Bridge>) {
+    if let Ok(holding) = holdings.get(event.entity) {
+        let id = holding.feature_id.clone();
+        bridge.update_status(|status| {
+            let serial = status.clicked.as_ref().map_or(0, |(_, n)| n + 1);
+            status.clicked = Some((id, serial));
+        });
     }
 }
 

@@ -225,6 +225,9 @@ fn apply_commands(
                     status.built = true;
                     status.error = None;
                     status.hovered = None;
+                    // A click on a world that no longer exists must not be
+                    // replayed against the one that replaced it.
+                    status.clicked = None;
                     status.selected_ward = None;
                     status.hovered_ward = None;
                 });
