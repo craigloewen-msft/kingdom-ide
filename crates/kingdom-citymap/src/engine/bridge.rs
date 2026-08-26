@@ -83,6 +83,12 @@ pub enum ViewerCommand {
     /// the map answers questions while the pointer is over it and forgets as
     /// soon as it leaves.
     SelectWard(Option<String>),
+    /// Which towns have work under way in them, and how much.
+    ///
+    /// Replaces whatever was set before rather than amending it: the interface
+    /// polls for the whole picture, so a town missing from the list is a town
+    /// with nothing running rather than a town nobody mentioned.
+    SetActivity(Vec<TownActivity>),
     /// Whether the King is actually looking at the map.
     ///
     /// The map is mounted once for the life of the page and hidden with CSS
@@ -94,6 +100,26 @@ pub enum ViewerCommand {
     /// most of the King's time is spent in a chamber rather than on the map,
     /// that is most of the time.
     Show(bool),
+}
+
+/// One town with agents working in it.
+///
+/// Deliberately a plain string and a count rather than a `kingdom-core` type:
+/// the engine knows nothing about cities or plans, and this is the seam that
+/// keeps it that way. The interface translates on its side of the bridge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TownActivity {
+    /// The town's name, as [`crate::map::MapTown::name`] gives it.
+    ///
+    /// Matched by **name** rather than by id, because a manifest's `town-N`
+    /// identifiers are numbered from two different orderings -- `scene::towns`
+    /// enumerates the packing order, `manifest::build_world_manifest` sorts by
+    /// file count first -- so `town-0` need not mean the same settlement in
+    /// both halves of one manifest. The name is what both agree on, and it is
+    /// the same string `kingdom_app::scan` builds a `CityId` from.
+    pub town: String,
+    /// How many plans are working there. Never zero.
+    pub working: usize,
 }
 
 /// What the engine is currently showing.

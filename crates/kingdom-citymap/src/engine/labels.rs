@@ -11,6 +11,7 @@
 use bevy::camera::Camera;
 use bevy::prelude::*;
 
+use super::activity::Activity;
 use super::bridge::LodLevel;
 use super::camera::MapCamera;
 use super::lod::ActiveLod;
@@ -214,10 +215,38 @@ pub fn spawn_label_pool(mut commands: Commands, mut pool: ResMut<LabelPool>) {
         .collect();
 }
 
+/// A plaque's second line, with what is working there added to it.
+///
+/// Appends to the existing detail rather than claiming a third line: a label
+/// slot holds exactly a [`LabelTitle`] and a [`LabelDetail`], and growing the
+/// pool is a larger change than one clause earns.
+///
+/// **ASCII only, deliberately.** Bevy's bundled default font is a *subset* of
+/// FiraMono carrying 95 codepoints, so anything outside ASCII renders as a
+/// tofu box. A middot and a bullet were both tried on screen and both came out
+/// as squares. (The manifest's own `"N files \u{b7} N lines"` has the same bug
+/// and predates this; it is left alone here rather than fixed in passing.)
+///
+/// Pure, so the wording can be pinned without a camera or a window.
+pub fn with_activity(detail: &str, working: usize) -> String {
+    if working == 0 {
+        return detail.to_owned();
+    }
+    // "1 working" rather than "1 plan working": the plaque is already crowded
+    // and the map's own vocabulary for a piece of work is the town lighting up.
+    let note = format!("[{working} working]");
+    if detail.is_empty() {
+        note
+    } else {
+        format!("{detail}  {note}")
+    }
+}
+
 /// Projects anchors, places labels, and drives the pool.
 #[allow(clippy::too_many_arguments)]
 pub fn update_labels(
     active: Res<ActiveLod>,
+    working: Res<Activity>,
     map: Res<LoadedMap>,
     camera: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     holdings: Query<&Holding>,
@@ -251,7 +280,15 @@ pub fn update_labels(
                 let anchor = project(Vec3::new(district.center[0], 0.0, district.center[1]))?;
                 Some(LabelRequest {
                     title: district.label.clone(),
-                    detail: district.detail.clone(),
+                    // A district plaque at this tier stands for a whole town,
+                    // and its `label` is that town's name -- which is what the
+                    // activity is keyed on. In a single-settlement map the
+                    // plaques are wards instead, and no ward shares a name with
+                    // a town, so the lookup simply finds nothing.
+                    detail: with_activity(
+                        &district.detail,
+                        working.working_in(&district.label),
+                    ),
                     anchor,
                     font_size: DISTRICT_FONT_SIZE,
                     detail_size: DETAIL_FONT_SIZE,
@@ -421,5 +458,36 @@ mod tests {
         ];
         let placed = place_labels(requests, VIEWPORT);
         assert_eq!(placed[0].request.title, "major.rs");
+    }
+
+    /// A quiet town's plaque must read exactly as it always did: this runs on
+    /// every district at the Districts tier, so a stray separator would appear
+    /// across the whole map the moment nothing at all was running.
+    #[test]
+    fn a_quiet_town_says_nothing_new() {
+        assert_eq!(with_activity("1,204 files", 0), "1,204 files");
+        assert_eq!(with_activity("", 0), "");
+    }
+
+    #[test]
+    fn a_working_town_says_how_much_is_running() {
+        assert_eq!(with_activity("1,204 files", 2), "1,204 files  [2 working]");
+        // Nothing to separate from, so no separator.
+        assert_eq!(with_activity("", 1), "[1 working]");
+    }
+
+    /// Bevy's bundled font is a 95-codepoint subset of FiraMono, so a plaque
+    /// written with a middot or a bullet renders a tofu box -- observed on
+    /// screen before this test was written. Anything this module composes must
+    /// stay inside ASCII.
+    #[test]
+    fn the_plaque_stays_within_the_font_it_is_drawn_with() {
+        for count in [1, 2, 17] {
+            let line = with_activity("1,204 files", count);
+            assert!(
+                line.is_ascii(),
+                "the default font cannot draw {line:?}"
+            );
+        }
     }
 }

@@ -223,7 +223,11 @@ crates/
                     by looking for `.git` and so drops a folder without one,
                     which disagrees with `kingdom-app::scan`. `manifest_for`
                     walks `Kingdom::cities` instead
-    engine/         Drawing it with Bevy (hydrate, plus native for its tests)
+    engine/         Drawing it with Bevy (hydrate, plus native for its tests).
+                    `activity.rs` is the one part fed from outside the manifest:
+                    which towns have agents working in them, traced as a pulsing
+                    ring, polled rather than pushed and never cached with the
+                    geometry
     view.rs         `CityMap` — the canvas, and the click that selects a city
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
@@ -538,12 +542,24 @@ that properly means an OS-level sandbox, which is a deliberate later decision.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
-- Live updates beyond a plan's own chamber. The chamber is pushed to over a
+- Live updates beyond a plan's own chamber, other than the one thing the map now
+  polls for. The chamber is pushed to over a
   WebSocket (`events.rs`, `watch.rs`), and the plan's browser is mirrored over a
-  second one (`screencast.rs`) — but the map and the rail still only learn of a
-  change when something refetches the kingdom. The spyglass is deliberately
+  second one (`screencast.rs`) — but the **rail** still only learns of a
+  change when something refetches the kingdom, and so does everything about the
+  map except which towns are working. That one fact is *polled*, every two
+  seconds and only while the map is on screen (`app.rs::poll_activity` over
+  `api::kingdom_activity`), because `events.rs` is keyed per plan by design and
+  a kingdom-wide channel is a real change rather than a smaller one. The
+  spyglass is deliberately
   *not* surfaced on the map for that reason: a city lighting up because a plan
   holds a live browser needs both this, and a plan that knows it owns a session.
+
+  Both halves of "is the King looking at the map?" hang off the **same**
+  `on_the_map` memo in `ThroneRoom`: it stops the activity poll
+  (`poll_activity`) and it stops the engine drawing (`ViewerCommand::Show`).
+  Keeping them on one signal is what stops the map from polling for a ring that
+  nothing is rendering, or rendering a ring nothing is refreshing.
 - **Any resource arbitration at all** — see §3. This matters more now than it
   did: the court can bind ports and run builds, so two plans genuinely can
   collide. Nothing detects it.

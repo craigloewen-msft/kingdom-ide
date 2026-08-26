@@ -87,6 +87,12 @@ pub fn CityMap(
     /// reads and writes it.
     #[allow(unused_variables)]
     selected: leptos::prelude::RwSignal<Option<kingdom_core::CityId>>,
+    /// Which cities have work under way. Unused here for the same reason: the
+    /// signature must match the browser's, because `app.rs` names this
+    /// component on both targets.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    working: leptos::prelude::Signal<Vec<kingdom_core::CityActivity>>,
     /// Whether the map is on screen. Unused here for the same reason: only the
     /// browser has an engine to stop. It is taken anyway so that the two
     /// `CityMap` signatures stay identical -- `app.rs` compiles against both,
