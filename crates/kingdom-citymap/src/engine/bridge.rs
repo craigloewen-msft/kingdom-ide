@@ -99,6 +99,13 @@ pub enum ViewerCommand {
 /// What the engine is currently showing.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
+    /// Whether a world has been built and drawn.
+    ///
+    /// False from boot until the first [`ViewerCommand::Load`] has been
+    /// spawned and framed, which is what the loading card watches: the
+    /// manifest arriving is not the same moment as the settlement standing up,
+    /// and building one of a few thousand holdings blocks a frame.
+    pub built: bool,
     /// The holding under the pointer.
     pub hovered: Option<String>,
     /// The innermost ward under the pointer, whether that came from the ground
@@ -186,7 +193,11 @@ impl Bridge {
 /// a drag is settling. Treating those as changes would wake the interface up
 /// sixty times a second for nothing.
 fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
-    left.hovered == right.hovered
+    // `built` is compared for a reason worth stating: a field left out here is
+    // a field the interface never hears about, because this is the only thing
+    // that moves `Bridge::revision` and the poll skips an unmoved revision.
+    left.built == right.built
+        && left.hovered == right.hovered
         && left.hovered_ward == right.hovered_ward
         && left.selected_ward == right.selected_ward
         && left.lod == right.lod
@@ -228,6 +239,20 @@ mod tests {
 
         bridge.update_status(|status| status.camera_rect[0] += 12.0);
         assert_ne!(bridge.revision(), after_hover);
+    }
+
+    #[test]
+    fn the_world_standing_up_wakes_the_interface() {
+        // The loading card hangs off this one field, and the poll only reads a
+        // status whose revision moved -- so a `built` that did not bump the
+        // revision would leave the card up over a finished map forever.
+        let bridge = Bridge::new();
+        assert!(!bridge.status().built, "nothing is drawn before a Load");
+
+        let start = bridge.revision();
+        bridge.update_status(|status| status.built = true);
+        assert_ne!(start, bridge.revision());
+        assert!(bridge.status().built);
     }
 
     #[test]

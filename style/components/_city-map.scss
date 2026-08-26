@@ -46,6 +46,169 @@
 // the only affordance saying so -- there is no hover chrome in the DOM to do it.
 .city-map.over-holding .city-map-canvas { cursor: pointer; }
 
+// The loading card: what the map is doing, while it is doing it.
+//
+// It sits over the canvas inside `.city-map`, so the decree bar -- a later
+// sibling of `.map-region` -- still stands above it. That is deliberate: the
+// King can be typing his decree while the cities go up.
+.city-survey {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  // The card is a report, not a control. Nothing here may swallow a drag meant
+  // for the map behind it.
+  pointer-events: none;
+  // Deep ocean, faintly lifted, so the card has something to sit on before the
+  // renderer paints its own sea.
+  background: radial-gradient(60% 60% at 50% 45%, rgba(t.$panel, 0.55), rgba(t.$void, 0.9));
+  opacity: 1;
+  transition: opacity 320ms ease;
+}
+
+// Leaving is a fade rather than an unmount, so the map is not revealed by a
+// hard cut. Once gone the animations are stopped as well -- otherwise three
+// keyframed elements would go on ticking behind the map for the life of the
+// page, and this component is mounted exactly once and never unmounted.
+.city-survey.gone {
+  opacity: 0;
+  visibility: hidden;
+
+  * { animation-play-state: paused; }
+}
+
+.survey-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 28px 40px 24px;
+  text-align: center;
+}
+
+// An isometric plot of ground, with towers going up on it.
+//
+// Every animated property below is `transform` or `opacity` and nothing else.
+// Those are composited off the main thread; `width`, `background-position` and
+// `clip-path` are not. The second phase this card covers blocks the main
+// thread for the whole of `spawn_world`, so an animation built on any of those
+// would freeze during precisely the wait it exists to cover -- and a frozen
+// spinner reads as a hung app, which is the impression this is here to remove.
+.survey-plot {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 7px;
+  width: 96px;
+  height: 64px;
+  margin-bottom: 14px;
+
+  // The ground the towers stand on: a square, turned 45° and then flattened,
+  // which is the same isometric the map itself is drawn in.
+  //
+  // The order of those two is the whole thing, and is easy to get backwards --
+  // a transform list applies right to left. `scaleY() rotate()` turns the
+  // square and *then* squashes the diamond, which is the plan view wanted.
+  // `rotate() scaleY()` squashes first and turns the result, which is a tilted
+  // skinny rectangle -- it reads as a stray diagonal stroke behind the towers,
+  // and that is exactly what it drew before this was fixed.
+  //
+  // Its centre sits 16px above the box's floor, and the towers are lifted by
+  // the same 16px, so they stand *on* the plane rather than in front of it.
+  // The flattening keeps the near vertex below the shortest tower's shortest
+  // moment -- see the floor in `survey-raise`.
+  &::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: -12px;
+    width: 54px;
+    height: 54px;
+    margin-left: -27px;
+    border: 1px solid rgba(t.$gold-dim, 0.85);
+    // A faint fill as well as an edge, so the plot reads as ground with a
+    // surface rather than as four lines.
+    background: rgba(t.$gold, 0.07);
+    transform: scaleY(0.42) rotate(45deg);
+  }
+}
+
+.survey-tower {
+  position: relative;
+  width: 12px;
+  // Standing on the ground plane, not on the floor of the box -- the same 16px
+  // the plot's centre sits at. See the note above.
+  margin-bottom: 16px;
+  border-radius: 1px 1px 0 0;
+  background: linear-gradient(180deg, rgba(t.$gold, 0.9), rgba(t.$gold-dim, 0.25));
+  // Grown from the ground, so a tower rises rather than inflating in place.
+  transform-origin: 50% 100%;
+  animation: survey-raise 1.8s ease-in-out infinite;
+
+  &:nth-child(1) { height: 26px; animation-delay: 0s; }
+  &:nth-child(2) { height: 38px; animation-delay: 0.22s; }
+  &:nth-child(3) { height: 30px; animation-delay: 0.44s; }
+}
+
+.survey-phase {
+  margin: 0;
+  color: t.$ink;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.survey-detail {
+  margin: 0;
+  color: t.$ink-faint;
+  font-size: 12px;
+}
+
+// A surveyor's line under the card, with a light running along it.
+.survey-rule {
+  position: relative;
+  width: 132px;
+  height: 1px;
+  margin-top: 14px;
+  overflow: hidden;
+  background: rgba(t.$edge-bright, 0.8);
+
+  > span {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, t.$gold, transparent);
+    // Translating a full-width layer, rather than animating a width or an
+    // offset, for the compositor reason above.
+    animation: survey-sweep 1.8s ease-in-out infinite;
+  }
+}
+
+// The floor is 0.55 rather than something nearer nothing: a tower is a building
+// going up, not a bar chart, and below about half height the shortest one drops
+// behind the near vertex of the ground it is standing on.
+@keyframes survey-raise {
+  0%, 100% { transform: scaleY(0.55); opacity: 0.5; }
+  50%      { transform: scaleY(1);    opacity: 1; }
+}
+
+@keyframes survey-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+// Held still for anyone who asked for that. The card still says which phase
+// the map is in, which is the part that carries the information -- the towers
+// only ever said "something is happening", and the words say it too.
+@media (prefers-reduced-motion: reduce) {
+  .survey-tower,
+  .survey-rule > span {
+    animation: none;
+  }
+
+  .survey-tower { opacity: 0.8; }
+  .survey-rule > span { opacity: 0.5; }
+}
+
 .city-map-error {
   position: absolute;
   inset-inline: 0;
