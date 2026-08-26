@@ -25,7 +25,7 @@
 
 use gloo_net::http::Request;
 use gloo_timers::callback::{Interval, Timeout};
-use kingdom_core::{CityActivity, CityId};
+use kingdom_core::{ChangeSummary, CityActivity, CityId};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -150,6 +150,14 @@ pub fn CityMap(
     /// the town to the one holding that file's building stands on.
     #[prop(into)]
     focus_file: Signal<Option<String>>,
+    /// What the open plan is proposing, if the King is in a chamber.
+    ///
+    /// Resolved against the manifest here and handed to the engine as plain
+    /// geometry -- see the effect below, which is the boundary the engine's
+    /// ignorance of Kingdom's domain is kept at. `None` outside a chamber, which
+    /// tears the works down.
+    #[prop(into)]
+    works: Signal<Option<ChangeSummary>>,
 ) -> impl IntoView {
     // First, and before anything is created: an engine that is not to run must
     // not be half-started and then told to stop. See the module doc.
@@ -287,6 +295,43 @@ pub fn CityMap(
     // returns to the city and the file that are open *now*, rather than
     // waiting for the next time one of them changes.
     let manual = Memo::new(move |_| status.with(|state| state.manual));
+
+    // What the open plan is proposing, resolved into ground and handed over.
+    //
+    // **This is the boundary.** Everything above it is Kingdom's domain -- a
+    // `ChangeSummary` of `ChangedFile`s with paths and line counts -- and
+    // everything below it is world-space geometry. The engine never learns what
+    // a plan or a changed file is, exactly as it never learns what a `CityId`
+    // is: `SetActivity` above translates for the same reason.
+    //
+    // Tracks the manifest as well as the works, and must: a chamber opened from
+    // a cold page has its summary in hand long before the map has arrived, and
+    // without the dependency those changes would never be drawn at all. The
+    // same trap the scoping effect below documents.
+    //
+    // And it tracks `built` for a second, sharper reason. Raising a world
+    // clears the works (`apply_commands`, the `Load` arm) -- scaffolding left
+    // hanging over a settlement being torn down would end up above whatever
+    // replaced it. On a cold page the summary is usually resolved *before* that
+    // `Load` lands, so without this the first send is thrown away and nothing
+    // ever asks again: the signal has not changed, so the effect does not
+    // re-run. Tracking `built` is what re-sends them once the city stands.
+    // Measured, not guessed -- the works were silently absent on first open.
+    let builder = bridge.clone();
+    Effect::new(move |_| {
+        let summary = works.get();
+        let city = focus_city.get();
+        let standing = built.get();
+        let raised = manifest.with(|map| match (map, &summary, &city) {
+            (Some(map), Some(summary), Some(city)) if standing => {
+                crate::map::works::resolve(map, city.as_str(), summary)
+            }
+            // No plan open, or nothing to draw against yet. An empty list is
+            // how the works are torn down, so this is sent rather than skipped.
+            _ => Vec::new(),
+        });
+        builder.send(ViewerCommand::SetWorks(raised));
+    });
 
     // Re-framing when the map changes home.
     //

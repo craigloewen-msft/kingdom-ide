@@ -120,6 +120,12 @@ pub fn CityMap(
     #[allow(unused_variables)]
     #[prop(into)]
     focus_file: leptos::prelude::Signal<Option<String>>,
+    /// What the open plan is proposing. Unused here, for the reason above --
+    /// only the browser has a manifest to resolve it against and an engine to
+    /// raise it with.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    works: leptos::prelude::Signal<Option<kingdom_core::ChangeSummary>>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

@@ -62,14 +62,24 @@ pub struct MeshCache {
 }
 
 #[derive(Clone)]
-struct BuildingHandles {
-    walls: Handle<Mesh>,
-    roof: Handle<Mesh>,
-    details: Option<Handle<Mesh>>,
+pub(super) struct BuildingHandles {
+    pub(super) walls: Handle<Mesh>,
+    pub(super) roof: Handle<Mesh>,
+    pub(super) details: Option<Handle<Mesh>>,
 }
 
 impl MeshCache {
-    fn building(&mut self, meshes: &mut Assets<Mesh>, shape: BuildingShape) -> BuildingHandles {
+    /// The meshes for a holding's shape, built on first use and shared after.
+    ///
+    /// `pub(super)` rather than private: `works` builds a ghost house for a file
+    /// that does not exist yet, and it must come out of the same cache and the
+    /// same generator as a real one -- a new file should look like a *building*,
+    /// which is the whole point of drawing it on a map of buildings.
+    pub(super) fn building(
+        &mut self,
+        meshes: &mut Assets<Mesh>,
+        shape: BuildingShape,
+    ) -> BuildingHandles {
         self.buildings
             .entry(shape)
             .or_insert_with(|| {

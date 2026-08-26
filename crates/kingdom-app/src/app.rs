@@ -161,6 +161,20 @@ pub struct KingdomState {
     /// `None` when no file is open. The rail's map deliberately does not pull
     /// back when that happens -- see `CityMap`.
     pub focus_file: RwSignal<Option<String>>,
+    /// What the plan the King is reading has changed, published where the map
+    /// can draw it.
+    ///
+    /// Here for exactly [`Self::focus_file`]'s reason, and it sits beside it for
+    /// that reason: the chamber renders inside the router's outlet, the map is
+    /// mounted outside it (see [`ThroneRoom`]), and a shared signal is the only
+    /// seam between them.
+    ///
+    /// Written by the chamber from the summary the review drawer already
+    /// fetches -- so this costs no request of its own -- and cleared on the way
+    /// out, so the works never outlive the chamber they describe.
+    ///
+    /// `None` when no plan is open, which is what tears the works down.
+    pub works: RwSignal<Option<kingdom_core::ChangeSummary>>,
     /// What each plan wants of the King, as the server last said.
     ///
     /// A cache beside the kingdom rather than a field on `Plan`, and the reason
@@ -203,6 +217,7 @@ impl KingdomState {
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
             focus_file: RwSignal::new(None),
+            works: RwSignal::new(None),
             attention: RwSignal::new(std::collections::HashMap::new()),
         }
     }
@@ -696,6 +711,7 @@ fn ThroneRoom() -> impl IntoView {
                     presence=presence
                     focus_city=state.selected
                     focus_file=state.focus_file
+                    works=state.works
                 />
                 // The rail's map is a view rather than a control -- clicking it
                 // cannot select, because the chamber force-sets the selection
@@ -714,6 +730,47 @@ fn ThroneRoom() -> impl IntoView {
                                     .unwrap_or_default()
                             }}
                         </span>
+                        // What the scaffolding on the map adds up to. The map
+                        // says where the work is and how it is distributed; a
+                        // scaffold is a proportion, so the totals are the one
+                        // thing the geometry cannot state.
+                        <Show when=move || {
+                            state.works.with(|w| {
+                                w.as_ref().is_some_and(|w| !w.files.is_empty())
+                            })
+                        }>
+                            <span
+                                class="map-rail-works"
+                                title=move || {
+                                    state.works.with(|w| {
+                                        let count = w
+                                            .as_ref()
+                                            .map(|w| w.files.len())
+                                            .unwrap_or(0);
+                                        format!(
+                                            "{count} files changed in this plan",
+                                        )
+                                    })
+                                }
+                            >
+                                <span class="count-added">
+                                    "+"
+                                    {move || {
+                                        state.works.with(|w| {
+                                            w.as_ref().map(|w| w.added()).unwrap_or(0)
+                                        })
+                                    }}
+                                </span>
+                                <span class="count-removed">
+                                    "\u{2212}"
+                                    {move || {
+                                        state.works.with(|w| {
+                                            w.as_ref().map(|w| w.removed()).unwrap_or(0)
+                                        })
+                                    }}
+                                </span>
+                            </span>
+                        </Show>
                         <a class="map-rail-open" href="/" title="Open the whole kingdom">
                             "\u{2197}"
                         </a>
