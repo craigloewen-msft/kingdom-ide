@@ -25,7 +25,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::engine;
 use crate::engine::bridge::{Bridge, TownActivity, ViewerCommand, ViewerStatus};
-use crate::map::MapManifest;
+use crate::map::{MapManifest, MapPresence};
 use crate::progress::Transfer;
 
 /// How often the component picks up what the engine is showing.
@@ -44,6 +44,21 @@ const POLL_INTERVAL_MS: u32 = 50;
 /// the same frame that would have announced it.
 const PAINT_PAUSE_MS: u32 = 50;
 
+/// How long to wait after the map changes home before re-framing the camera.
+///
+/// The map moves between two rectangles of wildly different shape -- the whole
+/// main region, and a pane at the foot of the rail -- and [`CameraRig`] is only
+/// ever re-fitted on `Load` and `Fit`, so a camera framed for one is wrong in
+/// the other.
+///
+/// The pause is the same class of problem as [`PAINT_PAUSE_MS`] above, in the
+/// other direction. Bevy resizes its canvas from a `ResizeObserver` on the
+/// parent element, which fires asynchronously, so a `Fit` or a `Focus` sent in
+/// the same tick as the class change would frame against the **old** viewport
+/// and leave the map cropped in its new home. Waiting a beat lets the observer
+/// land first.
+const RESIZE_SETTLE_MS: u32 = 140;
+
 /// The map: every city in the kingdom, as a disk of towns hanging in space.
 ///
 /// Fetches its manifest from [`crate::ROUTE`] on mount and hands it to the
@@ -53,6 +68,14 @@ const PAINT_PAUSE_MS: u32 = 50;
 /// `working` is which cities have agents in them right now, refreshed by
 /// whoever owns this component rather than here: the map draws what it is told
 /// and does not decide how often to ask.
+///
+/// # Two homes
+///
+/// This component is mounted exactly once (see the module note) but is shown in
+/// two places: its own screen, and a pane at the foot of the cities rail while
+/// the King is in a chamber. `presence` is which, and it is what the two focus
+/// props below are gated on — in the rail the map is *scoped* to the work in
+/// front of him, and on his own map he drives the camera himself.
 #[component]
 pub fn CityMap(
     /// The city the King has selected, if any.
@@ -60,12 +83,23 @@ pub fn CityMap(
     /// Which cities have a turn in flight, and how many.
     #[prop(into)]
     working: Signal<Vec<CityActivity>>,
-    /// Whether the map is the thing the King is currently looking at.
-    ///
-    /// False while he is in a plan's chamber, where the map is still mounted
-    /// but hidden. The engine cannot see a CSS class, so it has to be told.
+    /// Where the map is standing, and therefore how hard the engine should
+    /// work. The engine cannot see a CSS class, so it has to be told.
     #[prop(into)]
-    visible: Signal<bool>,
+    presence: Signal<MapPresence>,
+    /// The city the rail's map should frame, if any.
+    ///
+    /// Read only in [`MapPresence::Rail`]. This is the plan's own city, so the
+    /// pane beside a conversation shows the place that conversation is about
+    /// rather than the whole kingdom at a size nothing is legible at.
+    #[prop(into)]
+    focus_city: Signal<Option<CityId>>,
+    /// The file open in the chamber's panel, relative to the city's root.
+    ///
+    /// Read only in [`MapPresence::Rail`], and narrows the frame further: from
+    /// the town to the one holding that file's building stands on.
+    #[prop(into)]
+    focus_file: Signal<Option<String>>,
 ) -> impl IntoView {
     let manifest = RwSignal::new(None::<MapManifest>);
     let load_error = RwSignal::new(None::<String>);
@@ -166,18 +200,134 @@ pub fn CityMap(
         reporter.send(ViewerCommand::SetActivity(towns));
     });
 
-    // The engine draws whether or not anything is on screen, so it is told when
-    // it is not. This is an ordinary effect rather than part of the boot one:
-    // it has to run again every time the King moves between the map and a
+    // The engine draws whether or not anything is on screen, so it is told
+    // where it stands. This is an ordinary effect rather than part of the boot
+    // one: it has to run again every time the King moves between the map and a
     // chamber, which is the whole point of it.
     //
     // Kept apart from the activity effect above rather than merged into one:
     // each tracks a single signal, so moving between the map and a chamber does
     // not also re-send the town list, and a poll landing does not re-send the
-    // visibility.
+    // presence.
     let watching = bridge.clone();
     Effect::new(move |_| {
-        watching.send(ViewerCommand::Show(visible.get()));
+        watching.send(ViewerCommand::Show(presence.get()));
+    });
+
+    // Re-framing when the map changes home.
+    //
+    // The two homes are wildly different shapes, and the rig is re-fitted only
+    // on `Load` and `Fit` -- so without this the camera framed for one is
+    // cropped in the other. The rail's frame is the scoped one when there is a
+    // city to scope to, because `Focus` re-frames against the current viewport
+    // and therefore does the fitting as well as the scoping; otherwise, and on
+    // the King's own map, the whole world.
+    //
+    // Deliberately keyed on the home *changing* rather than on every render:
+    // `Effect` re-runs only when `presence` moves, so panning the rail's map
+    // and then opening a file does not snap the camera back.
+    //
+    // The pause is `RESIZE_SETTLE_MS`, and its doc says why it cannot be zero.
+    let reframer = bridge.clone();
+    Effect::new(move |_| {
+        let presence = presence.get();
+        if !presence.showing() {
+            return;
+        }
+
+        let reframer = reframer.clone();
+        Timeout::new(RESIZE_SETTLE_MS, move || {
+            // Read when it *fires*, not when it was scheduled, and that is the
+            // whole reason this is not captured above. Arriving in a chamber
+            // changes the route before the conversation has mounted and told us
+            // its city, so a scope read at schedule time is empty -- and this
+            // would then land a `Fit` on top of the `Focus` the effect below
+            // had already sent, leaving the rail showing the whole kingdom.
+            //
+            // Reading late is also simply more correct: the point of the delay
+            // is to act once the viewport has settled, so the scope should be
+            // whatever is true by then.
+            let scoped = presence
+                .in_rail()
+                .then(|| focus_city.get_untracked())
+                .flatten()
+                .and_then(|city| {
+                    manifest.with_untracked(|map| {
+                        let town = map.as_ref()?.town_named(city.as_str())?;
+                        Some((town.center, town.extent))
+                    })
+                });
+
+            reframer.send(match scoped {
+                Some((center, extent)) => ViewerCommand::Focus { center, extent },
+                None => ViewerCommand::Fit,
+            });
+        })
+        .forget();
+    });
+
+    // Scoping the rail's map to the city the conversation is about.
+    //
+    // Only in the rail: on his own map the King drives the camera, and a view
+    // that jumped every time the selection changed would take it from him.
+    //
+    // `status.built` is tracked as well as the city, and that is load-bearing
+    // rather than tidy. A world is raised a slice at a time, and the frame it
+    // finishes on calls `fit()` (see `raise::raise_world`) -- so on a page
+    // opened straight into a chamber this effect would send its `Focus` while
+    // the cities were still going up, and the raise would overwrite it with
+    // the whole kingdom a moment later. Re-running once the world is standing
+    // is what puts the scope back.
+    let scoper = bridge.clone();
+    Effect::new(move |_| {
+        let built = status.with(|state| state.built);
+        let Some(city) = focus_city.get() else {
+            return;
+        };
+        if !presence.get().in_rail() || !built {
+            return;
+        }
+        // Tracked, not `_untracked`: the manifest arrives after the first run
+        // of this effect, and without the dependency a chamber opened from a
+        // cold page would never frame its city at all.
+        let Some((center, extent)) = manifest.with(|map| {
+            let town = map.as_ref()?.town_named(city.as_str())?;
+            Some((town.center, town.extent))
+        }) else {
+            return;
+        };
+        scoper.send(ViewerCommand::Focus { center, extent });
+    });
+
+    // And narrowing it to the building of the file he is reading.
+    //
+    // `LookAt` rather than `Focus`: this moves the camera without changing the
+    // zoom, so the town stays framed and the eye is led to the holding within
+    // it. Closing the panel deliberately does *nothing* -- the map stays where
+    // it is rather than pulling back, because which city he is in is still
+    // true and re-framing on every closed diff would be motion for nothing.
+    //
+    // `built` for the same reason as the effect above: a camera pointed at a
+    // holding before the world it stands in has finished going up is undone by
+    // the raise's closing `fit()`.
+    let pointer = bridge.clone();
+    Effect::new(move |_| {
+        let built = status.with(|state| state.built);
+        let Some(path) = focus_file.get() else {
+            return;
+        };
+        if !presence.get().in_rail() || !built {
+            return;
+        }
+        let Some(city) = focus_city.get() else {
+            return;
+        };
+        let Some(center) = manifest.with(|map| {
+            Some(map.as_ref()?.holding_at(city.as_str(), &path)?.center)
+        }) else {
+            return;
+        };
+        pointer.send(ViewerCommand::LookAt { point: center });
     });
 
     // Clicking a building selects its city; clicking empty space clears it.
@@ -192,6 +342,13 @@ pub fn CityMap(
     // Reading the click out of an effect rather than out of the handler is
     // what makes that work: the engine may publish it *after* the DOM event
     // has already been and gone.
+    //
+    // Both halves are suppressed while the map stands in the rail, and that is
+    // not an oversight. In a chamber `conversation.rs` force-sets `selected`
+    // from the open plan on every render, so a click that changed it would be
+    // overwritten a frame later -- and a control that visibly does nothing is
+    // worse than no control. The rail's map is a view; its head carries the way
+    // to the real one. Panning and zooming stay live either way.
     let last_click = RwSignal::new(None::<(String, u64)>);
     Effect::new(move |_| {
         let Some(click) = status.with(|state| state.clicked.clone()) else {
@@ -202,6 +359,9 @@ pub fn CityMap(
             return;
         }
         last_click.set(Some(click.clone()));
+        if presence.get_untracked().in_rail() {
+            return;
+        }
         // A feature's `repository` is the project's directory name, which is
         // exactly what `CityId::new` is built from in `kingdom_app::scan`.
         let city = manifest.with_untracked(|map| {
@@ -223,6 +383,9 @@ pub fn CityMap(
     // pointer is over a holding at all, which a stale poll answers correctly
     // for a pointer that has been resting.
     let clear = move |_| {
+        if presence.get_untracked().in_rail() {
+            return;
+        }
         if status.with(|state| state.hovered.is_none()) {
             selected.set(None);
         }

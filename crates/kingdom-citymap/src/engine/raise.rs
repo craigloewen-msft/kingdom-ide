@@ -32,11 +32,11 @@ use bevy::winit::WinitSettings;
 use core::ops::Range;
 use core::time::Duration;
 
-use crate::map::{MapManifest, MapWorld};
+use crate::map::{MapManifest, MapPresence, MapWorld};
 
 use super::activity::Activity;
 use super::bridge::{Bridge, RaiseStage, Raising};
-use super::camera::{CameraRig, MapCamera};
+use super::camera::CameraRig;
 use super::lod::ActiveLod;
 use super::materials::MaterialCache;
 use super::spawn::{self, LoadedMap, MeshCache};
@@ -289,18 +289,17 @@ pub fn raise_world(
     mut lod: ResMut<ActiveLod>,
     mut working: ResMut<Activity>,
     mut winit: ResMut<WinitSettings>,
+    standing: Res<super::Standing>,
     windows: Query<&Window>,
-    cameras: Query<&Camera, With<MapCamera>>,
 ) {
     let Some(job) = raise.0.as_mut() else {
         return;
     };
 
     // A world under construction is worth every frame the machine will give:
-    // moving to a chamber mid-raise sends `ViewerCommand::Show(false)`, which
-    // drops the engine to four ticks a second and would turn three seconds of
-    // building into a minute of it.
-    *winit = super::winit_for(true);
+    // moving to a chamber mid-raise drops the engine to a few ticks a second
+    // and would turn three seconds of building into a minute of it.
+    *winit = super::winit_for(MapPresence::Full);
 
     let deadline = Instant::now() + FRAME_BUDGET;
     let world = &job.manifest.world;
@@ -369,9 +368,14 @@ pub fn raise_world(
 
     // And the engine goes back to whatever pace the King's attention justifies
     // -- which is not necessarily the one this system forced above, because he
-    // may have walked into a chamber while the cities were going up.
-    let watching = cameras.iter().any(|camera| camera.is_active);
-    *winit = super::winit_for(watching);
+    // may have walked into a chamber, or out to the map, while the cities were
+    // going up.
+    //
+    // Read from `Standing` rather than from the camera. `is_active` is one bit
+    // and there are three places the map can be, so inferring from it would
+    // bring a map that now lives in the rail back running continuously behind
+    // a conversation.
+    *winit = super::winit_for(standing.0);
 }
 
 #[cfg(test)]
