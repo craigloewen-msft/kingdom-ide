@@ -480,6 +480,13 @@ const ACTIVITY_POLL_MS: u64 = 2_000;
 fn poll_activity(working: RwSignal<Vec<CityActivity>>, showing: Memo<bool>) {
     #[cfg(feature = "hydrate")]
     {
+        // Nothing draws a ring under an automated browser, so nothing needs to
+        // know which towns are alight. Asked of the map rather than decided
+        // again here: one definition, read by both.
+        if kingdom_citymap::stood_down() {
+            return;
+        }
+
         let running = StoredValue::new(None::<leptos::leptos_dom::helpers::IntervalHandle>);
 
         let refresh = move || {

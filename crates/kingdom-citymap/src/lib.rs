@@ -51,12 +51,29 @@ pub mod build;
 #[cfg(any(feature = "hydrate", test))]
 pub mod engine;
 pub mod map;
+// The same gate, for the same reason: deciding whether to draw at all is a
+// decision about a browser, but it is made out of two plain values and is
+// worth pinning without one.
+#[cfg(any(feature = "hydrate", test))]
+pub mod mode;
 
 #[cfg(feature = "hydrate")]
 mod view;
 
 #[cfg(feature = "hydrate")]
 pub use view::CityMap;
+
+/// Whether the engine has been left unbooted on this page load.
+///
+/// The map asks this of itself; `kingdom_app::app` asks it too, so that the
+/// activity poll behind the map's working rings is not run for a ring nothing
+/// is drawing. One definition, read by both -- the same arrangement
+/// `Plan::wants_attention` has, and for the same reason.
+#[cfg(feature = "hydrate")]
+#[must_use]
+pub fn stood_down() -> bool {
+    view::map_mode().stood_down()
+}
 
 /// The map, as the server renders it: the element, and nothing in it.
 ///

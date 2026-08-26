@@ -14,16 +14,26 @@
 //! and hides it with CSS rather than letting a route unmount it. Mounting a
 //! second one would need a second winit event loop in one wasm instance, which
 //! is not a thing.
+//!
+//! # Or it never boots at all
+//!
+//! The other case is [`crate::mode`]: under an automated browser the engine is
+//! stood down and a notice is drawn in its place. Nothing here is created and
+//! then disabled -- no canvas, no manifest fetch, no timers, no Bevy -- because
+//! the cost this avoids is paid the moment a WebGL context is asked for, and no
+//! later instruction takes it back. See the module doc there.
 
 use gloo_net::http::Request;
 use gloo_timers::callback::{Interval, Timeout};
 use kingdom_core::{CityActivity, CityId};
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::engine;
 use crate::engine::bridge::{Bridge, TownActivity, ViewerCommand, ViewerStatus};
 use crate::map::MapManifest;
+use crate::mode::{decide, MapMode};
 
 /// How often the component picks up what the engine is showing.
 ///
@@ -40,6 +50,48 @@ const POLL_INTERVAL_MS: u32 = 50;
 /// it the phase is never drawn at all, because the work it announces begins on
 /// the same frame that would have announced it.
 const PAINT_PAUSE_MS: u32 = 50;
+
+/// What the map is doing on this page load, decided once and remembered.
+///
+/// # Why it is cached
+///
+/// Both facts it is decided from can change under the app's feet, and neither
+/// change may be allowed to alter the answer. `location.search` is gone the
+/// moment the router pushes `/plan/:id`, so a King who arrived on `?map=on`
+/// would find the override silently withdrawn by his first navigation -- and
+/// `kingdom_app::app::poll_activity` would then disagree with a `CityMap` that
+/// is mounted exactly once and has long since decided. One read at boot is what
+/// makes "one definition, read by both" true over the life of the page.
+pub(crate) fn map_mode() -> MapMode {
+    static DECIDED: std::sync::OnceLock<MapMode> = std::sync::OnceLock::new();
+    *DECIDED.get_or_init(|| decide(automated(), forced().as_deref()))
+}
+
+/// Whether this browser is being driven by automation.
+///
+/// `navigator.webdriver`, which CDP sets -- so Kingdom's own `browser_*` tools,
+/// Playwright and Puppeteer all report it without any of them being named here.
+///
+/// The cast is unchecked because it has to be: `webdriver` lives on the
+/// `NavigatorAutomationInformation` mixin, which `web-sys` declares with
+/// `is_type_of = |_| false`, so `dyn_into` can never succeed. Reading a missing
+/// property off a real `Navigator` yields `undefined`, which arrives here as
+/// `false` -- the answer wanted for any browser that does not have it.
+fn automated() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let navigator = window.navigator();
+    let automation: &web_sys::NavigatorAutomationInformation = navigator.unchecked_ref();
+    automation.webdriver()
+}
+
+/// The `map` query parameter, if the page was opened with one.
+fn forced() -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    let params = web_sys::UrlSearchParams::new_with_str(&search).ok()?;
+    params.get(crate::mode::OVERRIDE)
+}
 
 /// The map: every city in the kingdom, as a disk of towns hanging in space.
 ///
@@ -64,6 +116,12 @@ pub fn CityMap(
     #[prop(into)]
     visible: Signal<bool>,
 ) -> impl IntoView {
+    // First, and before anything is created: an engine that is not to run must
+    // not be half-started and then told to stop. See the module doc.
+    if map_mode().stood_down() {
+        return view! { <StoodDown/> }.into_any();
+    }
+
     let manifest = RwSignal::new(None::<MapManifest>);
     let load_error = RwSignal::new(None::<String>);
     let status = RwSignal::new(ViewerStatus::default());
@@ -212,6 +270,30 @@ pub fn CityMap(
             {move || load_error.get().map(|error| view! {
                 <p class="city-map-error">{error}</p>
             })}
+        </div>
+    }
+    .into_any()
+}
+
+/// What stands where the map would be, when the engine has been stood down.
+///
+/// Deliberately plain rather than in the kingdom's voice. This is a diagnostic
+/// addressed to whoever is driving the browser -- most often a model reading
+/// the page back through a tool -- and phrased in the metaphor it would read as
+/// a feature of the product rather than a fact about this session.
+///
+/// The second line is the way out. A notice that says only "no" leaves a plan
+/// asked to look at the map with nothing to try.
+#[component]
+fn StoodDown() -> impl IntoView {
+    view! {
+        <div class="city-map">
+            <div class="city-map-stood-down" role="status">
+                <p class="stood-down-notice">
+                    "Not running full rendering engine in headless test mode"
+                </p>
+                <p class="stood-down-way-out">"add ?map=on to draw it"</p>
+            </div>
         </div>
     }
 }

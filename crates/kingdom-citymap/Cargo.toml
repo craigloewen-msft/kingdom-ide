@@ -44,7 +44,19 @@ leptos = { version = "0.8", optional = true }
 gloo-net = { version = "0.6", optional = true }
 gloo-timers = { version = "0.3", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", features = ["Element", "HtmlCanvasElement"], optional = true }
+# `Navigator`/`NavigatorAutomationInformation` are what `mode` is decided from,
+# and `Location`/`UrlSearchParams` are what the override is read from. The cast
+# to the automation mixin needs `JsCast`, hence wasm-bindgen itself.
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", features = [
+    "Element",
+    "HtmlCanvasElement",
+    "Location",
+    "Navigator",
+    "NavigatorAutomationInformation",
+    "UrlSearchParams",
+    "Window",
+], optional = true }
 
 [dev-dependencies]
 # The copied tests run natively, and they compile the whole `engine` module, so
@@ -89,6 +101,7 @@ hydrate = [
     "dep:gloo-net",
     "dep:gloo-timers",
     "dep:wasm-bindgen-futures",
+    "dep:wasm-bindgen",
     "dep:web-sys",
     "dep:kingdom-core",
     "leptos/csr",
