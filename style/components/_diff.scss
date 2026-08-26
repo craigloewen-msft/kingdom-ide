@@ -68,6 +68,36 @@
   &:hover { color: t.$ink; }
 }
 
+// A switch in the bar: wrapping, and focus. The `on` state is gilded because
+// gold in this chamber means "this is yours" — these are the King's own reading
+// preferences rather than anything the court decided.
+//
+// Shared by all three panels that take this slot, which is the point: the bar
+// is deliberately identical between them, so a control does not move when he
+// switches from a diff to the file beside it.
+.diff-chip {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+
+  &.on {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+  }
+}
+
 // --- The rows ----------------------------------------------------------------
 
 .diff-stage {
@@ -75,8 +105,15 @@
   min-height: 0;
   // Both axes here and nowhere else: this is the one scroll container, and a
   // long line scrolls *both* columns sideways together, which is the whole
-  // reason for not splitting them.
+  // reason for not splitting them. (With wrapping on there is nothing to scroll
+  // sideways, which is rather the point of it.)
   overflow: auto;
+  // The measure a note composer sizes itself against. This used to be an inline
+  // `--panel-width` set from the resizer's signal, which was the only number
+  // that knew how much room there was — and stopped being true the moment the
+  // panel could take the conversation's room without that signal moving. A
+  // container query asks the box itself, so it cannot go stale.
+  container-type: inline-size;
 }
 
 .diff-empty,
@@ -110,6 +147,13 @@
   // neighbour, so the two sides stop lining up; `max-content` alone lets a
   // short file leave half the panel empty. `width: max-content` with
   // `min-width: 100%` is what keeps the columns equal *and* fills the panel.
+  //
+  // What it also does, and why `.wrap` below is the default: on a file with any
+  // long line the grid grows past the panel and the *new* column starts off
+  // screen. Measured at the panel's 640px default on one real line of this
+  // repository, the columns resolve to 856.8px each — so the right-hand side
+  // begins at x=857 in a box 640 wide and the King sees only the left. See the
+  // module note in `diff_view.rs`.
   display: grid;
   grid-template-columns: repeat(2, minmax(50%, 1fr));
   width: max-content;
@@ -117,6 +161,31 @@
   font-family: t.$font-mono;
   font-size: 11.5px;
   line-height: 1.55;
+}
+
+// Wrapped: the grid is the panel, and a long line runs on inside its own column
+// instead of pushing its neighbour out of the panel.
+//
+// The pair stays level for nothing, which is the part a hand-rolled two-pane
+// view gets wrong: a grid row is as tall as its tallest cell, so a line that
+// wraps to three rows leaves the cell opposite it three rows tall as well.
+// `minmax(0, 1fr)` rather than `minmax(50%, 1fr)` because with nowhere to
+// overflow to, a floor of 50% *of the grid* is the same 50% twice over and
+// rounds the pair past the panel's edge.
+.diff-grid.wrap {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: auto;
+
+  .diff-cell {
+    white-space: pre-wrap;
+    // Code has few spaces to break at, so a long path or a dense expression
+    // would otherwise refuse to wrap at all and put us back where we started.
+    overflow-wrap: anywhere;
+    // The clip exists to stop a line bleeding across the divider, and with
+    // wrapping there is nothing to bleed. Left in place it would cut the tail
+    // off a wrapped line's own last row on some sub-pixel layouts.
+    overflow: visible;
+  }
 }
 
 // A row is two cells that must stay level, so it spans the grid rather than
@@ -235,14 +304,15 @@
   // sideways, so writing about a wide line does not put the box off screen.
   position: sticky;
   left: 0;
-  // Sized against the *panel*, not against the grid. The grid is `max-content`
-  // wide -- wider than the panel whenever any line is long -- so `100%` here
-  // would be the longest line's width and would run the box off the right edge.
-  // `--panel-width` is set inline by the panel, which is the only thing that
-  // knows how much room there is; the fallback covers the first paint.
+  // Sized against the *stage*, not against the grid. Unwrapped the grid is
+  // `max-content` wide — wider than the panel whenever any line is long — so
+  // `100%` here would be the longest line's width and would run the box off the
+  // right edge. `100cqi` is the stage's own inline size, which is the one
+  // measure that is right whatever the panel is doing: dragged narrow, focused
+  // wide, or scrolled sideways.
   box-sizing: border-box;
-  width: var(--panel-width, 520px);
-  max-width: var(--panel-width, 520px);
+  width: 100cqi;
+  max-width: 100cqi;
 }
 
 .diff-text {
