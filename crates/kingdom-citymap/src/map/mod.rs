@@ -91,20 +91,15 @@ pub struct MapManifest {
 pub struct MapWorld {
     /// Everything the world covers, which is what the camera frames.
     pub bounds: MapRect,
-    /// The colour beyond the water.
-    pub sky: MapColor,
+    /// The empty space the disk hangs in, and what the camera clears to.
+    pub space: MapColor,
     /// The land the settlement stands on.
     pub ground: MapColor,
-    /// Open water, which runs to the horizon in every direction.
-    pub water: MapColor,
-    /// The shallower water lapping at the shore, between `shoreline` and
-    /// `moat`. Keeping it separate is what stops the island from looking like
-    /// it was cut out and pasted onto a flat sea.
-    pub shallows: MapColor,
-    /// The outline of the island, filled with `ground`.
-    pub shoreline: Vec<[f32; 2]>,
-    /// The outer edge of the shallows, just beyond `shoreline`.
-    pub moat: Vec<[f32; 2]>,
+    /// The edge of the world: a closed outline, filled with `ground`.
+    pub rim: Vec<[f32; 2]>,
+    /// What hangs below the ground, which is what makes the world an object
+    /// rather than a flat cut-out.
+    pub underside: MapUnderside,
     /// The light the renderer shades everything with.
     pub sun: MapSun,
     /// One per repository. Empty for a single settlement.
@@ -117,10 +112,41 @@ pub struct MapWorld {
     pub roads: Vec<MapRoad>,
     /// Every file.
     pub buildings: Vec<MapBuilding>,
-    /// Trees and shoreline posts.
+    /// Trees and rim posts.
     pub scenery: Vec<MapScenery>,
     /// Folder names painted flat onto the ground they belong to.
     pub ground_labels: Vec<MapGroundLabel>,
+}
+
+/// The rock under the ground: a sheer cliff, a frustum, and a spire.
+///
+/// The disk is drawn from its `rim` and these measurements rather than from a
+/// polygon soup, for the reason every other part of the manifest is: the
+/// builder says where things stand and how deep they go, and the renderer turns
+/// that into triangles. All the depths are world units below the ground plane,
+/// so they are read against the same `y = 0` everything else stands on.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MapUnderside {
+    /// How far the sheer band drops straight down from the rim before the rock
+    /// starts pulling in. This is the part that reads as a cliff face.
+    pub cliff: f32,
+    /// How far below the ground the frustum under the cliff ends.
+    pub shelf: f32,
+    /// What fraction of the rim's radius the frustum has pulled in to by the
+    /// time it reaches `shelf`. A smaller number is a steeper taper.
+    pub taper: f32,
+    /// How far below the ground the spire's tip hangs. The camera's fit is
+    /// widened to hold this, so it is also how much of the view the underside
+    /// is allowed to claim.
+    pub depth: f32,
+    /// The cliff band, which stands vertically and so still catches the sun.
+    pub cliff_color: MapColor,
+    /// The rock under the cliff. Drawn unlit -- see `rock_is_drawn_unlit` in
+    /// `engine::spawn` for why nothing down there can be lit.
+    pub rock: MapColor,
+    /// The spire, darker still, so the underside reads as falling away.
+    pub deep: MapColor,
 }
 
 /// The single directional light plus ambient fill.

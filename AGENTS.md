@@ -209,7 +209,12 @@ crates/
                     is the gathered margin, diff.rs reads a
                     revision against the plan it revises)
 
-  kingdom-citymap/  The map: every project drawn as a town on one island.
+  kingdom-citymap/  The map: every project drawn as a town on one disk, hanging
+                    in space. Repo City drew an island in a sea; the sea gave
+                    the world no silhouette, so the ground is now a circle with
+                    a cliff, a frustum and a spire under it — `MapUnderside`,
+                    proportional to the disk's own radius so a large kingdom
+                    and a small one hang the same way.
                     **Vendored** — this is Repo City
                     (github.com/craigloewen-msft/repo-city-visualizer, MIT),
                     copied in at 449f090 rather than depended on, so there is
@@ -225,7 +230,14 @@ crates/
                     by looking for `.git` and so drops a folder without one,
                     which disagrees with `kingdom-app::scan`. `manifest_for`
                     walks `Kingdom::cities` instead
-    engine/         Drawing it with Bevy (hydrate, plus native for its tests)
+    engine/         Drawing it with Bevy (hydrate, plus native for its tests).
+                    `activity.rs` is the one part fed from outside the manifest:
+                    which towns have agents working in them, traced as a pulsing
+                    ring, polled rather than pushed and never cached with the
+                    geometry. `stars.rs` is the one part not in the world at all:
+                    the projection is orthographic, so a star out in the scene
+                    would have no parallax and would *zoom* with the kingdom —
+                    it rides on the camera in pixels instead
     view.rs         `CityMap` — the canvas, and the click that selects a city
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
@@ -601,12 +613,26 @@ that properly means an OS-level sandbox, which is a deliberate later decision.
 - Live updates on the **map**. The chamber is pushed to over a WebSocket
   (`events.rs`, `watch.rs`), the plan's browser is mirrored over a second one
   (`screencast.rs`), and the **rail** now has one of its own — a kingdom-wide
-  socket carrying a `PlanPulse` per plan, which is what lets a plan that has
-  stopped to ask something say so from a chamber nobody has open. The map does
-  not read it yet: colouring holdings from plan state is a Bevy change rather
-  than a smaller one, and the channel it was waiting on now exists. The spyglass
-  is still deliberately *not* surfaced there: a city lighting up because a plan
-  holds a live browser needs a plan that knows it owns a session.
+  socket carrying a `PlanPulse` per plan (`watch.rs::KINGDOM_ROUTE`), which is
+  what lets a plan that has stopped to ask something say so from a chamber
+  nobody has open.
+
+  The map does not read it yet. Which towns are working is still *polled*, every
+  two seconds and only while the map is on screen (`app.rs::poll_activity` over
+  `api::kingdom_activity`) — written when `events.rs` was keyed per plan by
+  design and a kingdom-wide channel was "a real change rather than a smaller
+  one". That change has since landed, so the poll is now a survivor rather than
+  a necessity, and folding it onto the pulse is a tidy-up someone should do. The
+  rest of the map is a Bevy canvas, and colouring holdings from plan state is
+  its own piece of work. The spyglass is still deliberately *not* surfaced
+  there: a city lighting up because a plan holds a live browser needs a plan
+  that knows it owns a session.
+
+  Both halves of "is the King looking at the map?" hang off the **same**
+  `on_the_map` memo in `ThroneRoom`: it stops the activity poll
+  (`poll_activity`) and it stops the engine drawing (`ViewerCommand::Show`).
+  Keeping them on one signal is what stops the map from polling for a ring that
+  nothing is rendering, or rendering a ring nothing is refreshing.
 - **Any resource arbitration at all** — see §3. This matters more now than it
   did: the court can bind ports and run builds, so two plans genuinely can
   collide. Nothing detects it.

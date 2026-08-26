@@ -83,6 +83,12 @@ pub enum ViewerCommand {
     /// the map answers questions while the pointer is over it and forgets as
     /// soon as it leaves.
     SelectWard(Option<String>),
+    /// Which towns have work under way in them, and how much.
+    ///
+    /// Replaces whatever was set before rather than amending it: the interface
+    /// polls for the whole picture, so a town missing from the list is a town
+    /// with nothing running rather than a town nobody mentioned.
+    SetActivity(Vec<TownActivity>),
     /// Whether the King is actually looking at the map.
     ///
     /// The map is mounted once for the life of the page and hidden with CSS
@@ -96,9 +102,36 @@ pub enum ViewerCommand {
     Show(bool),
 }
 
+/// One town with agents working in it.
+///
+/// Deliberately a plain string and a count rather than a `kingdom-core` type:
+/// the engine knows nothing about cities or plans, and this is the seam that
+/// keeps it that way. The interface translates on its side of the bridge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TownActivity {
+    /// The town's name, as [`crate::map::MapTown::name`] gives it.
+    ///
+    /// Matched by **name** rather than by id, because a manifest's `town-N`
+    /// identifiers are numbered from two different orderings -- `scene::towns`
+    /// enumerates the packing order, `manifest::build_world_manifest` sorts by
+    /// file count first -- so `town-0` need not mean the same settlement in
+    /// both halves of one manifest. The name is what both agree on, and it is
+    /// the same string `kingdom_app::scan` builds a `CityId` from.
+    pub town: String,
+    /// How many plans are working there. Never zero.
+    pub working: usize,
+}
+
 /// What the engine is currently showing.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
+    /// Whether a world has been built and drawn.
+    ///
+    /// False from boot until the first [`ViewerCommand::Load`] has been
+    /// spawned and framed, which is what the loading card watches: the
+    /// manifest arriving is not the same moment as the settlement standing up,
+    /// and building one of a few thousand holdings blocks a frame.
+    pub built: bool,
     /// The holding under the pointer.
     pub hovered: Option<String>,
     /// The innermost ward under the pointer, whether that came from the ground
@@ -186,7 +219,11 @@ impl Bridge {
 /// a drag is settling. Treating those as changes would wake the interface up
 /// sixty times a second for nothing.
 fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
-    left.hovered == right.hovered
+    // `built` is compared for a reason worth stating: a field left out here is
+    // a field the interface never hears about, because this is the only thing
+    // that moves `Bridge::revision` and the poll skips an unmoved revision.
+    left.built == right.built
+        && left.hovered == right.hovered
         && left.hovered_ward == right.hovered_ward
         && left.selected_ward == right.selected_ward
         && left.lod == right.lod
@@ -228,6 +265,20 @@ mod tests {
 
         bridge.update_status(|status| status.camera_rect[0] += 12.0);
         assert_ne!(bridge.revision(), after_hover);
+    }
+
+    #[test]
+    fn the_world_standing_up_wakes_the_interface() {
+        // The loading card hangs off this one field, and the poll only reads a
+        // status whose revision moved -- so a `built` that did not bump the
+        // revision would leave the card up over a finished map forever.
+        let bridge = Bridge::new();
+        assert!(!bridge.status().built, "nothing is drawn before a Load");
+
+        let start = bridge.revision();
+        bridge.update_status(|status| status.built = true);
+        assert_ne!(start, bridge.revision());
+        assert!(bridge.status().built);
     }
 
     #[test]

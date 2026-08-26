@@ -4,11 +4,12 @@
 //! arrives as a footprint, a height, and an archetype, and the geometry is
 //! generated here — once per distinct shape, then shared.
 
-use bevy::light::CascadeShadowConfigBuilder;
+use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use crate::map::{MapBuilding, MapManifest, MapScenery, MapWard, MapWorld};
 
+use super::activity;
 use super::bridge::{Bridge, LodLevel};
 use super::camera;
 use super::materials::{MaterialCache, Surface, to_color};
@@ -23,6 +24,14 @@ pub struct SceneRoot;
 
 /// Line weight of a top-level folder's boundary, in world units.
 const WARD_EDGE_WIDTH: f32 = 2.6;
+
+/// Line weight of a working town's ring, in world units.
+///
+/// Much heavier than the heaviest ward kerb, and that is the point: at the
+/// Districts tier a whole town is a couple of hundred pixels across and every
+/// folder boundary inside it has collapsed into noise. Measured on screen at
+/// the fitted view -- 4.2 was a hairline indistinguishable from a ward kerb.
+const TOWN_RING_WIDTH: f32 = 9.0;
 
 /// A holding the pointer can interact with.
 #[derive(Component, Clone)]
@@ -91,19 +100,22 @@ impl MeshCache {
 /// depth. The camera looks down at a shallow angle, so a few hundredths of a
 /// world unit is enough to settle the order without being visible.
 mod layer {
-    pub const SEA: f32 = 0.0;
-    pub const SHALLOWS: f32 = 0.02;
-    pub const LAND: f32 = 0.04;
-    pub const TOWN: f32 = 0.06;
-    pub const WARD: f32 = 0.10;
-    pub const PLAZA: f32 = 0.16;
-    pub const ROAD: f32 = 0.20;
+    /// The rim's own ground. Everything else stacks on it.
+    pub const LAND: f32 = 0.0;
+    pub const TOWN: f32 = 0.02;
+    pub const WARD: f32 = 0.06;
+    pub const PLAZA: f32 = 0.12;
+    pub const ROAD: f32 = 0.16;
     /// Folder names sit above every ground surface, including the roads that
     /// cross their ward, so a name is never half-swallowed by a path.
     /// A folder's outline sits above every other ground surface but below the
     /// names, so a kerb still reads where a road runs along a ward's boundary.
-    pub const WARD_EDGE: f32 = 0.23;
-    pub const GROUND_LABEL: f32 = 0.26;
+    pub const WARD_EDGE: f32 = 0.19;
+    /// A working town's ring sits above every kerb inside it, so the fact that
+    /// an agent is here is never half-hidden by the folder tree it is working
+    /// in. Below the ground labels, which are what a name is for.
+    pub const TOWN_GLOW: f32 = 0.205;
+    pub const GROUND_LABEL: f32 = 0.22;
 }
 
 /// Removes the previous world, if any.
@@ -267,43 +279,57 @@ fn spawn_terrain(
     root: Entity,
     world: &MapWorld,
 ) {
-    // The sea runs far past the world so the horizon never shows a cut edge:
-    // an orthographic isometric camera turns a square into a diamond, and its
-    // corners would otherwise fall outside the terrain entirely.
-    let bounds = world.bounds;
-    let margin = bounds.width.max(bounds.depth) * 3.0;
-    let sea = meshes::ground_polygon(&[
-        Vec2::new(bounds.x - margin, bounds.y - margin),
-        Vec2::new(bounds.max_x() + margin, bounds.y - margin),
-        Vec2::new(bounds.max_x() + margin, bounds.max_y() + margin),
-        Vec2::new(bounds.x - margin, bounds.max_y() + margin),
-    ]);
-    commands.spawn((
-        ChildOf(root),
-        Mesh3d(meshes.add(sea)),
-        MeshMaterial3d(cache.get(materials, world.water, Surface::Water)),
-        Transform::from_xyz(0.0, layer::SEA, 0.0),
-        Pickable::IGNORE,
-    ));
-
-    // Open sea, then the shallows lapping around the island, then the island
-    // itself. Stacking them in that order is what makes the settlement read as
-    // land surrounded by water rather than a lake in a field.
-    for (polygon, color, surface, height) in [
-        (&world.moat, world.shallows, Surface::Water, layer::SHALLOWS),
-        (&world.shoreline, world.ground, Surface::Matte, layer::LAND),
-    ] {
-        if polygon.len() < 3 {
-            continue;
-        }
-        let mesh = meshes::ground_polygon(&to_points(polygon));
+    // The world is a disk hanging in space: the ground it stands on, and the
+    // rock below holding it up. There is nothing beyond the rim -- no plane
+    // running to the horizon -- so the silhouette of the disk is the edge of
+    // everything there is.
+    let rim = to_points(&world.rim);
+    if rim.len() >= 3 {
         commands.spawn((
             ChildOf(root),
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(cache.get(materials, color, surface)),
-            Transform::from_xyz(0.0, height, 0.0),
+            Mesh3d(meshes.add(meshes::ground_polygon(&rim))),
+            MeshMaterial3d(cache.get(materials, world.ground, Surface::Matte)),
+            Transform::from_xyz(0.0, layer::LAND, 0.0),
             Pickable::IGNORE,
         ));
+
+        // The cliff, the shelf and the spire are three meshes so each takes
+        // its own colour, and all three are drawn **unlit**.
+        //
+        // That is not a shortcut. The sun points almost straight down, so no
+        // surface under the disk receives any of it, and the scene is exposed
+        // for a 9,000-lux sun against a 420-lux ambient fill -- which renders
+        // the whole underside as a black silhouette whatever colour it is
+        // given. Lighting it properly would mean a second light aimed up at
+        // the rock, and that light would also fall on the town. Unlit rock,
+        // shaded by hand from the manifest's three colours, keeps the sun
+        // calibrated for the kingdom above and still reads as depth.
+        for (mesh, color) in [
+            (
+                meshes::rim_cliff(&rim, world.underside.cliff),
+                world.underside.cliff_color,
+            ),
+            (
+                meshes::disk_shelf(&rim, &world.underside),
+                world.underside.rock,
+            ),
+            (
+                meshes::disk_spire(&rim, &world.underside),
+                world.underside.deep,
+            ),
+        ] {
+            commands.spawn((
+                ChildOf(root),
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(cache.get(materials, color, Surface::Unlit)),
+                Transform::from_xyz(0.0, layer::LAND, 0.0),
+                // The spire would otherwise cast a long shadow into empty
+                // space, at the cost of the one cascade WebGL2 allows.
+                NotShadowCaster,
+                NotShadowReceiver,
+                Pickable::IGNORE,
+            ));
+        }
     }
 
     for town in &world.towns {
@@ -318,6 +344,8 @@ fn spawn_terrain(
             Transform::from_xyz(0.0, layer::TOWN, 0.0),
             Pickable::IGNORE,
         ));
+
+        spawn_town_ring(commands, meshes, materials, root, town);
     }
 
     for ward in &world.wards {
@@ -361,6 +389,57 @@ fn spawn_terrain(
             Pickable::IGNORE,
         ));
     }
+}
+
+/// Traces a town with the ring that lights up while an agent works there.
+///
+/// Spawned hidden with the world and never rebuilt: activity changes every few
+/// seconds and a respawn per change would rebuild geometry for a fact that is
+/// only a visibility flag. [`activity::apply_activity`] is what shows it.
+///
+/// Two departures from the ward kerb this is otherwise modelled on, both
+/// deliberate. The material is **its own** rather than the shared cache's,
+/// because the pulse writes to it and the cache hands one handle to every mesh
+/// of a similar colour. And there is **no** [`VisibleFrom`], so `apply_lod`
+/// leaves it alone: the ring answers "who is working here" at every zoom, not
+/// only at the tier it was drawn to be legible from.
+fn spawn_town_ring(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    root: Entity,
+    town: &crate::map::MapTown,
+) {
+    let mut points = to_points(&town.polygon);
+    // A ring is a loop, so the ribbon has to come back to where it started.
+    points.push(points[0]);
+
+    let material = materials.add(StandardMaterial {
+        base_color: activity::ring_color(1.0),
+        // Unlit: this is interface drawn in world space, not a surface in the
+        // scene, and its colour is the whole of its meaning. Lit, it took the
+        // sun's white specular and came out mint -- see `activity::PULSE_PEAK`.
+        unlit: true,
+        ..default()
+    });
+
+    commands.spawn((
+        ChildOf(root),
+        Mesh3d(meshes.add(meshes::ribbon(&points, TOWN_RING_WIDTH))),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(0.0, layer::TOWN_GLOW, 0.0),
+        activity::TownRing {
+            town: town.name.clone(),
+            material,
+        },
+        // Nothing is running when a world loads, and a ring shown around a
+        // quiet town would be a lie for as long as it took the first poll to
+        // land.
+        Visibility::Hidden,
+        // The ring is a hairline drawn over its own town; a click on it is meant
+        // for whatever it is drawn around.
+        Pickable::IGNORE,
+    ));
 }
 
 /// Draws a folder's boundary as a kerb around its ground.

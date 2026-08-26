@@ -27,8 +27,9 @@ pub enum Surface {
     Matte,
     /// Trim and windows: enough sheen to catch the sun and read as glass.
     Polished,
-    /// Water: smooth and a little reflective.
-    Water,
+    /// Stars: lit by nothing, so they hold their colour whatever the sun is
+    /// doing to the kingdom below them.
+    Unlit,
 }
 
 impl Surface {
@@ -36,7 +37,7 @@ impl Surface {
         match self {
             Self::Matte => 0,
             Self::Polished => 1,
-            Self::Water => 2,
+            Self::Unlit => 2,
         }
     }
 
@@ -44,7 +45,7 @@ impl Surface {
         match self {
             Self::Matte => 0.94,
             Self::Polished => 0.42,
-            Self::Water => 0.16,
+            Self::Unlit => 1.0,
         }
     }
 }
@@ -76,14 +77,15 @@ impl MaterialCache {
                     reflectance: match surface {
                         Surface::Matte => 0.06,
                         Surface::Polished => 0.35,
-                        Surface::Water => 0.55,
+                        Surface::Unlit => 0.0,
                     },
+                    unlit: surface == Surface::Unlit,
                     alpha_mode: if translucent {
                         AlphaMode::Blend
                     } else {
                         AlphaMode::Opaque
                     },
-                    // Ground and water are flat planes viewed from one side
+                    // Ground and rock are flat surfaces viewed from one side
                     // only, but ward polygons stack on the terrain and would
                     // otherwise z-fight; the spawner lifts them instead.
                     double_sided: false,
@@ -157,8 +159,17 @@ mod tests {
     #[test]
     fn translucent_colors_blend() {
         let (mut cache, mut assets) = cache();
-        let handle = cache.get(&mut assets, [10, 40, 80, 140], Surface::Water);
+        let handle = cache.get(&mut assets, [10, 40, 80, 140], Surface::Matte);
         let material = assets.get(&handle).expect("material");
         assert!(matches!(material.alpha_mode, AlphaMode::Blend));
+    }
+
+    /// A star has to hold its colour whatever the sun is doing, which is the
+    /// whole reason this surface exists.
+    #[test]
+    fn the_unlit_surface_is_not_lit() {
+        let (mut cache, mut assets) = cache();
+        let handle = cache.get(&mut assets, [240, 240, 255, 255], Surface::Unlit);
+        assert!(assets.get(&handle).expect("material").unlit);
     }
 }

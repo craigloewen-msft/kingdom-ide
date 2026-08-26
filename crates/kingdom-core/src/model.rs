@@ -148,6 +148,28 @@ impl Kingdom {
         self.plans.iter().find(|p| &p.id == id)
     }
 
+    /// Which cities have work under way in them, and how much.
+    ///
+    /// Cities with nothing running are left out entirely rather than reported
+    /// as zero: this is polled while the King watches the map, and the common
+    /// answer on a real dev folder is an empty list.
+    ///
+    /// Reads [`Kingdom::plans_in`], so a subagent is never counted -- it works
+    /// in the worktree of the plan that sent it, and counting it would light a
+    /// town four times for one piece of work.
+    pub fn activity(&self) -> Vec<CityActivity> {
+        self.cities
+            .iter()
+            .filter_map(|city| {
+                let working = self.plans_in(&city.id).filter(|p| p.is_busy()).count();
+                (working > 0).then(|| CityActivity {
+                    city: city.id.clone(),
+                    working,
+                })
+            })
+            .collect()
+    }
+
     /// Plans still awaiting the user's judgement.
     ///
     /// Never a subagent: a subagent reports to the model that sent it, and
@@ -157,6 +179,19 @@ impl Kingdom {
             .iter()
             .filter(|p| p.status == PlanStatus::AwaitingReview && !p.is_subagent())
     }
+}
+
+/// How much work is under way in one city, right now.
+///
+/// Deliberately tiny, and deliberately *not* a field on [`City`]: the map asks
+/// for this every couple of seconds while the King is looking at it, and a
+/// city carries its whole folder tree. See [`Kingdom::activity`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CityActivity {
+    /// The city with work in it.
+    pub city: CityId,
+    /// How many of its plans have a turn in flight. Never zero.
+    pub working: usize,
 }
 
 /// A single project directory: one city in the kingdom.
@@ -3670,6 +3705,87 @@ mod transcript_tests {
             vec![PlanId::new("plan-2"), PlanId::new("plan-3")],
             "a call finds its own errands, in the order they were sent, and not \
              the ones a later call sent"
+        );
+    }
+
+    /// The map lights a town from this, so it has to count *pieces of work*
+    /// rather than plans.
+    ///
+    /// Two failures it pins, both of which would look plausible on screen. An
+    /// errand shares its parent's worktree, so a plan that sent three of them
+    /// is one town working, not four -- the same reason `plans_in` filters them
+    /// and the reason this reads through it rather than over `plans`. And a
+    /// city with nothing running is *absent*, not present with a zero: the
+    /// engine shows a ring for every entry it is handed, so a zero would light
+    /// an idle town.
+    #[test]
+    fn activity_counts_the_work_in_a_city_and_not_the_errands_it_sent() {
+        let busy = CityId::new("forge");
+        let quiet = CityId::new("archive");
+
+        let choice = ModelChoice::new("mock", None);
+        let mut working = Plan::opened(
+            PlanId::new("plan-1"),
+            busy.clone(),
+            "Make the build fast",
+            &choice,
+            Workspace::in_place("/dev/forge"),
+        );
+        working.working_on = Some("Reading the build script".into());
+
+        // Errands of that plan, working in its worktree. One piece of work.
+        let mut first = Plan::spawned(PlanId::new("plan-2"), &working, "call-1", "Read the build");
+        first.working_on = Some("Reading".into());
+        let mut second = Plan::spawned(PlanId::new("plan-3"), &working, "call-1", "Read the tests");
+        second.working_on = Some("Reading".into());
+
+        // Awaiting the King is not work in flight: nothing is running.
+        let mut waiting = Plan::opened(
+            PlanId::new("plan-4"),
+            busy.clone(),
+            "Rename the crate",
+            &choice,
+            Workspace::in_place("/dev/forge"),
+        );
+        waiting.status = PlanStatus::AwaitingReview;
+
+        // A city whose only plan has settled.
+        let mut settled = Plan::opened(
+            PlanId::new("plan-5"),
+            quiet.clone(),
+            "Tidy the docs",
+            &choice,
+            Workspace::in_place("/dev/archive"),
+        );
+        settled.status = PlanStatus::Merged;
+
+        let city = |id: &CityId| City {
+            id: id.clone(),
+            name: id.to_string(),
+            path: id.to_string(),
+            kind: CityKind::Rust,
+            file_count: 12,
+            has_git: true,
+            dirty_files: 0,
+            structure: None,
+        };
+
+        let kingdom = Kingdom {
+            name: "Testburg".into(),
+            root: "/dev".into(),
+            cities: vec![city(&busy), city(&quiet)],
+            plans: vec![working, first, second, waiting, settled],
+            sandbox: false,
+        };
+
+        assert_eq!(
+            kingdom.activity(),
+            vec![CityActivity {
+                city: busy,
+                working: 1,
+            }],
+            "one decreed plan working is one town alight, however many errands \
+             it sent -- and a city with nothing running is absent rather than zero"
         );
     }
 

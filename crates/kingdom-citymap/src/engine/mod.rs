@@ -9,6 +9,7 @@
 //! The interface around the map is still Leptos. The two halves talk through
 //! [`bridge::Bridge`].
 
+pub mod activity;
 pub mod bridge;
 pub mod camera;
 pub mod input;
@@ -16,6 +17,7 @@ pub mod labels;
 pub mod materials;
 pub mod meshes;
 pub mod spawn;
+pub mod stars;
 pub mod text;
 pub mod wards;
 
@@ -33,6 +35,7 @@ use bevy::winit::{UpdateMode, WinitSettings};
 
 use std::time::Duration;
 
+use activity::Activity;
 use bridge::{Bridge, ViewerCommand};
 use camera::{CameraRig, MapCamera};
 use lod::ActiveLod;
@@ -111,6 +114,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<MaterialCache>()
             .init_resource::<LoadedMap>()
             .init_resource::<ActiveLod>()
+            .init_resource::<Activity>()
             .init_resource::<wards::ActiveWard>()
             .init_resource::<input::PointerState>()
             .init_resource::<labels::LabelPool>()
@@ -123,6 +127,13 @@ impl Plugin for RepoCityPlugin {
                     input::handle_scroll,
                     lod::track_lod,
                     lod::apply_lod,
+                    // After `apply_lod`, which walks every entity with a
+                    // `VisibleFrom` and would otherwise be free to hide a ring
+                    // in the same frame this has just shown it. A ring carries
+                    // no `VisibleFrom` precisely so that cannot happen, and the
+                    // ordering is the second half of that guarantee.
+                    activity::apply_activity,
+                    activity::pulse_rings,
                     camera::sync_camera,
                     wards::apply_label_legibility,
                     wards::track_active_ward,
@@ -134,15 +145,19 @@ impl Plugin for RepoCityPlugin {
     }
 }
 
-/// Spawns the camera before any world arrives, so the first frame is the sky
-/// rather than a black screen.
+/// Spawns the camera before any world arrives, so the first frame is empty
+/// space rather than a black screen or, worse, a flash of daylight sky the
+/// manifest is about to replace.
 fn setup(mut commands: Commands) {
     camera::spawn_camera(
         &mut commands,
-        Color::srgb(0.55, 0.68, 0.78),
+        // `build::scene::SPACE`, which the manifest carries and overrides this
+        // with the moment one arrives.
+        Color::srgb(0.027, 0.043, 0.078),
         Color::srgb(0.72, 0.78, 0.90),
         320.0,
     );
+    stars::spawn_stars(&mut commands);
 }
 
 /// Drains and applies everything the interface has asked for.
@@ -156,6 +171,7 @@ fn apply_commands(
     mut material_cache: ResMut<MaterialCache>,
     mut loaded: ResMut<LoadedMap>,
     mut rig: ResMut<CameraRig>,
+    mut working: ResMut<Activity>,
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
@@ -190,7 +206,7 @@ fn apply_commands(
 
                 if let Ok((mut camera, mut exposure, mut ambient)) = cameras.single_mut() {
                     camera.clear_color =
-                        ClearColorConfig::Custom(materials::to_color(manifest.world.sky));
+                        ClearColorConfig::Custom(materials::to_color(manifest.world.space));
                     // The manifest carries its own sun, so the camera is
                     // exposed for that light rather than for a default one.
                     *exposure = camera::exposure_for(manifest.world.sun.illuminance);
@@ -198,7 +214,7 @@ fn apply_commands(
                     ambient.brightness = manifest.world.sun.ambient_brightness;
                 }
 
-                fit(&mut rig, &manifest.world.bounds, viewport);
+                fit(&mut rig, &manifest.world, viewport);
                 // Zoom limits and detail tiers are measured against a house,
                 // so the reference house is taken once per world. The fitted
                 // scale is kept only as the floor on how far back the camera
@@ -206,6 +222,7 @@ fn apply_commands(
                 rig.holding = typical_holding(&manifest);
                 rig.fit_scale = rig.scale;
                 bridge.update_status(|status| {
+                    status.built = true;
                     status.error = None;
                     status.hovered = None;
                     status.selected_ward = None;
@@ -215,7 +232,7 @@ fn apply_commands(
             }
             ViewerCommand::Fit => {
                 if let Some(manifest) = loaded.0.as_ref() {
-                    fit(&mut rig, &manifest.world.bounds, viewport);
+                    fit(&mut rig, &manifest.world, viewport);
                 }
             }
             ViewerCommand::ZoomBy(factor) => rig.zoom_by(factor, Vec2::ZERO),
@@ -240,6 +257,14 @@ fn apply_commands(
             ViewerCommand::LookAt { point } => rig.look_at(Vec2::from_array(point)),
             ViewerCommand::SelectWard(id) => {
                 bridge.update_status(|status| status.selected_ward = id);
+            }
+            ViewerCommand::SetActivity(towns) => {
+                // Assigned through `Res`'s change detection rather than
+                // compared first: `apply_activity` runs only on a change, and
+                // an equal assignment still marks the resource changed, which
+                // costs one pass over a handful of rings. Guarding it here
+                // would trade that for a comparison on every poll.
+                *working = Activity(towns);
             }
             ViewerCommand::Show(showing) => {
                 // Two separate costs, and only stopping both is worth
@@ -275,16 +300,37 @@ fn apply_commands(
     }
 }
 
-fn fit(rig: &mut CameraRig, bounds: &crate::map::MapRect, viewport: Vec2) {
+/// Frames the whole world: the disk, and the spire hanging under it.
+///
+/// The rim is sampled rather than taken as a box, and the underside enters as
+/// the single point it actually is. A box would reserve a full world-width
+/// slab down at the spire's tip -- most of it empty -- and push the kingdom
+/// into the top third of the screen.
+fn fit(rig: &mut CameraRig, world: &crate::map::MapWorld, viewport: Vec2) {
+    let bounds = world.bounds;
     let center = bounds.center();
     rig.span = bounds.width.max(bounds.depth);
-    rig.frame(
-        Vec2::from_array(center),
-        Vec2::new(bounds.width, bounds.depth),
-        60.0,
-        viewport,
-    );
+
+    let mut points: Vec<Vec3> = world
+        .rim
+        .iter()
+        // The tallest holdings stand well inside the rim, so the rim is taken
+        // at the height of a roof rather than at the ground.
+        .map(|[x, y]| Vec3::new(*x, TALLEST, *y))
+        .collect();
+    if points.is_empty() {
+        points.push(Vec3::new(center[0], TALLEST, center[1]));
+    }
+    points.push(Vec3::new(center[0], -world.underside.depth, center[1]));
+
+    rig.frame_points(&points, viewport);
 }
+
+/// The height a fit assumes the tallest holding reaches.
+///
+/// The same 60 units the box-shaped fit used before the world grew an
+/// underside.
+const TALLEST: f32 = 60.0;
 
 /// The footprint span of a typical holding in this world.
 ///

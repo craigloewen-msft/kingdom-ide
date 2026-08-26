@@ -47,9 +47,10 @@ const REALM_FILL: f32 = 0.32;
 
 /// The size the absolute constants scattered through the scene were tuned at.
 ///
-/// Nothing is laid out in a square this size any more; it is only the yardstick
-/// for the few measurements that cannot stay absolute when an island grows by a
-/// factor of ten, such as the width of a road running between two towns.
+/// Nothing is laid out in a square this size, and since the coastline became a
+/// circle derived from the extent nothing outside the tests reads it either --
+/// it survives as the yardstick [`reference_extent`] hands them.
+#[cfg(test)]
 pub(crate) const REFERENCE_WORLD: f32 = 1000.0;
 
 /// The deepest a lot ever stands back from the street running past its cell.
