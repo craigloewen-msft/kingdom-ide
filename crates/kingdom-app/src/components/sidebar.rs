@@ -12,7 +12,7 @@
 
 use crate::app::{KingdomState, DEFAULT_SIDEBAR_WIDTH};
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
-use kingdom_core::{City, CityId, Plan};
+use kingdom_core::{Attention, City, CityId, Plan, PlanStatus};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -221,6 +221,19 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
 
     let has_plans = Memo::new(move |_| !plans.get().is_empty());
 
+    // Whether anything in this city is waiting on the King.
+    //
+    // Drawn on the city row because a branch can be *collapsed*, and a question
+    // that only shows on the plan row would then be hidden behind a chevron --
+    // which is precisely the state the King is in when he is not already
+    // watching that plan, and so exactly when he needs telling.
+    let asking = Memo::new(move |_| {
+        plans
+            .get()
+            .iter()
+            .any(|p| state.attention_of(p) == Some(Attention::Question))
+    });
+
     // Prominence follows *live* work, not whatever the filter happens to show.
     // A city whose plans are all approved or rejected has nothing awaiting the
     // user, so it recedes even in "All" -- otherwise switching filters would
@@ -251,6 +264,13 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                 </button>
                 <span class="kind-dot" style:background=city.kind.banner_color()></span>
                 <span class="city-name-text" title=city.path.clone()>{city.name.clone()}</span>
+                // Before the count rather than after it: this is the one thing
+                // in the row that is a call to act, and the count is provenance.
+                <Show when={move || asking.get()}>
+                    <span class="city-asking" title="A plan here is waiting on your answer">
+                        "\u{2637}"
+                    </span>
+                </Show>
                 <Show when={move || has_plans.get()}>
                     <span class="plan-count">{move || plans.get().len()}</span>
                 </Show>
@@ -269,15 +289,23 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     // without its status moving at all -- both are
                     // `AwaitingReview` -- so without it the badge would never
                     // change to "Proposal".
+                    //
+                    // What the plan wants is in the key for the third instance
+                    // of exactly that trap, and the sharpest one: a plan that
+                    // stops to ask a question does not move its status *or* its
+                    // proposal -- it is still `Drafting` throughout -- so
+                    // without this the row would go on reading "Drafting" for
+                    // the whole time the court sat waiting on an answer, which
+                    // is the fault this badge exists to fix.
                     <For
                         each={move || plans.get()}
-                        key=|p: &Plan| {
+                        key=move |p: &Plan| {
                             (
                                 p.id.clone(),
                                 p.status,
                                 p.title.clone(),
                                 p.choice().label(),
-                                p.standing_proposal().is_some(),
+                                state.attention_of(p),
                             )
                         }
                         let:plan
@@ -293,31 +321,14 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                             let title = plan.title.clone();
                             let summary = plan.summary.clone();
                             let model = plan.choice().label();
-                            let status = plan.status;
-                            // "Awaiting review" is true both of a plan the
-                            // model has merely finished speaking on and of one
-                            // that has put work to the user -- but only the
-                            // second is something they have to *act* on. The
-                            // rail is where they scan for that, so it says
-                            // which is which.
-                            //
-                            // A label, not a sixth `PlanStatus`: nothing about
-                            // the state machine changed, and the badge keeps its
-                            // colour.
-                            let badge = match plan.standing_proposal() {
-                                Some(_) => "Proposal",
-                                None => status.label(),
-                            };
+                            let (badge, tint) = badge_for(plan.status, state.attention_of(&plan));
                             view! {
                                 <li>
                                     <A href=href attr:class="plan-row" attr:title=summary>
                                         <span class="plan-row-inner" class:current=current>
                                             <span class="plan-title">{title}</span>
                                             <span class="plan-model">{model}</span>
-                                            <span class=format!(
-                                                "plan-badge plan-{}",
-                                                status.css_suffix(),
-                                            )>
+                                            <span class=format!("plan-badge plan-{tint}")>
                                                 {badge}
                                             </span>
                                         </span>
@@ -329,5 +340,68 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                 </ul>
             </Show>
         </li>
+    }
+}
+
+/// What one plan's badge says, and what colour it is.
+///
+/// Pure, and tested below, because it is the whole of the rail's answer to "is
+/// anything waiting on me?" -- the question this rail exists for -- and every
+/// wrong answer is a plan the King either chases for nothing or leaves blocked
+/// for an hour.
+///
+/// What a plan *wants* outranks the status it is in, and that is the point
+/// rather than a nicety. A status describes where a plan is in its life; an
+/// [`Attention`] describes whose move it is. They are genuinely independent: a
+/// plan parked on a question is `Drafting` and blocked, and painting it the
+/// working green says the opposite of the truth.
+fn badge_for(status: PlanStatus, needs: Option<Attention>) -> (&'static str, &'static str) {
+    match needs {
+        Some(needs) => (needs.label(), needs.css_suffix()),
+        None => (status.label(), status.css_suffix()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fault this feature exists for. A plan that has stopped to ask
+    /// something is still `Drafting`, so a badge read off the status alone says
+    /// "Drafting" in the working green -- the same thing it says for a plan
+    /// cheerfully running a build, while this one sits blocked on the King.
+    #[test]
+    fn a_plan_waiting_on_the_king_says_so_rather_than_drafting() {
+        assert_eq!(
+            badge_for(PlanStatus::Drafting, Some(Attention::Question)),
+            ("Question", "asking"),
+        );
+        assert_eq!(
+            badge_for(PlanStatus::Drafting, None),
+            ("Drafting", "drafting"),
+            "a plan actually working must keep reading as work in progress"
+        );
+    }
+
+    /// The distinction the rail already drew, kept: "Awaiting review" is true
+    /// both of a plan that merely finished speaking and of one holding a plan
+    /// out to be started, and only the second is something to act on.
+    #[test]
+    fn a_standing_proposal_still_reads_as_a_proposal() {
+        assert_eq!(
+            badge_for(PlanStatus::AwaitingReview, Some(Attention::Proposal)),
+            ("Proposal", "review"),
+        );
+        assert_eq!(
+            badge_for(PlanStatus::AwaitingReview, None),
+            ("Awaiting review", "review"),
+        );
+    }
+
+    /// Settled history wants nothing and must not be tinted as though it did.
+    #[test]
+    fn a_settled_plan_asks_for_nothing() {
+        assert_eq!(badge_for(PlanStatus::Merged, None), ("Merged", "merged"));
+        assert_eq!(badge_for(PlanStatus::Failed, None), ("Failed", "failed"));
     }
 }

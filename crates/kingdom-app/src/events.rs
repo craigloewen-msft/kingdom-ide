@@ -48,8 +48,29 @@
 //!
 //! An event stream would have needed a new event, a client that knew how to
 //! apply it, and a decision about ordering between the two channels.
+//!
+//! # Why the kingdom-wide channel does NOT carry whole plans
+//!
+//! Everything above justifies whole plans on a channel keyed *per plan*, where
+//! there is one watcher looking at exactly the plan being sent. The rail asks a
+//! different question -- "which of my thirty plans needs me?" -- and the same
+//! answer would be wrong for it: every open tab woken with every plan's entire
+//! transcript, on every round of every turn, to repaint a badge.
+//!
+//! So that channel carries [`kingdom_core::PlanPulse`], and it is **deduped**:
+//! a pulse goes out only when it differs from the last one sent for that plan.
+//! Both halves are load-bearing. The digest is what makes a message cheap; the
+//! dedupe is what makes most rounds send nothing at all, because a sixty-deed
+//! turn changes `working_on` a handful of times and what the King is wanted for
+//! twice.
+//!
+//! The dedupe is also what keeps this honest against the design above. A plan
+//! channel is complete on every message and so may be missed freely; a pulse
+//! channel is *also* complete on every message -- a pulse is a whole digest, not
+//! a delta -- so a listener that falls behind has still missed nothing but
+//! intermediate states. Dedupe narrows what is sent, never what a message says.
 
-use kingdom_core::{Plan, PlanId};
+use kingdom_core::{Plan, PlanId, PlanPulse};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::broadcast;
@@ -63,6 +84,14 @@ use tokio::sync::broadcast;
 /// non-event for that reason.
 const BACKLOG: usize = 16;
 
+/// How far behind a rail may fall on the kingdom-wide channel.
+///
+/// Larger than [`BACKLOG`] because one channel carries every plan in the
+/// kingdom: thirty plans working at once share this where each has its own
+/// per-plan channel. Falling behind is survivable on the same terms -- a pulse
+/// is a whole digest, so the next one is complete on its own.
+const PULSE_BACKLOG: usize = 64;
+
 /// One broadcast channel per plan being watched.
 ///
 /// Keyed by plan because that is the unit the conversation subscribes to. A
@@ -73,6 +102,34 @@ static CHANNELS: OnceLock<Mutex<HashMap<PlanId, broadcast::Sender<Plan>>>> = Onc
 
 fn registry() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
     CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The one channel every open browser listens to, whatever it is looking at.
+///
+/// Unlike [`CHANNELS`] this is not keyed by plan: its whole job is to tell a
+/// rail about plans whose chambers are *not* open, which is the case the
+/// per-plan channel structurally cannot cover. What it costs to have one shared
+/// channel -- waking every tab for every plan -- is what the digest and the
+/// dedupe below pay for.
+static PULSES: OnceLock<broadcast::Sender<PlanPulse>> = OnceLock::new();
+
+fn pulses_channel() -> &'static broadcast::Sender<PlanPulse> {
+    PULSES.get_or_init(|| broadcast::channel(PULSE_BACKLOG).0)
+}
+
+/// The last pulse sent for each plan, so an unchanged one is not sent again.
+///
+/// This is the dedupe, and it is what makes a shared channel affordable: a turn
+/// publishes on every deed, and the rail's view of a plan changes a handful of
+/// times across the whole turn. Without it, every tab would parse thirty
+/// identical messages saying the plan is still drafting.
+///
+/// Never grows without bound in practice -- one entry per plan in the kingdom --
+/// and is cleared with the channel it belongs to when a kingdom is closed.
+static LAST_PULSE: OnceLock<Mutex<HashMap<PlanId, PlanPulse>>> = OnceLock::new();
+
+fn last_pulse() -> &'static Mutex<HashMap<PlanId, PlanPulse>> {
+    LAST_PULSE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Announces a plan's current state to everyone watching it.
@@ -92,30 +149,86 @@ fn registry() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
 /// channel's only subscribers are watch sockets, and a browser has no use for
 /// the provider-opaque half of the model's thinking. The plan the *server*
 /// holds is untouched.
+///
+/// The rail is told separately, and *unconditionally*: see [`pulse`]. The two
+/// halves are independent on purpose, so a poisoned per-plan registry silences
+/// one chamber rather than every badge in the app.
 pub fn publish(plan: &Plan) {
-    let Ok(channels) = registry().lock() else {
-        return;
-    };
+    if let Ok(channels) = registry().lock() {
+        // Everything on this channel is bound for a browser, so the opaque half
+        // of the model's thinking is dropped once here rather than at each
+        // `send`. See `Plan::for_wire`: it is never drawn, and it was the
+        // largest thing on the wire by a wide margin.
+        //
+        // Built lazily, because the common case is that nobody is listening and
+        // the whole point of that case is that it costs nothing.
+        let mut for_wire: Option<Plan> = None;
 
-    // Everything on this channel is bound for a browser, so the opaque half of
-    // the model's thinking is dropped once here rather than at each `send`.
-    // See `Plan::for_wire`: it is never drawn, and it was the largest thing on
-    // the wire by a wide margin.
-    //
-    // Built lazily, because the common case is that nobody is listening and the
-    // whole point of that case is that it costs nothing.
-    let mut for_wire: Option<Plan> = None;
-
-    if let Some(tx) = channels.get(&plan.id) {
-        let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
-    }
-
-    // The second channel is the *sender's*, not a broadcast: only the plan that
-    // sent this subagent hears about it.
-    if let Some(subagent) = &plan.spawned_by {
-        if let Some(tx) = channels.get(&subagent.parent) {
+        if let Some(tx) = channels.get(&plan.id) {
             let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
         }
+
+        // The second channel is the *sender's*, not a broadcast: only the plan
+        // that sent this subagent hears about it.
+        if let Some(subagent) = &plan.spawned_by {
+            if let Some(tx) = channels.get(&subagent.parent) {
+                let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
+            }
+        }
+    }
+
+    pulse(plan);
+}
+
+/// Tells every open rail what this plan is and what it wants, if that changed.
+///
+/// Split out of [`publish`] so the one caller that does not go through
+/// `api::update` -- a plan being opened, which is pushed onto the kingdom
+/// directly -- can announce itself with the same words.
+///
+/// Silent when nothing a rail draws has moved. See the module docs: the dedupe
+/// is what makes a channel shared by every tab affordable, and it is safe
+/// precisely because a pulse is a whole digest rather than a delta.
+pub fn pulse(plan: &Plan) {
+    let pulse = plan.pulse();
+
+    // A subagent is never in the rail and never asks the user for anything, so
+    // a pulse for one is a message every tab would parse and discard.
+    if pulse.is_subagent {
+        return;
+    }
+
+    match last_pulse().lock() {
+        Ok(mut seen) => {
+            if seen.get(&pulse.id) == Some(&pulse) {
+                return;
+            }
+            seen.insert(pulse.id.clone(), pulse.clone());
+        }
+        // A poisoned dedupe must not silence the rail: send it. A duplicate
+        // message costs a repaint; a swallowed one costs the King a badge.
+        Err(_) => {}
+    }
+
+    let _ = pulses_channel().send(pulse);
+}
+
+/// Starts listening to every plan in the kingdom.
+///
+/// The rail's counterpart to [`subscribe`]. There is no id because there is
+/// nothing to name: this is the whole kingdom, which is the entire reason it
+/// exists.
+pub fn subscribe_to_pulses() -> broadcast::Receiver<PlanPulse> {
+    pulses_channel().subscribe()
+}
+
+/// Forgets what has been sent about a plan.
+///
+/// Called when a kingdom is closed, so that reopening one announces its plans
+/// afresh rather than deduping them against a previous kingdom's state.
+pub fn forget_pulses() {
+    if let Ok(mut seen) = last_pulse().lock() {
+        seen.clear();
     }
 }
 
@@ -316,6 +429,112 @@ mod tests {
             heard.id,
             PlanId::new("errand"),
             "a chamber must hear the errands its own plan sent, and only those"
+        );
+    }
+
+    /// Helper: the next pulse about a particular plan, ignoring the rest.
+    ///
+    /// The pulse channel is process-global and shared by every test in this
+    /// module, so a receiver hears other tests' plans too. Filtering by id is
+    /// what makes these tests independent of each other -- the same flake the
+    /// per-plan tests avoid by never sharing an id.
+    async fn pulse_about(rx: &mut broadcast::Receiver<PlanPulse>, id: &PlanId) -> PlanPulse {
+        loop {
+            let heard = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("a pulse should arrive well within the timeout")
+                .expect("the pulse channel should stay open");
+            if &heard.id == id {
+                return heard;
+            }
+        }
+    }
+
+    /// The fault this channel exists for, end to end: a plan parks on a
+    /// question and *every* browser is told, whether or not that plan's chamber
+    /// is open. The per-plan channel structurally cannot do this -- there is no
+    /// subscriber for a chamber nobody opened -- which is why a second channel
+    /// had to exist at all.
+    #[tokio::test]
+    async fn a_question_reaches_a_rail_that_is_watching_nothing_in_particular() {
+        let id = PlanId::new("pulse-asking");
+        let mut rail = subscribe_to_pulses();
+
+        let mut plan = a_plan("pulse-asking");
+        plan.working_on = Some("Waiting on the King".into());
+        plan.begin_tool_call(kingdom_core::ToolCall::started(
+            "q1",
+            kingdom_core::ASK_USER_QUESTION,
+            serde_json::json!({}),
+        ));
+
+        // Nobody is subscribed to this plan's own channel: the chamber is shut.
+        publish(&plan);
+
+        let heard = pulse_about(&mut rail, &id).await;
+        assert_eq!(heard.needs, Some(kingdom_core::Attention::Question));
+        assert_eq!(heard.status, kingdom_core::PlanStatus::Drafting);
+        assert_eq!(
+            heard.working_on.as_deref(),
+            Some("Waiting on the King"),
+            "the rail is told what the plan is doing, in the server's own words"
+        );
+    }
+
+    /// The dedupe, which is what makes one channel shared by every tab
+    /// affordable. A turn publishes on every deed; the rail's view of the plan
+    /// changes a handful of times in the whole turn.
+    ///
+    /// Worth pinning because the failure is invisible: nothing renders wrong,
+    /// the King's browser just parses thirty identical messages per turn and
+    /// gets slower with every plan he opens.
+    #[tokio::test]
+    async fn an_unchanged_plan_is_not_announced_twice() {
+        let id = PlanId::new("pulse-repeat");
+        let mut rail = subscribe_to_pulses();
+
+        let plan = a_plan("pulse-repeat");
+        publish(&plan);
+        publish(&plan);
+        publish(&plan);
+
+        // Something genuinely different, so there is a second message to find
+        // and the test cannot pass by the channel simply being slow.
+        let mut moved = plan.clone();
+        moved.working_on = Some("bash: cargo test".into());
+        publish(&moved);
+
+        let first = pulse_about(&mut rail, &id).await;
+        assert_eq!(first.working_on, None);
+
+        let second = pulse_about(&mut rail, &id).await;
+        assert_eq!(
+            second.working_on.as_deref(),
+            Some("bash: cargo test"),
+            "the three identical publishes must not have produced three messages"
+        );
+    }
+
+    /// A subagent never reaches the rail. It is excluded from the rail's list
+    /// and never asks the user for anything, so a pulse for one is a message
+    /// every open tab would parse and throw away.
+    #[tokio::test]
+    async fn the_rail_is_never_told_about_an_errand() {
+        let parent = a_plan("pulse-parent");
+        let mut rail = subscribe_to_pulses();
+
+        publish(&Plan::spawned(
+            PlanId::new("pulse-errand"),
+            &parent,
+            "call-1",
+            "Go and look",
+        ));
+        publish(&parent);
+
+        let heard = pulse_about(&mut rail, &parent.id).await;
+        assert_eq!(
+            heard.id, parent.id,
+            "the errand published first, so hearing the parent first means it was never sent"
         );
     }
 }
