@@ -269,6 +269,10 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                     // without its status moving at all -- both are
                     // `AwaitingReview` -- so without it the badge would never
                     // change to "Proposal".
+                    //
+                    // The model stays in the key even though the row no longer
+                    // draws it: it is in the tooltip, which is drawn text like
+                    // any other.
                     <For
                         each={move || plans.get()}
                         key=|p: &Plan| {
@@ -291,8 +295,25 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                             };
                             // Read off the plan before the view, which moves it.
                             let title = plan.title.clone();
-                            let summary = plan.summary.clone();
-                            let model = plan.choice().label();
+                            // Everything the row cannot fit, on hover. The title
+                            // leads because it is the thing being clipped -- a
+                            // rail two lines wide still cuts the longest of
+                            // them, and this is where the rest of it is.
+                            //
+                            // The model is here rather than in the row: it is
+                            // provenance, it repeats identically down the whole
+                            // rail, and the chamber header states it where the
+                            // question is actually live. The summary sits
+                            // between them and is often empty, so it is skipped
+                            // rather than left as a blank line.
+                            let hover = {
+                                let mut lines = vec![plan.title.clone()];
+                                if !plan.summary.trim().is_empty() {
+                                    lines.push(plan.summary.clone());
+                                }
+                                lines.push(plan.choice().label());
+                                lines.join("\n\n")
+                            };
                             let status = plan.status;
                             // "Awaiting review" is true both of a plan the
                             // model has merely finished speaking on and of one
@@ -310,10 +331,9 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                             };
                             view! {
                                 <li>
-                                    <A href=href attr:class="plan-row" attr:title=summary>
+                                    <A href=href attr:class="plan-row" attr:title=hover>
                                         <span class="plan-row-inner" class:current=current>
                                             <span class="plan-title">{title}</span>
-                                            <span class="plan-model">{model}</span>
                                             <span class=format!(
                                                 "plan-badge plan-{}",
                                                 status.css_suffix(),

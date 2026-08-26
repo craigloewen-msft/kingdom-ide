@@ -554,6 +554,12 @@ that properly means an OS-level sandbox, which is a deliberate later decision.
   spyglass is deliberately
   *not* surfaced on the map for that reason: a city lighting up because a plan
   holds a live browser needs both this, and a plan that knows it owns a session.
+
+  Both halves of "is the King looking at the map?" hang off the **same**
+  `on_the_map` memo in `ThroneRoom`: it stops the activity poll
+  (`poll_activity`) and it stops the engine drawing (`ViewerCommand::Show`).
+  Keeping them on one signal is what stops the map from polling for a ring that
+  nothing is rendering, or rendering a ring nothing is refreshing.
 - **Any resource arbitration at all** — see §3. This matters more now than it
   did: the court can bind ports and run builds, so two plans genuinely can
   collide. Nothing detects it.
