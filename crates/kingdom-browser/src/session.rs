@@ -35,6 +35,53 @@ use tokio::{sync::RwLock, task::JoinHandle};
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONSOLE_LOGS: usize = 1_000;
 
+/// The viewport a plan's browser opens at, unless [`VIEWPORT_VAR`] says
+/// otherwise.
+///
+/// Chosen against *Kingdom's own* responsive thresholds rather than picked as a
+/// round number. `kingdom_app::app::RAIL_FOLDS_BELOW` folds the cities rail
+/// under 1250px and `style/components/_file-tree.scss` hides the files rail
+/// under its own; the previous default of 1024x768 sat on the wrong side of
+/// both, so a plan opening the chamber to check its work was shown a *folded*
+/// interface and had to resize before its first screenshot was worth taking.
+/// 1440x900 clears every threshold this product has, with room to spare for the
+/// next one.
+const DEFAULT_VIEWPORT: (u32, u32) = (1440, 900);
+
+/// Overrides [`DEFAULT_VIEWPORT`], as `WIDTHxHEIGHT` -- for deliberately
+/// testing a narrow layout, which is the one case the default is wrong for.
+pub const VIEWPORT_VAR: &str = "KINGDOM_BROWSER_VIEWPORT";
+
+/// How long the pointer rests on a target before the button goes down.
+///
+/// Not politeness: a hover-driven UI cannot react to a press that arrives in
+/// the same batch as the move. chromiumoxide's `click` dispatches `mouseMoved`
+/// and `mousePressed` back to back over one CDP connection, so a page whose
+/// click handler reads *what is currently hovered* -- Kingdom's own map is one,
+/// and so is every tooltip and menu that opens on hover -- sees the press
+/// before any frame has been drawn with the pointer in its new place. A beat
+/// between the two is what makes a synthetic click behave like a human one.
+const HOVER_SETTLE: Duration = Duration::from_millis(120);
+
+/// The viewport to launch at: the environment's, else [`DEFAULT_VIEWPORT`].
+///
+/// A value that will not parse falls back rather than failing the launch. A
+/// typo'd size is worth ignoring; it is not worth leaving a plan with no
+/// browser at all, and the fallback is a working viewport rather than a guess.
+fn configured_viewport() -> (u32, u32) {
+    let Ok(raw) = std::env::var(VIEWPORT_VAR) else {
+        return DEFAULT_VIEWPORT;
+    };
+    parse_viewport(&raw).unwrap_or(DEFAULT_VIEWPORT)
+}
+
+fn parse_viewport(raw: &str) -> Option<(u32, u32)> {
+    let (width, height) = raw.trim().split_once(['x', 'X'])?;
+    let width: u32 = width.trim().parse().ok()?;
+    let height: u32 = height.trim().parse().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 #[derive(Debug, Error)]
 pub enum BrowserError {
     #[error("Chrome is not available. Install Google Chrome or Chromium, or set KINGDOM_CHROME_EXECUTABLE to its executable path. Details: {0}")]
@@ -123,6 +170,7 @@ impl BrowserSession {
         // "Chrome missing".
         let profile = profile_dir(plan);
         let _ = std::fs::remove_dir_all(&profile);
+        let (width, height) = configured_viewport();
         let mut builder = BrowserConfig::builder()
             .new_headless_mode()
             .no_sandbox()
@@ -135,8 +183,8 @@ impl BrowserSession {
             // screencast was capturing frames.
             .arg("disable-gpu")
             .viewport(chromiumoxide::handler::viewport::Viewport {
-                width: 1024,
-                height: 768,
+                width,
+                height,
                 device_scale_factor: Some(1.0),
                 emulating_mobile: false,
                 is_landscape: true,
@@ -467,11 +515,50 @@ impl BrowserSessionManager {
         }
         let session = self.session(plan).await?;
         let guard = session.read().await;
-        let element = timed(timeout, guard.page.find_element(selector)).await?;
-        // chromiumoxide's Element::click dispatches mousePressed/mouseReleased
-        // through CDP. JS `click()` is intentionally not used: it bypasses the
-        // trusted input path frameworks and browser defaults listen to.
-        timed(timeout, element.click()).await?;
+        // chromiumoxide dispatches mousePressed/mouseReleased through CDP. JS
+        // `click()` is intentionally not used: it bypasses the trusted input
+        // path frameworks and browser defaults listen to.
+        //
+        // The pointer is moved onto the element and left there for a beat
+        // before the press -- see [`HOVER_SETTLE`]. `Element::click` would move
+        // and press in one batch, which a page that decides what a click means
+        // from what is hovered cannot answer in time. That is also why the
+        // point is resolved here and clicked through the page: it is the only
+        // way to put a wait between the two.
+        let point = timed(timeout, guard.page.find_element(selector))
+            .await?
+            .scroll_into_view()
+            .await?
+            .clickable_point()
+            .await?;
+        timed(timeout, guard.page.move_mouse(point)).await?;
+        tokio::time::sleep(HOVER_SETTLE).await;
+        timed(timeout, guard.page.click(point)).await?;
+        Ok(())
+    }
+
+    /// Clicks a point in the viewport, for what no selector can name.
+    ///
+    /// The map is the case this exists for: it is one `<canvas>`, so every town
+    /// and every holding on it is the same element and a selector cannot
+    /// distinguish them. Coordinates are the only handle a caller has.
+    ///
+    /// Same settle as [`Self::click`], and for the map the same *reason* --
+    /// what a click there means is decided by what the engine has drawn under
+    /// the pointer.
+    pub async fn click_at(
+        &self,
+        plan: &str,
+        x: f64,
+        y: f64,
+        timeout: Duration,
+    ) -> Result<(), BrowserError> {
+        let session = self.session(plan).await?;
+        let guard = session.read().await;
+        let point = chromiumoxide::layout::Point { x, y };
+        timed(timeout, guard.page.move_mouse(point)).await?;
+        tokio::time::sleep(HOVER_SETTLE).await;
+        timed(timeout, guard.page.click(point)).await?;
         Ok(())
     }
 
@@ -749,6 +836,41 @@ async fn dispatch_key(page: &Page, key: &str, modifiers: &[String]) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default viewport must clear Kingdom's own responsive thresholds.
+    ///
+    /// This is the whole reason the number changed: at 1024 wide the cities
+    /// rail folds (`RAIL_FOLDS_BELOW` is 1250) and a plan checking its work in
+    /// the chamber is shown a narrowed interface it did not ask for. Pinned
+    /// here so that lowering the default is a deliberate act with a test to
+    /// argue with, rather than a tidy-up.
+    #[test]
+    fn the_default_viewport_is_wider_than_anything_kingdom_folds_at() {
+        assert!(
+            DEFAULT_VIEWPORT.0 >= 1250,
+            "the default viewport {}px folds the cities rail",
+            DEFAULT_VIEWPORT.0
+        );
+    }
+
+    /// The override is read, in both spellings of the separator.
+    #[test]
+    fn a_viewport_can_be_asked_for() {
+        assert_eq!(parse_viewport("800x600"), Some((800, 600)));
+        assert_eq!(parse_viewport(" 1920 X 1080 "), Some((1920, 1080)));
+    }
+
+    /// A size that will not parse yields nothing, so the caller can fall back.
+    ///
+    /// Zero is refused along with the nonsense: a viewport with no area is a
+    /// browser that can render nothing, which is a worse outcome than ignoring
+    /// the setting.
+    #[test]
+    fn a_viewport_that_makes_no_sense_is_not_offered() {
+        for bad in ["", "wide", "1440", "1440x", "0x900", "1440x0", "-1x-1"] {
+            assert_eq!(parse_viewport(bad), None, "{bad} was accepted");
+        }
+    }
 
     /// Detection must only ever name a file that exists.
     ///

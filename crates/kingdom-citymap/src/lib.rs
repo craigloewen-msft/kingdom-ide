@@ -16,15 +16,19 @@
 //! | Module | Target | What it is |
 //! |---|---|---|
 //! | [`map`] | both | the manifest: plain serialisable world-space geometry |
+//! | [`progress`] | both | how much of that manifest has arrived, as a bar |
 //! | [`build`] | `ssr` | scanning a kingdom on disk and laying it out |
 //! | [`engine`] | `hydrate` | drawing a manifest with Bevy |
 //!
 //! The split is load-bearing in both directions. [`build`] uses `std::fs` and
 //! `ignore`, neither of which belongs in a wasm bundle; [`engine`] pulls in
-//! Bevy, which must never reach the Axum binary. [`map`] is the only part on
-//! both, which is exactly why the manifest exists: it is the seam the two
-//! halves meet at, and `kingdom-app` is what carries it between them over
-//! [`crate::ROUTE`].
+//! Bevy, which must never reach the Axum binary. [`map`] is the only *seam* on
+//! both targets, which is exactly why the manifest exists: it is where the two
+//! halves meet, and `kingdom-app` is what carries it between them over
+//! [`crate::ROUTE`]. [`progress`] is on both targets for a smaller reason --
+//! only the browser reads it, but `cargo test` builds this crate with no
+//! features at all, and arithmetic nothing compiles is arithmetic nothing
+//! tests.
 //!
 //! `engine` is also compiled natively for `cargo test` — its camera, mesh,
 //! label and bridge logic are plain maths and the copied tests are what pin
@@ -51,29 +55,18 @@ pub mod build;
 #[cfg(any(feature = "hydrate", test))]
 pub mod engine;
 pub mod map;
-// The same gate, for the same reason: deciding whether to draw at all is a
-// decision about a browser, but it is made out of two plain values and is
-// worth pinning without one.
+// The same gate as `engine`, for a related reason: deciding whether to draw at
+// all is a decision about a browser, but it is made out of two plain values and
+// is worth pinning without one.
 #[cfg(any(feature = "hydrate", test))]
 pub mod mode;
+pub mod progress;
 
 #[cfg(feature = "hydrate")]
 mod view;
 
 #[cfg(feature = "hydrate")]
 pub use view::CityMap;
-
-/// Whether the engine has been left unbooted on this page load.
-///
-/// The map asks this of itself; `kingdom_app::app` asks it too, so that the
-/// activity poll behind the map's working rings is not run for a ring nothing
-/// is drawing. One definition, read by both -- the same arrangement
-/// `Plan::wants_attention` has, and for the same reason.
-#[cfg(feature = "hydrate")]
-#[must_use]
-pub fn stood_down() -> bool {
-    view::map_mode().stood_down()
-}
 
 /// The map, as the server renders it: the element, and nothing in it.
 ///
@@ -110,14 +103,23 @@ pub fn CityMap(
     #[allow(unused_variables)]
     #[prop(into)]
     working: leptos::prelude::Signal<Vec<kingdom_core::CityActivity>>,
-    /// Whether the map is on screen. Unused here for the same reason: only the
-    /// browser has an engine to stop. It is taken anyway so that the two
-    /// `CityMap` signatures stay identical -- `app.rs` compiles against both,
-    /// and a prop on one and not the other is a build failure on whichever
-    /// target is not being looked at.
+    /// Where the map is standing. Unused here for the same reason: only the
+    /// browser has an engine to slow down or stop. It is taken anyway so that
+    /// the two `CityMap` signatures stay identical -- `app.rs` compiles against
+    /// both, and a prop on one and not the other is a build failure on
+    /// whichever target is not being looked at. That is also why
+    /// [`map::MapPresence`] lives in `map`, the one module on both targets.
     #[allow(unused_variables)]
     #[prop(into)]
-    visible: leptos::prelude::Signal<bool>,
+    presence: leptos::prelude::Signal<map::MapPresence>,
+    /// The city the rail's map frames. Unused here, for the reason above.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    focus_city: leptos::prelude::Signal<Option<kingdom_core::CityId>>,
+    /// The file the rail's map points at. Unused here, for the reason above.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    focus_file: leptos::prelude::Signal<Option<String>>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

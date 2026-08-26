@@ -182,6 +182,32 @@
 
 .sidebar-body { flex: 1; overflow-y: auto; min-height: 0; }
 
+// --- The room the map stands in ----------------------------------------------
+//
+// Empty on purpose, and that is the whole trick. The map's canvas may be
+// mounted exactly once for the life of the page (see `ThroneRoom`), so it is
+// not a child of this rail -- it is an overlay drawn over these pixels. This
+// slot only reserves the space, so `.sidebar-body` above stops scrolling where
+// the map begins rather than running underneath it.
+//
+// Its height is set inline from `KingdomState::map_height`, which is the same
+// signal the overlay's rectangle is cut from. One number, two readers: they
+// cannot drift, and nothing has to be measured.
+//
+// `flex: 0 0 auto`, so it keeps the height the King dragged and the registry
+// above takes whatever the window's height leaves.
+.rail-map-slot {
+  flex: 0 0 auto;
+}
+
+// The divider above it. Borrows the files rail's split handle (`_review.scss`)
+// so the two rails drag the same way; `map-split` only pulls the margin back,
+// because there is a border under this one rather than over it.
+.rail-split.map-split {
+  margin-bottom: 0;
+  margin-top: -4px;
+}
+
 .registry { list-style: none; margin: 0; padding: 6px; }
 .city-branch { list-style: none; }
 

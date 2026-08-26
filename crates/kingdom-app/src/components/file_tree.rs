@@ -66,6 +66,16 @@ pub fn FileTree(
     /// `state.selected`, because the city a plan works in and the directory it
     /// works in are no longer the same place.
     plan: PlanId,
+    /// Bumped when the workspace's *shape* changes under the tree -- today, when
+    /// the King deletes a file himself.
+    ///
+    /// The cache below is never invalidated on its own, deliberately (see
+    /// [`fetch`]): re-listing on every tick would re-walk the whole open tree
+    /// whenever the court did anything. But a file the King has just deleted
+    /// would then sit in the rail forever, and clicking it would open a panel
+    /// reporting that it is gone. This is the one signal that empties the cache,
+    /// re-listing the root and every folder he has open.
+    revision: RwSignal<usize>,
     /// The file the panel beside the transcript is showing, if any. Drives the
     /// selected row, so the tree and the drawer agree on what is open.
     open_file: Memo<Option<String>>,
@@ -119,8 +129,26 @@ pub fn FileTree(
     // component, so unlike the city version this has nothing to reset: the
     // cache is born with the tree it belongs to and dies with it. See the note
     // on `open_plan` in `conversation.rs` for why that is true.
+    //
+    // ...and again whenever `revision` moves, which is the one thing that means
+    // "the listing you are holding is wrong". Emptying the cache first is what
+    // makes the refetch happen at all -- [`fetch`] returns early for a path it
+    // already holds, which is exactly the behaviour being overridden here.
     Effect::new(move |_| {
+        revision.track();
+
+        let open = expanded.get_untracked();
+        listings.update(|l| l.clear());
+
         fetch(plan.get_value(), ROOT.to_string(), listings, fetching);
+        // Every folder the King had open, so the tree comes back as he left it
+        // rather than collapsed to the root. They are listed in whatever order
+        // the set yields, which is fine: each row is placed by `walk` from the
+        // cache once its parent has arrived, so a child landing before its
+        // parent is simply not drawn yet.
+        for path in open {
+            fetch(plan.get_value(), path, listings, fetching);
+        }
     });
 
     // The whole visible tree, flattened. Recomputed when a folder opens, closes

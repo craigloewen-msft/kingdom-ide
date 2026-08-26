@@ -53,7 +53,11 @@ const CONTEXT: usize = 3;
 /// A minified bundle or a checked-in dataset is a legitimate text file that no
 /// side-by-side view can survive. 1.5 MB is comfortably above any hand-written
 /// source file and comfortably below the size at which the browser stalls.
-const MOST_BYTES: u64 = 1_500_000;
+///
+/// `pub(crate)` because [`crate::edit`] holds itself to the same threshold: "can
+/// the browser survive this file?" is one question, and a second constant is a
+/// second place to answer it differently.
+pub(crate) const MOST_BYTES: u64 = 1_500_000;
 
 /// Rows one diff may render before it is cut off.
 ///
@@ -617,7 +621,11 @@ fn count_lines(bytes: &[u8]) -> u32 {
 
 /// git's own heuristic, near enough: a NUL byte in the first block means not
 /// text. Cheap, and wrong only for files no diff would help with anyway.
-fn looks_binary(bytes: &[u8]) -> bool {
+///
+/// `pub(crate)` for [`crate::edit`], which must refuse to open the same files
+/// this refuses to diff -- a binary loaded into a textarea and saved back is a
+/// file destroyed by lossy UTF-8 conversion.
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8_000).any(|b| *b == 0)
 }
 

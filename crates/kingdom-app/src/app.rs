@@ -2,6 +2,7 @@
 
 use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, PromptBar, Sidebar};
+use kingdom_citymap::map::MapPresence;
 use kingdom_citymap::CityMap;
 use kingdom_core::{Attention, CityActivity, CityId, Kingdom, ModelChoice, Plan, WorkspaceMode};
 use leptos::prelude::*;
@@ -42,6 +43,13 @@ pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 /// belongs to a conversation -- but the width is remembered here so it survives
 /// moving between plans. See [`KingdomState::tree_width`].
 pub const DEFAULT_TREE_WIDTH: f64 = 240.0;
+
+/// How tall the map pane at the foot of the cities rail opens.
+///
+/// Enough to read a town's shape and see which of them are alight, without
+/// taking the rail over from the list of plans it exists for. The registry
+/// above takes whatever is left, so this is the only number behind the split.
+pub const DEFAULT_MAP_HEIGHT: f64 = 260.0;
 
 /// What the rail collapses *to*. Never zero: the rail is this app's entire
 /// navigation, so a collapsed one that could not be reopened would be a dead
@@ -101,6 +109,15 @@ pub struct KingdomState {
     /// local signal in the chamber, because a width the King dragged should not
     /// reset every time he opens a different plan.
     pub tree_width: RwSignal<f64>,
+    /// How tall the map pane at the foot of the cities rail is, in pixels.
+    ///
+    /// Lives here rather than in `sidebar.rs` for the reason `tree_width` does
+    /// -- a height the King dragged must survive moving between plans -- and
+    /// for a second one: [`ThroneRoom`] reads it too. The map's canvas is not
+    /// *inside* the rail, it is an overlay positioned over it, and this is the
+    /// one number both the rail's empty slot and that overlay are cut from.
+    /// Two numbers would be two rectangles free to disagree.
+    pub map_height: RwSignal<f64>,
     /// Whether the cities rail is folded away to a strip.
     ///
     /// A view preference and nothing more, but it lives here rather than in
@@ -134,6 +151,16 @@ pub struct KingdomState {
     pub choice: RwSignal<Option<ModelChoice>>,
     /// How the next new plan will be isolated on disk.
     pub workspace: RwSignal<WorkspaceMode>,
+    /// The file the chamber's panel is showing, relative to the plan's city.
+    ///
+    /// Written by the chamber and read by the map, which is why it is here: the
+    /// conversation renders inside the router's outlet and the map is mounted
+    /// outside it, so a shared signal is the only seam between them. Exactly
+    /// what `selected` already is, and it sits beside it for that reason.
+    ///
+    /// `None` when no file is open. The rail's map deliberately does not pull
+    /// back when that happens -- see `CityMap`.
+    pub focus_file: RwSignal<Option<String>>,
     /// What each plan wants of the King, as the server last said.
     ///
     /// A cache beside the kingdom rather than a field on `Plan`, and the reason
@@ -166,6 +193,7 @@ impl KingdomState {
             selected: RwSignal::new(None),
             sidebar_width: RwSignal::new(DEFAULT_SIDEBAR_WIDTH),
             tree_width: RwSignal::new(DEFAULT_TREE_WIDTH),
+            map_height: RwSignal::new(DEFAULT_MAP_HEIGHT),
             rail_collapsed: RwSignal::new(false),
             rail_preference: RwSignal::new(false),
             rail_decided_at: RwSignal::new(None),
@@ -174,6 +202,7 @@ impl KingdomState {
             error: RwSignal::new(None),
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
+            focus_file: RwSignal::new(None),
             attention: RwSignal::new(std::collections::HashMap::new()),
         }
     }
@@ -458,86 +487,30 @@ fn fold_rail_when_cramped(
     let _ = (collapsed, preference, decided_at);
 }
 
-/// How often the map asks which cities have agents working in them.
+/// Which cities have agents working in them, derived from the kingdom this
+/// browser already holds.
 ///
-/// A compromise, and worth naming as one. The chamber is *pushed* to over a
-/// socket; the map is not, because `events.rs` is keyed per plan by design --
-/// its own doc says a kingdom-wide channel "would wake every open tab for every
-/// keystroke of every plan". Two seconds is fast enough that a town lighting up
-/// feels like a response to starting work, and the request is a few dozen bytes
-/// asked only while the King is actually looking at the map.
-#[cfg(feature = "hydrate")]
-const ACTIVITY_POLL_MS: u64 = 2_000;
-
-/// Keeps `working` current while the map is on screen, and stops the moment it
-/// is not.
+/// This replaced a two-second poll of `api::kingdom_activity`, and the change
+/// was forced rather than opportunistic: the poll deliberately stopped whenever
+/// the map was off screen, so the map now standing in the rail beside every
+/// conversation would have shown rings frozen at the moment the King left `/`.
 ///
-/// Stopping matters more than starting. The King spends most of his time in a
-/// chamber, where this answers a question nobody is asking -- and a timer left
-/// running there would poll the server for the life of the session. The
-/// start/stop/`on_cleanup` shape is the one `conversation.rs::elapsed_clock`
-/// already uses for its own interval, for the same reason.
-fn poll_activity(working: RwSignal<Vec<CityActivity>>, showing: Memo<bool>) {
-    #[cfg(feature = "hydrate")]
-    {
-        // Nothing draws a ring under an automated browser, so nothing needs to
-        // know which towns are alight. Asked of the map rather than decided
-        // again here: one definition, read by both.
-        if kingdom_citymap::stood_down() {
-            return;
-        }
-
-        let running = StoredValue::new(None::<leptos::leptos_dom::helpers::IntervalHandle>);
-
-        let refresh = move || {
-            leptos::task::spawn_local(async move {
-                // A failure is silence, not an error banner. This is ambient
-                // decoration on a map; a server restart mid-poll must not put a
-                // message in front of the King about something he did not ask
-                // for. The next tick asks again.
-                if let Ok(seen) = crate::api::kingdom_activity().await {
-                    working.set(seen);
-                }
-            });
-        };
-
-        let stop = move || {
-            if let Some(handle) = running.try_get_value().flatten() {
-                handle.clear();
-                running.try_set_value(None);
-            }
-        };
-
-        Effect::new(move |_| {
-            // Unconditionally first: this run supersedes the last, whether it is
-            // about to start a new timer or to stop entirely.
-            stop();
-
-            if !showing.get() {
-                // Leaving the map clears what was last seen, so returning to it
-                // cannot show a ring around a town that stopped working while
-                // the King was elsewhere. The first poll is a moment away.
-                working.set(Vec::new());
-                return;
-            }
-
-            // Asked straight away, so the map does not stand quiet for two
-            // seconds after arriving on it.
-            refresh();
-
-            if let Ok(handle) = leptos::leptos_dom::helpers::set_interval_with_handle(
-                refresh,
-                std::time::Duration::from_millis(ACTIVITY_POLL_MS),
-            ) {
-                running.try_set_value(Some(handle));
-            }
-        });
-
-        on_cleanup(stop);
-    }
-
-    #[cfg(not(feature = "hydrate"))]
-    let _ = (working, showing);
+/// It turns out nothing had to be plumbed. [`Kingdom::activity`] is a pure
+/// method that compiles to wasm, and the browser is already told everything it
+/// needs: the rail's socket carries a [`kingdom_core::PlanPulse`] per plan,
+/// `absorb` writes its `working_on` onto the kingdom, and `Plan::is_busy` is
+/// `working_on.is_some()`. So this is push rather than poll, with no lag, no
+/// request while idle, and one answer on every screen instead of one screen's
+/// answer.
+///
+/// A `Memo` and not a closure, and that is what makes it cheap: it re-runs on
+/// every push, but `CityActivity` derives `PartialEq`, so a run that finds the
+/// same set notifies nobody -- and a transcript entry that changes no city's
+/// busy count therefore does not re-send `SetActivity` to the engine.
+fn kingdom_activity(state: KingdomState) -> Memo<Vec<CityActivity>> {
+    // `with`, not `get`: answering this should not clone every city and every
+    // plan in the kingdom.
+    Memo::new(move |_| state.kingdom.with(Kingdom::activity))
 }
 
 /// Root component: the throne room.
@@ -615,7 +588,7 @@ pub fn App() -> impl IntoView {
 /// it had no conversation to belong to and nothing to say but an instruction to
 /// go and pick a city, next to the very screen for picking one.
 ///
-/// # Why the map is here and not on its route
+/// # Why the map is here, and why it is a sibling of both
 ///
 /// [`CityMap`] hands its canvas to Bevy, and on the web `App::run()` never
 /// returns -- it gives control to `requestAnimationFrame` and keeps the element
@@ -625,42 +598,131 @@ pub fn App() -> impl IntoView {
 /// second engine is not the fix either: that would want a second winit event
 /// loop inside one wasm instance.
 ///
-/// So the map is mounted **once**, here, as a sibling of the outlet, and is
-/// hidden with CSS when the route is not `/`. It costs one canvas standing idle
-/// behind the chamber and buys a map that is still there when you come back.
+/// So the map is mounted **once**, here, and it is a direct child of the grid
+/// rather than of either track. That is what lets it be shown in two places
+/// without being rendered twice: it does not move through the DOM, it is
+/// positioned, and only the four numbers describing its rectangle change.
 ///
-/// Hidden is not the same as stopped, though, so `on_the_map` is handed to the
-/// map as well as to the class: CSS spares the King the pixels, and the prop is
-/// what spares his machine the work of drawing them.
+/// - On `/` it covers the main region, exactly as it always did.
+/// - In a chamber it stands at the foot of the cities rail, scoped to the city
+///   that conversation is about.
+/// - With the rail folded away in a chamber it has no home, and goes.
+///
+/// Every number in both rectangles is arithmetic over signals the grid track
+/// itself is written from, so the overlay and the column agree by construction
+/// rather than by measurement.
+///
+/// A home is not the same as a frame rate, though, so [`MapPresence`] is handed
+/// to the map as well as to the class: CSS decides which pixels the King sees,
+/// and the prop is what decides how much work his machine does producing them.
 #[component]
 fn ThroneRoom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let location = use_location();
     let on_the_map = Memo::new(move |_| location.pathname.get() == "/");
 
-    // Which cities have agents in them. Owned here rather than in
-    // `KingdomState` because nothing outside the map reads it, and polled only
-    // while the map is what the King is looking at.
-    let working = RwSignal::new(Vec::<CityActivity>::new());
-    poll_activity(working, on_the_map);
+    // Which cities have agents in them. Derived from the kingdom the rail's
+    // socket already keeps current -- see `kingdom_activity`, which replaced a
+    // poll that stopped whenever the map was off screen.
+    let working = kingdom_activity(state);
+
+    // Where the map stands. The single answer both the class and the engine are
+    // driven from, so the rectangle it is drawn in and the effort it spends
+    // drawing cannot disagree.
+    let presence = Memo::new(move |_| {
+        if on_the_map.get() {
+            MapPresence::Full
+        } else if state.rail_collapsed.get() {
+            // A chamber on a narrow window folds the rail on its own
+            // (`fold_rail_when_cramped`), so this is the ordinary laptop case
+            // rather than a corner: no room for a map, and the engine stops
+            // exactly as it did before there was a second home.
+            MapPresence::Hidden
+        } else {
+            MapPresence::Rail
+        }
+    });
+
+    // How wide the rail's track currently is. Read by the grid and by the
+    // overlay's rectangle both, which is what keeps the two in step.
+    let rail_width = move || {
+        if state.rail_collapsed.get() {
+            COLLAPSED_RAIL_WIDTH
+        } else {
+            state.sidebar_width.get()
+        }
+    };
 
     view! {
         <div
             class="throne-room"
-            style:grid-template-columns=move || {
-                let rail = if state.rail_collapsed.get() {
-                    COLLAPSED_RAIL_WIDTH
-                } else {
-                    state.sidebar_width.get()
-                };
-                format!("{}px 1fr", rail)
-            }
+            style:grid-template-columns=move || format!("{}px 1fr", rail_width())
         >
+            // First among the grid's children, and positioned rather than laid
+            // out. Paint order is settled by `z-index` in `_city-map.scss`
+            // rather than by this position: in the rail it lifts above the
+            // sidebar, and on its own screen it stays under the main region so
+            // the decree bar still stands over it.
+            <div
+                class="map-region"
+                class:at-rail=move || presence.get() == MapPresence::Rail
+                class:at-large=move || presence.get() == MapPresence::Full
+                class:gone=move || presence.get() == MapPresence::Hidden
+                style:left=move || {
+                    match presence.get() {
+                        MapPresence::Full => format!("{}px", rail_width()),
+                        _ => "0".to_owned(),
+                    }
+                }
+                style:width=move || {
+                    match presence.get() {
+                        MapPresence::Full => "auto".to_owned(),
+                        _ => format!("{}px", rail_width()),
+                    }
+                }
+                style:height=move || {
+                    match presence.get() {
+                        MapPresence::Full => "auto".to_owned(),
+                        // The same signal the rail's own empty slot is cut
+                        // from, so the canvas lands exactly where the registry
+                        // stops. See `KingdomState::map_height`.
+                        _ => format!("{}px", state.map_height.get()),
+                    }
+                }
+            >
+                <CityMap
+                    selected=state.selected
+                    working=working
+                    presence=presence
+                    focus_city=state.selected
+                    focus_file=state.focus_file
+                />
+                // The rail's map is a view rather than a control -- clicking it
+                // cannot select, because the chamber force-sets the selection
+                // from the open plan -- so the way to the real map has to be
+                // drawn. Rendered inside the region so the chrome travels with
+                // the rectangle instead of being a second thing to align.
+                <Show when=move || presence.get() == MapPresence::Rail>
+                    <div class="map-rail-head">
+                        <span class="rail-pane-label">"Kingdom"</span>
+                        <span class="map-rail-city">
+                            {move || {
+                                state
+                                    .selected
+                                    .get()
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_default()
+                            }}
+                        </span>
+                        <a class="map-rail-open" href="/" title="Open the whole kingdom">
+                            "\u{2197}"
+                        </a>
+                    </div>
+                </Show>
+            </div>
+
             <Sidebar/>
             <main class="main-region">
-                <div class="map-region" class:hidden=move || !on_the_map.get()>
-                    <CityMap selected=state.selected working=working visible=on_the_map/>
-                </div>
                 <Outlet/>
             </main>
         </div>

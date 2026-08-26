@@ -182,24 +182,34 @@ impl Tool for TmuxRun {
         // user's toolchain managers on PATH -- a `cargo` that works in his
         // terminal and not in the pane is a bug report nobody can reproduce.
         let shell_command = format!("bash -lc {}", quote(cmd));
-        let started = cli(
-            &socket,
-            &[
-                "new-window",
-                "-d",
-                "-P",
-                "-F",
-                "#{window_id}",
-                "-t",
-                SESSION,
-                "-n",
-                &name,
-                "-c",
-                &shop.root().to_string_lossy(),
-                &shell_command,
-            ],
-        )
-        .await;
+        // What this plan's children get beyond the server's own environment --
+        // see [`super::child_environment`]. `-e` per variable rather than an
+        // `export` prefixed onto the command, so nothing needs quoting twice
+        // and the pane's own shell still sees them.
+        let environment: Vec<String> = super::child_environment(shop)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let root = shop.root().to_string_lossy();
+        let mut arguments = vec![
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{window_id}",
+            "-t",
+            SESSION,
+            "-n",
+            &name,
+            "-c",
+            &root,
+        ];
+        for variable in &environment {
+            arguments.push("-e");
+            arguments.push(variable);
+        }
+        arguments.push(&shell_command);
+        let started = cli(&socket, &arguments).await;
 
         let started = match started {
             Ok(out) => out,
@@ -889,6 +899,51 @@ mod tests {
         })
         .await;
         assert!(landed.is_ok(), "the window did not start in the workspace");
+        let _ = cli(&socket_for(&shop), &["kill-server"]).await;
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+    use kingdom_core::Workspace;
+    use serde_json::json;
+
+    /// A rehearsal server started in a pane must inherit the mock, and keep its
+    /// records inside the workspace.
+    ///
+    /// Against a real tmux, because the mechanism *is* the `-e` flag: a unit
+    /// test over `child_environment` alone would still pass if these arguments
+    /// were assembled wrongly, and assembling them wrongly is the whole risk.
+    /// Verified to fail when the environment is dropped from the call.
+    #[tokio::test]
+    async fn a_pane_in_a_kingdom_checkout_is_pointed_at_the_mock() {
+        let dir = tempfile::tempdir().expect("a temporary workspace");
+        let marker = dir.path().join("crates").join("kingdom-app");
+        std::fs::create_dir_all(&marker).expect("the marker's directory");
+        std::fs::write(marker.join("Cargo.toml"), "[package]\n").expect("the marker");
+
+        let shop = Sandbox::new(Workspace::in_place(dir.path().display().to_string()))
+            .for_plan(kingdom_core::PlanId::new("plan-env".to_string()));
+
+        let outcome = TmuxRun
+            .run(
+                json!({
+                    "cmd": "echo model=$KINGDOM_MODEL home=$KINGDOM_HOME",
+                    "name": "env-check",
+                    "readiness": {"text": "model=", "timeout_seconds": 10}
+                }),
+                &shop,
+            )
+            .await;
+
+        let said = format!("{outcome:?}");
+        assert!(said.contains("model=mock"), "{said}");
+        assert!(
+            said.contains(&format!("home={}", dir.path().display())),
+            "the pane kept its records outside the workspace: {said}"
+        );
+
         let _ = cli(&socket_for(&shop), &["kill-server"]).await;
     }
 }

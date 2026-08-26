@@ -1121,6 +1121,85 @@ impl Plan {
         self.transcript.push(Entry::Note(Note::new(kind, body)));
     }
 
+    /// The King removes one entry from the record -- a message he does not
+    /// want read back to the model, or a tool call whose result should stop
+    /// influencing it.
+    ///
+    /// This is not a correction to something Kingdom got wrong; it is the
+    /// King editing his own history, which is why it earns a [`NoteKind`] of
+    /// its own rather than borrowing [`NoteKind::Workspace`] -- that one is for
+    /// his edits to the *project*, this is for his edits to the *conversation*.
+    /// The note is left standing in the transcript precisely so the erasure
+    /// itself is not erased: a plan whose record can vanish without a trace of
+    /// having vanished is not a record.
+    ///
+    /// Refuses three shapes of index, each for a reason a caller should report
+    /// rather than have swallowed:
+    /// - **out of range**, which is almost always a stale tab racing a second
+    ///   deletion -- every index after the one already removed has shifted;
+    /// - **a note**, so a deletion cannot be used to erase the fact that a
+    ///   deletion happened, or any other thing Kingdom itself recorded;
+    /// - **a tool call still running** (`outcome` is `None`), because the
+    ///   court has already sent that call and is waiting on its result --
+    ///   cutting it from the transcript would not stop the call, it would only
+    ///   make the log deny that the model is doing anything at all.
+    ///
+    /// A deleted call that shared a [`ToolCall::batch`] with others hands its
+    /// [`ToolCall::narration`] and [`ToolCall::reasoning`] on to the next
+    /// surviving call in that batch rather than losing them. Both belong to
+    /// the *reply* that produced the batch, not to whichever one of its calls
+    /// happens to carry them, and the reply is not gone just because one call
+    /// in it was.
+    pub fn delete_entry(&mut self, index: usize) -> Result<(), String> {
+        match self.transcript.get(index) {
+            None => return Err("That is no longer in the transcript.".to_string()),
+            Some(Entry::Note(_)) => {
+                return Err(
+                    "A note Kingdom left about the conversation cannot be removed.".to_string(),
+                )
+            }
+            Some(Entry::Tool(tool_call)) if tool_call.outcome.is_none() => {
+                return Err(
+                    "That call is still running and cannot be removed yet.".to_string(),
+                )
+            }
+            Some(Entry::Message(_) | Entry::Tool(_)) => {}
+        }
+
+        let removed = self.transcript.remove(index);
+        let description = match &removed {
+            Entry::Message(message) => match message.speaker {
+                Speaker::User => "a message you sent",
+                Speaker::Assistant => "a message the court sent",
+            }
+            .to_string(),
+            Entry::Tool(tool_call) => {
+                if let Some(batch) = tool_call.batch.clone() {
+                    if let Some(sibling) = self.transcript[index..]
+                        .iter_mut()
+                        .find_map(|entry| match entry {
+                            Entry::Tool(t) if t.batch.as_deref() == Some(batch.as_str()) => {
+                                Some(t)
+                            }
+                            _ => None,
+                        })
+                    {
+                        if sibling.narration.is_none() {
+                            sibling.narration = tool_call.narration.clone();
+                        }
+                        if sibling.reasoning.is_none() {
+                            sibling.reasoning = tool_call.reasoning.clone();
+                        }
+                    }
+                }
+                format!("a {} call", tool_call.tool)
+            }
+            Entry::Note(_) => unreachable!("refused above"),
+        };
+        self.note(NoteKind::Deleted, format!("You removed {description} from the record."));
+        Ok(())
+    }
+
     /// Sets words aside to be heard when the court next comes up for air.
     ///
     /// Returns the id naming them, which is how [`Plan::unqueue`] finds them
@@ -2321,6 +2400,12 @@ pub enum NoteKind {
     /// a kind is how that stays honest; sniffing the note's prose for the word
     /// "empty" would break the first time the wording improved.
     EmptyReply,
+    /// The King removed a message or a tool call from the transcript.
+    ///
+    /// Left standing rather than silently dropping the gap, so the record
+    /// shows that something was taken out even though it can no longer show
+    /// what. See [`Plan::delete_entry`].
+    Deleted,
 }
 
 impl NoteKind {
@@ -2334,6 +2419,7 @@ impl NoteKind {
             // Styled as a failure because it is one. The kind exists to be
             // matched on by the turn loop, not to be coloured differently.
             NoteKind::EmptyReply => "failed",
+            NoteKind::Deleted => "workspace",
         }
     }
 }
@@ -4190,6 +4276,128 @@ mod transcript_tests {
         assert!(
             plan.queued.is_empty(),
             "a plan from before the queue existed has nothing waiting on it"
+        );
+    }
+
+    /// The ordinary case: a message, gone, and the model never sees it again.
+    #[test]
+    fn deleting_a_message_removes_it_from_what_a_model_is_shown() {
+        let mut plan = working();
+        plan.say(Speaker::Assistant, "I will start by reading the file");
+        let index = plan.transcript.len() - 1;
+
+        plan.delete_entry(index)
+            .expect("an ordinary message can be removed");
+
+        assert!(
+            plan.messages()
+                .all(|m| m.body != "I will start by reading the file"),
+            "a deleted message must not be replayed to the model"
+        );
+        assert!(
+            plan.transcript
+                .iter()
+                .any(|e| matches!(e, Entry::Note(n) if n.kind == NoteKind::Deleted)),
+            "the record shows that something was removed, even though it \
+             cannot show what"
+        );
+    }
+
+    /// A tool call still running has no result yet to judge, and the court has
+    /// already sent it -- removing it from the log would not stop the call, it
+    /// would only make the record deny the model is doing anything at all.
+    #[test]
+    fn a_call_still_running_cannot_be_deleted() {
+        let mut plan = working();
+        plan.begin_tool_call(ToolCall::started("t1", "bash", serde_json::json!({})));
+        let index = plan.transcript.len() - 1;
+
+        assert!(
+            plan.delete_entry(index).is_err(),
+            "a call with no outcome yet must be refused"
+        );
+        assert_eq!(
+            plan.transcript.len(),
+            index + 1,
+            "a refused deletion must leave the transcript untouched"
+        );
+    }
+
+    /// Kingdom's own notices are the plan's honest record of what happened to
+    /// it, including of a deletion. A deletion that could remove *itself*
+    /// would let the erasure of a message erase its own trace as well.
+    #[test]
+    fn a_note_kingdom_left_cannot_be_deleted() {
+        let mut plan = working();
+        plan.note(NoteKind::Workspace, "Working in /dev/testburg.");
+        let index = plan.transcript.len() - 1;
+
+        assert!(
+            plan.delete_entry(index).is_err(),
+            "a note is Kingdom's own record and must not be erasable"
+        );
+    }
+
+    /// An index that no longer names anything -- past the end, most often a
+    /// stale tab racing a second deletion -- is refused rather than panicking
+    /// or silently doing nothing.
+    #[test]
+    fn deleting_an_out_of_range_index_is_refused() {
+        let mut plan = working();
+        assert!(plan.delete_entry(99).is_err());
+    }
+
+    /// A reply that asked for three things at once is one decision, and the
+    /// narration explaining it belongs to the reply, not to whichever one of
+    /// its calls happens to carry it. Deleting the first call of that batch
+    /// must not take the explanation down with it.
+    #[test]
+    fn deleting_the_first_call_of_a_batch_hands_its_narration_on() {
+        let mut plan = working();
+        let mut first = ToolCall::started("t1", "bash", serde_json::json!({"cmd": "ls"}));
+        first.batch = Some("batch-1".to_string());
+        first.narration = Some("I'll look at what's here first.".to_string());
+        plan.begin_tool_call(first);
+        plan.settle_tool_call(
+            "t1",
+            ToolOutcome::Done {
+                output: "Cargo.toml".to_string(),
+                artifacts: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let mut second = ToolCall::started("t2", "bash", serde_json::json!({"cmd": "pwd"}));
+        second.batch = Some("batch-1".to_string());
+        plan.begin_tool_call(second);
+        plan.settle_tool_call(
+            "t2",
+            ToolOutcome::Done {
+                output: "/dev/testburg".to_string(),
+                artifacts: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let first_index = plan
+            .transcript
+            .iter()
+            .position(|e| matches!(e, Entry::Tool(t) if t.id == "t1"))
+            .unwrap();
+        plan.delete_entry(first_index)
+            .expect("a settled call can be removed");
+
+        let Some(Entry::Tool(survivor)) = plan
+            .transcript
+            .iter()
+            .find(|e| matches!(e, Entry::Tool(t) if t.id == "t2"))
+        else {
+            panic!("the surviving call of the batch must still be in the transcript");
+        };
+        assert_eq!(
+            survivor.narration.as_deref(),
+            Some("I'll look at what's here first."),
+            "the reply's own words must not vanish with one of its calls"
         );
     }
 }

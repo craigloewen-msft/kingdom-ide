@@ -1,11 +1,12 @@
 //! A drag handle that sets the size of the panel beside it.
 //!
-//! Three panels want this: the left rail, which grows as the pointer moves
-//! right; the chamber's focused panel, which grows as it moves left; and the
-//! files rail's split, where the tree above grows as the pointer moves *down*.
-//! They are one component rather than three because the fiddly parts are not the
+//! Four panels want this: the left rail, which grows as the pointer moves
+//! right; the chamber's focused panel, which grows as it moves left; the files
+//! rail's split, where the tree above grows as the pointer moves *down*; and
+//! the cities rail's split, where the map pane below grows as it moves *up*.
+//! They are one component rather than four because the fiddly parts are not the
 //! arithmetic -- they are the three details below, and each one is a bug that
-//! would otherwise have to be found and fixed three times.
+//! would otherwise have to be found and fixed four times.
 //!
 //! - **The move and release listeners are on the window, not the handle.** The
 //!   handle is a few pixels wide and the pointer leaves it immediately. Worse,
@@ -36,12 +37,22 @@ pub enum Grows {
     /// The panel is above the handle: dragging down makes it taller. The files
     /// rail's split, where the tree sits over the review drawer.
     Downwards,
+    /// The panel is *below* the handle: dragging down makes it shorter. The
+    /// cities rail's split, where the map pane sits under the registry.
+    ///
+    /// The mirror of [`Grows::Downwards`], and the two are not
+    /// interchangeable. Which pane carries the measured size decides which one
+    /// absorbs a change in window height: in the files rail the tree is
+    /// measured and the drawer takes the remainder, and in the cities rail it
+    /// has to be the other way round -- the registry should grow with the
+    /// window and the map should keep the height it was given.
+    Upwards,
 }
 
 impl Grows {
     /// Whether this handle follows the pointer's vertical travel.
     fn vertical(self) -> bool {
-        matches!(self, Grows::Downwards)
+        matches!(self, Grows::Downwards | Grows::Upwards)
     }
 
     /// How much a pointer that has travelled `delta` along this handle's axis
@@ -49,7 +60,7 @@ impl Grows {
     fn apply(self, delta: f64) -> f64 {
         match self {
             Grows::Rightwards | Grows::Downwards => delta,
-            Grows::Leftwards => -delta,
+            Grows::Leftwards | Grows::Upwards => -delta,
         }
     }
 }
@@ -194,4 +205,39 @@ fn set_resizing_class(on: bool) {
 
     #[cfg(not(feature = "hydrate"))]
     let _ = on;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one thing a caller of this component can get backwards.
+    ///
+    /// The two vertical directions are mirrors and are *not* interchangeable:
+    /// which pane carries the measured size decides which one absorbs a change
+    /// in window height. The files rail measures the tree above its handle, and
+    /// the cities rail measures the map below its own -- so the registry grows
+    /// with the window and the map keeps the height the King gave it. Swapping
+    /// them still drags, just never in step with the pointer.
+    #[test]
+    fn a_handle_moves_the_panel_that_is_actually_beside_it() {
+        // Dragging down: the pane above the handle gets taller, the pane below
+        // it gets shorter.
+        assert_eq!(Grows::Downwards.apply(30.0), 30.0);
+        assert_eq!(Grows::Upwards.apply(30.0), -30.0);
+
+        // And dragging up does the reverse of each.
+        assert_eq!(Grows::Downwards.apply(-30.0), -30.0);
+        assert_eq!(Grows::Upwards.apply(-30.0), 30.0);
+    }
+
+    /// A handle that read the wrong coordinate would still move, which is why
+    /// the axis travels with the direction rather than being passed separately.
+    #[test]
+    fn both_vertical_directions_follow_the_pointer_downwards() {
+        assert!(Grows::Downwards.vertical());
+        assert!(Grows::Upwards.vertical());
+        assert!(!Grows::Rightwards.vertical());
+        assert!(!Grows::Leftwards.vertical());
+    }
 }

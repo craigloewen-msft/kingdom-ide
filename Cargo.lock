@@ -3596,6 +3596,7 @@ dependencies = [
  "gloo-net",
  "gloo-timers",
  "ignore",
+ "js-sys",
  "kingdom-core",
  "leptos",
  "serde",

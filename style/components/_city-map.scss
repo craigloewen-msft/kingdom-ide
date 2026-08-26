@@ -7,26 +7,110 @@
 // element the renderer draws into and nothing else.
 
 @use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
 
-// The map is mounted once, by `ThroneRoom`, and stands behind whichever route
-// is showing -- see the note on that component for why it may never unmount.
-// So it is taken out of flow and pinned to the region rather than being a flex
-// child of one route's column.
+// The map is mounted once, by `ThroneRoom`, and stands in one of two
+// rectangles -- see the note on that component for why it may never unmount,
+// and therefore why it is positioned rather than moved. It is a direct child of
+// the throne-room grid rather than of either track, so it can cover the main
+// region on `/` and the foot of the rail in a chamber without being rendered
+// twice.
+//
+// `left`, `width` and `height` are set inline from the same signals the grid
+// track is written from. What is here is only what does not change with them.
 .map-region {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
   // The void under the canvas: the renderer paints its own empty space, and
   // this is what shows for the moment before the first frame arrives.
   background: t.$void;
 }
 
-// Left mounted but out of sight while the King is in a plan's chamber.
-// `visibility` rather than `display: none`: the canvas keeps its size, so the
-// engine is not handed a zero-sized viewport it would have to be told to
+// --- On its own screen -------------------------------------------------------
+//
+// No z-index, deliberately. That leaves it in the same layer as its siblings,
+// where DOM order decides -- and it is rendered first, so `.main-region` paints
+// above it and the decree bar keeps standing over the map exactly as it did
+// when the map was inside that region.
+//
+// The cost of being underneath is that `.main-region` would swallow drags meant
+// for the canvas, which is why `_throne-room.scss` gives that region
+// `pointer-events: none` and lets its routed children take them back.
+.map-region.at-large {
+  left: 0;
+}
+
+// --- At the foot of the rail -------------------------------------------------
+//
+// Here it *must* paint above `.sidebar`, which is a positioned sibling with an
+// opaque background, so this is the one home that names a layer. The rail's own
+// edge resizer sits at z-index 5 and stays above it, which is right: the handle
+// runs the full height of the column, map included.
+.map-region.at-rail {
+  // Anchored to the *foot* of the rail. The base rule pins all four edges, so
+  // an explicit height there is over-constrained and the browser resolves it by
+  // keeping `top` and dropping `bottom` -- which hangs the map from the top of
+  // the column, over the kingdom's own header. Releasing `top` is what lets the
+  // inline height measure upwards from the bottom instead.
+  top: auto;
+  z-index: 3;
+  border-top: 1px solid t.$edge;
+}
+
+// No home at all: a chamber with the rail folded away. `visibility` rather than
+// `display: none`, for the reason it always was -- the canvas keeps its size, so
+// the engine is not handed a zero-sized viewport it would have to be told to
 // recover from.
-.map-region.hidden {
+.map-region.gone {
+  // Sized and anchored exactly as the rail's is, because this *is* the rail's
+  // home with the rail folded away -- bringing the rail back must reveal the
+  // map where it already stood rather than move it.
+  top: auto;
   visibility: hidden;
   pointer-events: none;
+}
+
+// The rail map's own head: what it is, where it is pointed, and the way out to
+// the full map.
+//
+// Overlaid on the canvas rather than placed above it in the rail, so the chrome
+// travels with the rectangle instead of being a second thing to keep aligned.
+// It is also why the rail's map needs no click handler of its own: selecting is
+// suppressed there (see `view.rs`), and this is what stands in its place.
+.map-rail-head {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  background: linear-gradient(rgba(t.$void, 0.85), rgba(t.$void, 0));
+  pointer-events: none;
+
+  > * { pointer-events: auto; }
+}
+
+.map-rail-city {
+  @include m.truncate;
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: t.$ink-dim;
+}
+
+.map-rail-open {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  color: t.$ink-faint;
+  font-size: 12px;
+  line-height: 1;
+  text-decoration: none;
+
+  &:hover { color: t.$gold; }
 }
 
 .city-map {
@@ -164,13 +248,20 @@
   font-size: 12px;
 }
 
-// A surveyor's line under the card, with a light running along it.
+// The bar under the card: a surveyor's line, with either a light running along
+// it or a measured length of it filled in.
+//
+// One element for both, because there are two ways this can be drawn and only
+// one of them is ever right at a given moment -- see `view::Survey`. Without a
+// fraction to show it is the sweep this card has always had; with one, the
+// same layer stops sweeping and is scaled to the fraction instead.
 .survey-rule {
   position: relative;
   width: 132px;
-  height: 1px;
+  height: 2px;
   margin-top: 14px;
   overflow: hidden;
+  border-radius: 1px;
   background: rgba(t.$edge-bright, 0.8);
 
   > span {
@@ -180,6 +271,30 @@
     // Translating a full-width layer, rather than animating a width or an
     // offset, for the compositor reason above.
     animation: survey-sweep 1.8s ease-in-out infinite;
+  }
+}
+
+// Measured: the same layer, filled from the left and scaled to how far along
+// the work is.
+//
+// `scaleX` rather than `width`, and this is the one place on the card where
+// that rule is load-bearing rather than tidy. The bar's whole job is to keep
+// moving across work that is on the main thread, and a transform is composited
+// off it -- so the fill still glides between two engine updates instead of
+// stepping only when the browser next gets a frame to itself.
+.survey-rule.measured {
+  > span {
+    animation: none;
+    // Grown from the left, so the bar fills rather than expanding about its
+    // middle.
+    transform-origin: 0 50%;
+    // Scaled by the inline style the component writes; 0 until it does, so a
+    // bar with no fraction yet is empty rather than full.
+    transform: scaleX(0);
+    background: linear-gradient(90deg, t.$gold-dim, t.$gold);
+    // Long enough to smooth the step between two engine updates, short enough
+    // that the bar is never visibly behind the work it reports.
+    transition: transform 140ms linear;
   }
 }
 
@@ -199,6 +314,11 @@
 // Held still for anyone who asked for that. The card still says which phase
 // the map is in, which is the part that carries the information -- the towers
 // only ever said "something is happening", and the words say it too.
+//
+// The *measured* bar is deliberately exempt: its length is information rather
+// than animation, and holding it at zero would leave a bar that never fills.
+// Only the transition between lengths is dropped, so it steps instead of
+// gliding.
 @media (prefers-reduced-motion: reduce) {
   .survey-tower,
   .survey-rule > span {
@@ -207,6 +327,11 @@
 
   .survey-tower { opacity: 0.8; }
   .survey-rule > span { opacity: 0.5; }
+
+  .survey-rule.measured > span {
+    opacity: 1;
+    transition: none;
+  }
 }
 
 // What stands where the map would be, when the engine has been stood down
