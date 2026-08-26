@@ -87,20 +87,34 @@ fn registry() -> &'static Mutex<HashMap<PlanId, broadcast::Sender<Plan>>> {
 /// A subagent is announced twice: once to its own conversation, and once to the
 /// conversation of the plan that sent it, which is where the user watches it
 /// work. See the module docs for why that costs nothing.
+///
+/// What goes out is [`Plan::for_wire`] rather than the plan itself: this
+/// channel's only subscribers are watch sockets, and a browser has no use for
+/// the provider-opaque half of the model's thinking. The plan the *server*
+/// holds is untouched.
 pub fn publish(plan: &Plan) {
     let Ok(channels) = registry().lock() else {
         return;
     };
 
+    // Everything on this channel is bound for a browser, so the opaque half of
+    // the model's thinking is dropped once here rather than at each `send`.
+    // See `Plan::for_wire`: it is never drawn, and it was the largest thing on
+    // the wire by a wide margin.
+    //
+    // Built lazily, because the common case is that nobody is listening and the
+    // whole point of that case is that it costs nothing.
+    let mut for_wire: Option<Plan> = None;
+
     if let Some(tx) = channels.get(&plan.id) {
-        let _ = tx.send(plan.clone());
+        let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
     }
 
     // The second channel is the *sender's*, not a broadcast: only the plan that
     // sent this subagent hears about it.
     if let Some(subagent) = &plan.spawned_by {
         if let Some(tx) = channels.get(&subagent.parent) {
-            let _ = tx.send(plan.clone());
+            let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
         }
     }
 }
@@ -176,6 +190,77 @@ mod tests {
         assert_eq!(
             heard.id, watched,
             "a watcher must not be woken by another plan's changes"
+        );
+    }
+
+    /// What crosses the socket is stripped of what a browser cannot draw.
+    ///
+    /// The size half of the push design, pinned at the place that performs it.
+    /// `events.rs` deliberately publishes *whole plans* -- that is what makes
+    /// reconnection free -- and the cost of that decision is paid on every
+    /// round of every turn. Most of those bytes were the model's opaque
+    /// thinking, which nothing in the chamber has ever rendered.
+    ///
+    /// Worth a test rather than a comment because the receiving side cannot
+    /// tell: a conversation absorbs whatever arrives, so a regression here
+    /// would show up only as the King's browser going slow again, with nothing
+    /// in the UI's own code to blame.
+    #[tokio::test]
+    async fn a_watcher_is_not_sent_the_thinking_it_cannot_read() {
+        // Its own id, deliberately. The registry is process-global and every
+        // test in this module shares it, so a plan id used by two tests lets
+        // one test's `publish` land in the other's receiver -- which is exactly
+        // the flake that reuse of "watched" produced here.
+        let id = PlanId::new("watched-thinking");
+        let mut rx = subscribe(&id);
+
+        let mut thinking = kingdom_core::Reasoning {
+            text: Some("checking how the rail reads a title".to_string()),
+            ..Default::default()
+        };
+        thinking.opaque.insert(
+            "signature".to_string(),
+            serde_json::json!("c2lnbmVkLXRoaW5raW5n"),
+        );
+
+        let mut plan = a_plan("watched-thinking");
+        plan.begin_tool_call(
+            kingdom_core::ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
+                "reply-1",
+                Some(thinking),
+                None,
+            ),
+        );
+
+        publish(&plan);
+
+        let heard = rx.recv().await.expect("the watched plan should arrive");
+        let Some(kingdom_core::Entry::Tool(deed)) = heard.transcript.last() else {
+            panic!("the deed must survive the crossing");
+        };
+        let carried = deed.reasoning.as_ref().expect("the thinking still rides");
+
+        assert_eq!(
+            carried.text.as_deref(),
+            Some("checking how the rail reads a title"),
+            "the chamber folds the prose away behind a chevron, so it must cross"
+        );
+        assert!(
+            carried.opaque.is_empty(),
+            "the provider's signature is never drawn and must not be sent"
+        );
+
+        // And publishing did not reach back and blind the caller's own plan,
+        // which is the copy the model is replayed from.
+        let Some(kingdom_core::Entry::Tool(original)) = plan.transcript.last() else {
+            panic!("the caller still holds its deed");
+        };
+        assert!(
+            original
+                .reasoning
+                .as_ref()
+                .is_some_and(|r| r.opaque.contains_key("signature")),
+            "publishing must not strip the plan the server keeps -- see Reasoning's docs"
         );
     }
 

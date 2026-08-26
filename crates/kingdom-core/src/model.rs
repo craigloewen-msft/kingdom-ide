@@ -97,6 +97,19 @@ impl Kingdom {
         }
     }
 
+    /// This kingdom as a browser should receive it.
+    ///
+    /// [`Plan::for_wire`] applied to every plan, and the reason to have it here
+    /// as well is that the opening fetch is the *largest* single transfer in
+    /// the app: it carries every plan at once, where a push carries one. On a
+    /// real kingdom that was a 13.9 MB page.
+    pub fn for_wire(&self) -> Self {
+        Self {
+            plans: self.plans.iter().map(Plan::for_wire).collect(),
+            ..self.clone()
+        }
+    }
+
     pub fn plan(&self, id: &PlanId) -> Option<&Plan> {
         self.plans.iter().find(|p| &p.id == id)
     }
@@ -1164,6 +1177,34 @@ impl Plan {
         })
     }
 
+    /// This plan as a browser should receive it.
+    ///
+    /// The one boundary between server state and a watching conversation, and
+    /// the reason it exists is bandwidth rather than secrecy. `events.rs` is
+    /// deliberate about the wire carrying whole plans, and that decision is
+    /// what makes reconnection free -- but it also means a plan's every byte is
+    /// re-sent, re-parsed and re-cloned on every round of every turn. On a real
+    /// kingdom that was 2.3 MB per push, and 41% of it was
+    /// [`Reasoning::opaque`], which nothing in the UI has ever drawn.
+    ///
+    /// So this drops exactly that and nothing else. It is *not* a general
+    /// "trim what a plan carries on the wire": everything the chamber renders
+    /// is still here, including the thinking's prose and the images a deed left
+    /// behind, and a browser handed this can still draw the whole conversation.
+    ///
+    /// **Never on the way to disk, and never on the way to a model.** The
+    /// opaque half must survive both round trips byte for byte; see
+    /// [`Reasoning::without_opaque`] for what is lost when it does not.
+    pub fn for_wire(&self) -> Self {
+        let mut plan = self.clone();
+        for entry in &mut plan.transcript {
+            if let Entry::Tool(tool_call) = entry {
+                tool_call.reasoning = tool_call.reasoning.take().map(Reasoning::without_opaque);
+            }
+        }
+        plan
+    }
+
     /// Records a tool call as begun, before it has run.
     ///
     /// Written down *before* the work rather than after it, so the conversation
@@ -1426,6 +1467,30 @@ impl Reasoning {
     /// rather than emit an empty object a gateway may reject.
     pub fn is_empty(&self) -> bool {
         self.text.as_ref().is_none_or(|t| t.trim().is_empty()) && self.opaque.is_empty()
+    }
+
+    /// The same thinking with only the half a reader can use.
+    ///
+    /// For the **wire**, and only for the wire. [`Reasoning::opaque`] is a
+    /// signature or an encrypted trace: it is carried for the provider, is
+    /// never drawn, and is the single largest thing in a long plan -- 41% of
+    /// the bytes across a real kingdom's records, and 1.35 MB of one 2.43 MB
+    /// plan. The conversation reads `text` alone, so every one of those bytes
+    /// crosses to a browser that has no use for it, is re-parsed on every push,
+    /// and is then deep-copied by each memo that reads the plan.
+    ///
+    /// The exact counterpart of [`ToolOutcome::without_images`], and the
+    /// asymmetry between them is the thing to keep straight. Images are
+    /// stripped for **disk** and kept on the wire, because the chamber draws
+    /// them; this is stripped for the **wire** and kept on disk, because the
+    /// model needs it echoed back byte for byte or the gateway silently
+    /// discards the thinking it signs -- the failure this type's own docs
+    /// describe.
+    pub fn without_opaque(self) -> Self {
+        Self {
+            text: self.text,
+            opaque: std::collections::BTreeMap::new(),
+        }
     }
 }
 
@@ -3019,6 +3084,104 @@ mod transcript_tests {
         assert!(
             reasoning.opaque.is_empty(),
             "an unkeyed blob cannot go back under a key it never recorded"
+        );
+    }
+
+    /// What the browser is handed keeps the thinking it draws and drops the
+    /// blob it cannot.
+    ///
+    /// The whole of the wire-size fix, pinned at the type that performs it. A
+    /// long plan's record is mostly `opaque` -- 41% of the bytes across a real
+    /// kingdom -- and none of it is ever rendered, so it is stripped on the way
+    /// to a conversation. `text` must survive, because the chamber folds it
+    /// away behind `thinking (N lines)` and a reader can open it.
+    #[test]
+    fn a_plan_bound_for_a_browser_keeps_its_prose_and_sheds_its_signature() {
+        let mut thinking = Reasoning {
+            text: Some("the title is read in sidebar.rs".to_string()),
+            ..Reasoning::default()
+        };
+        thinking.opaque.insert(
+            "signature".to_string(),
+            serde_json::json!("c2lnbmVkLXRoaW5raW5n"),
+        );
+
+        let mut plan = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+        plan.begin_tool_call(
+            ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
+                "reply-1",
+                Some(thinking),
+                None,
+            ),
+        );
+
+        let sent = plan.for_wire();
+        let Some(Entry::Tool(deed)) = sent.transcript.last() else {
+            panic!("the deed must survive the crossing");
+        };
+        let carried = deed
+            .reasoning
+            .as_ref()
+            .expect("the thinking is still there");
+
+        assert_eq!(
+            carried.text.as_deref(),
+            Some("the title is read in sidebar.rs"),
+            "the chamber draws the prose, so it must cross"
+        );
+        assert!(
+            carried.opaque.is_empty(),
+            "the signature is for the provider and is never drawn -- it must not cross"
+        );
+    }
+
+    /// And the plan the *server* holds is untouched by having been sent.
+    ///
+    /// The failure this guards against is silent and expensive: the opaque half
+    /// must be echoed back to the gateway byte for byte, and a gateway handed a
+    /// thinking block whose signature has gone discards it and keeps accepting
+    /// the request. So stripping in place -- rather than on a copy -- would
+    /// not error anywhere. It would make long investigations wander and repeat
+    /// themselves, which is the exact bug `Reasoning`'s own docs describe.
+    #[test]
+    fn sending_a_plan_to_a_browser_does_not_blind_the_one_the_server_keeps() {
+        let mut thinking = Reasoning::default();
+        thinking
+            .opaque
+            .insert("signature".to_string(), serde_json::json!("c2lnbmVk"));
+
+        let mut plan = Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        );
+        plan.begin_tool_call(
+            ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
+                "reply-1",
+                Some(thinking),
+                None,
+            ),
+        );
+
+        let _sent = plan.for_wire();
+
+        let Some(Entry::Tool(deed)) = plan.transcript.last() else {
+            panic!("the deed is still on the server's plan");
+        };
+        assert_eq!(
+            deed.reasoning
+                .as_ref()
+                .and_then(|r| r.opaque.get("signature")),
+            Some(&serde_json::json!("c2lnbmVk")),
+            "the plan the model is replayed from must keep its signature, under its own key"
         );
     }
 

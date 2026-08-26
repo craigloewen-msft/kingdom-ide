@@ -80,6 +80,26 @@ pub fn snapshot(id: &PlanId) -> Option<Plan> {
     lock().ok()?.plan(id).cloned()
 }
 
+/// A plan on its way to a browser and nowhere else.
+///
+/// Every `#[server]` function below hands back the plan it just changed, and
+/// the browser does exactly what the watch socket's receiver does with it:
+/// `Kingdom::insert`. So they are the same wire, and they carry the same
+/// needless weight -- [`Plan::for_wire`] has the measurements.
+///
+/// It matters most on [`say`], which is the King *typing*: without this, every
+/// message he sends is answered with a copy of the entire transcript including
+/// megabytes of provider signatures, parsed and cloned in the same frame as his
+/// next keystroke.
+///
+/// Named rather than inlined so that the rule is visible at each call site, and
+/// so a function that is ever consumed server-side is an obvious exception
+/// rather than a silent one. Nothing here changes what is stored.
+#[cfg(feature = "ssr")]
+fn to_browser(plan: Plan) -> Plan {
+    plan.for_wire()
+}
+
 /// Writes a plan to the records, turning a failed write into something the user
 /// can see rather than something that fails his prompt.
 ///
@@ -101,9 +121,14 @@ fn remember(root: &std::path::Path, plan: &mut Plan) {
 }
 
 /// Returns the currently open kingdom, or an empty one if none is open.
+///
+/// [`Kingdom::for_wire`], because this is the app's opening fetch and the
+/// largest single transfer it makes: every plan at once, where a push carries
+/// one. Stripping the model's opaque thinking here is what takes a real
+/// kingdom's page from 13.9 MB down. Server state is untouched.
 #[server(GetKingdom, "/api")]
 pub async fn get_kingdom() -> Result<Kingdom, ServerFnError> {
-    Ok(lock()?.clone())
+    Ok(lock()?.for_wire())
 }
 
 /// Opens a dev folder as the kingdom: scans it for cities and seats a model.
@@ -121,7 +146,10 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
     }
 
     enforce_sandbox(&root)?;
-    assemble(&root, None)
+    // `for_wire` on the way out only. `assemble` has already stored the whole
+    // kingdom, opaque thinking and all; what is narrowed is the copy this
+    // browser is handed.
+    assemble(&root, None).map(|k| k.for_wire())
 }
 
 /// Seeds a proving ground if needed and opens it.
@@ -133,7 +161,11 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 #[server(EnterProvingGrounds, "/api")]
 pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
     let name = fixture.unwrap_or_else(|| kingdom_core::mockdata::DEFAULT_FIXTURE.to_string());
-    open_fixture(&name).map_err(ServerFnError::new)
+    // `for_wire` here and not inside `open_fixture`, which the boot path also
+    // calls with no browser in sight. See `get_kingdom`.
+    open_fixture(&name)
+        .map(|k| k.for_wire())
+        .map_err(ServerFnError::new)
 }
 
 /// Seeds a named proving ground if it is not already standing, and opens it.
@@ -767,6 +799,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
         let running = crate::turns::is_running(&plan_id);
         receive(p, prompt, running);
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -839,7 +872,7 @@ pub async fn unqueue(plan: String, queued_id: String) -> Result<Plan, ServerFnEr
         ));
     }
 
-    Ok(updated)
+    Ok(to_browser(updated))
 }
 
 /// The user calls a halt on a turn that is running.
@@ -906,6 +939,7 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
         // The turn will publish its own stopped state in a moment. Returning
         // the plan as it stands keeps this caller honest about what it knows.
         return snapshot(&plan_id)
+            .map(to_browser)
             .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."));
     }
 
@@ -926,6 +960,7 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
              set right. Say something to send the court round again.",
         );
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -1117,7 +1152,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // visible and the plan is restartable, rather than needing a server restart
     // to reach `store::reconcile`.
     match handle.await {
-        Ok(result) => result,
+        Ok(result) => result.map(to_browser),
         Err(e) => {
             let mut kingdom = lock()?;
             let repaired = update(&mut kingdom, &plan_id, |p| {
@@ -1130,7 +1165,9 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
                      still in its workspace. Say something to set it going again.",
                 );
             });
-            repaired.ok_or_else(|| ServerFnError::new(format!("drafting task failed: {e}")))
+            repaired
+                .map(to_browser)
+                .ok_or_else(|| ServerFnError::new(format!("drafting task failed: {e}")))
         }
     }
 }
@@ -1921,7 +1958,9 @@ pub async fn answer_question(
         ));
     }
 
-    snapshot(&plan_id).ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+    snapshot(&plan_id)
+        .map(to_browser)
+        .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
 /// The King accepts the standing proposal, and the court gains its hands.
@@ -2022,6 +2061,7 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
         p.say(Speaker::User, kingdom_core::APPROVAL);
         p.status = PlanStatus::Drafting;
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan vanished as it was being approved."))
 }
 
@@ -2038,6 +2078,7 @@ pub async fn set_aside_plan(plan: String) -> Result<Plan, ServerFnError> {
     let mut kingdom = lock()?;
 
     update(&mut kingdom, &plan_id, |p| p.set_aside_proposal())
+        .map(to_browser)
         .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -2085,7 +2126,7 @@ pub async fn annotate_proposal(
         ));
     }
 
-    Ok(updated)
+    Ok(to_browser(updated))
 }
 
 /// The King takes a note back before the court has been told of it.
@@ -2111,7 +2152,7 @@ pub async fn withdraw_note(plan: String, note_id: String) -> Result<Plan, Server
         ));
     }
 
-    Ok(updated)
+    Ok(to_browser(updated))
 }
 
 /// The King sends his notes back for the court to answer.
@@ -2159,6 +2200,7 @@ pub async fn send_notes(plan: String) -> Result<Plan, ServerFnError> {
         let running = crate::turns::is_running(&plan_id);
         receive(p, notes_as_decree(&notes), running);
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan vanished as its notes were sent."))
 }
 
@@ -2352,7 +2394,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         crate::tools::propose_plan::discard_draft(&workspace);
     }
 
-    Ok(plan)
+    Ok(to_browser(plan))
 }
 
 /// Every model the user can choose between, and what each will accept.

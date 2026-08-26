@@ -98,7 +98,8 @@ pub fn CityRail(
 
     let city_name = Memo::new(move |_| {
         let id = state.selected.get()?;
-        state.kingdom.get().city(&id).map(|c| c.name.clone())
+        // `with`, not `get`: reading one name should not clone the kingdom.
+        state.kingdom.with(|k| k.city(&id).map(|c| c.name.clone()))
     });
 
     // Asked once on arrival and again whenever the court acts, so the list moves

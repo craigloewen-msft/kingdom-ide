@@ -122,7 +122,12 @@ pub fn Conversation() -> impl IntoView {
 
     let plan = Memo::new(move |_| {
         let id = plan_id.get()?;
-        state.kingdom.get().plan(&id).cloned()
+        // `with` rather than `get`: `get` on this signal *clones the entire
+        // kingdom* -- every plan, every transcript -- and then throws all but
+        // one away. On a real kingdom that is 14 MB copied to read one plan,
+        // and it happens on every watch-socket push. `with` borrows instead,
+        // so only the plan that is wanted is cloned.
+        state.kingdom.with(|k| k.plan(&id).cloned())
     });
 
     // Which plan is open, by identity rather than by value.
@@ -147,7 +152,11 @@ pub fn Conversation() -> impl IntoView {
 
     let city_name = Memo::new(move |_| {
         let plan = plan.get()?;
-        state.kingdom.get().city(&plan.city).map(|c| c.name.clone())
+        // `with`, for the reason given on `plan` above: this reads one `String`
+        // and would otherwise clone the kingdom to get it.
+        state
+            .kingdom
+            .with(|k| k.city(&plan.city).map(|c| c.name.clone()))
     });
 
     // The rail and the map should agree with the URL about where the user is.
@@ -357,19 +366,34 @@ fn ConversationBody(
             .unwrap_or_else(|| "the project".to_string()),
     );
 
-    let status = Memo::new(move |_| live.get().map(|p| p.status).unwrap_or(PlanStatus::Drafting));
+    // `with` throughout rather than `get`. Every one of the memos below re-runs
+    // on each watch-socket push, and `live.get()` deep-copies the *whole plan*
+    // -- its entire transcript -- to read a single field from it. Reading
+    // `status` that way cost a 2.3 MB clone per push on a real plan, and there
+    // are a dozen such memos. `with` borrows the plan and clones only what is
+    // actually kept.
+    let status = Memo::new(move |_| {
+        live.with(|p| p.as_ref().map(|p| p.status))
+            .unwrap_or(PlanStatus::Drafting)
+    });
     let settled = Memo::new(move |_| status.get().is_settled());
-    let title = Memo::new(move |_| live.get().map(|p| p.title).unwrap_or_default());
+    let title = Memo::new(move |_| {
+        live.with(|p| p.as_ref().map(|p| p.title.clone()))
+            .unwrap_or_default()
+    });
 
     // Whether a turn is actually in flight, as against merely `Drafting` --
     // which is also true of a plan nobody has started yet. This is what gates
     // Stop, so that the button appears only when there is something to stop.
-    let busy = Memo::new(move |_| live.get().is_some_and(|p| p.is_busy()));
+    let busy = Memo::new(move |_| live.with(|p| p.as_ref().is_some_and(|p| p.is_busy())));
 
     // What the King has said that the court has not heard yet. Read live: it
     // grows as he types into a working chamber, and empties the moment the turn
     // reaches a round boundary.
-    let queued = Memo::new(move |_| live.get().map(|p| p.queued).unwrap_or_default());
+    let queued = Memo::new(move |_| {
+        live.with(|p| p.as_ref().map(|p| p.queued.clone()))
+            .unwrap_or_default()
+    });
 
     // Calling a halt. Its own action so the button can read its pending state,
     // and so a second click while the first is in flight does nothing.
@@ -397,11 +421,11 @@ fn ConversationBody(
     // because it arrives mid-conversation over the watch socket -- and read
     // through `standing_proposal` rather than by testing the fields here, so
     // the browser and the server agree on what "awaiting their word" means.
-    let proposal = Memo::new(move |_| live.get().and_then(|p| p.standing_proposal().cloned()));
+    let proposal =
+        Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| p.standing_proposal().cloned())));
     // What the model may touch right now. Widens exactly once, on approval.
     let permissions = Memo::new(move |_| {
-        live.get()
-            .map(|p| p.permissions)
+        live.with(|p| p.as_ref().map(|p| p.permissions))
             .unwrap_or(Permissions::Full)
     });
 
@@ -411,7 +435,7 @@ fn ConversationBody(
     // reports no usage or declares no window; the header simply says nothing
     // rather than drawing a bar over a number nobody measured.
     let context = Memo::new(move |_| {
-        let usage = live.get()?.context?;
+        let usage = live.with(|p| p.as_ref()?.context)?;
         let percent = usage.percent()?;
         Some((
             percent,
@@ -429,9 +453,10 @@ fn ConversationBody(
     // snapshot here would leave the banner naming a title that has moved on.
     let parent = Memo::new(move |_| {
         let sent_by = subagent.get_value()?;
-        let kingdom = state.kingdom.get();
-        let parent = kingdom.plan(&sent_by.parent)?;
-        Some((parent.id.clone(), parent.title.clone()))
+        state.kingdom.with(|k| {
+            let parent = k.plan(&sent_by.parent)?;
+            Some((parent.id.clone(), parent.title.clone()))
+        })
     });
     let task = StoredValue::new(plan.prompt.clone());
 
@@ -446,10 +471,12 @@ fn ConversationBody(
         None => ("/".to_string(), "Back to the realm".to_string()),
     });
     let outcome = Memo::new(move |_| {
-        live.get()
-            .and_then(|p| p.outcome)
-            .map(|o| o.summary())
-            .unwrap_or_else(|| "This plan is closed.".to_string())
+        live.with(|p| {
+            p.as_ref()
+                .and_then(|p| p.outcome.as_ref())
+                .map(|o| o.summary())
+        })
+        .unwrap_or_else(|| "This plan is closed.".to_string())
     });
 
     // Keeps the newest line in view. A conversation longer than the viewport
@@ -459,7 +486,7 @@ fn ConversationBody(
         log_ref,
         Signal::derive(move || {
             (
-                live.get().map(|p| p.transcript.len()).unwrap_or(0),
+                live.with(|p| p.as_ref().map(|p| p.transcript.len()).unwrap_or(0)),
                 drafting.get(),
             )
         }),
@@ -652,7 +679,8 @@ fn ConversationBody(
 
     // A change signal for the review drawer, free from the watch socket: every
     // transcript entry is a moment the court may have touched a file.
-    let activity = Memo::new(move |_| live.get().map(|p| p.transcript.len()).unwrap_or(0));
+    let activity =
+        Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.transcript.len()).unwrap_or(0)));
 
     // Opening a file is the one thing that can *replace* what is in the panel
     // rather than merely closing it, so the rail hands the path here and this
@@ -682,7 +710,8 @@ fn ConversationBody(
     // What the court is doing to the page right now, for the panel's caption.
     // Read off the live plan, so it moves during a turn like everything else
     // the watch socket carries.
-    let browser_deed = Memo::new(move |_| live.get().and_then(|p| browsing(&p.transcript)));
+    let browser_deed =
+        Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| browsing(&p.transcript))));
 
     view! {
         // A flex row: the city's files, then everything that is read against
@@ -1189,16 +1218,18 @@ fn ConversationBody(
 /// the transcript as it was when the user walked in.
 #[component]
 fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
-    let plan_id = Memo::new(move |_| live.get().map(|p| p.id));
+    let plan_id = Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.id.clone())));
 
     // The chamber's one clock. It runs only while some deed is actually in
     // flight, and every running deed on the line reads this same signal -- see
     // `ticking_clock`.
     let anything_running = Memo::new(move |_| {
-        live.get().is_some_and(|p| {
-            p.transcript
-                .iter()
-                .any(|e| matches!(e, Entry::Tool(d) if d.in_flight()))
+        live.with(|p| {
+            p.as_ref().is_some_and(|p| {
+                p.transcript
+                    .iter()
+                    .any(|e| matches!(e, Entry::Tool(d) if d.in_flight()))
+            })
         })
     });
     let now = ticking_clock(anything_running);
@@ -1206,12 +1237,17 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     view! {
         <For
             each={move || {
-                live.get()
-                    .map(|p| p.transcript)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>()
+                // `with`: this clones the transcript it is about to iterate,
+                // which is unavoidable, but `get` would clone the whole plan
+                // *and then* the transcript out of it.
+                live.with(|p| {
+                    p.as_ref()
+                        .map(|p| p.transcript.clone())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .collect::<Vec<_>>()
+                })
             }}
             // Keyed by position *and* by what the entry is, so a tool call
             // settling in place re-renders. Keying on the index alone would
