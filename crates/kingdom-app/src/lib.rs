@@ -15,6 +15,8 @@ pub mod artifact;
 #[cfg(feature = "ssr")]
 pub mod citymap;
 #[cfg(feature = "ssr")]
+pub mod edit;
+#[cfg(feature = "ssr")]
 pub mod events;
 #[cfg(feature = "ssr")]
 pub mod llm;

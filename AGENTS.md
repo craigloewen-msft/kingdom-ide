@@ -128,7 +128,10 @@ crates/
     review.rs       What a plan changed, and how one file differs, as pure
                     data. The rows arrive already paired for a side-by-side
                     view; every decision needing a repository is made in
-                    kingdom-app::review
+                    kingdom-app::review. FileText/FileStamp live here too: one
+                    file whole and byte-exact for the King to edit, and the
+                    cheap "is this still what I opened?" a save is checked
+                    against
     naming.rs       slugify — a plan's title turned into its branch name
     sample.rs       Placeholder starter plans
     mockdata/       The Proving Grounds: synthetic fixtures, in Rust
@@ -152,6 +155,12 @@ crates/
                     kingdom's records are kept (ssr only)
     review.rs       What a plan has changed against the default branch, and one
                     file's diff, read out of its workspace with git (ssr only)
+    edit.rs         The King's own edits: one file read whole and byte-exact,
+                    written back, or removed. review.rs reads a file for
+                    LOOKING AT (numbered, truncatable); this reads one for
+                    CHANGING, so it never truncates and never reshapes. Holds
+                    the stamp check that stops a save overwriting what the
+                    court did while he was typing (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)
@@ -194,7 +203,9 @@ crates/
                     file_tree.rs (the plan's workspace on disk — a file row
                     opens it in the panel) and review_drawer.rs (every
                     file this plan has changed),
-                    source_view.rs (one file read whole) and diff_view.rs (one
+                    source_view.rs (one file read whole, and — in its other
+                    mode — open for the King to edit, save or delete) and
+                    diff_view.rs (one
                     changed file, old beside new) — those two and the spyglass
                     are alternatives for one panel, see `Aside`, and every line
                     of either takes a note,
@@ -710,6 +721,76 @@ a composer open does not refetch.** Both panels otherwise follow the court's
 edits, which is right while the King is only reading and wrong the moment he is
 typing against line 34 — the lines would shift under him and the note would land
 on something he never read.
+
+**And he can change the file himself.** The source panel has two modes. *Notes*
+is the panel above: every line takes a comment for the court. *Edit* replaces the
+lines with one box, and he can save the file or delete it — `plan_file_text` →
+`plan_write_file` / `plan_delete_file` over `edit.rs`. A mode of one panel rather
+than a fourth `Aside`, because it is the same file in the same slot; a King who
+spots a typo while reading should not have to close what he is looking at to fix
+it. It is deliberately **not** offered on the diff: editing one column of a
+comparison is ambiguous about which column, and the comparison goes stale under
+the cursor as it is typed into.
+
+Those routes are the fifth, sixth and seventh places an outsider names a path and
+the server opens it, and they raise the stakes — the earlier four only *read* a
+file the King should not see, and these overwrite or delete one. All seven go
+through `within_workspace` and none has a resolver of its own, which a test now
+pins by reading the source. They refuse a **settled** plan, as `annotate_file`
+does and for its reason, and they deliberately do **not** consult `Permissions`:
+that is what bounds the *court*, and gating it would mean the man reviewing a
+proposal cannot fix the typo he just found in it.
+
+Four decisions there are load-bearing.
+
+**The buffer is fetched, not rebuilt from the rendered lines.** `FileText` is a
+second type beside `SourceText` precisely so it can be whole and byte-exact where
+that one is numbered and truncated. Joining `SourceText`'s lines back with `\n`
+would need no request at all and would rewrite every CRLF file as LF and add or
+remove a final newline, because those lines come from `str::lines()` — a
+whole-file diff the King never asked for, landing in his agent's branch. A cap on
+`FileText` would be the same class of harm: a truncated buffer saved back is a
+file with its tail deleted, so a file too long to edit is *refused* rather than
+part-shown.
+
+**And the line endings are restored on the way out**, which is the same lesson
+one layer lower and was found only by driving the real panel. A **DOM textarea
+normalises CRLF to LF in its `value`**: the bytes reach the browser intact, the
+King types one character, and what comes back has had every `\r` stripped by the
+platform before any of Kingdom's code ran. The server-side round-trip test passed
+throughout — it never went near a DOM. So `edit::write` gives the text the
+convention the file on disk already had, guarded twice: only if the file *was*
+CRLF, and only if what arrived has no `\r` at all, which is the signature of a
+wholesale strip rather than of a deliberately mixed file. Nothing in the browser
+can be trusted to preserve this, and nothing in the browser needs to.
+
+**A save cannot overwrite work it never saw.** Every read carries a `FileStamp`
+— length and an FNV-1a hash, the not-cryptographic-and-doesn't-need-to-be trick
+`profile::hash` already uses — and a write or delete sends it back to be checked.
+The King reads a file while his agent works in the same workspace, so without
+this a save at the wrong moment silently destroys a round of the agent's work,
+which is the exact collision this product exists to surface rather than to cause.
+Optimistic rather than a lock, because a lock has to be released by something and
+the something is a browser tab that may simply be closed. A missing file stamps
+as `ABSENT`, which is what makes deleting an already-deleted file a refusal
+rather than a silent success.
+
+**Unsaved text is never dropped on the floor.** Dirty buffers are stashed by path
+for the chamber's lifetime, so glancing at another file mid-edit and coming back
+restores what was typed. No modal and no `confirm()` — there is nothing to lose,
+so there is nothing to ask about. Edit mode also suspends the refetch, which is
+the composer's rule above for a sharper version of its reason: text moving under
+a cursor is worse than under a quote.
+
+Two smaller things. A save appends a `NoteKind::Workspace` note, which the King
+reads and the model never sees — notes are excluded from `Plan::turns` by design,
+and the court finds out the honest way, since `patch` reads a file fresh on every
+call and refuses an anchor that is no longer there. That note also lengthens the
+transcript, which is the change signal the review drawer already refetches on, so
+his own edit refreshes the drawer's counts by the route the court's edits use.
+And a **delete** bumps a `revision` the files tree watches: that tree caches every
+listing and deliberately never re-lists, so without it a deleted file would sit
+in the rail forever. On delete only — a save changes no listing.
 
 **The court can see, and can be seen.** `read_image` closes the loop
 `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
