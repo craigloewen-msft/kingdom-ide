@@ -9,6 +9,7 @@
 //! The interface around the map is still Leptos. The two halves talk through
 //! [`bridge::Bridge`].
 
+pub mod activity;
 pub mod bridge;
 pub mod camera;
 pub mod input;
@@ -30,6 +31,7 @@ use bevy::render::RenderPlugin;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy::window::{PresentMode, WindowPlugin, WindowResolution};
 
+use activity::Activity;
 use bridge::{Bridge, ViewerCommand};
 use camera::{CameraRig, MapCamera};
 use lod::ActiveLod;
@@ -99,6 +101,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<MaterialCache>()
             .init_resource::<LoadedMap>()
             .init_resource::<ActiveLod>()
+            .init_resource::<Activity>()
             .init_resource::<wards::ActiveWard>()
             .init_resource::<input::PointerState>()
             .init_resource::<labels::LabelPool>()
@@ -111,6 +114,13 @@ impl Plugin for RepoCityPlugin {
                     input::handle_scroll,
                     lod::track_lod,
                     lod::apply_lod,
+                    // After `apply_lod`, which walks every entity with a
+                    // `VisibleFrom` and would otherwise be free to hide a ring
+                    // in the same frame this has just shown it. A ring carries
+                    // no `VisibleFrom` precisely so that cannot happen, and the
+                    // ordering is the second half of that guarantee.
+                    activity::apply_activity,
+                    activity::pulse_rings,
                     camera::sync_camera,
                     wards::apply_label_legibility,
                     wards::track_active_ward,
@@ -144,6 +154,7 @@ fn apply_commands(
     mut material_cache: ResMut<MaterialCache>,
     mut loaded: ResMut<LoadedMap>,
     mut rig: ResMut<CameraRig>,
+    mut working: ResMut<Activity>,
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
@@ -227,6 +238,14 @@ fn apply_commands(
             ViewerCommand::LookAt { point } => rig.look_at(Vec2::from_array(point)),
             ViewerCommand::SelectWard(id) => {
                 bridge.update_status(|status| status.selected_ward = id);
+            }
+            ViewerCommand::SetActivity(towns) => {
+                // Assigned through `Res`'s change detection rather than
+                // compared first: `apply_activity` runs only on a change, and
+                // an equal assignment still marks the resource changed, which
+                // costs one pass over a handful of rings. Guarding it here
+                // would trade that for a comparison on every poll.
+                *working = Activity(towns);
             }
         }
     }

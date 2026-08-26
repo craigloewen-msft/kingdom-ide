@@ -9,6 +9,7 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use crate::map::{MapBuilding, MapManifest, MapScenery, MapWard, MapWorld};
 
+use super::activity;
 use super::bridge::{Bridge, LodLevel};
 use super::camera;
 use super::materials::{MaterialCache, Surface, to_color};
@@ -23,6 +24,14 @@ pub struct SceneRoot;
 
 /// Line weight of a top-level folder's boundary, in world units.
 const WARD_EDGE_WIDTH: f32 = 2.6;
+
+/// Line weight of a working town's ring, in world units.
+///
+/// Much heavier than the heaviest ward kerb, and that is the point: at the
+/// Districts tier a whole town is a couple of hundred pixels across and every
+/// folder boundary inside it has collapsed into noise. Measured on screen at
+/// the fitted view -- 4.2 was a hairline indistinguishable from a ward kerb.
+const TOWN_RING_WIDTH: f32 = 9.0;
 
 /// A holding the pointer can interact with.
 #[derive(Component, Clone)]
@@ -103,6 +112,10 @@ mod layer {
     /// A folder's outline sits above every other ground surface but below the
     /// names, so a kerb still reads where a road runs along a ward's boundary.
     pub const WARD_EDGE: f32 = 0.23;
+    /// A working town's ring sits above every kerb inside it, so the fact that
+    /// an agent is here is never half-hidden by the folder tree it is working
+    /// in. Below the ground labels, which are what a name is for.
+    pub const TOWN_GLOW: f32 = 0.245;
     pub const GROUND_LABEL: f32 = 0.26;
 }
 
@@ -318,6 +331,8 @@ fn spawn_terrain(
             Transform::from_xyz(0.0, layer::TOWN, 0.0),
             Pickable::IGNORE,
         ));
+
+        spawn_town_ring(commands, meshes, materials, root, town);
     }
 
     for ward in &world.wards {
@@ -361,6 +376,57 @@ fn spawn_terrain(
             Pickable::IGNORE,
         ));
     }
+}
+
+/// Traces a town with the ring that lights up while an agent works there.
+///
+/// Spawned hidden with the world and never rebuilt: activity changes every few
+/// seconds and a respawn per change would rebuild geometry for a fact that is
+/// only a visibility flag. [`activity::apply_activity`] is what shows it.
+///
+/// Two departures from the ward kerb this is otherwise modelled on, both
+/// deliberate. The material is **its own** rather than the shared cache's,
+/// because the pulse writes to it and the cache hands one handle to every mesh
+/// of a similar colour. And there is **no** [`VisibleFrom`], so `apply_lod`
+/// leaves it alone: the ring answers "who is working here" at every zoom, not
+/// only at the tier it was drawn to be legible from.
+fn spawn_town_ring(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    root: Entity,
+    town: &crate::map::MapTown,
+) {
+    let mut points = to_points(&town.polygon);
+    // A ring is a loop, so the ribbon has to come back to where it started.
+    points.push(points[0]);
+
+    let material = materials.add(StandardMaterial {
+        base_color: activity::ring_color(1.0),
+        // Unlit: this is interface drawn in world space, not a surface in the
+        // scene, and its colour is the whole of its meaning. Lit, it took the
+        // sun's white specular and came out mint -- see `activity::PULSE_PEAK`.
+        unlit: true,
+        ..default()
+    });
+
+    commands.spawn((
+        ChildOf(root),
+        Mesh3d(meshes.add(meshes::ribbon(&points, TOWN_RING_WIDTH))),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(0.0, layer::TOWN_GLOW, 0.0),
+        activity::TownRing {
+            town: town.name.clone(),
+            material,
+        },
+        // Nothing is running when a world loads, and a ring shown around a
+        // quiet town would be a lie for as long as it took the first poll to
+        // land.
+        Visibility::Hidden,
+        // The ring is a hairline drawn over its own town; a click on it is meant
+        // for whatever it is drawn around.
+        Pickable::IGNORE,
+    ));
 }
 
 /// Draws a folder's boundary as a kerb around its ground.

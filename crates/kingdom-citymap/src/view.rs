@@ -17,12 +17,12 @@
 
 use gloo_net::http::Request;
 use gloo_timers::callback::{Interval, Timeout};
-use kingdom_core::CityId;
+use kingdom_core::{CityActivity, CityId};
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::engine;
-use crate::engine::bridge::{Bridge, ViewerCommand, ViewerStatus};
+use crate::engine::bridge::{Bridge, TownActivity, ViewerCommand, ViewerStatus};
 use crate::map::MapManifest;
 
 /// How often the component picks up what the engine is showing.
@@ -37,10 +37,16 @@ const POLL_INTERVAL_MS: u32 = 50;
 /// Fetches its manifest from [`crate::ROUTE`] on mount and hands it to the
 /// engine. `selected` is the King's chosen city, shared with the rest of the
 /// app — clicking a building sets it, clicking open sea clears it.
+///
+/// `working` is which cities have agents in them right now, refreshed by
+/// whoever owns this component rather than here: the map draws what it is told
+/// and does not decide how often to ask.
 #[component]
 pub fn CityMap(
     /// The city the King has selected, if any.
     selected: RwSignal<Option<CityId>>,
+    /// Which cities have a turn in flight, and how many.
+    working: Signal<Vec<CityActivity>>,
 ) -> impl IntoView {
     let manifest = RwSignal::new(None::<MapManifest>);
     let load_error = RwSignal::new(None::<String>);
@@ -91,6 +97,31 @@ pub fn CityMap(
             status.set(watcher.status());
         })
         .forget();
+    });
+
+    // Which towns are alight. Sent on every change rather than polled by the
+    // engine, and translated from `CityId` to a town name here because this is
+    // the boundary the engine's ignorance of Kingdom's domain is kept at.
+    //
+    // The name is the identifier on purpose. A `CityId` is built from a
+    // project's directory name (`kingdom_app::scan`), and a `MapTown`'s name is
+    // that same directory name (`build::scan` reads it from `file_name`) — the
+    // very identity the click handler below already relies on in the other
+    // direction. The manifest's own `town-N` ids would be the obvious key and
+    // are the wrong one: `scene::towns` numbers them in packing order while
+    // `manifest::build_world_manifest` numbers its districts by file count, so
+    // the two need not agree within one manifest.
+    let reporter = bridge.clone();
+    Effect::new(move |_| {
+        let towns = working
+            .get()
+            .into_iter()
+            .map(|city| TownActivity {
+                town: city.city.to_string(),
+                working: city.working,
+            })
+            .collect();
+        reporter.send(ViewerCommand::SetActivity(towns));
     });
 
     // Clicking a building selects its city; clicking open sea clears it.

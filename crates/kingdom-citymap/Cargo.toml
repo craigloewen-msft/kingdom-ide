@@ -72,6 +72,12 @@ bevy = { version = "0.19", default-features = false, features = [
 ] }
 # The manifest's own doctest round-trips it as JSON.
 serde_json.workspace = true
+# One test pins the working-town ring against `PlanStatus::Drafting.color()`.
+# A *dev*-dependency deliberately: the engine must not know what a plan is, and
+# the colour is copied into `engine::activity` rather than imported. What this
+# buys is that the copy failing to keep up is a test failure rather than a map
+# and a rail quietly disagreeing about the same plan.
+kingdom-core.workspace = true
 tempfile = "3"
 
 [features]
