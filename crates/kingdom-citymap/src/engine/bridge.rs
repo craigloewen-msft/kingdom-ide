@@ -270,6 +270,20 @@ pub struct Raising {
 /// What the engine is currently showing.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
+    /// Whether the engine has started at all.
+    ///
+    /// False from the moment the interface is created until the engine's
+    /// `Startup` runs, which on the web is a genuine wait rather than a
+    /// formality: booting Bevy means asking for a GPU adapter and a device and
+    /// compiling the first pipelines, and a `Load` sent before that lands sits
+    /// in the command queue until it is over.
+    ///
+    /// The loading card is what needs the distinction. Without it "the engine
+    /// has not woken yet" and "the engine has the manifest and the first slice
+    /// is pending" are the same absence of a [`Self::raising`], and the card
+    /// announced work that had not started -- measured at up to 1.4 seconds of
+    /// "Raising the cities" while nothing was being raised.
+    pub awake: bool,
     /// Whether a world has been built and drawn.
     ///
     /// False from boot until the first [`ViewerCommand::Load`] has been
@@ -398,6 +412,7 @@ fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
     // a field the interface never hears about, because this is the only thing
     // that moves `Bridge::revision` and the poll skips an unmoved revision.
     left.built == right.built
+        && left.awake == right.awake
         && raising_matches(left.raising, right.raising)
         && left.hovered == right.hovered
         && left.clicked == right.clicked

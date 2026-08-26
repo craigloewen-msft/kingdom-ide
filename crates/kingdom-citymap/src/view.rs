@@ -35,14 +35,19 @@ use crate::engine;
 use crate::engine::bridge::{Bridge, TownActivity, ViewerCommand, ViewerStatus};
 use crate::map::{MapManifest, MapPresence};
 use crate::mode::{decide, MapMode};
-use crate::progress::Transfer;
+use crate::progress::{Transfer, Wait};
 
 /// How often the component picks up what the engine is showing.
 ///
-/// The engine renders on its own clock. This only has to be often enough that
-/// a click lands on whatever the pointer was over, and the bridge's revision
-/// counter means an idle map costs nothing.
-const POLL_INTERVAL_MS: u32 = 50;
+/// The engine renders on its own clock. This has to be often enough that a
+/// click lands on whatever the pointer was over, and -- the reason it is not
+/// slower -- often enough to catch the loading bar moving. A world goes up in
+/// frames of about `raise::TARGET_FRAME`, so a poll of the same order would
+/// alias against them and throw away most of the readings the engine
+/// published: measured at 50 ms, the bar painted a third of what it was
+/// told. The bridge's revision counter is what makes asking this often cheap,
+/// and an idle map still costs nothing.
+const POLL_INTERVAL_MS: u32 = 16;
 
 /// How long the loading card is given to paint its second phase before the
 /// engine is handed the world.
@@ -190,48 +195,45 @@ pub fn CityMap(
 
     let bridge = Bridge::new();
 
-    // The engine takes over the canvas, so it can only start once the canvas is
-    // in the document. `engine::run` never returns on the web, so it is
-    // deferred into its own task rather than blocking the effect.
-    let boot = bridge.clone();
-    Effect::new(move |started: Option<bool>| {
-        if started == Some(true) {
-            return true;
-        }
-        let boot = boot.clone();
-        Timeout::new(0, move || engine::run(boot)).forget();
-        true
-    });
-
     let loader = bridge.clone();
     Effect::new(move |_| {
         let loader = loader.clone();
         spawn_local(async move {
-            match load_manifest(transfer).await {
+            let outcome = load_manifest(transfer).await;
+            // The signal first, the engine second, and a beat between them --
+            // which is not fussiness, it is the only way the phase after this
+            // one is ever seen.
+            //
+            // Booting Bevy is not a request either. It asks for a GPU adapter
+            // and a device and compiles the first pipelines, and every bit of
+            // that lands on the thread the card is drawn from. Started on
+            // mount, as it used to be, all of it landed *on top of the fetch*:
+            // measured against a running server, a 3.3-second download painted
+            // its bar exactly twice, and the card then sat on an indeterminate
+            // sweep for up to 1.4 seconds while the engine finished waking.
+            //
+            // Nothing can be drawn before the manifest exists, so waiting for
+            // it costs no pixel and buys the whole first phase a free thread.
+            match outcome {
                 Ok(map) => {
-                    // The signal first, the command second, and a beat between
-                    // them -- which is not fussiness, it is the only way the
-                    // second phase is ever seen.
-                    //
-                    // Handing the engine a world is not a request: Bevy's loop
-                    // runs on `requestAnimationFrame`, which fires *before* the
-                    // browser paints, so `spawn_world` blocks the very frame
-                    // that would have drawn "Raising the cities". Sent inline,
-                    // the card went from "Surveying the realm" straight to gone
-                    // -- measured, not guessed -- and the King saw a card
-                    // freeze and vanish rather than a phase change.
-                    //
-                    // So the phase is published, the task yields, and the paint
-                    // lands before the block begins. The delay is spent inside
-                    // a wait of several seconds and costs nothing anyone can
-                    // perceive.
                     manifest.set(Some(map.clone()));
                     Timeout::new(PAINT_PAUSE_MS, move || {
+                        // Queued before the engine is started, because
+                        // `engine::run` may never return -- see below. The
+                        // bridge holds it until the first update drains it,
+                        // which is exactly what the queue is for.
                         loader.send(ViewerCommand::Load(Box::new(map)));
+                        boot(loader);
                     })
                     .forget();
                 }
-                Err(error) => load_error.set(Some(error)),
+                Err(error) => {
+                    // Still booted, so a kingdom whose manifest could not be
+                    // read shows the same empty space and stars it always did
+                    // behind the error, rather than a black rectangle.
+                    load_error.set(Some(error));
+                    Timeout::new(PAINT_PAUSE_MS, move || boot(loader)).forget();
+                }
             }
         });
     });
@@ -725,14 +727,20 @@ fn StoodDown() -> impl IntoView {
 ///
 /// Both phases report *measured* work rather than a timer pretending to be
 /// progress: bytes off the wire against `content-length` for the fetch, and
-/// weighted items built against the manifest's own totals for the raise. Either
-/// can decline to answer — a fetch with no declared length, a moment between
-/// the two phases — and an unanswered bar is drawn as the indeterminate sweep
-/// this card has always had rather than as a guess.
+/// weighted items built against the manifest's own totals for the raise. They
+/// are two segments of one scale rather than two bars taking turns -- see
+/// [`Wait`] -- so the bar only ever moves forwards, and the moment between them
+/// holds where the fetch left it instead of forgetting what it knew.
 ///
-/// And it moves during the raise only because [`crate::engine::raise`] hands
-/// the frame back between slices. Built in one call, as it used to be, the
-/// browser could not have repainted a bar at all.
+/// One case still declines to answer, and it is the case the sweep was written
+/// for: a fetch whose length the server never declared. Then the first segment
+/// is genuinely unmeasurable, and an honest sweep beats an invented number.
+///
+/// And it moves during the raise for two reasons, both of which had to be true.
+/// [`crate::engine::raise`] hands the frame back between slices -- built in one
+/// call, as it used to be, the browser could not have repainted a bar at all --
+/// and it stops the engine rendering a world nobody can see while it does, so
+/// the frame it hands back is one the card can actually be drawn in.
 ///
 /// # Why it goes on failure
 ///
@@ -755,27 +763,18 @@ fn Survey(
     let arrived = move || manifest.with(Option::is_some);
     let built = move || status.with(|s| s.built);
 
-    // How far along, or `None` for a bar with no fraction on it. The three
-    // cases are asked in the order they happen.
-    //
-    // The finished one is not redundant. `raising` is cleared the moment the
-    // world stands, and the card then spends 320ms fading out -- so without
-    // this the King's last sight of the bar is it emptying and going back to an
-    // indeterminate sweep, which reads as the work being undone at the exact
-    // moment it succeeded.
-    //
-    // The gap between the two phases -- manifest in hand, engine not yet handed
-    // it -- is deliberately left as `None`: it lasts a frame, and a bar snapped
-    // back to zero for one frame reads as work being lost.
-    let fraction = move || {
-        if built() {
-            Some(1.0)
-        } else if arrived() {
-            status.with(|s| s.raising.map(|raising| raising.fraction))
-        } else {
-            transfer.with(Transfer::fraction)
-        }
+    // The whole wait as one number. See [`Wait`]: the two phases are segments
+    // of a single scale rather than two bars taking turns, so the moment
+    // between them holds the bar at the boundary instead of dropping it back to
+    // a sweep -- a moment measured at up to 1.4 seconds, not the single frame
+    // this once assumed.
+    let wait = move || Wait {
+        transfer: transfer.get(),
+        arrived: arrived(),
+        raising: status.with(|s| s.raising.map(|raising| raising.fraction)),
+        built: built(),
     };
+    let fraction = move || wait().fraction();
 
     // What is happening, in the King's words. During the raise the engine says
     // which part of the settlement is going up, so the caption moves with the
@@ -788,8 +787,19 @@ fn Survey(
             return "The kingdom stands".to_owned();
         }
         status.with(|s| match s.raising {
+            // The world is built and the engine is about to show it. A full bar
+            // under the caption of a building stage would claim the masons are
+            // still at the names while they are in fact standing back -- and
+            // this is the longest single frame of the whole wait, so it is the
+            // caption the King reads for the longest.
+            Some(raising) if raising.fraction >= 1.0 => "Opening the gates".to_owned(),
             Some(raising) => raising.stage.label().to_owned(),
-            // Between the manifest arriving and the engine picking it up.
+            // The manifest is in hand and nothing is going up yet, which is two
+            // different waits and used to be reported as one. Before the engine
+            // has woken there is nobody to build; after it has, the first slice
+            // is a frame away. Saying "Raising the cities" for both announced
+            // work that had not started, for as long as a second and a half.
+            None if !s.awake => "Summoning the masons".to_owned(),
             None => "Raising the cities".to_owned(),
         })
     };
@@ -841,6 +851,22 @@ fn Survey(
             </div>
         </div>
     }
+}
+
+/// Starts the engine into the canvas that is already in the document.
+///
+/// `engine::run` hands control to the browser's animation loop and may never
+/// return, so this must be the last thing its caller does -- which is why the
+/// `Load` command is queued on the bridge *before* it, rather than after.
+///
+/// # Why it is not started on mount
+///
+/// It was, and that is what made the first phase's bar useless. See the effect
+/// in [`CityMap`]: booting costs seconds of main thread, the fetch's bar is
+/// drawn from that same thread, and there is nothing to draw until the manifest
+/// has arrived anyway.
+fn boot(bridge: Bridge) {
+    engine::run(bridge);
 }
 
 /// Fetches the manifest the server built for this kingdom, reporting progress.

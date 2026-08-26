@@ -776,6 +776,36 @@ What is deliberately **not** done here is compressing that route. It would cut
 change with its own trade-offs and it is what `Transfer`'s clamp is written to
 survive.
 
+**And then the King reported it as an indeterminate bar that goes forever — and
+he was right about what reached the screen.** Measured in a browser against a
+running server, the card painted **three** distinct fractions in five seconds,
+with an indeterminate sweep at each end of them. Two faults, both invisible from
+the code that computes the numbers.
+
+The first was composition. Each phase was asked for its own fraction and the bar
+swept whenever the one asked had none — and the gap between the two phases,
+commented as lasting "a frame", measured up to **1,430 ms**, because the engine
+was still booting and the `Load` sat in the bridge queue. `progress::Wait` now
+composes them: the fetch fills the first `FETCH_SHARE`, the raise fills the
+rest, a phase that has not begun holds the bar where the last one left it, and
+the sweep is kept only for a fetch whose length the server never declared.
+
+The second was that the readings were **published and not painted**. Recording
+frame timestamps inside the map page found single frames of **2,694 ms** while
+`FRAME_BUDGET` was 8 ms — because that budget bounds the wrong half. Issuing a
+spawn and adding a mesh is cheap; applying the commands and preparing the meshes
+for the GPU is not, and all of it happens after the deadline is checked for the
+last time. So `raise` now adapts: `Job::allowance` is what a frame may spend, in
+`Step::weight` units, halved or doubled from what the *whole previous frame*
+cost. Weighed rather than counted, because two thousand trees and two thousand
+folder names are not the same frame. Alongside it, the engine no longer renders
+a world nobody can see — the camera is off for the length of the raise — the
+engine boots when the manifest lands rather than on mount (which alone took the
+fetch from 3.3 s to ~60 ms), and the reveal, the single most expensive frame in
+the app at 2,835 ms, waits behind a bar the King has already seen reach the end.
+
+25 painted readings, against three. `tasks/00250` has the tables.
+
 **Not built at all:**
 - **Subagents with tools, and subagents that spawn subagents.** A subagent is
   read-only
