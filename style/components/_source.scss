@@ -1,0 +1,127 @@
+// The source panel: one file, read whole, with a note against any line.
+//
+// Occupies the same column as the spyglass and the diff, and never at the same
+// time — see `Aside` in `conversation.rs`. It shares `.chamber-aside` with them,
+// which is where the flex sizing and the narrow-screen behaviour live, and it
+// borrows `.diff-bar` and `.diff-stage` outright: three panels take this slot,
+// and the King should not have to re-learn a chrome each time he switches.
+//
+// What it does NOT share is the diff's grid. There is one column here, so a row
+// is an ordinary flex line and a note's box is simply the next block.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+.source-panel {
+  display: flex;
+  flex-direction: column;
+  background: t.$void;
+}
+
+// The language's own colour, as the tree and the map tint it. The bar otherwise
+// carries no colour at all, so this is the one thing saying what kind of file
+// is open without reading the extension.
+.source-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.85;
+}
+
+.source-lines {
+  // `max-content` with a `min-width` of the panel, as the diff's grid does: a
+  // long line scrolls sideways inside the one scroll container rather than
+  // wrapping, and a short file still fills the width.
+  width: max-content;
+  min-width: 100%;
+  font-family: t.$font-mono;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+// A line and, when one is open, the box written against it.
+.source-row { display: block; }
+
+// The line itself. A button, because every line is pressable — writing a note
+// is the whole reason this panel is not a `<pre>`.
+.source-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 0 8px 0 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  white-space: pre;
+  cursor: pointer;
+
+  &:hover {
+    background: t.$panel;
+
+    // The gutter mark's slot is always there; on hover an unnoted line shows a
+    // faint pencil in it, so the affordance is discoverable without a mark on
+    // every line permanently.
+    .source-mark::after {
+      content: "\270e";
+      color: t.$ink-faint;
+    }
+  }
+
+  &.noted { background: rgba(t.$gold, 0.06); }
+}
+
+.source-row.writing .source-line { background: rgba(t.$gold, 0.1); }
+
+.source-number {
+  flex: 0 0 auto;
+  width: 44px;
+  padding-left: 8px;
+  color: t.$ink-faint;
+  font-size: 10px;
+  text-align: right;
+  // Never selected with the code: copying a file should give the King the
+  // lines, not the line numbers interleaved through them.
+  user-select: none;
+}
+
+// One narrow column down the left holding the note mark, so a noted line is
+// findable by scanning a single strip rather than by reading every row.
+.source-mark {
+  flex: 0 0 auto;
+  width: 10px;
+  color: t.$gold;
+  font-size: 10px;
+  line-height: 1.55;
+  user-select: none;
+}
+
+.source-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: t.$ink;
+}
+
+// The box, under the line it is about. Indented past the gutter so it reads as
+// belonging to that line rather than to the file.
+.source-composer {
+  padding: 4px 12px 8px 54px;
+  // The composer is prose, not code: the file's monospace must not be inherited
+  // into a textarea the King writes English in.
+  font-family: t.$font-sans;
+  font-size: 13px;
+  // Sticks to the panel's left edge when a long line has scrolled the container
+  // sideways -- otherwise writing a note about a wide line puts the box off
+  // screen.
+  position: sticky;
+  left: 0;
+  // Sized against the *panel*, not against the lines. `.source-lines` is
+  // `max-content` wide -- the longest line's width -- so `100%` here would run
+  // the box off the right edge of the panel. `--panel-width` is set inline by
+  // the panel, which is the only thing that knows how much room there is.
+  box-sizing: border-box;
+  width: var(--panel-width, 520px);
+  max-width: var(--panel-width, 520px);
+}

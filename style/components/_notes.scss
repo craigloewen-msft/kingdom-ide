@@ -1,0 +1,242 @@
+// Notes: the box one is written in, the rows they gather into, and the King's
+// review of the code.
+//
+// Two things annotate in Kingdom — a block of a plan, and a line of a file — and
+// they share everything except their frame. The composer is one component
+// (`note_composer.rs`), so it is one set of rules here; the rows are one shape,
+// so `.note-item` is shared; and the send button carries the same weight in
+// both places, so `.note-send` is too. What differs is where the margin sits,
+// and that stays with each owner: `.note-margin` in `_proposal.scss`, and
+// `.review-margin` below.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+// --- Writing one note -------------------------------------------------------
+//
+// Inline, under the thing it is about, for the reason `.chat-question` is
+// inline rather than modal: the text being objected to has to stay on screen
+// while the objection is written.
+.note-composer {
+  margin: 8px 0 4px;
+  padding: 10px;
+  border: 1px solid rgba(t.$gold, 0.4);
+  border-radius: t.$radius;
+  background: t.$panel;
+}
+
+.note-input {
+  width: 100%;
+  max-height: 160px;
+  padding: 6px 8px;
+  border: 1px solid t.$edge;
+  border-radius: 6px;
+  background: t.$panel-2;
+  color: t.$ink;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+
+  &:focus {
+    outline: none;
+    border-color: t.$gold-dim;
+  }
+}
+
+.note-composer-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.note-write {
+  padding: 5px 12px;
+  border: 1px solid t.$gold-dim;
+  border-radius: 6px;
+  background: rgba(t.$gold, 0.12);
+  color: t.$gold;
+  font-size: 12px;
+
+  &:hover:not(:disabled) { background: rgba(t.$gold, 0.2); }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+.note-cancel {
+  padding: 5px 12px;
+  border: 1px solid t.$edge;
+  border-radius: 6px;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 12px;
+
+  &:hover {
+    border-color: t.$edge-bright;
+    color: t.$ink;
+  }
+}
+
+// --- One note, gathered -----------------------------------------------------
+//
+// Shared by both margins. A three-column grid: where the note landed, what it
+// is against and what was written, with the withdraw cross spanning the rows.
+
+.note-list {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.note-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 2px 8px;
+  padding: 6px 0;
+  border-top: 1px solid t.$edge;
+
+  &:first-child { border-top: none; }
+}
+
+// Which line. Only a code review sets one — a proposal's note is anchored to a
+// block, which the quote identifies perfectly well by itself — so the column
+// simply collapses when there is nothing in it.
+.note-line {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: baseline;
+  color: t.$gold-dim;
+  font-family: t.$font-mono;
+  font-size: 10px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+// What the note is against. Clamped to one line: this is a label saying where
+// the note landed, not the passage itself, which is a click away in the panel.
+.note-quote {
+  grid-column: 2;
+  overflow: hidden;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.note-body {
+  grid-column: 2;
+  color: t.$ink;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.note-withdraw {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: t.$ink-faint;
+  font-size: 14px;
+  line-height: 1;
+
+  &:hover {
+    background: rgba(t.$failed, 0.15);
+    color: t.$failed;
+  }
+}
+
+// Gold-edged but not filled: sending notes is a real act, but it is not the act
+// of handing over the ability to change files. `.proposal-accept` keeps that
+// weight to itself.
+.note-send {
+  padding: 7px 14px;
+  border: 1px solid t.$gold-dim;
+  border-radius: t.$radius;
+  background: transparent;
+  color: t.$gold;
+  font-size: 12px;
+  font-weight: 600;
+
+  &:hover:not(:disabled) { background: rgba(t.$gold, 0.12); }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+// --- The King's review of the code ------------------------------------------
+//
+// Above the composer, where the proposal's margin also sits and for its reason:
+// a decision still to make belongs where his attention already is. Not inside
+// the panel, because a review spans several files and the panel shows one.
+//
+// Capped and scrolling: a thorough review is twenty notes, and twenty notes
+// pushing the composer off the bottom of the screen would take away the other
+// way of saying something.
+.review-margin {
+  flex-shrink: 0;
+  margin: 10px 0 4px;
+  padding: 12px;
+  border: 1px solid rgba(t.$gold, 0.3);
+  border-radius: t.$radius;
+  background: rgba(t.$gold, 0.04);
+}
+
+.review-margin-head {
+  margin-bottom: 8px;
+  color: t.$gold;
+  font-size: 11px;
+}
+
+.review-margin-list {
+  max-height: 260px;
+  margin-bottom: 10px;
+  overflow-y: auto;
+}
+
+// One file's worth of notes. The gap between groups is what does the grouping
+// visually; a heading rule as well would be two devices saying one thing.
+.review-margin-file {
+  & + & { margin-top: 10px; }
+}
+
+// The file's name, and the way back to it. A button because it opens the file:
+// the King writes a review over several minutes and needs to get back to what
+// he was objecting to.
+.review-margin-path {
+  @include m.truncate;
+  display: block;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: t.$ink-dim;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover .review-margin-name { color: t.$gold; }
+}
+
+// Dimmed folder, bright name, as the review drawer does it: in a narrow column
+// the name is what is being looked for and the path only disambiguates it.
+.review-margin-folder { color: t.$ink-faint; }
+.review-margin-name { color: t.$ink; }
+
+// The notes under a file are indented to its name, so the grouping reads
+// downwards without a rule drawn for it.
+.review-margin-file .note-list {
+  margin: 0 0 0 8px;
+  border-left: 1px solid t.$edge;
+  padding-left: 8px;
+}

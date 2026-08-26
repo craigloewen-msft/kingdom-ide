@@ -6,8 +6,9 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom, plan_briefing, say,
-    send_notes, set_aside_plan, stop_plan, unqueue, withdraw_note,
+    annotate_file, annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom,
+    plan_briefing, say, send_file_notes, send_notes, set_aside_plan, stop_plan, unqueue,
+    withdraw_file_note, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -16,8 +17,10 @@ use crate::components::BrowserView;
 use crate::components::CityRail;
 use crate::components::DiffView;
 use crate::components::Prose;
-// `WardTree` is no longer named here: the files rail is `CityRail` now, which
-// stacks the tree over the review drawer and mounts both itself.
+use crate::components::ReviewMargin;
+use crate::components::SourceView;
+// `FileTree` is not named here: the files rail is `CityRail`, which stacks the
+// tree over the review drawer and mounts both itself.
 use crate::components::ProposalCard;
 use kingdom_core::{
     Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Speaker, Timestamp, ToolCall,
@@ -27,14 +30,14 @@ use leptos_router::hooks::use_params_map;
 
 /// What is showing in the panel beside the transcript.
 ///
-/// **One focused panel at a time**, and this type is why. The spyglass and the
-/// diff both want the full-height column right of the conversation, and both
-/// are things the King reads *against* the transcript rather than instead of
-/// it. Two of them side by side would leave three columns fighting over a
-/// screen the transcript is supposed to be the middle of, so opening either one
-/// closes the other -- not by two booleans watching each other, which is how
-/// they end up both true, but because there is only one signal and it holds one
-/// value.
+/// **One focused panel at a time**, and this type is why. The spyglass, the
+/// diff and the source view all want the full-height column right of the
+/// conversation, and all three are things the King reads *against* the
+/// transcript rather than instead of it. Two of them side by side would leave
+/// three columns fighting over a screen the transcript is supposed to be the
+/// middle of, so opening any one closes the others -- not by three booleans
+/// watching each other, which is how they end up all true, but because there is
+/// only one signal and it holds one value.
 ///
 /// The transcript is deliberately *outside* this decision. It is not one of the
 /// alternatives; it is the thing they are alternatives beside.
@@ -42,8 +45,12 @@ use leptos_router::hooks::use_params_map;
 enum Aside {
     Hidden,
     Browser,
-    /// A file under review, named relative to the plan's workspace.
+    /// A file under review, named relative to the plan's workspace: what this
+    /// plan changed about it.
     Diff(String),
+    /// A file being read whole, named the same way. Opened from the files tree,
+    /// where most files have no diff to show.
+    Source(String),
 }
 
 impl Aside {
@@ -51,10 +58,30 @@ impl Aside {
         matches!(self, Aside::Browser)
     }
 
-    /// The file being read, if a diff is what is showing.
-    fn file(&self) -> Option<String> {
+    /// The file being compared, if a diff is what is showing.
+    fn diff_file(&self) -> Option<String> {
         match self {
             Aside::Diff(path) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    /// The file being read whole, if that is what is showing.
+    fn source_file(&self) -> Option<String> {
+        match self {
+            Aside::Source(path) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    /// The file being shown either way.
+    ///
+    /// What the rail highlights against: the tree and the drawer may hold the
+    /// same path, and the King should see the row he pressed marked whichever
+    /// pane he pressed it in.
+    fn file(&self) -> Option<String> {
+        match self {
+            Aside::Diff(path) | Aside::Source(path) => Some(path.clone()),
             _ => None,
         }
     }
@@ -84,6 +111,21 @@ const DIFF_BOUNDS: Bounds = Bounds {
 };
 
 const DIFF_WIDTH_KEY: &str = "kingdom.diff_width";
+
+/// How wide the source view may be dragged.
+///
+/// Its own bounds and its own key, deliberately not shared with the diff's --
+/// the precedent the spyglass and the diff set, and for its reason. One column
+/// of code needs less room than two side by side, so the default is narrower;
+/// the width the King drags for one should still be there when he comes back to
+/// it rather than having been overwritten by another panel.
+const SOURCE_BOUNDS: Bounds = Bounds {
+    min: 320.0,
+    max: 1200.0,
+    default: 520.0,
+};
+
+const SOURCE_WIDTH_KEY: &str = "kingdom.source_width";
 
 /// The browser deed the panel should caption itself with, if any.
 ///
@@ -672,10 +714,15 @@ fn ConversationBody(
     restore_width(spyglass_width, SPYGLASS_WIDTH_KEY, SPYGLASS_BOUNDS);
     let diff_width = RwSignal::new(DIFF_BOUNDS.default);
     restore_width(diff_width, DIFF_WIDTH_KEY, DIFF_BOUNDS);
+    let source_width = RwSignal::new(SOURCE_BOUNDS.default);
+    restore_width(source_width, SOURCE_WIDTH_KEY, SOURCE_BOUNDS);
 
-    // The file the panel is reading, for the rail's selected row and for the
-    // panel's own fetch.
+    // The file the rail should mark as open, whichever way it is showing.
     let open_file = Memo::new(move |_| aside.get().file());
+    // And the two the panels fetch by. Split, because a diff and a whole file
+    // are different requests and the wrong panel must not fire one.
+    let diff_file = Memo::new(move |_| aside.get().diff_file());
+    let source_file = Memo::new(move |_| aside.get().source_file());
 
     // A change signal for the review drawer, free from the watch socket: every
     // transcript entry is a moment the court may have touched a file.
@@ -684,8 +731,16 @@ fn ConversationBody(
 
     // Opening a file is the one thing that can *replace* what is in the panel
     // rather than merely closing it, so the rail hands the path here and this
-    // is where the browser gives way to the diff.
+    // is where the browser gives way. Two callbacks, because the two panes of
+    // the rail mean different things by "show me this": the drawer asks what
+    // changed, and the tree asks what is there.
     let review_file = Callback::new(move |path: String| aside.set(Aside::Diff(path)));
+    let read_file = Callback::new(move |path: String| aside.set(Aside::Source(path)));
+
+    // Opening a file from the review margin. Deliberately the *source* view:
+    // the margin lists notes from both panels, and a note written on a file
+    // with no diff could not be reopened at all if this asked for one.
+    let open_noted_file = read_file;
 
     // What the plan has changed. Held here rather than in the rail because two
     // views read it: the drawer's rows and its badge, and the diff panel, which
@@ -697,7 +752,7 @@ fn ConversationBody(
     // King is reading, these move and the panel fetches again -- at no cost,
     // because the rail has already asked the question.
     let diff_version = Memo::new(move |_| {
-        let Some(path) = open_file.get() else {
+        let Some(path) = diff_file.get() else {
             return (0, 0);
         };
         summary
@@ -706,6 +761,108 @@ fn ConversationBody(
             .map(|f| (f.added, f.removed))
             .unwrap_or((0, 0))
     });
+
+    // The source view's own stamp. The summary cannot serve here: a file the
+    // plan has not changed is absent from it, so its counts never move however
+    // much the court edits the file. The transcript's length does move, and it
+    // is the same free signal the review drawer already refetches on.
+    let source_version = activity;
+
+    // What the King has written against lines of code, read live off the plan
+    // so a note written in another tab appears here, and so the margin empties
+    // the moment the review is sent.
+    let review_notes = Memo::new(move |_| {
+        live.get()
+            .map(|p| p.review_notes.clone())
+            .unwrap_or_default()
+    });
+    // Narrowed to the file each panel is showing, so a line can say whether it
+    // already carries a note.
+    let notes_on_diff = Memo::new(move |_| {
+        let Some(path) = diff_file.get() else {
+            return Vec::new();
+        };
+        review_notes
+            .get()
+            .into_iter()
+            .filter(|n| n.path == path)
+            .collect()
+    });
+    let notes_on_source = Memo::new(move |_| {
+        let Some(path) = source_file.get() else {
+            return Vec::new();
+        };
+        review_notes
+            .get()
+            .into_iter()
+            .filter(|n| n.path == path)
+            .collect()
+    });
+
+    // Writing one. The panels are presentational -- every call in this view is
+    // owned here, as the proposal card's already were -- so they hand the note
+    // up and this decides what happens to it.
+    let annotate_line = Callback::new(
+        move |(line, side, quote, note): (u32, kingdom_core::NoteSide, String, String)| {
+            // The path is read here rather than passed up: the panel knows the
+            // line, and the chamber knows which file is open. Asking the panel
+            // to carry a path it was handed would be a second copy to keep in
+            // step with `Aside`.
+            let Some(path) = open_file.get_untracked() else {
+                return;
+            };
+            let plan_id = id.get_value();
+            leptos::task::spawn_local(async move {
+                match annotate_file(plan_id.to_string(), path, line, side, quote, note).await {
+                    Ok(updated) => {
+                        state.error.set(None);
+                        state.kingdom.update(|k| k.insert(updated));
+                    }
+                    Err(e) => state.error.set(Some(e.to_string())),
+                }
+            });
+        },
+    );
+
+    // Taking one back. Losing the race is reported rather than swallowed, for
+    // the reason `api::withdraw_file_note` gives.
+    let withdraw_line_note = Callback::new(move |note_id: String| {
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match withdraw_file_note(plan_id.to_string(), note_id).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // Putting the review to the court. An `Action` for the reason sending the
+    // proposal's notes is one: the button reads its own pending state, and a
+    // second click while the first is in flight does nothing -- a double send
+    // would drain the review once and then report a confusing failure for notes
+    // that in fact landed.
+    let send_review = Action::new(move |_: &()| {
+        let plan_id = id.get_value();
+        async move {
+            match send_file_notes(plan_id.to_string()).await {
+                Ok(_) => {
+                    state.error.set(None);
+                    if let Ok(k) = get_kingdom().await {
+                        state.kingdom.set(k);
+                    }
+                    on_draft.run(plan_id);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        }
+    });
+    let send_the_review = Callback::new(move |_: ()| {
+        send_review.dispatch(());
+    });
+    let sending_review = Signal::derive(move || send_review.pending().get());
 
     // What the court is doing to the page right now, for the panel's caption.
     // Read off the live plan, so it moves during a turn like everything else
@@ -730,7 +887,8 @@ fn ConversationBody(
                 looking=looking
                 activity=activity
                 open_file=open_file
-                on_open=review_file
+                on_read=read_file
+                on_diff=review_file
             />
             // The transcript and the panel beside it: side by side rather than
             // stacked, because the transcript and the thing it describes are
@@ -958,6 +1116,23 @@ fn ConversationBody(
                             />
                         })}
                     </Show>
+
+                    // The King's own review of the code, gathered from both
+                    // panels. Above the composer, beside the proposal card and
+                    // for its reason: this is a decision still to make, and it
+                    // sits where his attention already is.
+                    //
+                    // Deliberately *outside* the settled/subagent `Show` below,
+                    // which swaps the composer for a record: this draws only
+                    // when there is something in it, and a settled plan cannot
+                    // have anything in it -- `annotate_file` refuses one.
+                    <ReviewMargin
+                        notes=review_notes
+                        sending=sending_review
+                        on_open=open_noted_file
+                        on_withdraw=withdraw_line_note
+                        on_send=send_the_review
+                    />
 
                     // A settled plan is a record, not a place to type. The composer goes
                     // and the outcome takes its place, so the conversation says what became
@@ -1189,7 +1364,7 @@ fn ConversationBody(
                     />
                 </Show>
 
-                <Show when=move || open_file.get().is_some()>
+                <Show when=move || diff_file.get().is_some()>
                     <Resizer
                         width=diff_width
                         grows=Grows::Leftwards
@@ -1199,9 +1374,30 @@ fn ConversationBody(
                     />
                     <DiffView
                         plan=id.get_value()
-                        path=open_file
+                        path=diff_file
                         version=diff_version
+                        notes=notes_on_diff
                         width=diff_width
+                        on_note=annotate_line
+                        on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
+                    />
+                </Show>
+
+                <Show when=move || source_file.get().is_some()>
+                    <Resizer
+                        width=source_width
+                        grows=Grows::Leftwards
+                        bounds=SOURCE_BOUNDS
+                        storage_key=SOURCE_WIDTH_KEY
+                        class="spyglass-resizer"
+                    />
+                    <SourceView
+                        plan=id.get_value()
+                        path=source_file
+                        version=source_version
+                        notes=notes_on_source
+                        width=source_width
+                        on_note=annotate_line
                         on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
                 </Show>

@@ -173,8 +173,9 @@ pub struct SourceFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
-    /// Path relative to the city root, which is what identifies this entry and
-    /// what is handed back to list a directory one level down.
+    /// Path relative to the root being listed -- a plan's workspace -- which is
+    /// what identifies this entry and what is handed back to list a directory
+    /// one level down.
     pub path: String,
     pub is_dir: bool,
     /// What tints the entry, reusing the map's own language colours so a `.rs`
@@ -577,6 +578,73 @@ pub struct Plan {
     /// count *is* how full the window is.
     #[serde(default)]
     pub context: Option<ContextUsage>,
+    /// What the user has written against individual lines of code, and has not
+    /// yet sent.
+    ///
+    /// The same shape and the same three reasons as [`Plan::queued`] and
+    /// [`Proposal::notes`]: a note typed and not sent must survive a reload, a
+    /// second tab and a server restart; it is deliberately nowhere near the
+    /// transcript until it is sent, which keeps it out of [`Plan::turns`]; and
+    /// [`Plan::take_review_notes`] is the only way out, so nothing can compose
+    /// the decree and leave the notes standing to be sent twice.
+    ///
+    /// **On the plan rather than on a [`Proposal`]**, which is the one place
+    /// this departs from marginal notes on a plan document. These are written
+    /// against work in progress, so they must survive approval and outlive any
+    /// proposal: reviewing what the court has *built* is the case they exist
+    /// for, and by then there is no standing proposal to hang them on.
+    #[serde(default)]
+    pub review_notes: Vec<ReviewNote>,
+}
+
+/// Something the user wrote against one line of one file.
+///
+/// The sibling of [`ProposalNote`]: the same act -- an objection pinned to the
+/// thing it is about -- performed against code rather than against prose. Its
+/// own type rather than a variant of that one because the anchor is genuinely
+/// different: a proposal note names a markdown block in a document that exists
+/// only on the plan, and this names a line of a file on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewNote {
+    /// Names this note so it can be withdrawn before it is sent. Derived like
+    /// [`Plan::queue`]'s id, and for the same purpose.
+    pub id: String,
+    /// Which file, relative to the plan's workspace. The same string the
+    /// review drawer and the diff panel identify a file by.
+    pub path: String,
+    /// The line's number in its own file, 1-based, as an editor counts.
+    pub line: u32,
+    /// Which version of the file the line was read in.
+    pub side: NoteSide,
+    /// The line's own text, as it stood when the note was written.
+    ///
+    /// Carried rather than looked up again at sending time, for the reason
+    /// [`ProposalNote::quote`] is -- and more urgently. A line number is a
+    /// reference into a file that is about to be rewritten, and here the court
+    /// may be rewriting it *while the note is being typed*: by the time the
+    /// review is sent, line 34 can be a different line. The text he actually
+    /// annotated cannot move.
+    pub quote: String,
+    /// What he wrote.
+    pub body: String,
+    /// When he wrote it. See [`Timestamp`].
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+}
+
+/// Which version of a file a [`ReviewNote`] is against.
+///
+/// A note in a source view is always [`NoteSide::Working`]. Only the *old*
+/// column of a side-by-side diff can yield [`NoteSide::Base`], and that case is
+/// worth naming rather than flattening: a note on a deleted line is an ordinary
+/// review comment -- "why did this go?" -- and reported as a bare line number it
+/// would point the court at whatever now occupies that position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NoteSide {
+    /// The file as it stands in the plan's workspace now.
+    Working,
+    /// The file as it stood before this plan touched it.
+    Base,
 }
 
 /// A plan the model has drawn up and put to the user.
@@ -814,6 +882,7 @@ impl Plan {
             proposal: None,
             // Nothing has been sent yet, so there is nothing counted.
             context: None,
+            review_notes: Vec::new(),
         }
     }
 
@@ -875,6 +944,9 @@ impl Plan {
             // Its own window, not its parent's: it is a separate conversation
             // with a separate exchange, sharing only the model.
             context: None,
+            // Nothing is ever put to the user about a subagent, so there is
+            // nothing for him to write against.
+            review_notes: Vec::new(),
         }
     }
 
@@ -1088,6 +1160,85 @@ impl Plan {
     /// What the user has written in the margin and not yet sent.
     pub fn notes(&self) -> &[ProposalNote] {
         self.proposal.as_ref().map_or(&[], |p| &p.notes)
+    }
+
+    /// The user writes a note against one line of one file.
+    ///
+    /// The sibling of [`Plan::annotate`], and it differs in exactly one way:
+    /// there is no standing proposal to check. These notes are written against
+    /// work in progress, so the only state that can refuse one is a *settled*
+    /// plan -- its workspace has been cleared from disk, so the file the note
+    /// names is gone and there is nothing to change in answer to it.
+    ///
+    /// Returns the note's id, or `None` when the plan is settled. The caller
+    /// reports that rather than swallowing it, for the reason [`Plan::annotate`]
+    /// does: a note silently written onto nothing is one the user believes he
+    /// has made.
+    pub fn annotate_file(
+        &mut self,
+        path: impl Into<String>,
+        line: u32,
+        side: NoteSide,
+        quote: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Option<String> {
+        if self.status.is_settled() {
+            return None;
+        }
+
+        let at = Timestamp::now();
+        let id = format!(
+            "{}-line-{}-{}",
+            self.id.as_str(),
+            self.review_notes.len(),
+            at.map(|Timestamp(ms)| ms).unwrap_or_default()
+        );
+        self.review_notes.push(ReviewNote {
+            id: id.clone(),
+            path: path.into(),
+            line,
+            side,
+            quote: quote.into(),
+            body: body.into(),
+            at,
+        });
+        Some(id)
+    }
+
+    /// Takes a line note back before the court has been told of it.
+    ///
+    /// False when there is no such note, which the caller should report for the
+    /// same reason [`Plan::unannotate`] does: it means the review has already
+    /// been sent, and quietly doing nothing would leave the user believing he
+    /// had withdrawn something the model is about to read.
+    pub fn unannotate_file(&mut self, id: &str) -> bool {
+        let before = self.review_notes.len();
+        self.review_notes.retain(|note| note.id != id);
+        self.review_notes.len() != before
+    }
+
+    /// Empties the review, for the moment it is put to the court.
+    ///
+    /// Draining rather than reading, exactly as [`Plan::take_notes`] is: the
+    /// one way these leave a plan is by being sent, so there is no path that
+    /// composes the decree and then leaves the notes standing to be sent a
+    /// second time.
+    pub fn take_review_notes(&mut self) -> Vec<ReviewNote> {
+        std::mem::take(&mut self.review_notes)
+    }
+
+    /// What the user has written against lines of code and not yet sent.
+    pub fn review_notes(&self) -> &[ReviewNote] {
+        &self.review_notes
+    }
+
+    /// The notes standing against one file, for that file's own gutter.
+    ///
+    /// The panel shows one file and the margin shows the whole review, so this
+    /// is the narrowing between them. Kept here rather than filtered in the
+    /// view so both readers agree on what "a note on this file" means.
+    pub fn review_notes_on<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a ReviewNote> {
+        self.review_notes.iter().filter(move |n| n.path == path)
     }
 
     /// The user accepts the standing proposal, and the model gains its tools.
@@ -3652,5 +3803,196 @@ mod transcript_tests {
             plan.queued.is_empty(),
             "a plan from before the queue existed has nothing waiting on it"
         );
+    }
+}
+
+/// Notes written against lines of code, which is a different act from writing
+/// in a plan's margin and outlives the proposal that margin belongs to.
+#[cfg(test)]
+mod review_note_tests {
+    use super::*;
+
+    fn working() -> Plan {
+        Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        )
+    }
+
+    /// The exact analogue of `a_note_is_not_a_turn_until_it_is_sent`, and the
+    /// one test that keeps a private second thought out of a model's context.
+    ///
+    /// `Plan::turns` is the single doorway between a plan's log and anything
+    /// that talks to a model. A review note reaching it would put the King's
+    /// half-formed objection to the court while he was still deciding whether
+    /// to make it.
+    #[test]
+    fn a_line_note_is_not_a_turn_until_it_is_sent() {
+        let mut plan = working();
+
+        let before = plan.turns().count();
+        plan.annotate_file(
+            "src/lex.rs",
+            42,
+            NoteSide::Working,
+            "let n = i + 1;",
+            "This is the off-by-one.",
+        )
+        .expect("a plan in play can be annotated");
+
+        assert_eq!(
+            plan.turns().count(),
+            before,
+            "a note against a line is not yet addressed to anyone"
+        );
+        assert!(
+            !plan.turns().any(|t| matches!(&t, Turn::Message(m)
+                if m.body.contains("off-by-one"))),
+            "the note's text must not reach a model before it is sent"
+        );
+    }
+
+    /// What separates these from `ProposalNote`, and the reason they live on the
+    /// plan rather than on the proposal.
+    ///
+    /// Reviewing what the court has *built* is the case they exist for, and by
+    /// then the proposal has been accepted -- or set aside. Either clearing the
+    /// review would throw away work the King has done, at the exact moment he
+    /// most wants it.
+    #[test]
+    fn a_review_outlives_the_proposal_it_was_written_beside() {
+        let mut plan = working();
+        plan.propose("Fix it", "# Fix it\n\nChange `lex.rs`.");
+        plan.status = PlanStatus::AwaitingReview;
+        plan.annotate_file("src/lex.rs", 42, NoteSide::Working, "let n = i;", "Wrong.")
+            .expect("annotatable");
+
+        plan.approve();
+        assert_eq!(
+            plan.review_notes().len(),
+            1,
+            "approving a plan must not discard the King's review of its code"
+        );
+
+        // And the other ending: a proposal cleared away takes its own margin
+        // with it (`Proposal::notes`) and leaves this alone.
+        let mut aside = working();
+        aside.propose("Fix it", "# Fix it\n\nChange `lex.rs`.");
+        aside.status = PlanStatus::AwaitingReview;
+        aside
+            .annotate_file("src/lex.rs", 1, NoteSide::Working, "a", "b")
+            .expect("annotatable");
+        aside.set_aside_proposal();
+        assert_eq!(aside.review_notes().len(), 1);
+    }
+
+    /// A settled plan's workspace has been cleared from disk, so the file a
+    /// note would name is gone. Refused rather than recorded: a note written
+    /// onto nothing is one the King believes he has made.
+    #[test]
+    fn a_settled_plan_has_no_code_left_to_annotate() {
+        for status in [PlanStatus::Merged, PlanStatus::Archived] {
+            let mut plan = working();
+            plan.status = status;
+            assert!(
+                plan.annotate_file("src/lex.rs", 1, NoteSide::Working, "a", "b")
+                    .is_none(),
+                "{status:?} has no workspace to read line 1 of"
+            );
+            assert!(plan.review_notes().is_empty());
+        }
+
+        // Every state still in play takes one, including Failed -- a plan that
+        // failed is exactly one the King may want to write against.
+        for status in [
+            PlanStatus::Drafting,
+            PlanStatus::AwaitingReview,
+            PlanStatus::Failed,
+        ] {
+            let mut plan = working();
+            plan.status = status;
+            assert!(
+                plan.annotate_file("src/lex.rs", 1, NoteSide::Working, "a", "b")
+                    .is_some(),
+                "{status:?} is still in play"
+            );
+        }
+    }
+
+    /// Withdrawing reports whether it found anything, and draining empties.
+    ///
+    /// Both halves are the caller's cue: a withdrawal that found nothing means
+    /// the review has already gone to the court, and saying so is the whole
+    /// point -- `unqueue` and `unannotate` lose the same race the same way.
+    #[test]
+    fn a_note_can_be_taken_back_and_the_review_is_drained_once() {
+        let mut plan = working();
+        let id = plan
+            .annotate_file("src/lex.rs", 42, NoteSide::Working, "let n = i;", "Wrong.")
+            .expect("annotatable");
+        plan.annotate_file("src/main.rs", 7, NoteSide::Base, "gone()", "Why?")
+            .expect("annotatable");
+
+        assert!(plan.unannotate_file(&id), "a standing note is withdrawable");
+        assert!(
+            !plan.unannotate_file(&id),
+            "withdrawing it twice must report the miss rather than shrug"
+        );
+
+        let taken = plan.take_review_notes();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].side, NoteSide::Base);
+        assert!(
+            plan.review_notes().is_empty(),
+            "draining leaves nothing to be sent a second time"
+        );
+    }
+
+    /// The panel shows one file; the margin shows the whole review. This is the
+    /// narrowing between them, and it lives on the plan so both agree.
+    #[test]
+    fn the_notes_on_one_file_are_only_that_files() {
+        let mut plan = working();
+        plan.annotate_file("src/lex.rs", 1, NoteSide::Working, "a", "first")
+            .expect("annotatable");
+        plan.annotate_file("src/main.rs", 2, NoteSide::Working, "b", "second")
+            .expect("annotatable");
+        plan.annotate_file("src/lex.rs", 9, NoteSide::Working, "c", "third")
+            .expect("annotatable");
+
+        let lines: Vec<u32> = plan.review_notes_on("src/lex.rs").map(|n| n.line).collect();
+        assert_eq!(lines, vec![1, 9]);
+        assert_eq!(plan.review_notes_on("nothing.rs").count(), 0);
+    }
+
+    /// A plan recorded before line review existed must still load. Written as
+    /// literal JSON rather than by serialising a `Plan`, because the point is
+    /// what is *absent* from a document already on disk.
+    #[test]
+    fn a_plan_recorded_before_line_review_still_loads() {
+        let before = r#"{
+            "id": "plan-old",
+            "city": "c1",
+            "title": "An older plan",
+            "summary": "",
+            "prompt": "Do the thing",
+            "model": "mock",
+            "effort": null,
+            "transcript": [],
+            "status": "AwaitingReview",
+            "workspace": {
+                "mode": "InPlace",
+                "path": "/dev/testburg",
+                "branch": null,
+                "id": null
+            },
+            "working_on": null
+        }"#;
+
+        let plan: Plan = serde_json::from_str(before).expect("an older record must still load");
+        assert!(plan.review_notes().is_empty());
     }
 }

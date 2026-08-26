@@ -182,14 +182,67 @@
 
 .diff-number {
   flex: 0 0 auto;
-  width: 38px;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 3px;
+  width: 48px;
   padding-left: 8px;
+  border: none;
+  background: transparent;
   color: t.$ink-faint;
+  font-family: inherit;
   font-size: 10px;
   text-align: right;
   // Never selected with the code: copying a diff should give the King the
   // lines, not the line numbers interleaved through them.
   user-select: none;
+  // A button now, because every line takes a note. The pointer is what says so
+  // — the *text* deliberately stays unpressable, since selecting a line to copy
+  // it is what the King does most while reading a diff.
+  cursor: pointer;
+
+  &:hover { color: t.$gold; }
+
+  // An empty cell has no line to write against, so its number is not a button
+  // at all and must not offer to be one.
+  .diff-cell.empty & { cursor: default; }
+}
+
+// A line that already carries a note. Faint, because the note itself is in the
+// margin above the composer and this is only a reminder of where it landed.
+.diff-note-mark {
+  color: t.$gold;
+  font-size: 9px;
+}
+
+.diff-cell.noted { box-shadow: inset 2px 0 0 t.$gold-dim; }
+.diff-cell.writing { background: rgba(t.$gold, 0.12); }
+
+// The box, spanning both columns beneath the row it is about — the same trick
+// `.diff-gap` uses, and for the same reason: `.diff-row` is `display: contents`
+// and has no box of its own, and a composer inside one cell would be half a
+// panel wide and would push its column out of step with the other.
+.diff-composer {
+  grid-column: 1 / -1;
+  padding: 4px 12px 8px 56px;
+  background: t.$panel;
+  // Prose, not code: the diff's monospace must not be inherited into a textarea
+  // the King writes English in.
+  font-family: t.$font-sans;
+  font-size: 13px;
+  // Sticks to the panel's left edge when a long line has scrolled the grid
+  // sideways, so writing about a wide line does not put the box off screen.
+  position: sticky;
+  left: 0;
+  // Sized against the *panel*, not against the grid. The grid is `max-content`
+  // wide -- wider than the panel whenever any line is long -- so `100%` here
+  // would be the longest line's width and would run the box off the right edge.
+  // `--panel-width` is set inline by the panel, which is the only thing that
+  // knows how much room there is; the fallback covers the first paint.
+  box-sizing: border-box;
+  width: var(--panel-width, 520px);
+  max-width: var(--panel-width, 520px);
 }
 
 .diff-text {

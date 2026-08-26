@@ -30,7 +30,7 @@
 
 // The tree. Its height is set inline from the split's signal; `flex: 0 0 auto`
 // so it keeps the height the King dragged rather than being stretched.
-.rail-wards { flex: 0 0 auto; }
+.rail-files { flex: 0 0 auto; }
 
 // The drawer. Takes whatever the tree does not.
 .rail-review {
