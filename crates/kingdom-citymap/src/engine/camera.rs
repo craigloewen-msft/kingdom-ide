@@ -49,6 +49,16 @@ const MIN_HOLDING_PIXELS: f32 = 8.0;
 /// absolute limit governs wherever it possibly can.
 const FIT_HEADROOM: f32 = 1.15;
 
+/// How large a holding is drawn when the map is pointed at one file.
+///
+/// Comfortably past [`LodLevel`]'s 64 px `FileDetail` threshold rather than on
+/// it, so the tier cannot flicker as the pane is resized, and far short of
+/// [`MAX_HOLDING_PIXELS`] so neighbours stay in frame and the building has a
+/// street to stand on. In the rail's ~290 px pane that is three and a half
+/// holdings across: the file's own building, the ones either side of it, and
+/// the per-file labels the tier turns on.
+pub const INSPECT_HOLDING_PIXELS: f32 = 84.0;
+
 /// The footprint span assumed for a holding before a world is loaded.
 const DEFAULT_HOLDING: f32 = 30.0;
 
@@ -170,6 +180,19 @@ impl CameraRig {
     pub fn pan(&mut self, delta: Vec2) {
         let (right, up) = screen_axes();
         self.focus += (-right * delta.x + up * delta.y) * self.scale;
+    }
+
+    /// Zooms so a typical holding comes out `pixels` wide, holding the centre
+    /// of the viewport over the same world point.
+    ///
+    /// This is the currency detail is already measured in — see
+    /// [`Self::holding_pixels`] and [`LodLevel::for_holding_pixels`] — so a
+    /// caller can ask for a tier rather than for a scale, and get the same
+    /// apparent house size in a twelve-file repository and in a realm of three
+    /// thousand. It goes through [`Self::clamp_scale`] like every other zoom,
+    /// so nothing can ask the camera past where the wheel could take it.
+    pub fn zoom_to_holding_pixels(&mut self, pixels: f32) {
+        self.scale = self.clamp_scale(self.scale_for_holding_pixels(pixels));
     }
 
     /// Zooms by `factor` while holding `anchor` — an offset in pixels from the
@@ -710,6 +733,73 @@ mod tests {
         assert_eq!(rig.scale, 2.0);
         assert_eq!(rig.focus.x, 120.0);
         assert_eq!(rig.focus.z, 340.0);
+    }
+
+    /// Asking for a holding size must actually deliver it, and must deliver it
+    /// whatever world the camera is standing over -- which is the whole point
+    /// of measuring in apparent house size rather than in scale.
+    #[test]
+    fn zooming_to_a_holding_size_gives_that_size() {
+        for span in [200.0f32, 2_000.0, 20_000.0] {
+            let mut rig = rig();
+            rig.span = span;
+            rig.frame(
+                Vec2::ZERO,
+                Vec2::splat(span),
+                60.0,
+                Vec2::new(1_400.0, 900.0),
+            );
+            rig.fit_scale = rig.scale;
+
+            rig.zoom_to_holding_pixels(INSPECT_HOLDING_PIXELS);
+            let pixels = rig.holding_pixels();
+            assert!(
+                (pixels - INSPECT_HOLDING_PIXELS).abs() < 0.5,
+                "span {span} gave {pixels} px"
+            );
+        }
+    }
+
+    /// The reason the constant exists: pointing the map at a file has to land
+    /// in the tier that draws per-file labels.
+    #[test]
+    fn inspecting_a_file_reaches_the_file_detail_tier() {
+        for span in [200.0f32, 2_000.0, 20_000.0] {
+            let mut rig = rig();
+            rig.span = span;
+            rig.frame(
+                Vec2::ZERO,
+                Vec2::splat(span),
+                60.0,
+                Vec2::new(1_400.0, 900.0),
+            );
+            rig.fit_scale = rig.scale;
+
+            rig.zoom_to_holding_pixels(INSPECT_HOLDING_PIXELS);
+            assert_eq!(rig.lod(), LodLevel::FileDetail, "span {span}");
+        }
+    }
+
+    /// A zoom asked for from outside is still a zoom, so the absolute limits
+    /// govern it exactly as they govern the wheel.
+    #[test]
+    fn zooming_to_a_holding_size_still_obeys_the_limits() {
+        let mut close = rig();
+        close.zoom_to_holding_pixels(MAX_HOLDING_PIXELS * 10.0);
+        assert!(
+            close.holding_pixels() <= MAX_HOLDING_PIXELS + 0.5,
+            "came out at {} px",
+            close.holding_pixels()
+        );
+
+        let mut far = rig();
+        far.fit_scale = far.scale;
+        far.zoom_to_holding_pixels(MIN_HOLDING_PIXELS * 0.1);
+        assert!(
+            far.holding_pixels() >= MIN_HOLDING_PIXELS - 0.5,
+            "came out at {} px",
+            far.holding_pixels()
+        );
     }
 
     #[test]

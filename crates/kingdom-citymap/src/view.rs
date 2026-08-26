@@ -270,6 +270,24 @@ pub fn CityMap(
         watching.send(ViewerCommand::Show(presence.get()));
     });
 
+    // Two reads of the engine's status, as memos rather than as bare reads
+    // inside the effects below.
+    //
+    // This is not tidiness. `status` is re-set wholesale on every poll the
+    // bridge's revision moved for -- and the revision moves for a camera rect
+    // that shifted half a world unit, so *panning the map* re-set it. The
+    // focus effects below read `built` from it, so a pan re-ran them and
+    // re-sent the `Focus` that dragged the camera straight back: the map
+    // fighting the King's own hand. A memo only notifies when its own value
+    // changes, so a pan no longer wakes anything that would undo it.
+    let built = Memo::new(move |_| status.with(|state| state.built));
+    // Whether the King has taken the camera. The two focus effects are gated
+    // on it, and both track it -- so when the engine hands the camera back
+    // after `input::RELEASE_AFTER` they re-run on their own and the map
+    // returns to the city and the file that are open *now*, rather than
+    // waiting for the next time one of them changes.
+    let manual = Memo::new(move |_| status.with(|state| state.manual));
+
     // Re-framing when the map changes home.
     //
     // The two homes are wildly different shapes, and the rig is re-fitted only
@@ -284,6 +302,13 @@ pub fn CityMap(
     // and then opening a file does not snap the camera back.
     //
     // The pause is `RESIZE_SETTLE_MS`, and its doc says why it cannot be zero.
+    //
+    // Not suppressed while the King holds the camera, and instead it *ends*
+    // that hold. A camera framed for the whole main region is simply wrong in
+    // a 290px pane at the foot of the rail, so this is fitting rather than
+    // following -- and making a change of home hand the camera back gives the
+    // rule a shape a person can hold: free look lasts as long as the map stays
+    // where it is.
     let reframer = bridge.clone();
     Effect::new(move |_| {
         let presence = presence.get();
@@ -292,6 +317,7 @@ pub fn CityMap(
         }
 
         let reframer = reframer.clone();
+        reframer.send(ViewerCommand::ReleaseCamera);
         Timeout::new(RESIZE_SETTLE_MS, move || {
             // Read when it *fires*, not when it was scheduled, and that is the
             // whole reason this is not captured above. Arriving in a chamber
@@ -327,20 +353,26 @@ pub fn CityMap(
     // Only in the rail: on his own map the King drives the camera, and a view
     // that jumped every time the selection changed would take it from him.
     //
-    // `status.built` is tracked as well as the city, and that is load-bearing
-    // rather than tidy. A world is raised a slice at a time, and the frame it
+    // `built` is tracked as well as the city, and that is load-bearing rather
+    // than tidy. A world is raised a slice at a time, and the frame it
     // finishes on calls `fit()` (see `raise::raise_world`) -- so on a page
     // opened straight into a chamber this effect would send its `Focus` while
     // the cities were still going up, and the raise would overwrite it with
     // the whole kingdom a moment later. Re-running once the world is standing
     // is what puts the scope back.
+    //
+    // And `manual` is tracked for the opposite reason: while the King has the
+    // camera this must not move it, and the moment the engine hands it back
+    // this must re-run and put the map where it now belongs.
     let scoper = bridge.clone();
     Effect::new(move |_| {
-        let built = status.with(|state| state.built);
+        if manual.get() {
+            return;
+        }
         let Some(city) = focus_city.get() else {
             return;
         };
-        if !presence.get().in_rail() || !built {
+        if !presence.get().in_rail() || !built.get() {
             return;
         }
         // Tracked, not `_untracked`: the manifest arrives after the first run
@@ -357,33 +389,58 @@ pub fn CityMap(
 
     // And narrowing it to the building of the file he is reading.
     //
-    // `LookAt` rather than `Focus`: this moves the camera without changing the
-    // zoom, so the town stays framed and the eye is led to the holding within
-    // it. Closing the panel deliberately does *nothing* -- the map stays where
-    // it is rather than pulling back, because which city he is in is still
-    // true and re-framing on every closed diff would be motion for nothing.
+    // `Inspect` rather than `LookAt`: this centres on the holding *and* zooms
+    // until a house is `camera::INSPECT_HOLDING_PIXELS` wide, which is the
+    // tier that draws per-file labels. A bare `LookAt` kept the town's zoom,
+    // which in a rail pane is a twenty-pixel house -- the coarsest tier there
+    // is -- so the map aimed at the file without ever arriving at it.
+    //
+    // Closing the panel pulls back to the town, which reverses what this did
+    // before. That older behaviour was right when the difference was a pan of
+    // a town-wide frame and re-framing would have been motion for nothing; it
+    // is wrong now that opening a file fills the pane with one building,
+    // because a closed panel would leave the map staring at a file the King is
+    // no longer reading. Which city he is in is still true, so the town is
+    // what it falls back to.
     //
     // `built` for the same reason as the effect above: a camera pointed at a
     // holding before the world it stands in has finished going up is undone by
-    // the raise's closing `fit()`.
+    // the raise's closing `fit()`. And `manual` for the same reason too.
     let pointer = bridge.clone();
     Effect::new(move |_| {
-        let built = status.with(|state| state.built);
-        let Some(path) = focus_file.get() else {
+        if manual.get() {
             return;
-        };
-        if !presence.get().in_rail() || !built {
+        }
+        let open = focus_file.get();
+        if !presence.get().in_rail() || !built.get() {
             return;
         }
         let Some(city) = focus_city.get() else {
             return;
         };
-        let Some(center) = manifest.with(|map| {
-            Some(map.as_ref()?.holding_at(city.as_str(), &path)?.center)
-        }) else {
+        let framed = manifest.with(|map| {
+            let map = map.as_ref()?;
+            match open.as_deref() {
+                // A file to point at: its building, close enough to read.
+                Some(path) => {
+                    map.holding_at(city.as_str(), path)
+                        .map(|holding| ViewerCommand::Inspect {
+                            point: holding.center,
+                        })
+                }
+                // None open: back out to the town the chamber is about.
+                None => map
+                    .town_named(city.as_str())
+                    .map(|town| ViewerCommand::Focus {
+                        center: town.center,
+                        extent: town.extent,
+                    }),
+            }
+        });
+        let Some(command) = framed else {
             return;
         };
-        pointer.send(ViewerCommand::LookAt { point: center });
+        pointer.send(command);
     });
 
     // Clicking a building selects its city; clicking empty space clears it.
@@ -447,6 +504,15 @@ pub fn CityMap(
         }
     };
 
+    // Handing the camera back. The chip does not need to know what to re-frame:
+    // the two focus effects above track `manual`, so clearing it is enough to
+    // make them re-run against whatever is open now.
+    //
+    // A `Bridge` rather than a ready-made handler, because `Show` may build its
+    // children more than once and a closure that moved the handler out of its
+    // environment would only be callable the first time.
+    let resumer = bridge.clone();
+
     view! {
         <div class="city-map" class:over-holding=move || status.with(|s| s.hovered.is_some())>
             <canvas
@@ -455,6 +521,28 @@ pub fn CityMap(
                 on:click=clear
                 aria-label="The kingdom: every project, drawn as a disk of towns in space"
             ></canvas>
+            // Shown only in the rail, because only there does anything follow
+            // him: on his own map the camera was always his, so a chip saying
+            // he has taken it would announce a state that is simply the normal
+            // one. A real button, so it is reachable by keyboard and announced
+            // as the control it is.
+            <Show when=move || manual.get() && presence.get().in_rail()>
+                {
+                    let resumer = resumer.clone();
+                    view! {
+                        <button
+                            class="map-free-look"
+                            on:click=move |_| resumer.send(ViewerCommand::ReleaseCamera)
+                            title="The map is where you left it. Press to follow the plan again \
+                                   -- which also happens on its own after ten minutes."
+                        >
+                            <span class="map-free-look-mark"></span>
+                            <span class="map-free-look-name">"Free look"</span>
+                            <span class="map-free-look-resume">"Follow"</span>
+                        </button>
+                    }
+                }
+            </Show>
             <Survey manifest=manifest status=status failed=load_error transfer=transfer/>
             {move || load_error.get().map(|error| view! {
                 <p class="city-map-error">{error}</p>

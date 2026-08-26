@@ -130,6 +130,60 @@
 // the only affordance saying so -- there is no hover chrome in the DOM to do it.
 .city-map.over-holding .city-map-canvas { cursor: pointer; }
 
+// The free-look chip: the map is where the King put it, and here is the way
+// back.
+//
+// Bottom-left, which is the one corner nothing else claims -- `.map-rail-head`
+// takes the top and the loading card is centred. It sits inside `.city-map`
+// alongside the canvas, so it travels with whichever rectangle the map is
+// standing in without being a second thing to position.
+.map-free-look {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid t.$edge-bright;
+  border-radius: 999px;
+  background: rgba(t.$panel, 0.88);
+  color: t.$ink-dim;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover {
+    border-color: t.$gold-dim;
+    color: t.$ink;
+  }
+
+  &:hover .map-free-look-resume { color: t.$gold; }
+}
+
+// A held camera is a state, not an alarm, so this is a steady dot rather than
+// anything that blinks: the King is reading a file with the map parked where
+// he left it, and a pulsing light in the corner of that is a nag.
+.map-free-look-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: t.$gold-dim;
+}
+
+.map-free-look-name {
+  color: t.$ink-dim;
+}
+
+// The offer, set apart from the state by a rule rather than by weight: the
+// chip says one thing and offers another, and they should not read as one
+// phrase.
+.map-free-look-resume {
+  padding-left: 6px;
+  border-left: 1px solid t.$edge-bright;
+  color: t.$ink-faint;
+}
+
 // The loading card: what the map is doing, while it is doing it.
 //
 // It sits over the canvas inside `.city-map`, so the decree bar -- a later
