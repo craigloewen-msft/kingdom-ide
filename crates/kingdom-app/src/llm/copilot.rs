@@ -10,8 +10,8 @@
 //! nowhere to go.
 
 use super::{
-    credential, Act, Acts, Answer, Brief, Draft, Model, ModelError, Provider, ProviderCatalogue,
-    Reply, ToolSpec,
+    credential, Act, Acts, Answer, Brief, Budget, Draft, Model, ModelError, Provider,
+    ProviderCatalogue, Reply, ToolSpec,
 };
 use kingdom_core::{CredentialState, ModelChoice, ModelEffort, ModelOption, Speaker, Turn};
 use serde_json::{json, Value};
@@ -467,34 +467,36 @@ fn request_body(
 ///
 /// A call that produced a *picture* adds one more, and it is a lie told
 /// carefully. See [`shown`].
+///
+/// **What this does not carry.** A request is bounded by [`Budget`], and what
+/// gets shed to meet it is decided by [`shedding`] before a byte is emitted. The
+/// short version: a picture is replayed only while it is new, and old signed
+/// thinking goes before old prose does. Every drop is marked.
 fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
+    let blocks = blocks(&brief.turns);
+    let shed = shedding(&blocks, can_see, brief.budget);
+
     let mut out = vec![json!({
         "role": "system",
         "content": system_prompt(brief),
     })];
 
-    let mut turns = brief.turns.iter().peekable();
-    while let Some(turn) = turns.next() {
-        match turn {
-            Turn::Message(u) => out.push(json!({
+    // Which reply we are on, counted over acting blocks only -- `shed` speaks in
+    // those terms because "two replies ago" is what an image's usefulness
+    // actually decays with, and messages from the King do not deliberate.
+    let mut reply = 0;
+
+    for block in &blocks {
+        match block {
+            Block::Said(u) => out.push(json!({
                 "role": match u.speaker {
                     Speaker::User => "user",
                     Speaker::Assistant => "assistant",
                 },
                 "content": u.body,
             })),
-            Turn::Tool(first) => {
-                // Everything that arrived in the same reply as `first`. A call
-                // with no batch stands alone, which is what a record written
-                // before batches existed gets.
-                let mut batch = vec![first];
-                while let Some(Turn::Tool(next)) = turns.peek() {
-                    if !next.same_reply_as(first) {
-                        break;
-                    }
-                    batch.push(next);
-                    turns.next();
-                }
+            Block::Acted(batch) => {
+                let first = batch[0];
 
                 let mut assistant = json!({
                     "role": "assistant",
@@ -526,8 +528,14 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                     if let Some(text) = &reasoning.text {
                         assistant["reasoning_content"] = json!(text);
                     }
-                    for (key, value) in &reasoning.opaque {
-                        assistant[key.as_str()] = value.clone();
+                    // The signed half is the one thing here that a gateway
+                    // silently discards when it arrives wrong, so it is shed
+                    // only from replies old enough that nothing is still
+                    // reasoning from them -- see `shedding`.
+                    if reply >= shed.opaque_from_reply {
+                        for (key, value) in &reasoning.opaque {
+                            assistant[key.as_str()] = value.clone();
+                        }
                     }
                 }
 
@@ -537,6 +545,23 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                 // made. The gateway matches them by id, but a reader of this
                 // request should see them in the order they happened.
                 for tool_call in batch {
+                    // Belt as well as braces: `ToolSpec::for_model` already keeps
+                    // `read_image` away from a model with no vision, so a tool call
+                    // with pictures should be unreachable here. Checking anyway
+                    // costs a branch and avoids failing a whole turn if that filter
+                    // is ever bypassed.
+                    let picture = can_see
+                        .then(|| shown(tool_call))
+                        .flatten()
+                        .filter(|_| reply >= shed.images_from_reply);
+
+                    // A picture that *was* here and is not any more is said so,
+                    // for the reason `replayed` gives: a model that believes it
+                    // can still see something will describe it from memory and
+                    // be confidently wrong. One told the attachment is gone can
+                    // simply take another screenshot.
+                    let dropped = picture.is_none() && can_see && !tool_call.shown().is_empty();
+
                     out.push(json!({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -547,20 +572,20 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
                         "content": if tool_call.in_flight() {
                             "(still running)".to_string()
                         } else {
-                            replayed(tool_call.report())
+                            let mut content = replayed(tool_call.report(), shed.result_cap);
+                            if dropped {
+                                content.push_str(WITHOUT_ITS_PICTURE);
+                            }
+                            content
                         },
                     }));
-                    // Belt as well as braces: `ToolSpec::for_model` already keeps
-                    // `read_image` away from a model with no vision, so a tool call
-                    // with pictures should be unreachable here. Checking anyway
-                    // costs a branch and avoids failing a whole turn if that filter
-                    // is ever bypassed.
-                    if can_see {
-                        if let Some(message) = shown(tool_call) {
-                            out.push(message);
-                        }
+
+                    if let Some(message) = picture {
+                        out.push(message);
                     }
                 }
+
+                reply += 1;
             }
         }
     }
@@ -580,6 +605,276 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
     out
 }
 
+/// What is appended to a result whose picture is no longer attached.
+const WITHOUT_ITS_PICTURE: &str = "\n\n[... the image this call returned is not attached to this \
+     request. It was sent when it was new; it is dropped from later requests because a \
+     conversation cannot carry every picture it has ever looked at. Take it again if you need to \
+     look at it now. ...]";
+
+/// One assistant decision, with the calls it asked for.
+///
+/// The grouping [`messages`] used to do inline, lifted out because the shedding
+/// below has to see the whole conversation before it can emit any of it: "is
+/// this picture recent?" cannot be answered while walking forwards past it.
+enum Block<'a> {
+    Said(&'a kingdom_core::Message),
+    /// Calls that arrived in one reply, never empty.
+    Acted(Vec<&'a kingdom_core::ToolCall>),
+}
+
+/// The turns grouped into the replies they arrived as.
+///
+/// A call with no batch stands alone, which is what a record written before
+/// batches existed gets.
+fn blocks(turns: &[Turn]) -> Vec<Block<'_>> {
+    let mut out = Vec::new();
+    let mut turns = turns.iter().peekable();
+
+    while let Some(turn) = turns.next() {
+        match turn {
+            Turn::Message(u) => out.push(Block::Said(u)),
+            Turn::Tool(first) => {
+                let mut batch = vec![first];
+                while let Some(Turn::Tool(next)) = turns.peek() {
+                    if !next.same_reply_as(first) {
+                        break;
+                    }
+                    batch.push(next);
+                    turns.next();
+                }
+                out.push(Block::Acted(batch));
+            }
+        }
+    }
+
+    out
+}
+
+/// What one request will leave behind to fit its [`Budget`].
+struct Shedding {
+    /// The first reply whose pictures are attached. Later replies keep theirs.
+    images_from_reply: usize,
+    /// The first reply whose signed thinking is echoed back.
+    opaque_from_reply: usize,
+    /// The most of any one tool result that is replayed.
+    result_cap: usize,
+}
+
+/// How many replies back a picture is still worth sending.
+///
+/// **This is the fix, and it is unconditional.** A picture is looked at once, in
+/// the reply that asked for it, and from then on the model reasons from what it
+/// said about it -- `ToolArtifact`'s own doc calls `images` "what the model was
+/// shown, true for one turn". This module treated them as true forever: every
+/// image ever read rode every subsequent request, so a plan that took six
+/// screenshots sent 4 MB of base64 on every round until the gateway refused the
+/// body outright. Nothing else in the request grows like that.
+///
+/// Two rather than one because a model routinely takes a screenshot in one reply
+/// and reasons about it in the next, and cutting at one would blind it exactly
+/// as it turned to look.
+const RECENT_REPLIES: usize = 2;
+
+/// How many replies of signed thinking a gateway is assumed to still want.
+///
+/// Wider than [`RECENT_REPLIES`] and shed only under real pressure, because
+/// this is the dangerous one: `Reasoning::without_opaque` records that a gateway
+/// *silently discards* thinking whose signature did not come back, so dropping
+/// one that is still live costs the model its reasoning with no error to show
+/// for it. Old blobs are a different matter -- nothing is still thinking with
+/// them, and 633 KB of them was half the text of the request that died.
+const LIVE_REPLIES: usize = 8;
+
+/// What to leave out so the request fits, decided before anything is emitted.
+///
+/// Ordered by what it costs to lose. Pictures already answered go first and go
+/// unconditionally; then old signed thinking, which nothing in the UI has ever
+/// drawn; then the tails of old results, which `replayed` was already trimming
+/// and which say so when they do. The King's words and the system prompt are
+/// never shed -- a request that has dropped the question is not a smaller
+/// request, it is a different one.
+fn shedding(blocks: &[Block<'_>], can_see: bool, budget: Budget) -> Shedding {
+    // Tallied once, then asked repeatedly. Each candidate below differs only in
+    // *which* of these it counts, so re-walking the transcript per candidate
+    // would re-serialise every tool call's arguments a dozen times over -- 110ms
+    // on a real plan, against 3ms for the whole assembly.
+    let tally = tally(blocks, can_see);
+    let replies = tally.len();
+
+    // Fix A: pictures beyond the recent window never ride, whatever the budget
+    // says. A request that happens to fit today would otherwise keep every
+    // picture until the day it does not, which is precisely the failure this
+    // exists to prevent -- and the King would meet it mid-investigation rather
+    // than early.
+    let mut shed = Shedding {
+        images_from_reply: replies.saturating_sub(RECENT_REPLIES),
+        opaque_from_reply: 0,
+        result_cap: MOST_REPLAYED,
+    };
+
+    let fits = |shed: &Shedding| weight(&tally, shed) <= budget.bytes;
+
+    if fits(&shed) {
+        return shed;
+    }
+
+    // Over budget even so. Shed the rest in order, stopping as soon as it fits:
+    // each step is a real loss, so none of them is taken speculatively.
+
+    // The remaining pictures, oldest first.
+    for from in (0..=shed.images_from_reply).rev() {
+        shed.images_from_reply = from;
+        if fits(&shed) {
+            return shed;
+        }
+    }
+    // Nothing recent is worth keeping if the body is still too big without it.
+    shed.images_from_reply = replies;
+    if fits(&shed) {
+        return shed;
+    }
+
+    // Signed thinking, oldest first, and never from a reply still live.
+    let live_from = replies.saturating_sub(LIVE_REPLIES);
+    for from in 0..=live_from {
+        shed.opaque_from_reply = from;
+        if fits(&shed) {
+            return shed;
+        }
+    }
+
+    // Results, halved until they fit or stop being worth reading. The floor is
+    // not zero: a result trimmed to nothing tells the model its command
+    // produced no output, which is a different and worse lie than a marked cut.
+    while shed.result_cap > 512 {
+        shed.result_cap /= 2;
+        if fits(&shed) {
+            return shed;
+        }
+    }
+
+    // Everything sheddable is shed and it still does not fit. The caller sends
+    // it anyway and reports honestly if the gateway refuses -- guessing further
+    // would mean dropping the conversation itself.
+    shed
+}
+
+/// What one reply weighs, split by what a [`Shedding`] can drop.
+struct Tally {
+    /// Everything that always goes: ids, arguments, narration, prose reasoning,
+    /// and any words said before this reply.
+    fixed: usize,
+    /// The signed thinking blobs.
+    opaque: usize,
+    /// The base64 of this reply's pictures, where the model can see at all.
+    images: usize,
+    /// Each result's full length, kept separately so a cap can be applied
+    /// without re-reading the transcript.
+    results: Vec<usize>,
+}
+
+/// Every reply weighed once.
+///
+/// Words from the King are folded into the `fixed` of the reply that follows
+/// them -- they are never shed, so which bucket holds them does not matter, and
+/// this keeps the result indexable by reply number.
+fn tally(blocks: &[Block<'_>], can_see: bool) -> Vec<Tally> {
+    let mut out: Vec<Tally> = Vec::new();
+    let mut pending_said = 0;
+
+    for block in blocks {
+        match block {
+            Block::Said(u) => pending_said += u.body.len(),
+            Block::Acted(batch) => {
+                let mut fixed = std::mem::take(&mut pending_said);
+                let mut opaque = 0;
+                let mut images = 0;
+                let mut results = Vec::with_capacity(batch.len());
+
+                if let Some(reasoning) = &batch[0].reasoning {
+                    fixed += reasoning.text.as_ref().map_or(0, |t| t.len());
+                    opaque += reasoning
+                        .opaque
+                        .iter()
+                        .map(|(key, value)| key.len() + value.to_string().len())
+                        .sum::<usize>();
+                }
+                fixed += batch[0].narration.as_ref().map_or(0, |n| n.len());
+
+                for tool_call in batch {
+                    fixed += tool_call.id.len()
+                        + tool_call.tool.len()
+                        + tool_call.input.to_string().len();
+                    results.push(tool_call.report().len());
+                    if can_see {
+                        images += tool_call
+                            .shown()
+                            .iter()
+                            .map(|image| image.data.len() + image.media_type.len())
+                            .sum::<usize>();
+                    }
+                }
+
+                out.push(Tally {
+                    fixed,
+                    opaque,
+                    images,
+                    results,
+                });
+            }
+        }
+    }
+
+    // Anything said after the last reply still counts against the budget.
+    if pending_said > 0 {
+        if let Some(last) = out.last_mut() {
+            last.fixed += pending_said;
+        } else {
+            out.push(Tally {
+                fixed: pending_said,
+                opaque: 0,
+                images: 0,
+                results: Vec::new(),
+            });
+        }
+    }
+
+    out
+}
+
+/// Roughly how many bytes of body a shedding leaves, for comparison with a
+/// [`Budget`].
+///
+/// An estimate, deliberately. The exact figure needs the assembled JSON, and
+/// building the whole request once per candidate -- images and all -- to weigh
+/// it would cost more than the saving. Every term that grows without bound is
+/// counted exactly; the per-message JSON scaffolding is not, which is part of
+/// why `Budget::FULL` is set well below any real limit.
+fn weight(tally: &[Tally], shed: &Shedding) -> usize {
+    tally
+        .iter()
+        .enumerate()
+        .map(|(reply, one)| {
+            one.fixed
+                + one
+                    .results
+                    .iter()
+                    .map(|len| (*len).min(shed.result_cap))
+                    .sum::<usize>()
+                + if reply >= shed.opaque_from_reply {
+                    one.opaque
+                } else {
+                    0
+                }
+                + if reply >= shed.images_from_reply {
+                    one.images
+                } else {
+                    0
+                }
+        })
+        .sum()
+}
+
 /// How much of one tool result is worth replaying.
 ///
 /// The transcript on disk keeps every byte -- this bounds only what goes back
@@ -591,6 +886,11 @@ fn messages(brief: &Brief, can_see: bool) -> Vec<Value> {
 /// Head and tail rather than head alone because the two ends are where the
 /// information is: a command's first lines say what it did and its last say how
 /// it went, while the middle of a long build log is the part nobody reads.
+///
+/// This bounds *one* result. It is not a bound on the request, which is what
+/// [`Budget`] is for: three hundred results each comfortably under this cap
+/// still added up to a body a gateway refused. `shedding` may lower it further
+/// for a conversation that needs it.
 const MOST_REPLAYED: usize = 12 * 1024;
 
 /// Head and tail of one, with an honest marker of what was dropped.
@@ -599,21 +899,27 @@ const MOST_REPLAYED: usize = 12 * 1024;
 /// have the model draw conclusions from a file it believes it read in full;
 /// being told the middle is missing, and how much, it can go back for the part
 /// it needs with `offset` and `limit`.
-fn replayed(report: &str) -> String {
-    if report.len() <= MOST_REPLAYED {
+fn replayed(report: &str, cap: usize) -> String {
+    if report.len() <= cap {
         return report.to_string();
     }
 
     // Two thirds from the front: the head of a result is usually the answer,
     // and the tail is usually the verdict.
-    let head_budget = MOST_REPLAYED / 3 * 2;
-    let tail_budget = MOST_REPLAYED - head_budget;
+    let head_budget = cap / 3 * 2;
+    let tail_budget = cap - head_budget;
 
     // Cut on character boundaries -- `report` is a `str`, and slicing mid-UTF-8
     // would panic on a file with any non-ASCII in it.
     let head_end = floor_boundary(report, head_budget);
     let tail_start = ceil_boundary(report, report.len() - tail_budget);
-    let dropped = tail_start - head_end;
+
+    // A cap small enough that the two ends meet leaves nothing to drop, and
+    // `tail_start - head_end` would underflow. Sending the whole thing is the
+    // right answer: it is already shorter than the marker explaining the cut.
+    let Some(dropped) = tail_start.checked_sub(head_end) else {
+        return report.to_string();
+    };
 
     format!(
         "{}\n\n[... {dropped} bytes of this result were not replayed. The full text is in \
@@ -690,19 +996,26 @@ fn shown(tool_call: &kingdom_core::ToolCall) -> Option<Value> {
 #[async_trait::async_trait]
 impl Model for CopilotModel {
     async fn take_turn(&self, brief: &Brief) -> Result<Answer, ModelError> {
+        let request = request_body(
+            self.api_name(),
+            self.effort,
+            messages(brief, self.can_see),
+            &brief.tools,
+            self.max_output_tokens,
+        );
+
+        // Measured before it goes, so a 413 can say how big "too big" was. The
+        // gateway's own message never does, and "Request Entity Too Large" with
+        // no number attached is what made this failure feel unknowable.
+        let sent = serde_json::to_vec(&request).map_or(0, |body| body.len());
+
         let response = self
             .http
             .post(ENDPOINT)
             .bearer_auth(&self.token)
             .header("Copilot-Integration-Id", INTEGRATION_ID)
             .header("Editor-Version", EDITOR_VERSION)
-            .json(&request_body(
-                self.api_name(),
-                self.effort,
-                messages(brief, self.can_see),
-                &brief.tools,
-                self.max_output_tokens,
-            ))
+            .json(&request)
             .send()
             .await
             .map_err(|e| ModelError::Transport(e.to_string()))?;
@@ -727,6 +1040,19 @@ impl Model for CopilotModel {
             // tried, and retrying one only spends the user's afternoon.
             if status.is_server_error() || status.as_u16() == 429 {
                 return Err(ModelError::Transport(detail));
+            }
+
+            // 413 is neither of those. The gateway did not consider the request
+            // and decline it -- it declined to *read* it, because it was too
+            // big. Retrying unchanged is futile, but the request is ours to
+            // shrink, so this gets a variant the turn loop can act on. Reported
+            // as a `Refused`, it killed a real plan three times in ninety
+            // seconds with nothing the King could do about it.
+            if status.as_u16() == 413 {
+                return Err(ModelError::TooLarge(format!(
+                    "{detail} (the request body was {} bytes)",
+                    sent
+                )));
             }
 
             // Surface the provider's own words. An opaque "request failed" here
@@ -1177,6 +1503,7 @@ mod tests {
             turns: vec![Turn::Tool(tool_call)],
             aside: None,
             tools: Vec::new(),
+            budget: Budget::FULL,
         }
     }
 
@@ -1185,6 +1512,35 @@ mod tests {
             media_type: "image/png".into(),
             data: "QUJD".into(),
         }]
+    }
+
+    /// One reply that took a screenshot and looked at it, carrying real weight.
+    ///
+    /// The base64 is sized like the ones that killed the plan -- ~800 KB each --
+    /// because a test with a four-byte picture would pass whatever the budget
+    /// did, and it is the weight that is the bug.
+    fn a_look(i: usize) -> kingdom_core::ToolCall {
+        let mut tool_call = kingdom_core::ToolCall::started(
+            format!("look-{i}"),
+            "read_image",
+            json!({ "path": format!("shot-{i}.png") }),
+        );
+        tool_call = tool_call.in_reply(format!("look-reply-{i}"), None, None);
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::seen(
+            format!("Looked at shot-{i}.png."),
+            vec![kingdom_core::ToolImage {
+                media_type: "image/png".into(),
+                data: "Q".repeat(800_000),
+            }],
+        ));
+        tool_call
+    }
+
+    /// A signed thinking blob of `size` bytes, under the key a gateway sends.
+    fn signature(size: usize) -> std::collections::BTreeMap<String, Value> {
+        [("signature".to_string(), json!("s".repeat(size)))]
+            .into_iter()
+            .collect()
     }
 
     /// A settled call, optionally tied to a reply and carrying its thinking.
@@ -1214,6 +1570,7 @@ mod tests {
             turns,
             aside: None,
             tools: Vec::new(),
+            budget: Budget::FULL,
         }
     }
 
@@ -1412,7 +1769,7 @@ mod tests {
     #[test]
     fn a_long_tool_result_is_bounded_and_says_so() {
         let long = "x".repeat(MOST_REPLAYED * 2);
-        let out = replayed(&long);
+        let out = replayed(&long, MOST_REPLAYED);
 
         assert!(out.len() < long.len(), "a long result must be bounded");
         assert!(
@@ -1420,7 +1777,7 @@ mod tests {
             "truncation must be visible to the model, not silent: {out:.200}"
         );
         // Short results are untouched -- the common case must not grow a note.
-        assert_eq!(replayed("a short result"), "a short result");
+        assert_eq!(replayed("a short result", MOST_REPLAYED), "a short result");
     }
 
     /// Multi-byte text must not be cut mid-character.
@@ -1429,7 +1786,7 @@ mod tests {
     /// down a turn over a source file that merely contained an em dash.
     #[test]
     fn bounding_a_result_does_not_split_a_character() {
-        let out = replayed(&"€".repeat(MOST_REPLAYED));
+        let out = replayed(&"€".repeat(MOST_REPLAYED), MOST_REPLAYED);
         assert!(out.contains("were not replayed"));
     }
 
@@ -1469,6 +1826,242 @@ mod tests {
         assert_eq!(
             parts[1]["image_url"]["url"], "data:image/png;base64,QUJD",
             "the data URL is what the format actually reads"
+        );
+    }
+
+    /// The regression the 413 was: every picture ever taken, on every round.
+    ///
+    /// A real plan read six screenshots over an hour and then died, three times
+    /// in ninety seconds, on `Request Entity Too Large`. 4.02 MB of its 5.3 MB
+    /// body was base64 images, every one of which had been looked at and
+    /// answered rounds earlier -- and because the request is rebuilt
+    /// deterministically from the transcript, "keep going" resent exactly the
+    /// same body and was refused exactly the same way.
+    ///
+    /// The bound is unconditional rather than a response to pressure. A
+    /// conversation that happens to fit today would otherwise keep every
+    /// picture until the day it does not, and meet this failure deep into an
+    /// investigation rather than never.
+    #[test]
+    fn only_recent_pictures_ride_the_wire() {
+        let turns: Vec<Turn> = (0..10).map(|i| Turn::Tool(a_look(i))).collect();
+        let messages = messages(&brief_with(turns), true);
+
+        let carried = messages.iter().filter(|m| m["role"] == "user").count();
+        assert_eq!(
+            carried, RECENT_REPLIES,
+            "ten pictures were taken and only the recent ones may be resent: {carried}"
+        );
+
+        // Every call still gets its result -- shedding the picture must not
+        // shed the call, which the model matches against its own tool_call id.
+        assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 10);
+    }
+
+    /// A picture that is gone must say it is gone.
+    ///
+    /// The same judgement `replayed` makes about a truncated result, and for a
+    /// sharper reason: a model that believes it can still see a screenshot will
+    /// describe it from memory and be confidently wrong about a UI it is being
+    /// asked to verify. Told the attachment is no longer there, it can simply
+    /// take another one.
+    #[test]
+    fn a_dropped_picture_is_admitted_to_the_model() {
+        let turns: Vec<Turn> = (0..5).map(|i| Turn::Tool(a_look(i))).collect();
+        let messages = messages(&brief_with(turns), true);
+        let results: Vec<_> = messages.iter().filter(|m| m["role"] == "tool").collect();
+
+        let oldest = results[0]["content"].as_str().unwrap();
+        assert!(
+            oldest.contains("is not attached to this request"),
+            "an old picture's absence must be stated, not silent: {oldest}"
+        );
+
+        let newest = results[results.len() - 1]["content"].as_str().unwrap();
+        assert!(
+            !newest.contains("is not attached"),
+            "a picture that *is* attached must not be disclaimed: {newest}"
+        );
+    }
+
+    /// A model with no vision hears nothing about pictures either way.
+    ///
+    /// It was never sent the image, so "the image is not attached" would be news
+    /// about a thing that never happened -- and an invitation to take a
+    /// screenshot it could not look at.
+    #[test]
+    fn a_blind_model_is_not_told_about_a_picture_it_never_had() {
+        let messages = messages(&brief_with_tool_call(a_picture()), false);
+        let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+
+        assert!(
+            !tool["content"]
+                .as_str()
+                .unwrap()
+                .contains("is not attached"),
+            "a model that cannot see must hear nothing about images: {tool}"
+        );
+    }
+
+    /// The specimen: a conversation of the shape that died, now fitting.
+    ///
+    /// Modelled on `plan-22` of the `dev` kingdom -- hundreds of entries, six
+    /// large screenshots, several hundred KB of signed thinking -- because the
+    /// bug was only ever visible in aggregate. Every individual part of that
+    /// request was within its own limit; the sum was not, and nothing was
+    /// measuring the sum.
+    #[test]
+    fn a_long_conversation_with_pictures_fits_the_budget() {
+        let mut turns = vec![Turn::Message(kingdom_core::Message::new(
+            Speaker::User,
+            "Replace the kingdom map with Repo City's Bevy renderer",
+        ))];
+
+        for i in 0..150 {
+            let mut tool_call =
+                kingdom_core::ToolCall::started(format!("call-{i}"), "bash", json!({ "cmd": "b" }));
+            tool_call = tool_call.in_reply(
+                format!("reply-{i}"),
+                Some(kingdom_core::Reasoning {
+                    text: Some("x".repeat(1200)),
+                    opaque: signature(4000),
+                }),
+                None,
+            );
+            tool_call.outcome = Some(kingdom_core::ToolOutcome::done("y".repeat(2000)));
+            turns.push(Turn::Tool(tool_call));
+
+            // A screenshot every twenty-five replies, as the real plan took.
+            if i % 25 == 0 {
+                turns.push(Turn::Tool(a_look(1000 + i)));
+            }
+        }
+
+        let body = serde_json::to_vec(&json!(messages(&brief_with(turns), true)))
+            .expect("the request must serialise");
+
+        assert!(
+            body.len() < Budget::FULL.bytes,
+            "a conversation of the shape that died must now fit: {} bytes",
+            body.len()
+        );
+
+        // The number that matters is not the budget, it is the one the gateway
+        // refused. 5.3 MB went out and came back 413; the same conversation must
+        // now be a fraction of that, and it is the images that make the
+        // difference -- the last screenshot here is dozens of replies back, so
+        // none of them rides at all.
+        assert!(
+            body.len() < 2 * 1024 * 1024,
+            "the body that died was 5.3 MB, three quarters of it stale pictures; \
+             this one is {} bytes",
+            body.len()
+        );
+    }
+
+    /// Signed thinking must not be shed while it is still live.
+    ///
+    /// The delicate half of the budget, and the one that fails silently.
+    /// `Reasoning::without_opaque` records that a gateway *discards* thinking
+    /// whose signature did not come back -- no error, no warning, just a model
+    /// that has quietly lost its reasoning. So pressure on the request may take
+    /// old blobs, which nothing is thinking with any more, and must never take
+    /// recent ones.
+    #[test]
+    fn recent_signed_thinking_survives_even_a_squeezed_request() {
+        let turns: Vec<Turn> = (0..40)
+            .map(|i| {
+                let mut tool_call = kingdom_core::ToolCall::started(
+                    format!("call-{i}"),
+                    "bash",
+                    json!({ "cmd": "ls" }),
+                );
+                tool_call = tool_call.in_reply(
+                    format!("reply-{i}"),
+                    Some(kingdom_core::Reasoning {
+                        text: None,
+                        opaque: signature(20_000),
+                    }),
+                    None,
+                );
+                tool_call.outcome = Some(kingdom_core::ToolOutcome::done("ok"));
+                Turn::Tool(tool_call)
+            })
+            .collect();
+
+        // A budget far below what those blobs alone weigh, so shedding is
+        // forced to reach them. This is the pressure the guarantee holds under.
+        let mut brief = brief_with(turns);
+        brief.budget = Budget { bytes: 64 * 1024 };
+
+        let messages = messages(&brief, false);
+        let signed = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant" && !m["signature"].is_null())
+            .count();
+
+        assert_eq!(
+            signed, LIVE_REPLIES,
+            "the most recent replies keep the signature the gateway still wants: {signed}"
+        );
+
+        // And they must be the *last* ones. Keeping the oldest would satisfy the
+        // count while losing exactly the thinking that is still in use.
+        let newest = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .next_back()
+            .unwrap();
+        assert!(
+            !newest["signature"].is_null(),
+            "the newest reply's signature is the one that must never go: {newest:#?}"
+        );
+    }
+
+    /// A 413 is not a refusal, and the difference is the whole recovery.
+    ///
+    /// `Refused` is fatal by design -- the model considered the question and
+    /// declined, and asking again only spends the user's quota. A 413 is the
+    /// gateway never having read the question. Classifying it as the former is
+    /// what left a real plan with no way forward but a server restart.
+    #[test]
+    fn a_request_refused_for_size_is_shrinkable_rather_than_fatal() {
+        let too_large = ModelError::TooLarge("Copilot returned 413".into());
+        assert!(
+            too_large.is_shrinkable(),
+            "a 413 must be recoverable by sending less"
+        );
+        assert!(
+            !too_large.is_transient(),
+            "resending the identical body would be refused identically"
+        );
+
+        // A considered refusal stays fatal: a shorter version of the same
+        // question would be declined just as firmly.
+        let refused = ModelError::Refused("Copilot returned 400".into());
+        assert!(!refused.is_shrinkable());
+        assert!(!refused.is_transient());
+    }
+
+    /// Shrinking has a floor, and reaching it is a failure rather than a loop.
+    ///
+    /// Past a point the request is the system prompt, the tool schemas and the
+    /// King's own words, none of which may be shed. Halving forever would either
+    /// spin or send a request with the conversation filed off; the honest answer
+    /// is to stop and say what was too big.
+    #[test]
+    fn a_budget_stops_shrinking_rather_than_emptying_the_request() {
+        let mut budget = Budget::FULL;
+        let mut steps = 0;
+        while let Some(tighter) = budget.tighter() {
+            assert!(tighter.bytes < budget.bytes, "each step must be smaller");
+            budget = tighter;
+            steps += 1;
+            assert!(steps < 100, "shrinking must terminate");
+        }
+        assert!(
+            budget.bytes > 0,
+            "the floor must leave room for a real request, not nothing"
         );
     }
 

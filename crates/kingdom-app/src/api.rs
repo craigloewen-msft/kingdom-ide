@@ -1366,6 +1366,11 @@ pub(crate) async fn converse(
             // Later rounds have a reply behind them and nothing to explain.
             aside: (after_silence && round == 0).then(|| AFTER_SILENCE.to_string()),
             tools: tools.clone(),
+            // Every turn starts willing to carry the lot. A turn that is refused
+            // for size lowers this and asks again; it deliberately does not
+            // persist, because the next turn may be shorter than this one and
+            // starting it pre-shrunk would shed a picture nobody needed to lose.
+            budget: crate::llm::Budget::FULL,
         };
 
         // Raced against the halt so a Stop lands while the model is still
@@ -1383,6 +1388,12 @@ pub(crate) async fn converse(
         // this loop used to return `settle(Err)` on the first of them, killing
         // a plan mid-investigation over a hiccup. A refusal or a missing
         // credential still fails at once: see `ModelError::is_transient`.
+        //
+        // A request the gateway would not read is the third case, and it is
+        // neither of those. Resending it unchanged is pointless, so it is not
+        // transient; but the request is ours, so `brief` is rebuilt with a
+        // tighter budget and asked again. That is why `brief` is `mut` here.
+        let mut brief = brief;
         let mut attempt = 0;
         let answer = loop {
             let outcome = tokio::select! {
@@ -1393,6 +1404,24 @@ pub(crate) async fn converse(
 
             match outcome {
                 Ok(answer) => break answer,
+                // Too large, and there is still something left to shed. No
+                // backoff: nothing is unwell and there is nothing to wait for --
+                // the next request is simply a smaller one, and pausing before
+                // sending it would only make a recoverable turn feel broken.
+                Err(e) if e.is_shrinkable() => {
+                    let Some(tighter) = brief.budget.tighter() else {
+                        // Everything sheddable is already shed. Saying so beats
+                        // reporting the gateway's bare refusal, which names no
+                        // number and suggests no remedy.
+                        return settle(plan_id, Err(e));
+                    };
+                    brief.budget = tighter;
+
+                    let mut kingdom = lock()?;
+                    update(&mut kingdom, &plan_id, |p| {
+                        p.working_on = Some("Trimming the request and asking again".into());
+                    });
+                }
                 Err(e) if worth_asking_again(&e, attempt) => {
                     attempt += 1;
                     // Told while it is happening rather than afterwards: a turn
