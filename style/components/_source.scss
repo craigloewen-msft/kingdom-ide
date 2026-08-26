@@ -125,3 +125,172 @@
   width: var(--panel-width, 520px);
   max-width: var(--panel-width, 520px);
 }
+
+// --- Edit mode ---------------------------------------------------------------
+//
+// The same panel in the same slot, with the lines replaced by one box. Nothing
+// here is a second panel: the bar, the stage and the width are shared with
+// Notes mode, which is what makes switching feel like turning the file over
+// rather than opening something new.
+
+// The mode switch, in the bar between the path and the close button. Two
+// segments rather than one toggle: the state the King is *not* in is named as
+// well as the one he is, so "what am I looking at?" never has to be inferred
+// from whether the lines happen to be clickable.
+.source-mode {
+  display: flex;
+  flex: 0 0 auto;
+  border: 1px solid t.$edge-bright;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.mode-seg {
+  padding: 2px 9px;
+  border: none;
+  background: transparent;
+  color: t.$ink-faint;
+  font-family: t.$font-sans;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+
+  &:hover:not(:disabled) { color: t.$ink; }
+
+  // The segment that is on carries the gold the chamber uses for "this is where
+  // you are", so the two read as one control with a position rather than as two
+  // buttons of equal weight.
+  &.on {
+    background: rgba(t.$gold, 0.14);
+    color: t.$gold;
+  }
+
+  // A file that cannot be edited says why in its `title` rather than vanishing:
+  // a control that disappears leaves the King wondering whether he imagined it.
+  &:disabled {
+    color: t.$ink-faint;
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+// What can be done to the file, in a strip under the bar. Its own row rather
+// than more buttons in the bar: the bar is shared with two other panels and is
+// already at its width, and these appear only in Edit mode.
+.source-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  background: t.$panel;
+  border-bottom: 1px solid t.$edge;
+  font-family: t.$font-sans;
+  font-size: 11.5px;
+}
+
+.source-save,
+.source-revert,
+.source-delete,
+.confirm-yes,
+.confirm-no {
+  padding: 3px 10px;
+  border: 1px solid t.$edge-bright;
+  border-radius: 5px;
+  background: t.$panel-2;
+  color: t.$ink-dim;
+  font: inherit;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: t.$gold-dim;
+    color: t.$ink;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+// Save is the one thing in the strip the King came here to press, so it carries
+// the gold — but only while there is something to save. A permanently gold
+// button in a panel that is usually clean would train him to ignore it.
+.source-save:not(:disabled) {
+  border-color: t.$gold-dim;
+  color: t.$gold;
+}
+
+.source-dirty {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: t.$gold;
+  font-size: 10.5px;
+  // The spacer as well as the label: it pushes Delete to the far end whether or
+  // not there is anything to say.
+  &:not(.on) { color: transparent; }
+}
+
+// Deliberately at the opposite end of the strip from Save, and deliberately not
+// coloured until it is armed. It is the one act here an untracked file does not
+// come back from, so it should not sit under the cursor on its way to Revert.
+.source-delete:hover {
+  border-color: t.$failed;
+  color: t.$failed;
+}
+
+// The second step. Two presses and no modal — the `done-picker`'s reasoning —
+// except that this one is genuinely worth the second press.
+.source-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.confirm-ask {
+  color: t.$failed;
+  font-size: 10.5px;
+}
+
+.confirm-yes {
+  border-color: t.$failed;
+  color: t.$failed;
+
+  &:hover:not(:disabled) {
+    background: rgba(t.$failed, 0.14);
+    border-color: t.$failed;
+    color: t.$failed;
+  }
+}
+
+// The box itself. Fills the stage and scrolls, where a note composer grows to
+// fit: this is a file, and a textarea that grew to a 4,000-line one would push
+// its own actions off the top of the screen.
+.source-editor {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 6px 12px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: t.$void;
+  color: t.$ink;
+  // The file's own type, matching Notes mode exactly, so switching between them
+  // does not reflow the text the King is reading.
+  font-family: t.$font-mono;
+  font-size: 11.5px;
+  line-height: 1.55;
+  // A long line scrolls rather than wraps, as `.source-lines` does — a wrapped
+  // line makes the position the King is typing at disagree with the line number
+  // he saw a moment ago in the other mode.
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 4;
+}
+
+// The stage is the one scroll container in Notes mode. In Edit mode the
+// textarea does its own scrolling, so the stage must not add a second scrollbar
+// around a box that already fills it.
+.source-panel.editing .diff-stage { overflow: hidden; }
