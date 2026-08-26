@@ -47,6 +47,58 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
+# Dev profile for the wasm bundle.
+#
+# This exists because `cargo leptos watch` -- the loop AGENTS.md documents as
+# *the* way to run Kingdom -- otherwise builds the client with plain `dev`, and
+# a plain `dev` client is a browser artifact rather than a native one. Measured
+# on this workspace before the profile existed: 344.7 MB served for one page
+# load, 71% of it debug symbols, the rest compiled at opt-level 0. That was
+# survivable while the client was Leptos and some SVG; with Bevy, wgpu and a
+# ~38,000-entity scene it is not.
+#
+# cargo-leptos runs `wasm-opt` on release only (its `compile/front.rs` guards
+# the call on `proj.release`), so in dev this profile is the only lever there
+# is -- nothing downstream recovers what is left unoptimised here.
+#
+# It is a *named* profile rather than an edit to `[profile.dev]` on purpose.
+# `lib-profile-dev` below applies it to the client bundle alone, so the Axum
+# server and `cargo test` keep building exactly as they did; widening `dev`
+# would slow both to fix neither.
+[profile.wasm-dev]
+inherits = "dev"
+# The bundle is downloaded and compiled by a browser on every reload, and DWARF
+# debug info was the bulk of it. Measured on this workspace: 344.7 MB before,
+# 111.6 MB after, and wasm CPU time on an idle map fell 4.8x (4136ms -> 858ms
+# over six seconds) because this profile also stops shipping opt-level 0 code.
+#
+# This does *not* strip the `name` section, which is still ~50 MB of the
+# remainder -- `debug = false` drops DWARF, and symbol names are a separate
+# thing. `strip = "symbols"` would take those too, and was deliberately not
+# used: the names are what turns a `console_error_panic_hook` backtrace from
+# `wasm-function[12345]` into a Rust function name, and Kingdom is served over
+# loopback where the remaining bytes cost ~0.2s. Debuggability is worth more
+# than that here. On a release build `wasm-release` and `wasm-opt` handle it.
+debug = false
+
+# Bevy, wgpu and hashbrown are the hot loops here, and they are never what is
+# being edited -- so they are pure cost to leave unoptimised. Their ECS inner
+# loops (`QueryIter::next`, `RawTable` lookups) dominated a profile of the map
+# sitting still, purely for want of inlining. Optimising dependencies costs one
+# slow build and nothing afterwards, because they are not rebuilt on a save.
+[profile.wasm-dev.package."*"]
+opt-level = 3
+
+# Kingdom's own crates stay cheap to rebuild: these *are* what gets edited, so
+# they are the only ones whose compile time is paid on every save. 1 buys most
+# of the gap between a debug and a release build without that cost.
+[profile.wasm-dev.package.kingdom-citymap]
+opt-level = 1
+[profile.wasm-dev.package.kingdom-app]
+opt-level = 1
+[profile.wasm-dev.package.kingdom-core]
+opt-level = 1
+
 # cargo-leptos configuration ------------------------------------------------
 # Drives the two-target build: a native SSR server binary + a wasm client bundle.
 [[workspace.metadata.leptos]]
@@ -74,6 +126,9 @@ bin-default-features = false
 lib-features = ["hydrate"]
 lib-default-features = false
 lib-profile-release = "wasm-release"
+# See `[profile.wasm-dev]` above: this is what makes `cargo leptos watch` serve
+# an optimised bundle instead of a third of a gigabyte of debug symbols.
+lib-profile-dev = "wasm-dev"
 
 # cargo-leptos otherwise runs `wasm-opt -Oz --enable-bulk-memory
 # --enable-nontrapping-float-to-int`, and the renderer needs two more features

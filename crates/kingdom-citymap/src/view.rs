@@ -41,6 +41,12 @@ const POLL_INTERVAL_MS: u32 = 50;
 pub fn CityMap(
     /// The city the King has selected, if any.
     selected: RwSignal<Option<CityId>>,
+    /// Whether the map is the thing the King is currently looking at.
+    ///
+    /// False while he is in a plan's chamber, where the map is still mounted
+    /// but hidden. The engine cannot see a CSS class, so it has to be told.
+    #[prop(into)]
+    visible: Signal<bool>,
 ) -> impl IntoView {
     let manifest = RwSignal::new(None::<MapManifest>);
     let load_error = RwSignal::new(None::<String>);
@@ -91,6 +97,15 @@ pub fn CityMap(
             status.set(watcher.status());
         })
         .forget();
+    });
+
+    // The engine draws whether or not anything is on screen, so it is told when
+    // it is not. This is an ordinary effect rather than part of the boot one:
+    // it has to run again every time the King moves between the map and a
+    // chamber, which is the whole point of it.
+    let watching = bridge.clone();
+    Effect::new(move |_| {
+        watching.send(ViewerCommand::Show(visible.get()));
     });
 
     // Clicking a building selects its city; clicking open sea clears it.

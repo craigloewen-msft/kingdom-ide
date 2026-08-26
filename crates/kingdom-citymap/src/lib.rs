@@ -75,6 +75,14 @@ pub fn CityMap(
     /// reads and writes it.
     #[allow(unused_variables)]
     selected: leptos::prelude::RwSignal<Option<kingdom_core::CityId>>,
+    /// Whether the map is on screen. Unused here for the same reason: only the
+    /// browser has an engine to stop. It is taken anyway so that the two
+    /// `CityMap` signatures stay identical -- `app.rs` compiles against both,
+    /// and a prop on one and not the other is a build failure on whichever
+    /// target is not being looked at.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    visible: leptos::prelude::Signal<bool>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

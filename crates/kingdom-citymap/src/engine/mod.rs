@@ -29,6 +29,9 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy::window::{PresentMode, WindowPlugin, WindowResolution};
+use bevy::winit::{UpdateMode, WinitSettings};
+
+use std::time::Duration;
 
 use bridge::{Bridge, ViewerCommand};
 use camera::{CameraRig, MapCamera};
@@ -41,6 +44,15 @@ use spawn::{LoadedMap, MeshCache, SceneRoot};
 /// The canvas is created by Leptos and handed over, rather than injected by
 /// the engine, so the surrounding interface keeps control of the layout.
 pub const CANVAS_SELECTOR: &str = "#repo-city-canvas";
+
+/// How long the engine may sleep when the King is not watching the map.
+///
+/// This is a wake guarantee rather than a frame rate. It bounds how long
+/// [`ViewerCommand::Show`] can sit unread in the bridge, because only a running
+/// update drains it -- so it is also the worst-case delay before the map comes
+/// back when he returns to it. Short enough not to be seen, long enough that an
+/// idle map is doing nothing worth measuring.
+const IDLE_WAKE: Duration = Duration::from_millis(250);
 
 /// Boots the engine into the page.
 ///
@@ -147,6 +159,7 @@ fn apply_commands(
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
+    mut winit: ResMut<WinitSettings>,
 ) {
     let queued = bridge.drain_commands();
     if queued.is_empty() {
@@ -227,6 +240,36 @@ fn apply_commands(
             ViewerCommand::LookAt { point } => rig.look_at(Vec2::from_array(point)),
             ViewerCommand::SelectWard(id) => {
                 bridge.update_status(|status| status.selected_ward = id);
+            }
+            ViewerCommand::Show(showing) => {
+                // Two separate costs, and only stopping both is worth
+                // anything. An inactive camera is skipped by the render graph,
+                // which is the GPU half; the update mode is the CPU half, and
+                // without it the whole schedule would still run sixty times a
+                // second to draw nothing.
+                if let Ok((mut camera, _, _)) = cameras.single_mut() {
+                    camera.is_active = showing;
+                }
+                *winit = if showing {
+                    WinitSettings {
+                        focused_mode: UpdateMode::Continuous,
+                        unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+                    }
+                } else {
+                    // Deliberately a short wait rather than a long one. The
+                    // engine is told to come back *through the bridge*, which
+                    // only `apply_commands` drains and which therefore only
+                    // runs on an update -- so this interval is also the delay
+                    // before a return to the map is noticed. Ticking four
+                    // times a second costs almost nothing, because every
+                    // system in the schedule early-returns when nothing has
+                    // changed, while the expensive half stays off with the
+                    // camera.
+                    WinitSettings {
+                        focused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+                        unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+                    }
+                };
             }
         }
     }

@@ -492,6 +492,10 @@ pub fn App() -> impl IntoView {
 /// So the map is mounted **once**, here, as a sibling of the outlet, and is
 /// hidden with CSS when the route is not `/`. It costs one canvas standing idle
 /// behind the chamber and buys a map that is still there when you come back.
+///
+/// Hidden is not the same as stopped, though, so `on_the_map` is handed to the
+/// map as well as to the class: CSS spares the King the pixels, and the prop is
+/// what spares his machine the work of drawing them.
 #[component]
 fn ThroneRoom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -513,7 +517,7 @@ fn ThroneRoom() -> impl IntoView {
             <Sidebar/>
             <main class="main-region">
                 <div class="map-region" class:hidden=move || !on_the_map.get()>
-                    <CityMap selected=state.selected/>
+                    <CityMap selected=state.selected visible=on_the_map/>
                 </div>
                 <Outlet/>
             </main>
