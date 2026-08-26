@@ -89,6 +89,8 @@ pub fn FileTree(
     let listings = RwSignal::new(HashMap::<String, Vec<DirEntry>>::new());
     // Paths with a request in flight, so a double-click cannot send two.
     let fetching = RwSignal::new(HashSet::<String>::new());
+    // The scrolling box, so the open file's row can be brought into view.
+    let body = NodeRef::<leptos::html::Div>::new();
 
     let plan = StoredValue::new(plan);
 
@@ -199,6 +201,71 @@ pub fn FileTree(
         }
     };
 
+    // Revealing the file the panel is showing, wherever it came from.
+    //
+    // The tree already marks the open file's row selected, but a file several
+    // folders deep sits inside folders the King never opened -- so there is no
+    // row to mark, and the rail looks like it has ignored him. That was
+    // tolerable while the only way to open a file was to press a row that was
+    // by definition already visible. It is not now that a file can be opened by
+    // pressing its building on the map, or from the review drawer.
+    //
+    // Two halves: open the folders on the way down, then scroll to what they
+    // uncovered.
+    Effect::new(move |_| {
+        let Some(path) = open_file.get() else {
+            return;
+        };
+
+        // Every folder on the way to the file. `src/engine/camera.rs` needs
+        // `src` and `src/engine` -- the file's own path is not a folder and is
+        // deliberately not included.
+        let mut ancestors = Vec::new();
+        let mut walked = String::new();
+        let mut parts: Vec<&str> = path.split('/').collect();
+        parts.pop();
+        for part in parts {
+            if !walked.is_empty() {
+                walked.push('/');
+            }
+            walked.push_str(part);
+            ancestors.push(walked.clone());
+        }
+
+        // Only the ones that are not already open, so a file opened inside a
+        // folder the King has expanded himself writes nothing and cannot
+        // re-trigger this effect.
+        let shut: Vec<String> = expanded.with_untracked(|open| {
+            ancestors
+                .iter()
+                .filter(|path| !open.contains(*path))
+                .cloned()
+                .collect()
+        });
+        if !shut.is_empty() {
+            expanded.update(|open| {
+                for path in &shut {
+                    open.insert(path.clone());
+                }
+            });
+            // A folder whose listing has not arrived yet contributes no rows,
+            // and `walk` places a child only once its parent has landed -- so
+            // these may complete in any order and the tree assembles itself as
+            // they do. `fetch` ignores a path it already holds, so a folder
+            // opened before costs nothing here.
+            for path in shut {
+                fetch(plan.get_value(), path, listings, fetching);
+            }
+        }
+
+        // And then bring the row into view. Tracking `rows` as well as the path
+        // is what makes this work for a folder that had to be fetched: the row
+        // does not exist on this run, and the effect re-runs when the listing
+        // lands and builds it.
+        rows.track();
+        reveal_selected_row(body);
+    });
+
     // "Never fetched" and "fetched, and empty" read differently: the first is a
     // wait, the second is an answer.
     let empty = Memo::new(move |_| rows.get().is_empty());
@@ -207,7 +274,7 @@ pub fn FileTree(
     view! {
         // Just the body: the column, its head and its resizer belong to the
         // rail that holds this, because the review drawer shares all three.
-        <div class="file-tree-body">
+        <div class="file-tree-body" node_ref=body>
             <Show when=move || empty.get()>
                 <p class="file-tree-hint">
                     {move || if loading_root.get() { "Surveying\u{2026}" } else { "Nothing here." }}
@@ -316,3 +383,66 @@ pub fn FileTree(
         </div>
     }
 }
+
+/// Scrolls the row of the open file into view, if it has one and it is off
+/// screen.
+///
+/// Found by the `selected` class the rows already compute rather than by
+/// building a selector out of the path. That is not a shortcut: a path may hold
+/// quotes, brackets and spaces, and escaping one into a CSS attribute selector
+/// correctly is a job with a wrong answer. The class is already exactly "the
+/// row of the file the panel is showing".
+///
+/// Deferred by a frame, because the caller runs inside the effect that *causes*
+/// the row to exist: Leptos has not flushed the new rows to the DOM yet, so
+/// looking now would find the tree as it was.
+///
+/// Only scrolls when the row is genuinely outside the box. Pressing a row that
+/// is already on screen -- the ordinary case, and the only one before the map
+/// could open files -- must not jerk the list about under the King's pointer.
+#[cfg(feature = "hydrate")]
+fn reveal_selected_row(body: NodeRef<leptos::html::Div>) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let scroll = Closure::once_into_js(move || {
+        let Some(box_el) = body.get_untracked() else {
+            return;
+        };
+        let box_el: web_sys::HtmlElement = box_el.into();
+        let Ok(Some(row)) = box_el.query_selector(".file-row.selected") else {
+            return;
+        };
+        let Ok(row) = row.dyn_into::<web_sys::HtmlElement>() else {
+            return;
+        };
+
+        // `offset_top` is measured against the offset parent rather than the
+        // scroll box, so the two are subtracted rather than one being trusted.
+        let top = row.offset_top() - box_el.offset_top();
+        let bottom = top + row.offset_height();
+        let view_top = box_el.scroll_top();
+        let view_bottom = view_top + box_el.client_height();
+
+        if top >= view_top && bottom <= view_bottom {
+            return;
+        }
+        // Centred, so a file revealed from the map arrives with its neighbours
+        // around it rather than jammed against an edge -- the King is being
+        // shown *where* the file lives, not only that it exists.
+        let centred = top - (box_el.client_height() - row.offset_height()) / 2;
+        box_el.set_scroll_top(centred.max(0));
+    });
+    let _ = window.request_animation_frame(scroll.unchecked_ref());
+}
+
+/// The server has no tree to scroll and no DOM to look in.
+///
+/// This crate builds on both targets, so the browser's version needs a
+/// counterpart here -- the same split `browser_view.rs` makes for its
+/// screencast, and for the same reason.
+#[cfg(not(feature = "hydrate"))]
+fn reveal_selected_row(_body: NodeRef<leptos::html::Div>) {}

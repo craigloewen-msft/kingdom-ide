@@ -161,6 +161,19 @@ pub struct KingdomState {
     /// `None` when no file is open. The rail's map deliberately does not pull
     /// back when that happens -- see `CityMap`.
     pub focus_file: RwSignal<Option<String>>,
+    /// The file the King picked by pressing its building on the rail's map.
+    ///
+    /// [`Self::focus_file`]'s return leg, and it sits beside it for that
+    /// reason: that one carries what the chamber has open *out* to the map, and
+    /// this carries what he pressed on the map *back*. Same seam, same reason
+    /// for being here -- the map is mounted outside the router's outlet (see
+    /// [`ThroneRoom`]) and cannot be handed a chamber's callback.
+    ///
+    /// Written by the map only while it stands in the rail, and only for a file
+    /// of the city the open plan works in. Read by the chamber, which opens the
+    /// file and then **clears this**: it is a message rather than a state, and
+    /// leaving it set would mean the same building could not be pressed twice.
+    pub picked_file: RwSignal<Option<String>>,
     /// What the plan the King is reading has changed, published where the map
     /// can draw it.
     ///
@@ -217,6 +230,7 @@ impl KingdomState {
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
             focus_file: RwSignal::new(None),
+            picked_file: RwSignal::new(None),
             works: RwSignal::new(None),
             attention: RwSignal::new(std::collections::HashMap::new()),
         }
@@ -711,6 +725,7 @@ fn ThroneRoom() -> impl IntoView {
                     presence=presence
                     focus_city=state.selected
                     focus_file=state.focus_file
+                    picked_file=state.picked_file
                     works=state.works
                 />
                 // The rail's map is a view rather than a control -- clicking it

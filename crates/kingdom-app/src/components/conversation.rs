@@ -749,6 +749,10 @@ fn ConversationBody(
     Effect::new(move |_| state.focus_file.set(open_file.get()));
     on_cleanup(move || {
         state.focus_file.try_set(None);
+        // And any building pressed but not yet read. A pick that outlived its
+        // chamber would open a file of the *previous* plan's city in the next
+        // one the King walks into.
+        state.picked_file.try_set(None);
     });
     // And the two the panels fetch by. Split, because a diff and a whole file
     // are different requests and the wrong panel must not fire one.
@@ -772,6 +776,31 @@ fn ConversationBody(
     // the margin lists notes from both panels, and a note written on a file
     // with no diff could not be reopened at all if this asked for one.
     let open_noted_file = read_file;
+
+    // And opening one the King pressed on the rail's map.
+    //
+    // The third way into the panel, and it arrives as a signal rather than a
+    // callback because the map cannot be handed one: it is mounted outside the
+    // router's outlet and may never unmount (see `ThroneRoom`), so a closure
+    // belonging to this chamber would outlive the chamber. `state.picked_file`
+    // is the seam, exactly as `state.focus_file` is in the other direction.
+    //
+    // `Aside::Source` and not `Aside::Diff`, for the reason written just above
+    // about the review margin: the map draws every file of the city, and most
+    // of them have no diff to show.
+    //
+    // Cleared as soon as it is read, which is what makes it a message rather
+    // than a state. Without that, closing the panel and pressing the same
+    // building again would set the signal to a value it already held, no effect
+    // would run, and the King would press a house that had visibly worked a
+    // moment ago and watch it do nothing.
+    Effect::new(move |_| {
+        let Some(path) = state.picked_file.get() else {
+            return;
+        };
+        state.picked_file.set(None);
+        aside.set(Aside::Source(path));
+    });
 
     // What the plan has changed. Held here rather than in the rail because two
     // views read it: the drawer's rows and its badge, and the diff panel, which
