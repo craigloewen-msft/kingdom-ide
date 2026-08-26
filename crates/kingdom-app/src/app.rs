@@ -3,7 +3,7 @@
 use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, PromptBar, Sidebar};
 use kingdom_citymap::CityMap;
-use kingdom_core::{CityActivity, CityId, Kingdom, ModelChoice, WorkspaceMode};
+use kingdom_core::{Attention, CityActivity, CityId, Kingdom, ModelChoice, Plan, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
@@ -134,6 +134,29 @@ pub struct KingdomState {
     pub choice: RwSignal<Option<ModelChoice>>,
     /// How the next new plan will be isolated on disk.
     pub workspace: RwSignal<WorkspaceMode>,
+    /// What each plan wants of the King, as the server last said.
+    ///
+    /// A cache beside the kingdom rather than a field on `Plan`, and the reason
+    /// is which channel carries it. A plan's own transcript answers this too --
+    /// [`kingdom_core::Plan::wants_attention`] reads it -- but the transcript
+    /// only arrives on the *chamber's* socket, so a browser sitting on the map
+    /// would never learn that a plan had stopped to ask something. The rail's
+    /// socket carries the answer directly.
+    ///
+    /// Written by both sockets, so the two cannot disagree: the pulse writes
+    /// what the server computed, and the chamber writes what it computes from
+    /// the plan it was just handed. Read through
+    /// [`KingdomState::attention_of`], which falls back to the plan itself for
+    /// a plan neither socket has spoken about yet -- the opening fetch, most
+    /// often, which is a plain HTTP response carrying no pulse at all.
+    ///
+    /// The value is an `Option` inside the map, and that is load-bearing rather
+    /// than sloppy. "The server says this plan wants nothing" and "nothing has
+    /// been said about this plan" have to stay different answers: a plan whose
+    /// question was answered in another tab pulses `None`, and if that were
+    /// stored as an *absent* entry the badge would fall back to a transcript
+    /// fetched before the answer and go on showing a question nobody is asking.
+    pub attention: RwSignal<std::collections::HashMap<kingdom_core::PlanId, Option<Attention>>>,
 }
 
 impl KingdomState {
@@ -151,7 +174,33 @@ impl KingdomState {
             error: RwSignal::new(None),
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
+            attention: RwSignal::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// What a plan wants of the King, however this browser came to know it.
+    ///
+    /// The cache first, because it is the only half a browser away from the
+    /// chamber ever hears; the plan's own transcript second, so a kingdom just
+    /// fetched over HTTP still badges correctly before any socket has spoken.
+    ///
+    /// Note the double `Option`: an entry holding `None` is the server saying
+    /// this plan wants nothing, and it wins over the plan's own -- possibly
+    /// stale -- transcript. Only a genuinely *missing* entry falls back.
+    pub fn attention_of(&self, plan: &Plan) -> Option<Attention> {
+        match self.attention.with(|known| known.get(&plan.id).copied()) {
+            Some(said) => said,
+            None => plan.wants_attention(),
+        }
+    }
+
+    /// Records what the server says a plan wants, from either socket.
+    pub fn note_attention(&self, plan: &kingdom_core::PlanId, needs: Option<Attention>) {
+        // Written even when nothing is wanted -- see the field's docs. Cheap:
+        // one entry per plan, and the rail is the only reader.
+        self.attention.update(|known| {
+            known.insert(plan.clone(), needs);
+        });
     }
 
     /// Records the user's choice and remembers it for next time.
@@ -502,6 +551,11 @@ pub fn App() -> impl IntoView {
         state.rail_decided_at,
     );
 
+    // The rail's own channel, opened once for the life of the app. It is what
+    // lets a plan that has stopped to ask something say so while the King is
+    // looking at the map or at another chamber entirely.
+    watch_kingdom(state);
+
     // Load any kingdom the server already has open, so a refresh does not
     // send the user back to the folder picker.
     let initial = Resource::new(|| (), |_| get_kingdom());
@@ -768,5 +822,169 @@ fn ChooseKingdom() -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+/// Keeps the rail in step with every plan in the kingdom, not just the one on
+/// screen.
+///
+/// The counterpart to `conversation.rs::watch_plan`, and deliberately the same
+/// shape: a socket owned by an effect, a fixed-delay reconnect with no backoff
+/// ladder and no give-up, and a drop that cancels the retry. What differs is
+/// what it carries -- a list of [`kingdom_core::PlanPulse`] rather than a plan
+/// -- and why it exists at all: the chamber's socket structurally cannot report
+/// a plan whose chamber is closed, and "which of my agents needs me?" is a
+/// question about exactly those.
+///
+/// Mounted once, by [`App`], and never unmounted. Browser-only: under SSR there
+/// is no socket, and the first render is served from server state.
+fn watch_kingdom(state: KingdomState) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |previous: Option<KingdomWatch>| KingdomWatch::open(state, previous));
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = state;
+}
+
+/// Applies one pulse: the badge cache first, then whatever else moved.
+///
+/// Returns false for a plan this browser does not hold, which the caller reads
+/// as "refetch". A pulse is deliberately too small to invent a plan from -- see
+/// [`kingdom_core::PlanPulse`] -- and half a plan in the rail would be a row
+/// leading to an empty chamber.
+#[cfg(feature = "hydrate")]
+fn absorb(state: KingdomState, pulse: &kingdom_core::PlanPulse) -> bool {
+    // The attention is recorded whether or not the plan is known. It costs one
+    // map entry and it means the badge is already right at the instant the
+    // refetch below lands, rather than one push later.
+    state.note_attention(&pulse.id, pulse.needs);
+    state
+        .kingdom
+        .try_update(|k| k.apply(pulse))
+        .unwrap_or(false)
+}
+
+/// An open watch on the whole kingdom, which closes itself when dropped.
+#[cfg(feature = "hydrate")]
+struct KingdomWatch {
+    socket: web_sys::WebSocket,
+    /// Kept alive for the socket's lifetime: a closure handed to JS and then
+    /// dropped on the Rust side would be called after being freed. Same
+    /// reasoning as `PlanWatch` in `conversation.rs`.
+    _on_message: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _on_close: wasm_bindgen::closure::Closure<dyn FnMut()>,
+    /// Cleared on drop, so a retry queued by a closing socket does not reopen
+    /// a watch nothing owns.
+    retry: std::rc::Rc<std::cell::Cell<Option<i32>>>,
+}
+
+#[cfg(feature = "hydrate")]
+impl KingdomWatch {
+    /// How long to wait before reopening a dropped socket. The server is on
+    /// loopback, so a dropped socket means it is restarting.
+    const RETRY_MS: i32 = 1000;
+
+    fn open(state: KingdomState, previous: Option<Self>) -> Self {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+
+        // Before opening another, so a re-run cannot leave a socket behind.
+        drop(previous);
+
+        let socket = web_sys::WebSocket::new(&Self::url())
+            .expect("the rail's watch socket should be constructible");
+
+        let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+            move |event: web_sys::MessageEvent| {
+                let Some(text) = event.data().as_string() else {
+                    return;
+                };
+                // A message that will not parse means the server sent a shape
+                // this bundle does not know -- a stale tab after a rebuild.
+                // Dropping it leaves the rail showing the last good state.
+                let Ok(pulses) = serde_json::from_str::<Vec<kingdom_core::PlanPulse>>(&text) else {
+                    return;
+                };
+
+                // Every message is a list, including a single-plan update, so
+                // there is one code path here rather than two. See `watch.rs`.
+                let unknown = pulses.iter().filter(|p| !absorb(state, p)).count();
+
+                // A plan this browser has never seen -- opened in another tab.
+                // One refetch teaches it about all of them at once, and it
+                // cannot loop: after it lands, the ids are known.
+                if unknown > 0 {
+                    leptos::task::spawn_local(async move {
+                        if let Ok(k) = crate::api::get_kingdom().await {
+                            state.kingdom.set(k);
+                        }
+                    });
+                }
+            },
+        );
+        socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+        let retry = std::rc::Rc::new(std::cell::Cell::new(None));
+        let on_close = Closure::<dyn FnMut()>::new({
+            let retry = retry.clone();
+            move || {
+                let Some(window) = web_sys::window() else {
+                    return;
+                };
+                let reopen = Closure::once_into_js({
+                    let retry = retry.clone();
+                    move || {
+                        retry.set(None);
+                        // Deliberately leaked, exactly as `PlanWatch`'s retry
+                        // is: the reopened watch outlives this callback and has
+                        // no owner to hand it back to. Bounded by the number of
+                        // disconnects in one visit, and the socket it holds is
+                        // closed by the browser when the page goes.
+                        std::mem::forget(KingdomWatch::open(state, None));
+                    }
+                });
+                if let Ok(handle) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    reopen.unchecked_ref(),
+                    Self::RETRY_MS,
+                ) {
+                    retry.set(Some(handle));
+                }
+            }
+        });
+        socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+        Self {
+            socket,
+            _on_message: on_message,
+            _on_close: on_close,
+            retry,
+        }
+    }
+
+    /// The socket's address, derived from the page's own origin so it follows
+    /// the server wherever it is served from.
+    fn url() -> String {
+        let location = web_sys::window()
+            .expect("a browser has a window")
+            .location();
+        let secure = location.protocol().map(|p| p == "https:").unwrap_or(false);
+        let host = location.host().unwrap_or_default();
+        let scheme = if secure { "wss" } else { "ws" };
+        format!("{scheme}://{host}{}", crate::watch::KINGDOM_ROUTE)
+    }
+}
+
+#[cfg(feature = "hydrate")]
+impl Drop for KingdomWatch {
+    fn drop(&mut self) {
+        // Order matters: clear the close handler before closing, or closing
+        // deliberately would schedule the reconnect this drop exists to stop.
+        self.socket.set_onclose(None);
+        self.socket.set_onmessage(None);
+        let _ = self.socket.close();
+
+        if let (Some(handle), Some(window)) = (self.retry.take(), web_sys::window()) {
+            window.clear_timeout_with_handle(handle);
+        }
     }
 }

@@ -777,6 +777,21 @@
 
 .question-mark { opacity: 0.8; }
 
+// "2 of 3". Pushed to the far end of the head, away from the court's name: it
+// is where he is, not who is speaking.
+.question-step {
+  margin-left: auto;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 10px;
+}
+
+.question-hint {
+  margin: 0 0 8px;
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
 .question-block + .question-block {
   margin-top: 14px;
   padding-top: 14px;
@@ -818,6 +833,16 @@
     background: rgba(t.$gold, 0.08);
   }
 
+  // Chosen, and not yet sent. Clicking an option now *selects* rather than
+  // answering, so this state has to be unmistakable — without it the King has
+  // no way to tell what he has picked before he presses Submit.
+  &.chosen {
+    border-color: t.$gold;
+    background: rgba(t.$gold, 0.14);
+
+    .option-label { color: t.$gold; }
+  }
+
   &:disabled { cursor: default; }
 }
 
@@ -833,11 +858,64 @@
 }
 
 // The options are the court's guesses. The King is the one deciding, so he must
-// be able to say something that was not on the list.
+// be able to say something that was not on the list — and, now that choosing is
+// separate from sending, to say it *beside* an option rather than instead of it.
 .question-own-words {
   margin-top: 12px;
 
   .decree-input { width: 100%; }
+}
+
+// Back on the left, Submit on the right, and nothing in between — the shape of
+// every wizard the King has ever used. Submit is where Next was, deliberately:
+// on the last question the same place under his cursor becomes the thing that
+// sends, and the word is the only difference.
+.question-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid t.$edge;
+
+  .nav-spacer { flex: 1 1 auto; }
+}
+
+.question-back,
+.question-next,
+.question-submit {
+  padding: 6px 14px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$panel;
+  color: t.$ink-dim;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: rgba(t.$gold, 0.6);
+    color: t.$ink;
+  }
+
+  // Nothing chosen yet. Dimmed rather than hidden: the King should be able to
+  // see what he is working towards, and the title says what is missing.
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+// The one that ends the exchange, so it carries the gold the rest borrow on
+// hover. It is the only button in the card that sends anything.
+.question-submit {
+  border-color: rgba(t.$gold, 0.6);
+  background: rgba(t.$gold, 0.12);
+  color: t.$gold;
+
+  &:hover:not(:disabled) {
+    background: rgba(t.$gold, 0.2);
+    color: t.$gold;
+  }
 }
 
 // --- Something went wrong just now -----------------------------------------

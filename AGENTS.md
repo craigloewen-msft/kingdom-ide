@@ -142,8 +142,10 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
-    events.rs       Publishing a plan's changes to its watchers (ssr only)
-    watch.rs        The chamber's push socket (ssr only)
+    events.rs       Publishing a plan's changes to its watchers, and a digest of
+                    every plan to the rail (ssr only)
+    watch.rs        The chamber's push socket, and the rail's (the route
+                    constants cross to wasm; the handlers are ssr only)
     screencast.rs   The King's live view of a plan's browser (ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
@@ -489,6 +491,64 @@ watched 257k of 1M tick by while the gateway refused him on bytes, and the bar
 was telling the truth about the wrong quantity. Reporting wire bytes beside it is
 its own task.
 
+**A question is asked one at a time, and the rail says one is standing.** Two
+halves of the same fault. `ask_user_question` may put up to four questions, and
+the chamber used to render all of them with every option live — so the *first*
+click sent its own label and settled the call, and the other three answers were
+discarded without the court ever learning they had been asked. They are now put
+to the King one at a time (`Question` in `conversation.rs`), with Back and Next
+between them and **Submit** in place of Next on the last. `compose_answer` folds
+the lot into the single `String` the parked oneshot takes.
+
+Every question ends in Submit, including a lone one. That costs the old
+one-click path a second click and buys three things worth more: `multi_select`
+becomes answerable at all (it had been in the schema, and read by nothing), an
+option and a sentence of his own can stand *together*, and the set is answered
+as one act. A single question still sends its **bare answer** with no
+scaffolding, so the far side reads exactly as it always did — the mock's "You
+chose X" path and the tool's own test needed no change. Several are labelled and
+kept in the order asked, and a question he left alone is named as `(no answer)`
+rather than dropped: silence and omission look identical to a model, which then
+fills the gap with the guess it stopped to avoid making.
+
+The King's place in the wizard is local state, and it survives the push socket
+for a reason that is not obvious: `Transcript`'s `<For>` is keyed by
+`(index, entry_version)` and an in-flight call holds version 1 throughout, so
+deeds landing elsewhere re-render the list without rebuilding that row. A change
+to that key would silently send him back to question one every time the court
+did anything.
+
+**And the rail could not have told him.** A plan parked on a question is still
+`PlanStatus::Drafting` — asking moves nothing — so a badge read off the status
+said "Drafting" in the working green, the same thing it says for a plan happily
+running a build. `Attention` answers the different question *whose move is it*,
+and is deliberately **not** a sixth `PlanStatus`: a status is where a plan is in
+its life, and a sixth variant would ripple through `ALL`, the map legend,
+`is_settled` and every match on plan state to say one word.
+`Plan::wants_attention` is the single definition, read by the rail, the chamber
+header and the pulse alike.
+
+**A second socket carries it, and it carries a digest.** `events.rs` argues at
+length that whole plans on the wire are free — and that argument holds only for a
+channel keyed *per plan*, where one watcher is looking at exactly what is sent.
+The rail asks "which of my thirty plans needs me?", and answering it the same way
+would wake every open tab with every transcript on every round to repaint a
+badge. So `/watch/kingdom` carries `PlanPulse` — id, city, title, status, what it
+is doing, what it wants — and is **deduped** against the last pulse sent for that
+plan. The digest makes a message cheap; the dedupe makes most rounds send nothing
+at all. Dedupe narrows what is *sent*, never what a message *says*: a pulse is a
+whole digest, so a listener that falls behind has still missed only intermediate
+states, which is the same property that makes lag survivable on the plan channel.
+
+Two details there are load-bearing. The badge cache in `KingdomState` stores an
+`Option` *inside* the map, because "the server says this plan wants nothing" and
+"nothing has been said about this plan" must stay different answers — a question
+answered in another tab pulses `None`, and treating that as silence would fall
+back to a transcript fetched before the answer and go on showing a question
+nobody is asking. And **both** sockets write it: the chamber's, which holds the
+whole plan and computes it, and the rail's, which is told. They cannot disagree,
+because `wants_attention` is the one definition on both ends.
+
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
 deliberately *out* of the transcript and therefore out of `Plan::turns`) and
@@ -550,18 +610,23 @@ that properly means an OS-level sandbox, which is a deliberate later decision.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
-- Live updates beyond a plan's own chamber, other than the one thing the map now
-  polls for. The chamber is pushed to over a
-  WebSocket (`events.rs`, `watch.rs`), and the plan's browser is mirrored over a
-  second one (`screencast.rs`) — but the **rail** still only learns of a
-  change when something refetches the kingdom, and so does everything about the
-  map except which towns are working. That one fact is *polled*, every two
-  seconds and only while the map is on screen (`app.rs::poll_activity` over
-  `api::kingdom_activity`), because `events.rs` is keyed per plan by design and
-  a kingdom-wide channel is a real change rather than a smaller one. The
-  spyglass is deliberately
-  *not* surfaced on the map for that reason: a city lighting up because a plan
-  holds a live browser needs both this, and a plan that knows it owns a session.
+- Live updates on the **map**. The chamber is pushed to over a WebSocket
+  (`events.rs`, `watch.rs`), the plan's browser is mirrored over a second one
+  (`screencast.rs`), and the **rail** now has one of its own — a kingdom-wide
+  socket carrying a `PlanPulse` per plan (`watch.rs::KINGDOM_ROUTE`), which is
+  what lets a plan that has stopped to ask something say so from a chamber
+  nobody has open.
+
+  The map does not read it yet. Which towns are working is still *polled*, every
+  two seconds and only while the map is on screen (`app.rs::poll_activity` over
+  `api::kingdom_activity`) — written when `events.rs` was keyed per plan by
+  design and a kingdom-wide channel was "a real change rather than a smaller
+  one". That change has since landed, so the poll is now a survivor rather than
+  a necessity, and folding it onto the pulse is a tidy-up someone should do. The
+  rest of the map is a Bevy canvas, and colouring holdings from plan state is
+  its own piece of work. The spyglass is still deliberately *not* surfaced
+  there: a city lighting up because a plan holds a live browser needs a plan
+  that knows it owns a session.
 
   Both halves of "is the King looking at the map?" hang off the **same**
   `on_the_map` memo in `ThroneRoom`: it stops the activity poll

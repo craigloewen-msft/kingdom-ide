@@ -272,6 +272,10 @@ pub fn open_last_kingdom() -> Result<Option<Kingdom>, String> {
 pub async fn leave_kingdom() -> Result<(), ServerFnError> {
     *lock()? = Kingdom::unopened();
     crate::profile::forget_kingdom();
+    // The dedupe is keyed by plan id and would otherwise carry a closed
+    // kingdom's answers into the next one, so plans that had not changed since
+    // would open silently and their badges never arrive.
+    crate::events::forget_pulses();
     Ok(())
 }
 
@@ -511,6 +515,10 @@ pub async fn begin_plan(
     let root = std::path::PathBuf::from(&kingdom.root);
     remember(&root, &mut plan);
     kingdom.plans.push(plan.clone());
+    // Opening does not go through `update`, so nothing else would announce it.
+    // Without this a plan opened in one tab is invisible in another's rail
+    // until something refetches the kingdom.
+    crate::events::pulse(&plan);
 
     Ok(plan)
 }
@@ -1896,7 +1904,7 @@ fn describe(tool: &str, input: &serde_json::Value) -> String {
     // and "who is blocked behind whom" is one of the three questions this
     // product exists to answer. It gets said in those words rather than being
     // rendered as another tool name.
-    if tool == "ask_user_question" {
+    if tool == kingdom_core::ASK_USER_QUESTION {
         return "Waiting on the King".to_string();
     }
 

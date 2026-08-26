@@ -91,6 +91,15 @@ pub enum Scenario {
     /// the server speaking first, and a tool call that parks until a person
     /// replies.
     Ask,
+    /// Asks the user *several* questions at once, one of them multi-select.
+    ///
+    /// Its own scenario rather than a bigger [`Scenario::Ask`], because the two
+    /// rehearse genuinely different UI: one question is a card with a Submit
+    /// under it, and several is a wizard with a place in it that has to survive
+    /// every push the chamber receives. Without this the multi-question path
+    /// could only be exercised against a real gateway, and the King's place in
+    /// it could not be exercised at all.
+    AskSeveral,
     /// Uses a tool, then answers from its result.
     ///
     /// The offline rehearsal for the whole turn loop: a first call that asks to
@@ -147,6 +156,7 @@ impl Scenario {
             "work" | "tools" => Some(Scenario::Work),
             "errand" | "errands" => Some(Scenario::Subagents),
             "ask" => Some(Scenario::Ask),
+            "ask-many" | "ask-several" => Some(Scenario::AskSeveral),
             "propose" | "proposal" => Some(Scenario::Propose),
             _ => None,
         }
@@ -213,7 +223,7 @@ impl MockModel {
                 None => Reply::Acts(
                     Acts::plain(vec![Act {
                         id: "mock-question-1".to_string(),
-                        tool: "ask_user_question".to_string(),
+                        tool: kingdom_core::ASK_USER_QUESTION.to_string(),
                         input: serde_json::json!({
                             "questions": [{
                                 "question": format!(
@@ -249,6 +259,80 @@ impl MockModel {
                     summary: format!("Asked the King, and he chose: {}", chosen.trim()),
                     body: format!(
                         "You chose \"{}\", so that is how I would proceed on {}.\n\n\
+                         (Drafted by the mock model \u{2014} no real work was done.)",
+                        chosen.trim(),
+                        city.name
+                    ),
+                }),
+            }),
+
+            // Several at once, one of them multi-select. The chamber puts them
+            // to the King one at a time; what comes back here is the composed
+            // answer, which is why the reply quotes it whole rather than
+            // pretending it was a single choice.
+            Scenario::AskSeveral => Ok(match done_already(brief) {
+                None => Reply::Acts(
+                    Acts::plain(vec![Act {
+                        id: "mock-question-many".to_string(),
+                        tool: kingdom_core::ASK_USER_QUESTION.to_string(),
+                        input: serde_json::json!({
+                            "questions": [
+                                {
+                                    "question": format!(
+                                        "How should I approach {}?",
+                                        city.name
+                                    ),
+                                    "header": "Approach",
+                                    "options": [
+                                        {
+                                            "label": "The careful way",
+                                            "description": "Read everything first, change \
+                                                            one thing, and check it."
+                                        },
+                                        {
+                                            "label": "The quick way",
+                                            "description": "Make the obvious change and see \
+                                                            whether it builds."
+                                        }
+                                    ]
+                                },
+                                {
+                                    "question": "Which of these should I leave alone?",
+                                    "header": "Untouched",
+                                    "multi_select": true,
+                                    "options": [
+                                        { "label": "The tests" },
+                                        { "label": "The build files" },
+                                        {
+                                            "label": "The styles",
+                                            "description": "Anything under style/."
+                                        }
+                                    ]
+                                },
+                                {
+                                    "question": "And how would you like it proved?",
+                                    "header": "Proof",
+                                    "options": [
+                                        { "label": "Tests only" },
+                                        {
+                                            "label": "Tests and a screenshot",
+                                            "description": "Slower, but you see it."
+                                        }
+                                    ]
+                                }
+                            ]
+                        }),
+                    }])
+                    .saying(format!(
+                        "There are a few things about {} I would rather have from you than \
+                         guess at.",
+                        city.name
+                    )),
+                ),
+                Some(chosen) => Reply::Spoke(Draft {
+                    summary: "Asked the King three things, and heard back.".to_string(),
+                    body: format!(
+                        "You said:\n\n{}\n\nSo that is how I would proceed on {}.\n\n\
                          (Drafted by the mock model \u{2014} no real work was done.)",
                         chosen.trim(),
                         city.name

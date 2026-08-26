@@ -254,6 +254,32 @@
   text-align: center;
 }
 
+// A plan in this city is waiting on an answer.
+//
+// On the *city* row rather than only on the plan's, because a branch can be
+// collapsed — and a King who is not already watching that plan is exactly the
+// one whose branches are shut. A question hidden behind a chevron is a question
+// nobody answers.
+//
+// The only thing in the rail that pulses. Reserved for this deliberately: it is
+// the one state where work has stopped and cannot resume until he acts.
+.city-asking {
+  flex-shrink: 0;
+  color: t.$gold;
+  font-size: 11px;
+  animation: asking-pulse 2s ease-in-out infinite;
+}
+
+@keyframes asking-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+// Nothing moves for a reader who has asked the system to stop moving things.
+@media (prefers-reduced-motion: reduce) {
+  .city-asking { animation: none; }
+}
+
 // --- Plans under a city ----------------------------------------------------
 //
 // Every plan row is a link to its chamber, so the whole row is a target and
