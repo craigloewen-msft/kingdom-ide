@@ -237,6 +237,19 @@ pub struct Sandbox {
     tool_call: Option<String>,
     /// How much of the world this plan may touch. See [`Permissions`].
     permissions: Permissions,
+    /// Whether the model driving this turn can look at a picture.
+    ///
+    /// The third narrowing, beside [`Permissions`] and `Model::can_act`, and the
+    /// only one a *tool* needs at run time rather than at offer time.
+    /// `ToolSpec::for_model` handles the others by withholding the tool
+    /// entirely, which does not work here: `browser_take_screenshot` is worth
+    /// offering to a blind model -- the King still sees the picture in the
+    /// chamber -- it simply must not be handed the base64.
+    ///
+    /// Defaults to true, so a caller that never says is assumed sighted. The
+    /// cost of being wrong that way is bytes; the other way it is a model told
+    /// nothing about an image it could have read.
+    sighted: bool,
 }
 
 /// A refusal: the tool would not run, and why.
@@ -280,7 +293,22 @@ impl Sandbox {
             plan: kingdom_core::PlanId::new(String::new()),
             tool_call: None,
             permissions: Permissions::Full,
+            sighted: true,
         }
+    }
+
+    /// Records whether the model driving this turn can look at a picture.
+    ///
+    /// See the field. The one caller is `api.rs`, which asks the model the same
+    /// question [`crate::llm::ToolSpec::for_model`] asks it.
+    pub fn seen_by_a_sighted_model(mut self, sighted: bool) -> Self {
+        self.sighted = sighted;
+        self
+    }
+
+    /// Whether a tool should bother handing this model an image.
+    pub fn sighted(&self) -> bool {
+        self.sighted
     }
 
     /// Narrows what this sandbox may do. See [`Permissions`].

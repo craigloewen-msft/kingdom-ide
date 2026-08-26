@@ -4,6 +4,16 @@ use crate::ids::*;
 use crate::permissions::Permissions;
 use serde::{Deserialize, Serialize};
 
+/// The tool a model calls to stop and ask the user something.
+///
+/// Named here rather than only in `kingdom-app::tools::ask_user_question`
+/// because three different places have to recognise a parked question by name:
+/// the tool itself, the server describing what a plan is doing, and the browser
+/// deciding to draw the question rather than a deed. Two of those compile to
+/// wasm and cannot see the tool, so the string was written out three times and
+/// a rename would have broken the other two silently.
+pub const ASK_USER_QUESTION: &str = "ask_user_question";
+
 // ---------------------------------------------------------------------------
 // Kingdom & Cities
 // ---------------------------------------------------------------------------
@@ -94,6 +104,30 @@ impl Kingdom {
         match self.plans.iter_mut().find(|p| p.id == plan.id) {
             Some(existing) => *existing = plan,
             None => self.plans.push(plan),
+        }
+    }
+
+    /// Applies a pulse to the plan it names, if this kingdom holds it.
+    ///
+    /// Returns false when it does not -- a plan opened in another tab, most
+    /// likely -- which the browser reads as "refetch", because a pulse carries
+    /// too little to invent a plan from and inventing a half-one would put a row
+    /// in the rail that leads to an empty chamber.
+    ///
+    /// Only the fields a pulse actually carries are touched. Everything else on
+    /// the plan -- above all its transcript -- is left exactly as it was, which
+    /// is what makes this safe to apply to the very plan whose chamber is open:
+    /// the two sockets write different parts of the same record and cannot
+    /// clobber each other.
+    pub fn apply(&mut self, pulse: &PlanPulse) -> bool {
+        match self.plans.iter_mut().find(|p| p.id == pulse.id) {
+            Some(plan) => {
+                plan.title = pulse.title.clone();
+                plan.status = pulse.status;
+                plan.working_on = pulse.working_on.clone();
+                true
+            }
+            None => false,
         }
     }
 
@@ -809,12 +843,39 @@ impl Proposal {
 ///
 /// The count is the *provider's*, never ours -- see [`ContextUsage::percent`]
 /// for why an estimate would be worse than nothing.
+///
+/// **Tokens are not the only bill, which is why [`ContextUsage::bytes`] rides
+/// beside them.** A gateway enforces two separate limits and Kingdom has been
+/// refused on each: a context window, counted in tokens, and a request size,
+/// counted in bytes. A plan died three times on `413 Request Entity Too Large`
+/// while this struct cheerfully reported 257k of 1M -- telling the truth about
+/// the wrong quantity, which is worse than saying nothing, because the King had
+/// a number in front of him and it said he was fine.
+///
+/// The two diverge because much of a request is not prose. Signed reasoning
+/// blobs and base64 images are heavy on the wire and cheap or free in tokens;
+/// an audit of four real plans found the signatures alone were 39-56% of every
+/// request while the reported token count tracked only the visible content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
     /// Tokens the last turn actually cost, as the provider reported them.
     pub tokens: usize,
     /// The window those tokens were measured against.
     pub window: usize,
+    /// Bytes the last request actually weighed on the wire.
+    ///
+    /// Ours rather than the provider's, and the one number here that is not a
+    /// report but a measurement: `copilot.rs` sizes the body before it sends it
+    /// so a 413 can name its own size, and this is that figure kept rather than
+    /// discarded.
+    ///
+    /// `#[serde(default)]` because every plan recorded before this field
+    /// existed must still load -- `store::load` *skips* a document that will not
+    /// parse, so a missing field would silently empty the King's rail. Zero
+    /// reads as "not measured", which is what a reader should show as nothing
+    /// rather than as an empty request.
+    #[serde(default)]
+    pub bytes: usize,
 }
 
 impl ContextUsage {
@@ -834,6 +895,27 @@ impl ContextUsage {
         // reply as well as the prompt can report slightly over its own limit,
         // and "104%" reads as a bug in Kingdom rather than as a full window.
         Some(((self.tokens * 100 / self.window).min(100)) as u8)
+    }
+
+    /// What the last request weighed, for a reader: `1.4 MB`, or `None`.
+    ///
+    /// `None` when nothing was measured, for the same reason [`Self::percent`]
+    /// returns it for an undeclared window: a reader that prints this
+    /// unconditionally should say nothing rather than claim a request of zero
+    /// bytes. Plans recorded before this was measured are exactly that case.
+    ///
+    /// Megabytes past a megabyte and kilobytes below it, because the number
+    /// exists to be compared against a limit that lives in megabytes -- and
+    /// "1447 KB" makes a reader do the division that the failure it warns about
+    /// gives him no time for.
+    pub fn weight(&self) -> Option<String> {
+        match self.bytes {
+            0 => None,
+            bytes if bytes >= 1024 * 1024 => {
+                Some(format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)))
+            }
+            bytes => Some(format!("{} KB", bytes / 1024)),
+        }
     }
 }
 
@@ -1328,6 +1410,66 @@ impl Plan {
     /// tells the system prompt to remind the model whose plan it is following.
     pub fn approved_proposal(&self) -> Option<&Proposal> {
         self.proposal.as_ref().filter(|p| p.approved)
+    }
+
+    /// The question this plan has stopped to ask, if one is still standing.
+    ///
+    /// A single reader, for the same reason [`Plan::standing_proposal`] is one:
+    /// the browser draws a question instead of a deed and the rail badges the
+    /// plan for it, and two answers to "is there a question here?" is how those
+    /// come to disagree.
+    ///
+    /// In flight is the whole test. Once answered the call carries an outcome
+    /// and is ordinary history, which is what stops the user being asked the
+    /// same thing twice.
+    pub fn open_question(&self) -> Option<&ToolCall> {
+        self.transcript.iter().rev().find_map(|e| match e {
+            Entry::Tool(d) if d.tool == ASK_USER_QUESTION && d.in_flight() => Some(d),
+            _ => None,
+        })
+    }
+
+    /// What this plan wants of the user, if anything.
+    ///
+    /// The one place "does this need me?" is decided, and the reason it is here
+    /// rather than in the rail is that three surfaces ask it: the rail's badge,
+    /// the chamber's header, and [`Plan::pulse`], which carries the answer to
+    /// every open browser. A rail that decided this for itself would disagree
+    /// with the chamber the moment either changed.
+    ///
+    /// A question outranks a proposal because it is the narrower interruption:
+    /// a parked question is holding a turn open, where a proposal has already
+    /// ended one. In practice both cannot stand at once -- `propose_plan` ends
+    /// the turn -- but ranking them is cheaper than relying on that.
+    ///
+    /// Never for a subagent. A subagent reports to the model that sent it and
+    /// nothing about it is ever put to the user, which is the same rule
+    /// [`Kingdom::pending_plans`] and the rail's own filter keep.
+    pub fn wants_attention(&self) -> Option<Attention> {
+        if self.is_subagent() {
+            return None;
+        }
+        if self.open_question().is_some() {
+            return Some(Attention::Question);
+        }
+        self.standing_proposal().map(|_| Attention::Proposal)
+    }
+
+    /// This plan as the rail needs it: what it is, what it is doing, and what
+    /// it wants.
+    ///
+    /// See [`PlanPulse`] for why the kingdom-wide channel carries this rather
+    /// than the plan itself.
+    pub fn pulse(&self) -> PlanPulse {
+        PlanPulse {
+            id: self.id.clone(),
+            city: self.city.clone(),
+            title: self.title.clone(),
+            status: self.status,
+            working_on: self.working_on.clone(),
+            needs: self.wants_attention(),
+            is_subagent: self.is_subagent(),
+        }
     }
 
     /// Just the messages, in order.
@@ -2286,6 +2428,82 @@ impl PlanStatus {
     }
 }
 
+/// What a plan wants of the user, when it wants something.
+///
+/// Deliberately *not* a sixth [`PlanStatus`]. A status is where a plan is in its
+/// life -- drafting, awaiting review, merged -- and none of those change when a
+/// model stops to ask a question: the plan is still `Drafting`, it is simply
+/// blocked on a person. A sixth variant would have rippled through `ALL`, the
+/// map legend, `is_settled` and every match on plan state to say one word.
+///
+/// An enum rather than a bool because the rail has to say *which* -- "Question"
+/// and "Proposal" are different acts with different buttons behind them -- and
+/// because the next thing that will want the user's attention (a plan blocked on
+/// a port another plan is holding) is a variant here rather than a second flag
+/// somewhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Attention {
+    /// The court has stopped mid-turn and is waiting on an answer.
+    Question,
+    /// A plan is standing in front of the user, waiting to be started.
+    Proposal,
+}
+
+impl Attention {
+    /// What the badge says.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Attention::Question => "Question",
+            Attention::Proposal => "Proposal",
+        }
+    }
+
+    /// CSS class suffix, e.g. `plan-asking`.
+    ///
+    /// A proposal keeps the review colour it has always had: it *is* the
+    /// awaiting-review state, said more precisely. A question gets its own,
+    /// because the plan asking one is still `Drafting` and would otherwise be
+    /// painted the working green -- indistinguishable from a plan cheerfully
+    /// running a build while it sits blocked on the user.
+    pub fn css_suffix(&self) -> &'static str {
+        match self {
+            Attention::Question => "asking",
+            Attention::Proposal => "review",
+        }
+    }
+}
+
+/// One plan, as small as the rail can be told about it.
+///
+/// The kingdom-wide channel carries these rather than whole plans, and that is a
+/// deliberate departure from `events.rs`'s own rule. Publishing whole plans is
+/// free on a *per-plan* socket, where there is one watcher looking at exactly
+/// that plan. A kingdom-wide socket is the case that reasoning does not cover:
+/// every open tab would be woken with every plan's entire transcript on every
+/// round of every turn, to redraw a badge.
+///
+/// So this is the digest the rail actually renders, and nothing more. It is not
+/// a plan and cannot be mistaken for one -- a browser handed a pulse can update
+/// a row and cannot draw a conversation, which is the point. The chamber still
+/// has its own socket carrying everything.
+///
+/// `city` and `title` ride along so a pulse for a plan this browser has never
+/// seen -- one opened in another tab -- says enough to be worth refetching for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanPulse {
+    pub id: PlanId,
+    pub city: CityId,
+    pub title: String,
+    pub status: PlanStatus,
+    /// What the plan is doing right now, in the words `api::describe` chose.
+    pub working_on: Option<String>,
+    /// What it wants of the user, if anything. See [`Attention`].
+    pub needs: Option<Attention>,
+    /// Subagents are excluded from the rail, so a pulse says which it is rather
+    /// than making the rail look the plan up to find out.
+    pub is_subagent: bool,
+}
+
 /// What the user chose to do with a plan when he closed it.
 ///
 /// Crosses the wire, so it lives here rather than in the server. Two options
@@ -2757,7 +2975,8 @@ mod tests {
         assert_eq!(
             ContextUsage {
                 tokens: 4_000,
-                window: 0
+                window: 0,
+                bytes: 0,
             }
             .percent(),
             None
@@ -2766,7 +2985,8 @@ mod tests {
         assert_eq!(
             ContextUsage {
                 tokens: 50_000,
-                window: 200_000
+                window: 200_000,
+                bytes: 0,
             }
             .percent(),
             Some(25)
@@ -2775,11 +2995,63 @@ mod tests {
         assert_eq!(
             ContextUsage {
                 tokens: 208_000,
-                window: 200_000
+                window: 200_000,
+                bytes: 0,
             }
             .percent(),
             Some(100),
             "a full window reads as full, never as more than full"
+        );
+    }
+
+    /// The other limit, reported in the unit it is actually enforced in.
+    ///
+    /// A gateway refuses on a token window *and* on a request size, and Kingdom
+    /// has met both. The second killed a plan three times in ninety seconds
+    /// while `percent()` reported 26% of a million -- true, and about the wrong
+    /// quantity. This is the number that would have said why.
+    ///
+    /// The zero case is the one that matters for correctness rather than
+    /// presentation: every plan recorded before this field existed loads with
+    /// `bytes: 0` via `#[serde(default)]`, and a header that printed "0 KB" for
+    /// those would be claiming a measurement nobody took.
+    #[test]
+    fn an_unmeasured_request_weighs_nothing_rather_than_zero() {
+        let unmeasured = ContextUsage {
+            tokens: 4_000,
+            window: 1_000_000,
+            bytes: 0,
+        };
+        assert_eq!(
+            unmeasured.weight(),
+            None,
+            "a plan recorded before this was measured must say nothing, not '0 KB'"
+        );
+
+        // Below a megabyte, kilobytes. The unit a small request is legible in.
+        assert_eq!(
+            ContextUsage {
+                bytes: 442 * 1024,
+                ..unmeasured
+            }
+            .weight()
+            .as_deref(),
+            Some("442 KB")
+        );
+
+        // Past it, megabytes -- because the limit this exists to warn about is
+        // quoted in megabytes, and a reader meeting it has no time to divide.
+        // 1,520,435 is a real figure: the last request of a real plan, which is
+        // 1.45 MB and so reads as 1.4 rather than 1.5. Rounding down at the
+        // tenth is the right direction for a number compared against a ceiling.
+        assert_eq!(
+            ContextUsage {
+                bytes: 1_520_435,
+                ..unmeasured
+            }
+            .weight()
+            .as_deref(),
+            Some("1.4 MB")
         );
     }
 
@@ -4110,5 +4382,146 @@ mod review_note_tests {
 
         let plan: Plan = serde_json::from_str(before).expect("an older record must still load");
         assert!(plan.review_notes().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+
+    fn plan() -> Plan {
+        Plan::opened(
+            PlanId::new("plan-1"),
+            CityId::new("c1"),
+            "Fix the parser",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+        )
+    }
+
+    fn asking() -> ToolCall {
+        ToolCall::started("q1", ASK_USER_QUESTION, serde_json::json!({}))
+    }
+
+    /// The fault this whole feature exists for: a plan parked on a question is
+    /// still `Drafting`, so nothing about its *status* says the user is being
+    /// waited on. The rail read the status and said "Drafting" -- the same word
+    /// it uses for a plan happily running a build.
+    #[test]
+    fn a_parked_question_is_something_the_status_alone_cannot_say() {
+        let mut plan = plan();
+        plan.begin_tool_call(asking());
+
+        assert_eq!(
+            plan.status,
+            PlanStatus::Drafting,
+            "asking does not move a plan's status, which is exactly why \
+             `wants_attention` is a separate question"
+        );
+        assert_eq!(plan.wants_attention(), Some(Attention::Question));
+        assert!(plan.open_question().is_some());
+    }
+
+    /// Answered is history. The same call must stop demanding attention the
+    /// instant it settles, or the badge outlives the question and the user goes
+    /// looking for something that is no longer being asked.
+    #[test]
+    fn an_answered_question_wants_nothing() {
+        let mut plan = plan();
+        plan.begin_tool_call(asking());
+        plan.settle_tool_call("q1", ToolOutcome::done("Left"));
+
+        assert!(plan.open_question().is_none());
+        assert_eq!(plan.wants_attention(), None);
+    }
+
+    /// A question outranks a proposal, and a proposal is still reported when
+    /// there is no question. Both halves matter: the rail draws one badge, so
+    /// the ranking is what decides which word it shows.
+    #[test]
+    fn a_question_outranks_a_proposal() {
+        let mut plan = plan();
+        plan.propose("Fix the off-by-one", "Change `lex.rs` line 42.");
+        plan.status = PlanStatus::AwaitingReview;
+        assert_eq!(plan.wants_attention(), Some(Attention::Proposal));
+
+        plan.begin_tool_call(asking());
+        assert_eq!(
+            plan.wants_attention(),
+            Some(Attention::Question),
+            "a parked turn is the narrower interruption and is what the badge says"
+        );
+    }
+
+    /// Nothing about a subagent is ever put to the user -- it reports to the
+    /// model that sent it. The rail excludes them, so a subagent that somehow
+    /// asked a question must not light up its parent's city either.
+    #[test]
+    fn a_subagent_never_asks_the_king_for_anything() {
+        let parent = plan();
+        let mut errand = Plan::spawned(
+            PlanId::new("plan-errand"),
+            &parent,
+            "Read the parser",
+            "call-1",
+        );
+        errand.begin_tool_call(asking());
+
+        assert!(
+            errand.open_question().is_some(),
+            "the call is there; it is the *attention* that is withheld"
+        );
+        assert_eq!(errand.wants_attention(), None);
+    }
+
+    /// A pulse carries what the rail draws, and the attention is computed from
+    /// the plan rather than trusted from a field somebody has to remember to
+    /// set.
+    #[test]
+    fn a_pulse_says_what_the_rail_needs_and_no_more() {
+        let mut plan = plan();
+        plan.working_on = Some("Waiting on the King".into());
+        plan.begin_tool_call(asking());
+
+        let pulse = plan.pulse();
+        assert_eq!(pulse.id, plan.id);
+        assert_eq!(pulse.needs, Some(Attention::Question));
+        assert_eq!(pulse.working_on.as_deref(), Some("Waiting on the King"));
+        assert!(!pulse.is_subagent);
+    }
+
+    /// The half that makes two sockets safe on one plan: a pulse touches only
+    /// the fields it carries. If it replaced the plan, the rail's cheap channel
+    /// would wipe the transcript the chamber's expensive one just delivered.
+    #[test]
+    fn applying_a_pulse_leaves_the_transcript_alone() {
+        let mut kingdom = Kingdom::unopened();
+        let mut plan = plan();
+        plan.begin_tool_call(asking());
+        kingdom.plans.push(plan.clone());
+
+        let mut moved = plan.clone();
+        moved.working_on = Some("bash: cargo test".into());
+        moved.status = PlanStatus::AwaitingReview;
+
+        assert!(kingdom.apply(&moved.pulse()));
+        let stored = kingdom.plan(&plan.id).expect("the plan is still there");
+        assert_eq!(stored.status, PlanStatus::AwaitingReview);
+        assert_eq!(stored.working_on.as_deref(), Some("bash: cargo test"));
+        assert_eq!(
+            stored.transcript.len(),
+            plan.transcript.len(),
+            "a pulse must never be able to shorten a conversation"
+        );
+    }
+
+    /// A pulse for a plan this kingdom has never heard of is reported rather
+    /// than invented. Half a plan in the rail would be a row leading to an
+    /// empty chamber.
+    #[test]
+    fn a_pulse_for_an_unknown_plan_is_reported() {
+        let mut kingdom = Kingdom::unopened();
+        assert!(!kingdom.apply(&plan().pulse()));
+        assert!(kingdom.plans.is_empty());
     }
 }

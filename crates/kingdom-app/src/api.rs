@@ -272,6 +272,10 @@ pub fn open_last_kingdom() -> Result<Option<Kingdom>, String> {
 pub async fn leave_kingdom() -> Result<(), ServerFnError> {
     *lock()? = Kingdom::unopened();
     crate::profile::forget_kingdom();
+    // The dedupe is keyed by plan id and would otherwise carry a closed
+    // kingdom's answers into the next one, so plans that had not changed since
+    // would open silently and their badges never arrive.
+    crate::events::forget_pulses();
     Ok(())
 }
 
@@ -511,6 +515,10 @@ pub async fn begin_plan(
     let root = std::path::PathBuf::from(&kingdom.root);
     remember(&root, &mut plan);
     kingdom.plans.push(plan.clone());
+    // Opening does not go through `update`, so nothing else would announce it.
+    // Without this a plan opened in one tab is invisible in another's rail
+    // until something refetches the kingdom.
+    crate::events::pulse(&plan);
 
     Ok(plan)
 }
@@ -1519,7 +1527,12 @@ pub(crate) async fn converse(
         let tools = ToolSpec::for_model(model.as_ref(), permissions);
         let shop = Sandbox::new(workspace.clone())
             .for_plan(plan_id.clone())
-            .under(permissions);
+            .under(permissions)
+            // The fourth narrowing, and the one that could not live in
+            // `for_model`: `browser_take_screenshot` is offered to every model
+            // -- the King sees the picture either way -- but only a sighted one
+            // is handed the base64 with it. See `Sandbox::sighted`.
+            .seen_by_a_sighted_model(model.can_see());
 
         let brief = Brief {
             system_prompt: SystemPrompt::assemble(
@@ -1629,11 +1642,21 @@ pub(crate) async fn converse(
         //
         // Both numbers or neither: a count with no window is a percentage of
         // nothing. See `kingdom_core::ContextUsage`.
+        //
+        // The byte weight rides along rather than being written separately,
+        // for the same reason and one more: it is the *other* limit a gateway
+        // enforces, and the two are only comparable when they describe the same
+        // request. Written here, they always do.
         if let Some(tokens) = answer.tokens {
             let window = model.context_window();
+            let bytes = answer.bytes;
             let mut kingdom = lock()?;
             update(&mut kingdom, &plan_id, |p| {
-                p.context = Some(kingdom_core::ContextUsage { tokens, window });
+                p.context = Some(kingdom_core::ContextUsage {
+                    tokens,
+                    window,
+                    bytes,
+                });
             });
         }
 
@@ -2041,7 +2064,7 @@ fn describe(tool: &str, input: &serde_json::Value) -> String {
     // and "who is blocked behind whom" is one of the three questions this
     // product exists to answer. It gets said in those words rather than being
     // rendered as another tool name.
-    if tool == "ask_user_question" {
+    if tool == kingdom_core::ASK_USER_QUESTION {
         return "Waiting on the King".to_string();
     }
 

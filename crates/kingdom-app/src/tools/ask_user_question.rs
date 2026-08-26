@@ -30,7 +30,7 @@
 //!    instead, which is the only place that can know.
 
 use super::{Refusal, Sandbox, Tool};
-use kingdom_core::{PlanId, ToolOutcome, WaitBudget};
+use kingdom_core::{PlanId, ToolOutcome, WaitBudget, ASK_USER_QUESTION};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -92,8 +92,12 @@ pub struct AskUserQuestion;
 
 #[async_trait::async_trait]
 impl Tool for AskUserQuestion {
+    /// The name is [`ASK_USER_QUESTION`], defined in `kingdom-core` because the
+    /// browser has to recognise a parked question by it and cannot see this
+    /// crate. The tool still answers for its own name; it just no longer spells
+    /// it out a second time.
     fn name(&self) -> &'static str {
-        "ask_user_question"
+        ASK_USER_QUESTION
     }
 
     fn description(&self) -> String {
