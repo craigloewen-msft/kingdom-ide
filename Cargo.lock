@@ -3596,11 +3596,13 @@ dependencies = [
  "gloo-net",
  "gloo-timers",
  "ignore",
+ "js-sys",
  "kingdom-core",
  "leptos",
  "serde",
  "serde_json",
  "tempfile",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]

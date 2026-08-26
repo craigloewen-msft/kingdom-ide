@@ -16,15 +16,19 @@
 //! | Module | Target | What it is |
 //! |---|---|---|
 //! | [`map`] | both | the manifest: plain serialisable world-space geometry |
+//! | [`progress`] | both | how much of that manifest has arrived, as a bar |
 //! | [`build`] | `ssr` | scanning a kingdom on disk and laying it out |
 //! | [`engine`] | `hydrate` | drawing a manifest with Bevy |
 //!
 //! The split is load-bearing in both directions. [`build`] uses `std::fs` and
 //! `ignore`, neither of which belongs in a wasm bundle; [`engine`] pulls in
-//! Bevy, which must never reach the Axum binary. [`map`] is the only part on
-//! both, which is exactly why the manifest exists: it is the seam the two
-//! halves meet at, and `kingdom-app` is what carries it between them over
-//! [`crate::ROUTE`].
+//! Bevy, which must never reach the Axum binary. [`map`] is the only *seam* on
+//! both targets, which is exactly why the manifest exists: it is where the two
+//! halves meet, and `kingdom-app` is what carries it between them over
+//! [`crate::ROUTE`]. [`progress`] is on both targets for a smaller reason --
+//! only the browser reads it, but `cargo test` builds this crate with no
+//! features at all, and arithmetic nothing compiles is arithmetic nothing
+//! tests.
 //!
 //! `engine` is also compiled natively for `cargo test` — its camera, mesh,
 //! label and bridge logic are plain maths and the copied tests are what pin
@@ -51,6 +55,7 @@ pub mod build;
 #[cfg(any(feature = "hydrate", test))]
 pub mod engine;
 pub mod map;
+pub mod progress;
 
 #[cfg(feature = "hydrate")]
 mod view;

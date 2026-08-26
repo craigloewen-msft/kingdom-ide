@@ -16,6 +16,7 @@ pub mod input;
 pub mod labels;
 pub mod materials;
 pub mod meshes;
+pub mod raise;
 pub mod spawn;
 pub mod stars;
 pub mod text;
@@ -36,10 +37,11 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use std::time::Duration;
 
 use activity::Activity;
-use bridge::{Bridge, ViewerCommand};
+use bridge::{Bridge, RaiseStage, Raising, ViewerCommand};
 use camera::{CameraRig, MapCamera};
 use lod::ActiveLod;
 use materials::MaterialCache;
+use raise::Raise;
 use spawn::{LoadedMap, MeshCache, SceneRoot};
 
 /// The CSS selector of the canvas the engine draws into.
@@ -115,6 +117,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<LoadedMap>()
             .init_resource::<ActiveLod>()
             .init_resource::<Activity>()
+            .init_resource::<Raise>()
             .init_resource::<wards::ActiveWard>()
             .init_resource::<input::PointerState>()
             .init_resource::<labels::LabelPool>()
@@ -123,6 +126,10 @@ impl Plugin for RepoCityPlugin {
                 Update,
                 (
                     apply_commands,
+                    // Straight after the commands that start it, so a world
+                    // begins going up on the same frame it was handed over
+                    // rather than one later.
+                    raise::raise_world,
                     input::track_pointer,
                     input::handle_scroll,
                     lod::track_lod,
@@ -165,11 +172,10 @@ fn setup(mut commands: Commands) {
 fn apply_commands(
     mut commands: Commands,
     bridge: Res<Bridge>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut mesh_cache: ResMut<MeshCache>,
     mut material_cache: ResMut<MaterialCache>,
     mut loaded: ResMut<LoadedMap>,
+    mut raise: ResMut<Raise>,
     mut rig: ResMut<CameraRig>,
     mut working: ResMut<Activity>,
     existing: Query<Entity, With<SceneRoot>>,
@@ -189,20 +195,25 @@ fn apply_commands(
     for command in queued {
         match command {
             ViewerCommand::Load(manifest) => {
+                // The world is no longer built here. `raise::raise_world`
+                // builds it a slice at a time over the frames that follow, so
+                // the browser can paint the loading bar between them -- see
+                // that module for why one call cannot.
+                //
+                // What is still done inline is everything that costs nothing:
+                // clearing the old world, lighting the scene, and spawning the
+                // root the new one goes up under.
+                raise.abandon();
                 spawn::clear_world(
                     &mut commands,
                     &existing,
                     &mut mesh_cache,
                     &mut material_cache,
                 );
-                spawn::spawn_world(
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut mesh_cache,
-                    &mut material_cache,
-                    &manifest.world,
-                );
+                // The manifest the map is *about to be* is not the map, so
+                // anything reading `LoadedMap` mid-raise must find the absence
+                // rather than a world whose entities do not exist yet.
+                loaded.0 = None;
 
                 if let Ok((mut camera, mut exposure, mut ambient)) = cameras.single_mut() {
                     camera.clear_color =
@@ -214,15 +225,21 @@ fn apply_commands(
                     ambient.brightness = manifest.world.sun.ambient_brightness;
                 }
 
-                fit(&mut rig, &manifest.world, viewport);
-                // Zoom limits and detail tiers are measured against a house,
-                // so the reference house is taken once per world. The fitted
-                // scale is kept only as the floor on how far back the camera
-                // may pull, so that a large world can still be framed whole.
-                rig.holding = typical_holding(&manifest);
-                rig.fit_scale = rig.scale;
+                // Hidden until it stands. The loading card is a translucent
+                // gradient rather than an opaque screen, so a half-built
+                // kingdom would show through it -- and scenery spawns visible
+                // and is only culled the next time `apply_lod` runs, so the
+                // King would watch trees appear and then vanish.
+                let root = spawn::spawn_root(&mut commands, Visibility::Hidden);
                 bridge.update_status(|status| {
-                    status.built = true;
+                    // Not built, and no longer showing whatever stood before: a
+                    // stale map under a loading card is worse than an empty
+                    // one, because it looks finished.
+                    status.built = false;
+                    status.raising = Some(Raising {
+                        stage: RaiseStage::Ground,
+                        fraction: 0.0,
+                    });
                     status.error = None;
                     status.hovered = None;
                     // A click on a world that no longer exists must not be
@@ -231,7 +248,7 @@ fn apply_commands(
                     status.selected_ward = None;
                     status.hovered_ward = None;
                 });
-                loaded.0 = Some(manifest);
+                raise.begin(manifest, root);
             }
             ViewerCommand::Fit => {
                 if let Some(manifest) = loaded.0.as_ref() {
@@ -278,27 +295,41 @@ fn apply_commands(
                 if let Ok((mut camera, _, _)) = cameras.single_mut() {
                     camera.is_active = showing;
                 }
-                *winit = if showing {
-                    WinitSettings {
-                        focused_mode: UpdateMode::Continuous,
-                        unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
-                    }
-                } else {
-                    // Deliberately a short wait rather than a long one. The
-                    // engine is told to come back *through the bridge*, which
-                    // only `apply_commands` drains and which therefore only
-                    // runs on an update -- so this interval is also the delay
-                    // before a return to the map is noticed. Ticking four
-                    // times a second costs almost nothing, because every
-                    // system in the schedule early-returns when nothing has
-                    // changed, while the expensive half stays off with the
-                    // camera.
-                    WinitSettings {
-                        focused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
-                        unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
-                    }
-                };
+                // Not while a world is going up. `raise_world` overrides this
+                // to continuous every frame it runs anyway -- see the note
+                // there -- and setting it here as well would only mean the
+                // pace flickering between the two systems for the length of a
+                // raise.
+                if !raise.in_flight() {
+                    *winit = winit_for(showing);
+                }
             }
+        }
+    }
+}
+
+/// How hard the engine works, given whether the King is looking at the map.
+///
+/// Shared with [`raise::raise_world`], which forces the watching pace while a
+/// world goes up and restores this on the frame it finishes -- one definition,
+/// so the two cannot disagree about what "idle" means.
+fn winit_for(showing: bool) -> WinitSettings {
+    if showing {
+        WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+        }
+    } else {
+        // Deliberately a short wait rather than a long one. The engine is told
+        // to come back *through the bridge*, which only `apply_commands`
+        // drains and which therefore only runs on an update -- so this interval
+        // is also the delay before a return to the map is noticed. Ticking four
+        // times a second costs almost nothing, because every system in the
+        // schedule early-returns when nothing has changed, while the expensive
+        // half stays off with the camera.
+        WinitSettings {
+            focused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+            unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
         }
     }
 }

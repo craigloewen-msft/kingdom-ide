@@ -81,6 +81,15 @@ pub fn CityRail(
     /// every tick of it means the court may have touched a file. See the module
     /// note in `review_drawer.rs`.
     activity: Memo<usize>,
+    /// Bumped when the King deletes a file himself, so the tree can drop its
+    /// cache and list the workspace again.
+    ///
+    /// Its own signal rather than folded into `activity`, because the two mean
+    /// different things: `activity` says *something happened*, which is worth a
+    /// cheap re-count of the diff, and this says *the shape of the workspace
+    /// changed*, which is the only thing worth throwing a listing away for. The
+    /// tree is deliberately cached against re-listing on every idle tick.
+    revision: RwSignal<usize>,
     /// The file the panel beside the transcript is showing, if it is showing a
     /// file at all -- read whole or as a diff. Both panes highlight against it.
     open_file: Memo<Option<String>>,
@@ -154,6 +163,7 @@ pub fn CityRail(
                 </div>
                 <FileTree
                     plan=plan.clone()
+                    revision=revision
                     open_file=open_file
                     on_open=on_read
                 />

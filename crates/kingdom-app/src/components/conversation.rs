@@ -7,8 +7,8 @@
 
 use crate::api::{
     annotate_file, annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom,
-    plan_briefing, say, send_file_notes, send_notes, set_aside_plan, stop_plan, unqueue,
-    withdraw_file_note, withdraw_note,
+    plan_briefing, plan_delete_file, plan_write_file, say, send_file_notes, send_notes,
+    set_aside_plan, stop_plan, unqueue, withdraw_file_note, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -837,6 +837,63 @@ fn ConversationBody(
         },
     );
 
+    // The King's own edits, saved and deleted. The panel is presentational --
+    // every call in this view is owned here, as the note above it is -- so it
+    // hands up what was typed and this decides what happens to it.
+    //
+    // The path is read here rather than passed up, for `annotate_line`'s reason:
+    // the panel knows the buffer and the chamber knows which file is open, and a
+    // path carried through the panel would be a second copy to keep in step with
+    // `Aside`.
+    //
+    // `saved_stamp` is the answer coming back. A `Callback` cannot return the
+    // result of a server call, and the panel needs the new stamp -- without it
+    // the second save of a session is checked against the stamp of the file
+    // before the first, and refused as stale by the King's own edit.
+    let saved_stamp = RwSignal::new(None::<kingdom_core::FileStamp>);
+    let save_file = Callback::new(move |(content, stamp): (String, kingdom_core::FileStamp)| {
+        let Some(path) = open_file.get_untracked() else {
+            return;
+        };
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match plan_write_file(plan_id.to_string(), path, content, stamp).await {
+                Ok(written) => {
+                    state.error.set(None);
+                    saved_stamp.set(Some(written.stamp));
+                    // The plan is not updated from here: the save appended a
+                    // note server-side, and the watch socket delivers the
+                    // whole plan back. Inserting a stale copy would race it.
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // How many times a file has been deleted. Not read for its value: the files
+    // tree caches every listing and deliberately never refetches, so a deleted
+    // file would sit in it forever. Bumping this clears that cache. On delete
+    // only -- a save changes no listing.
+    let tree_revision = RwSignal::new(0usize);
+    let delete_file = Callback::new(move |stamp: kingdom_core::FileStamp| {
+        let Some(path) = open_file.get_untracked() else {
+            return;
+        };
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match plan_delete_file(plan_id.to_string(), path, stamp).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                    tree_revision.update(|r| *r += 1);
+                    // The panel was showing a file that no longer exists.
+                    aside.set(Aside::Hidden);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
     // Taking one back. Losing the race is reported rather than swallowed, for
     // the reason `api::withdraw_file_note` gives.
     let withdraw_line_note = Callback::new(move |note_id: String| {
@@ -899,6 +956,7 @@ fn ConversationBody(
                 summary=summary
                 looking=looking
                 activity=activity
+                revision=tree_revision
                 open_file=open_file
                 on_read=read_file
                 on_diff=review_file
@@ -1440,6 +1498,9 @@ fn ConversationBody(
                         notes=notes_on_source
                         width=source_width
                         on_note=annotate_line
+                        on_save=save_file
+                        on_delete=delete_file
+                        saved=saved_stamp
                         on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
                 </Show>

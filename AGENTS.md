@@ -128,7 +128,10 @@ crates/
     review.rs       What a plan changed, and how one file differs, as pure
                     data. The rows arrive already paired for a side-by-side
                     view; every decision needing a repository is made in
-                    kingdom-app::review
+                    kingdom-app::review. FileText/FileStamp live here too: one
+                    file whole and byte-exact for the King to edit, and the
+                    cheap "is this still what I opened?" a save is checked
+                    against
     naming.rs       slugify — a plan's title turned into its branch name
     sample.rs       Placeholder starter plans
     mockdata/       The Proving Grounds: synthetic fixtures, in Rust
@@ -154,6 +157,12 @@ crates/
                     kingdom's records are kept (ssr only)
     review.rs       What a plan has changed against the default branch, and one
                     file's diff, read out of its workspace with git (ssr only)
+    edit.rs         The King's own edits: one file read whole and byte-exact,
+                    written back, or removed. review.rs reads a file for
+                    LOOKING AT (numbered, truncatable); this reads one for
+                    CHANGING, so it never truncates and never reshapes. Holds
+                    the stamp check that stops a save overwriting what the
+                    court did while he was typing (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)
@@ -202,7 +211,9 @@ crates/
                     file_tree.rs (the plan's workspace on disk — a file row
                     opens it in the panel) and review_drawer.rs (every
                     file this plan has changed),
-                    source_view.rs (one file read whole) and diff_view.rs (one
+                    source_view.rs (one file read whole, and — in its other
+                    mode — open for the King to edit, save or delete) and
+                    diff_view.rs (one
                     changed file, old beside new) — those two and the spyglass
                     are alternatives for one panel, see `Aside`, and every line
                     of either takes a note,
@@ -229,8 +240,13 @@ crates/
                     same reason: `build` walks the disk and must never reach
                     wasm; `engine` is Bevy and must never reach the server.
     map/            The manifest: world-space geometry, plain serialisable
-                    data. The ONLY part on both targets — it is the seam the
-                    two halves meet at
+                    data. The one *seam* on both targets — where the two halves
+                    meet
+    progress.rs     How much of that manifest has arrived, as a fraction and a
+                    line of text. Also on both targets, for a smaller reason:
+                    only the browser reads it, but `cargo test` builds this
+                    crate with no features, and `view.rs` is hydrate-only, so
+                    arithmetic left there is never compiled by the suite
     build/          Scanning a kingdom and laying it out (ssr). Repo City's
                     own `Survey` was deliberately NOT taken: it finds projects
                     by looking for `.git` and so drops a folder without one,
@@ -243,8 +259,12 @@ crates/
                     geometry. `stars.rs` is the one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
                     would have no parallax and would *zoom* with the kingdom —
-                    it rides on the camera in pixels instead
-    view.rs         `CityMap` — the canvas, and the click that selects a city
+                    it rides on the camera in pixels instead. `raise.rs` builds
+                    a world a slice at a time instead of in one call, so the
+                    browser gets the frame back and the loading bar can move —
+                    see §4
+    view.rs         `CityMap` — the canvas, the click that selects a city, and
+                    the loading card with the bar on it
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -663,6 +683,59 @@ offering it scoped to a draft says *you may write down what you would change*.
 boundary the model is trusted to keep rather than one that is enforced. Closing
 that properly means an OS-level sandbox, which is a deliberate later decision.
 
+**The map says how far along it is, and had to be rebuilt to be able to.** The
+loading card named its two phases and animated three towers; it reported no
+progress, because there was none to be had. Both phases now carry a real bar,
+and the second one is the whole of the work.
+
+The fetch was the easy half: `view::read_whole` reads the body a chunk at a time
+instead of calling `Response::json`, and counts bytes against `content-length`.
+`progress::Transfer` turns that into a fraction and a line — *2.1 MB of 4.2 MB*.
+It refuses to answer rather than guessing when the two numbers cannot be
+compared: no declared length, or a count that has passed it. That second case is
+not hypothetical — putting compression in front of `/kingdom/map.json` would
+make `content-length` the compressed size while the reader counts decompressed
+bytes, and a bar reading 640% is worse than one that admits it does not know.
+
+The raise is the half that mattered. **A bar over `spawn_world` could not have
+moved at all**: measured on a real dev folder, building ~20k entities held the
+main thread in blocks of 1.3–1.7 seconds, and a sampling loop started at
+navigation did not get its first turn until t≈10.9 s. Nothing repaints in there
+— which is exactly why the card's SCSS already insisted every animation on it be
+`transform`/`opacity`, since those composite off the main thread. A *number* has
+no such escape. So `engine::raise` cuts the build into slices against an 8 ms
+deadline, publishes the fraction to the bridge between them, and lets the frame
+go. The bar moves because the browser is free to draw it.
+
+Five things there are load-bearing. `spawn.rs`'s stages take a `Range` and
+`spawn_step` is the one door both paths go through, so the sliced build and
+`spawn_world` cannot raise different settlements. The root is spawned
+**hidden** and revealed on the last slice: the card is a translucent gradient
+rather than an opaque screen, and scenery spawns visible and is only culled when
+`apply_lod` next runs — so the King would otherwise watch trees appear and then
+vanish. `ActiveLod` and `Activity` are **marked changed** at completion, because
+both systems early-return unless their resource moved and every entity of the
+new world was spawned after the last change. Winit is held at the watching pace
+while a raise is in flight, since walking into a chamber mid-raise would
+otherwise drop the engine to four ticks a second and turn three seconds into a
+minute — `winit_for` is one definition so the two systems cannot disagree. And
+`built` still means *standing*, so the card's dismissal and the bridge's test
+for it are untouched.
+
+The weights in `Step::weight` are **estimates** and the design assumes so:
+being wrong makes the bar advance unevenly and nothing else, and `fraction`
+reaches exactly 1.0 whatever they say. `status_matches` compares the fraction
+within 0.5% for the reason it already tolerates sub-pixel camera drift — tens of
+thousands of entities against a bar a few hundred pixels wide — but starting and
+finishing are always heard, because `None` means *nothing is going up* and
+rounding that together with a build at 0% would leave the bar indeterminate for
+the whole first slice.
+
+What is deliberately **not** done here is compressing that route. It would cut
+4.35 MB to ~694 KB and help the fetch more than any bar does, but it is a server
+change with its own trade-offs and it is what `Transfer`'s clamp is written to
+survive.
+
 **Not built at all:**
 - **Subagents with tools, and subagents that spawn subagents.** A subagent is
   read-only
@@ -846,6 +919,76 @@ a composer open does not refetch.** Both panels otherwise follow the court's
 edits, which is right while the King is only reading and wrong the moment he is
 typing against line 34 — the lines would shift under him and the note would land
 on something he never read.
+
+**And he can change the file himself.** The source panel has two modes. *Notes*
+is the panel above: every line takes a comment for the court. *Edit* replaces the
+lines with one box, and he can save the file or delete it — `plan_file_text` →
+`plan_write_file` / `plan_delete_file` over `edit.rs`. A mode of one panel rather
+than a fourth `Aside`, because it is the same file in the same slot; a King who
+spots a typo while reading should not have to close what he is looking at to fix
+it. It is deliberately **not** offered on the diff: editing one column of a
+comparison is ambiguous about which column, and the comparison goes stale under
+the cursor as it is typed into.
+
+Those routes are the fifth, sixth and seventh places an outsider names a path and
+the server opens it, and they raise the stakes — the earlier four only *read* a
+file the King should not see, and these overwrite or delete one. All seven go
+through `within_workspace` and none has a resolver of its own, which a test now
+pins by reading the source. They refuse a **settled** plan, as `annotate_file`
+does and for its reason, and they deliberately do **not** consult `Permissions`:
+that is what bounds the *court*, and gating it would mean the man reviewing a
+proposal cannot fix the typo he just found in it.
+
+Four decisions there are load-bearing.
+
+**The buffer is fetched, not rebuilt from the rendered lines.** `FileText` is a
+second type beside `SourceText` precisely so it can be whole and byte-exact where
+that one is numbered and truncated. Joining `SourceText`'s lines back with `\n`
+would need no request at all and would rewrite every CRLF file as LF and add or
+remove a final newline, because those lines come from `str::lines()` — a
+whole-file diff the King never asked for, landing in his agent's branch. A cap on
+`FileText` would be the same class of harm: a truncated buffer saved back is a
+file with its tail deleted, so a file too long to edit is *refused* rather than
+part-shown.
+
+**And the line endings are restored on the way out**, which is the same lesson
+one layer lower and was found only by driving the real panel. A **DOM textarea
+normalises CRLF to LF in its `value`**: the bytes reach the browser intact, the
+King types one character, and what comes back has had every `\r` stripped by the
+platform before any of Kingdom's code ran. The server-side round-trip test passed
+throughout — it never went near a DOM. So `edit::write` gives the text the
+convention the file on disk already had, guarded twice: only if the file *was*
+CRLF, and only if what arrived has no `\r` at all, which is the signature of a
+wholesale strip rather than of a deliberately mixed file. Nothing in the browser
+can be trusted to preserve this, and nothing in the browser needs to.
+
+**A save cannot overwrite work it never saw.** Every read carries a `FileStamp`
+— length and an FNV-1a hash, the not-cryptographic-and-doesn't-need-to-be trick
+`profile::hash` already uses — and a write or delete sends it back to be checked.
+The King reads a file while his agent works in the same workspace, so without
+this a save at the wrong moment silently destroys a round of the agent's work,
+which is the exact collision this product exists to surface rather than to cause.
+Optimistic rather than a lock, because a lock has to be released by something and
+the something is a browser tab that may simply be closed. A missing file stamps
+as `ABSENT`, which is what makes deleting an already-deleted file a refusal
+rather than a silent success.
+
+**Unsaved text is never dropped on the floor.** Dirty buffers are stashed by path
+for the chamber's lifetime, so glancing at another file mid-edit and coming back
+restores what was typed. No modal and no `confirm()` — there is nothing to lose,
+so there is nothing to ask about. Edit mode also suspends the refetch, which is
+the composer's rule above for a sharper version of its reason: text moving under
+a cursor is worse than under a quote.
+
+Two smaller things. A save appends a `NoteKind::Workspace` note, which the King
+reads and the model never sees — notes are excluded from `Plan::turns` by design,
+and the court finds out the honest way, since `patch` reads a file fresh on every
+call and refuses an anchor that is no longer there. That note also lengthens the
+transcript, which is the change signal the review drawer already refetches on, so
+his own edit refreshes the drawer's counts by the route the court's edits use.
+And a **delete** bumps a `revision` the files tree watches: that tree caches every
+listing and deliberately never re-lists, so without it a deleted file would sit
+in the rail forever. On delete only — a save changes no listing.
 
 **The court can see, and can be seen.** `read_image` was the tool that closed the
 loop `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
