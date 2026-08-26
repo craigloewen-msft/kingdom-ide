@@ -83,6 +83,17 @@ pub enum ViewerCommand {
     /// the map answers questions while the pointer is over it and forgets as
     /// soon as it leaves.
     SelectWard(Option<String>),
+    /// Whether the King is actually looking at the map.
+    ///
+    /// The map is mounted once for the life of the page and hidden with CSS
+    /// while he is in a plan's chamber -- see `kingdom_app::app::ThroneRoom`
+    /// for why it may never unmount. But `visibility: hidden` stops the pixels
+    /// reaching the screen, not the work of producing them: the engine would
+    /// go on running its render graph over every building on the island,
+    /// behind a conversation, for as long as that conversation lasted. Since
+    /// most of the King's time is spent in a chamber rather than on the map,
+    /// that is most of the time.
+    Show(bool),
 }
 
 /// What the engine is currently showing.
