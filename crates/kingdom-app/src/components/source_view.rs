@@ -18,8 +18,13 @@
 //!
 //! **Notes** is the panel's original self: every line is a button that opens a
 //! composer, and what is written lands in the review the King sends to the
-//! court. **Edit** replaces the lines with one textarea and lets him change the
-//! file himself, save it, or delete it.
+//! court. Its lines arrive already split into coloured runs -- see
+//! `kingdom_app::highlight`, which does that on the server so no syntax
+//! definition reaches the browser. **Edit** replaces the lines with
+//! one textarea and lets him change the file himself, save it, or delete it;
+//! there is deliberately no colour there, because a textarea cannot hold one
+//! without a second element behind it kept in sync, and this is a panel for a
+//! quick fix rather than a second editor.
 //!
 //! A mode of one panel rather than a fourth [`Aside`], because it is the same
 //! file in the same slot answering the same question -- and because a King who
@@ -55,7 +60,8 @@
 use crate::api::{plan_file_text, plan_source};
 use crate::components::note_composer::NoteComposer;
 use kingdom_core::{
-    DiffVerdict, FileStamp, FileText, NoteSide, PlanId, ReviewNote, SourceLine, SourceText,
+    CodeSpan, DiffVerdict, FileStamp, FileText, NoteSide, PlanId, ReviewNote, SourceLine,
+    SourceText,
 };
 use leptos::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -603,13 +609,13 @@ pub fn SourceView(
                             // edit gives the same number different content, and a
                             // key of the number alone would leave the old line
                             // drawn under the new one's note.
-                            key=|line: &SourceLine| (line.number, line.text.clone())
+                            key=|line: &SourceLine| (line.number, line.text())
                             let:line
                         >
                             {
                                 let number = line.number;
-                                let body = line.text.clone();
-                                let quote = StoredValue::new(line.text.clone());
+                                let spans = line.spans.clone();
+                                let quote = StoredValue::new(line.text());
                                 let open = Memo::new(move |_| writing.get() == Some(number));
                                 let noted = Memo::new(move |_| marked.get().contains(&number));
 
@@ -643,7 +649,41 @@ pub fn SourceView(
                                                     ""
                                                 }}
                                             </span>
-                                            <span class="source-text">{body.clone()}</span>
+                                            // Painted run by run, as a diff row
+                                            // is: what colour a piece of code
+                                            // takes was decided on the server,
+                                            // where the syntax definitions are.
+                                            // A file nothing is known about
+                                            // arrives as a single plain span and
+                                            // reads exactly as it always did.
+                                            <span class="source-text">
+                                                <For
+                                                    each={
+                                                        let spans = spans.clone();
+                                                        move || {
+                                                            spans
+                                                                .clone()
+                                                                .into_iter()
+                                                                .enumerate()
+                                                                .collect::<Vec<_>>()
+                                                        }
+                                                    }
+                                                    key=|(i, _): &(usize, CodeSpan)| *i
+                                                    let:span
+                                                >
+                                                    {
+                                                        let (_, span) = span;
+                                                        view! {
+                                                            <span class=format!(
+                                                                "tok tok-{}",
+                                                                span.token.css_suffix(),
+                                                            )>
+                                                                {span.text.clone()}
+                                                            </span>
+                                                        }
+                                                    }
+                                                </For>
+                                            </span>
                                         </button>
 
                                         <Show when=move || open.get()>

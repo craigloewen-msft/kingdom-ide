@@ -99,6 +99,32 @@ opt-level = 1
 [profile.wasm-dev.package.kingdom-core]
 opt-level = 1
 
+# The syntax highlighter, optimised even in a debug build.
+#
+# `[profile.wasm-dev]` above says why for the client; this is the same argument
+# for the *server*, which `cargo leptos watch` builds with plain `dev`. Syntect
+# is a regex engine walking a file character by character, and unoptimised it is
+# roughly 16x slower: measured on this workspace, tokenising `model.rs` (4,735
+# lines) took 5.4s at opt-level 0 and 350ms released. 5.4s is long enough to
+# make opening a file in the source panel feel broken during development, and
+# the whole point of that panel is that it answers immediately.
+#
+# These crates are never what is being edited, so the cost is one slow build and
+# nothing afterwards -- with these entries the same file tokenises in 1.15s on a
+# debug server. Release builds are unaffected; they already optimise everything.
+[profile.dev.package.syntect]
+opt-level = 3
+[profile.dev.package.fancy-regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.bincode]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
 # cargo-leptos configuration ------------------------------------------------
 # Drives the two-target build: a native SSR server binary + a wasm client bundle.
 [[workspace.metadata.leptos]]
