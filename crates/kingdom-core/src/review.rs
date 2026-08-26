@@ -164,7 +164,85 @@ pub struct SourceLine {
     /// The line's number in its own file, 1-based. Carried rather than derived
     /// from the index because a truncated file still has to number honestly.
     pub number: u32,
+    /// The text, split into the runs that carry one colour each.
+    ///
+    /// The same shape [`DiffLine`] already has, and for the same reason: a line
+    /// is rendered as a sequence of spans, so the thing that decides where a
+    /// span begins is a server's job rather than a browser's. A line nothing is
+    /// known about is one span of [`Token::Plain`], which is what an
+    /// unrecognised language, an over-wide line and a spent budget all fall to.
+    pub spans: Vec<CodeSpan>,
+}
+
+impl SourceLine {
+    /// The whole line as one string.
+    ///
+    /// Load-bearing rather than a convenience. A note the King writes carries
+    /// the line it is about as a `quote`, and the court is shown that quote --
+    /// so if joining the spans did not give back exactly the bytes that were
+    /// read, every note against a coloured line would misquote it. The
+    /// highlighter has a test pinning this for real files.
+    pub fn text(&self) -> String {
+        self.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+}
+
+/// A run of text within a line, and what kind of code it is.
+///
+/// Deliberately not [`Span`], which carries `emphasis: bool` and answers "is
+/// this part of what changed?". This answers "what is this?". One type with
+/// both would invite a diff row to be tinted by syntax and a source line to be
+/// emphasised, neither of which is a thing that happens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeSpan {
     pub text: String,
+    pub token: Token,
+}
+
+/// What a run of code is, coarsely.
+///
+/// Seven answers rather than the hundreds of scopes a syntax definition
+/// distinguishes, because this exists to be *read at a glance* -- the same
+/// reasoning [`Language`] is a short list rather than an exhaustive one. A
+/// reader scanning a file wants comments to recede and strings to separate
+/// themselves from code; they do not want a different colour for a lifetime
+/// than for a keyword.
+///
+/// In `kingdom-core` because it crosses the wire, but nothing here *produces*
+/// one: the parser is `kingdom_app::highlight` and is server-only, so no syntax
+/// definition and no regex engine reaches the wasm bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Token {
+    /// Prose the compiler ignores. Recedes.
+    Comment,
+    /// A string or character literal, quotes included.
+    Str,
+    /// A number, and the language's own constants -- `true`, `nil`, `None`.
+    Number,
+    /// A keyword or a storage word: `fn`, `pub`, `if`, `const`.
+    Keyword,
+    /// A function, at its definition or its call.
+    Function,
+    /// A type, a struct, an enum -- and, in markup, an attribute name.
+    Type,
+    /// Everything else, including every line of a file nothing is known about.
+    Plain,
+}
+
+impl Token {
+    /// The class the view puts on the span, so the stylesheet names each token
+    /// once. Metaphor-free on purpose: this is what the compiler reads.
+    pub fn css_suffix(&self) -> &'static str {
+        match self {
+            Token::Comment => "comment",
+            Token::Str => "string",
+            Token::Number => "number",
+            Token::Keyword => "keyword",
+            Token::Function => "function",
+            Token::Type => "type",
+            Token::Plain => "plain",
+        }
+    }
 }
 
 /// One file whole and exact, for the King to edit.

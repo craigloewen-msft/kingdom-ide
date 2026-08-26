@@ -187,6 +187,42 @@ fn store_width(storage_key: &'static str, width: f64) {
     let _ = (storage_key, width);
 }
 
+// --- Flag persistence ------------------------------------------------------
+//
+// The same pair for a yes/no view preference -- whether the chamber's panel is
+// focused, today. Here rather than in the view that wants one, because this is
+// already the module that knows how a panel's preference is remembered: the
+// effect-not-render rule below is the whole subtlety, and a third private copy
+// of `local_storage()` is how one caller ends up reading storage during
+// rendering and breaking hydration.
+
+/// Restores a stored flag, in an effect and for [`restore_width`]'s reason:
+/// reading storage while rendering would make the server emit markup that
+/// hydration then disagrees with.
+pub fn restore_flag(flag: RwSignal<bool>, storage_key: &'static str) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        if let Some(stored) = local_storage().and_then(|s| s.get_item(storage_key).ok().flatten()) {
+            flag.set(stored == "1");
+        }
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = (flag, storage_key);
+}
+
+/// Remembers a flag for the next visit. `"1"`/`"0"` rather than `"true"`, which
+/// is what `app.rs` already stores the rail's fold as.
+pub fn store_flag(storage_key: &'static str, on: bool) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(storage_key, if on { "1" } else { "0" });
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = (storage_key, on);
+}
+
 /// Suppresses text selection for the duration of a drag, so the pointer
 /// crossing the map does not smear a highlight across it.
 fn set_resizing_class(on: bool) {

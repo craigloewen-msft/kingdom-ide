@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use activity::Activity;
 use bridge::{Bridge, RaiseStage, Raising, ViewerCommand};
-use camera::{CameraRig, MapCamera};
+use camera::{CameraGlide, CameraRig, MapCamera};
 use lod::ActiveLod;
 use materials::MaterialCache;
 use raise::Raise;
@@ -139,6 +139,7 @@ impl Plugin for RepoCityPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.bridge.clone())
             .init_resource::<CameraRig>()
+            .init_resource::<CameraGlide>()
             .init_resource::<MeshCache>()
             .init_resource::<MaterialCache>()
             .init_resource::<LoadedMap>()
@@ -167,6 +168,17 @@ impl Plugin for RepoCityPlugin {
                     // than one later -- and so the release cannot undo a pan
                     // that arrived in the same frame it fell due.
                     input::release_when_still,
+                    // After all three of those, which is what lets the King
+                    // interrupt a glide: a drag or a scroll in this frame has
+                    // already taken the camera by the time the tween looks,
+                    // so it stands down rather than pulling the map back out
+                    // of his hands. Before `track_lod`, so a frame is drawn at
+                    // the detail tier the camera actually reached in it.
+                    camera::advance_glide,
+                    // Straight after it, so a journey that started or ended in
+                    // this frame is paid for -- or stopped being paid for --
+                    // in the same one.
+                    pace_for_glide,
                     lod::track_lod,
                     lod::apply_lod,
                     // After `apply_lod`, which walks every entity with a
@@ -224,6 +236,7 @@ fn apply_commands(
     mut loaded: ResMut<LoadedMap>,
     mut raise: ResMut<Raise>,
     mut rig: ResMut<CameraRig>,
+    mut glide: ResMut<CameraGlide>,
     mut working: ResMut<Activity>,
     mut works: ResMut<works::Works>,
     existing: Query<Entity, With<SceneRoot>>,
@@ -243,6 +256,14 @@ fn apply_commands(
         .unwrap_or(Vec2::splat(1.0));
 
     for command in queued {
+        // Every arm below that moves the camera ends whatever journey was under
+        // way, and it is done once here rather than remembered in five places.
+        // A glide left running would spend the rest of its quarter second
+        // writing its own destination over a fit that has just been asked for,
+        // so the last instruction has to win.
+        if command.moves_the_camera() {
+            glide.cancel();
+        }
         match command {
             ViewerCommand::Load(manifest) => {
                 // The world is no longer built here. `raise::raise_world`
@@ -334,13 +355,20 @@ fn apply_commands(
                     viewport,
                 );
             }
-            ViewerCommand::Inspect { point } => {
-                rig.look_at(Vec2::from_array(point));
-                // The zoom is the whole point of this command: `look_at` alone
-                // slid a town-wide frame sideways and left a house twenty
-                // pixels wide, which is the coarsest detail tier. See the
-                // variant's own doc.
-                rig.zoom_to_holding_pixels(camera::INSPECT_HOLDING_PIXELS);
+            ViewerCommand::Inspect { point, glide: fly } => {
+                // Both ways of getting there agree on the destination, because
+                // both ask the rig for it -- see `inspect_target`. The zoom is
+                // the whole point of this command: centring alone slid a
+                // town-wide frame sideways and left a house twenty pixels wide,
+                // which is the coarsest detail tier. See the variant's own doc.
+                let (focus, scale) =
+                    rig.inspect_target(Vec2::from_array(point), camera::INSPECT_HOLDING_PIXELS);
+                if fly {
+                    glide.begin(&rig, focus, scale);
+                } else {
+                    rig.focus = focus;
+                    rig.scale = scale;
+                }
             }
             ViewerCommand::ReleaseCamera => steering.release(),
             ViewerCommand::SelectWard(id) => {
@@ -402,6 +430,50 @@ fn apply_commands(
                 }
             }
         }
+    }
+}
+
+/// Runs the engine flat out for as long as a camera glide lasts.
+///
+/// This is what answers the objection the cut was originally chosen over: the
+/// rail's map ticks at [`RAIL_WAKE`], and a quarter-second tween drawn at eight
+/// frames a second would read worse than the jump it replaced. So a glide buys
+/// the frames it needs and gives them straight back.
+///
+/// The same bargain [`raise::raise_world`] strikes for the length of a world
+/// going up, and it is bounded far more tightly than that one: a glide lasts
+/// [`camera::GLIDE_SECONDS`], and only ever happens in the rail, because
+/// `Inspect` is only ever sent there.
+///
+/// `Local<bool>` rather than a resource because nothing else has any business
+/// asking: the question is "did *this system* raise the pace", and the answer
+/// is only ever read on the next run of it. Without it the restore would fire
+/// on every idle frame and would fight `Show` for the setting.
+fn pace_for_glide(
+    glide: Res<CameraGlide>,
+    raise: Res<Raise>,
+    standing: Res<Standing>,
+    mut winit: ResMut<WinitSettings>,
+    mut forcing: Local<bool>,
+) {
+    if glide.in_flight() {
+        if !*forcing {
+            *winit = winit_for(MapPresence::Full);
+            *forcing = true;
+        }
+        return;
+    }
+    if !*forcing {
+        return;
+    }
+    *forcing = false;
+    // Not while a world is going up. `raise_world` forces the watching pace
+    // every frame it runs and restores the right one when it finishes, so
+    // handing the pace back here as well would only mean the two systems
+    // flickering between settings for the length of the raise -- the same
+    // guard, and the same reason, as the `Show` arm above.
+    if !raise.in_flight() {
+        *winit = winit_for(standing.0);
     }
 }
 

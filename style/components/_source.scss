@@ -104,6 +104,23 @@
   color: t.$ink;
 }
 
+// Syntax colour. One rule per token, emitted from the one map in `_tokens.scss`
+// so "what colour is a keyword?" has a single answer -- the same mechanical
+// spelling `$statuses` and `$terrain` already get.
+//
+// The class is written by `Token::css_suffix`, so a token added in Rust without
+// an entry here simply falls back to `.source-text`'s ink: uncoloured, never
+// invisible.
+@each $name, $colour in t.$syntax {
+  .tok-#{$name} { color: $colour; }
+}
+
+// Comments are the one token that changes more than its hue. They are prose
+// among code and there is a great deal of them in this repository, so italics
+// separate them by shape as well as by colour -- which is also what keeps them
+// legible for a reader who cannot rely on the colour at all.
+.tok-comment { font-style: italic; }
+
 // The box, under the line it is about. Indented past the gutter so it reads as
 // belonging to that line rather than to the file.
 .source-composer {
@@ -117,13 +134,14 @@
   // screen.
   position: sticky;
   left: 0;
-  // Sized against the *panel*, not against the lines. `.source-lines` is
-  // `max-content` wide -- the longest line's width -- so `100%` here would run
-  // the box off the right edge of the panel. `--panel-width` is set inline by
-  // the panel, which is the only thing that knows how much room there is.
+  // Sized against the *stage*, not against the lines. `.source-lines` is
+  // `max-content` wide — the longest line's width — so `100%` here would run
+  // the box off the right edge of the panel. `100cqi` is the stage's own inline
+  // size (`.diff-stage` is the container; the source view shares it), which
+  // stays right when the panel is focused and no pixel width is set at all.
   box-sizing: border-box;
-  width: var(--panel-width, 520px);
-  max-width: var(--panel-width, 520px);
+  width: 100cqi;
+  max-width: 100cqi;
 }
 
 // --- Edit mode ---------------------------------------------------------------

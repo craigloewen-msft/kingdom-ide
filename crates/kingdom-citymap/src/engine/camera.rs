@@ -51,13 +51,26 @@ const FIT_HEADROOM: f32 = 1.15;
 
 /// How large a holding is drawn when the map is pointed at one file.
 ///
-/// Comfortably past [`LodLevel`]'s 64 px `FileDetail` threshold rather than on
-/// it, so the tier cannot flicker as the pane is resized, and far short of
-/// [`MAX_HOLDING_PIXELS`] so neighbours stay in frame and the building has a
-/// street to stand on. In the rail's ~290 px pane that is three and a half
-/// holdings across: the file's own building, the ones either side of it, and
-/// the per-file labels the tier turns on.
-pub const INSPECT_HOLDING_PIXELS: f32 = 84.0;
+/// Past [`LodLevel`]'s 64 px `FileDetail` threshold, so the tier that draws
+/// per-file labels is the one this lands in -- which is the whole reason the
+/// constant exists -- and far short of [`MAX_HOLDING_PIXELS`] so neighbours
+/// stay in frame and the building has a street to stand on.
+///
+/// The margin over that threshold is only three pixels, so it is guarded by a
+/// test rather than by eye: `inspecting_a_file_reaches_the_file_detail_tier`
+/// fails if this is ever lowered past it. Nothing about the margin is fragile
+/// at runtime -- [`CameraRig::holding_pixels`] is the holding span over the
+/// scale and consults the viewport nowhere, so this is a constant measured
+/// against a constant however the pane is resized.
+pub const INSPECT_HOLDING_PIXELS: f32 = 67.0;
+
+/// How long the camera takes to travel to a file it is pointed at.
+///
+/// Quick enough to feel like a cut that happens to be legible rather than an
+/// animation waited on, and long enough that the eye can follow which way the
+/// map went. See [`super::bridge::ViewerCommand::Inspect`] for when this is
+/// spent and when the camera simply arrives.
+pub const GLIDE_SECONDS: f32 = 0.25;
 
 /// The footprint span assumed for a holding before a world is loaded.
 const DEFAULT_HOLDING: f32 = 30.0;
@@ -296,6 +309,26 @@ impl CameraRig {
         self.focus = Vec3::new(point.x, self.focus.y, point.y);
     }
 
+    /// Where the camera would stand if it were pointed at a file's building:
+    /// centred on `point`, zoomed until a holding is `pixels` wide.
+    ///
+    /// Answered without moving anything, because the camera now has two ways to
+    /// get there -- arriving at once, or gliding over
+    /// [`GLIDE_SECONDS`] -- and both must agree on the destination to the last
+    /// decimal. Computing it twice in two places is how they would come to
+    /// differ, and a glide that ends a fraction from where a cut would have
+    /// landed is a detail tier flickering on arrival.
+    ///
+    /// The scale goes through [`Self::clamp_scale`] exactly as
+    /// [`Self::zoom_to_holding_pixels`] does, so a destination beyond the zoom
+    /// limits is the *reachable* one rather than one the camera would be
+    /// dragged back from at the end of its journey.
+    pub fn inspect_target(&self, point: Vec2, pixels: f32) -> (Vec3, f32) {
+        let focus = Vec3::new(point.x, self.focus.y, point.y);
+        let scale = self.clamp_scale(self.scale_for_holding_pixels(pixels));
+        (focus, scale)
+    }
+
     /// The world-space ground rect the viewport currently covers.
     ///
     /// The projected viewport is a rotated rectangle on the ground, so this
@@ -317,6 +350,169 @@ impl CameraRig {
             max = max.max(Vec2::new(corner.x, corner.z));
         }
         [min.x, min.y, max.x - min.x, max.y - min.y]
+    }
+}
+
+/// A journey the camera is part-way through.
+///
+/// Held apart from [`CameraRig`] rather than as a field on it, and that is
+/// load-bearing: everything else in the engine reads the rig for *where the
+/// camera is now*, and a rig that also carried where it was going would invite
+/// a reader to use the destination as the current view. The rig stays the
+/// single answer to "what is on screen"; this is only the thing writing it.
+///
+/// `None` -- the default -- means the camera is wherever it was put.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct CameraGlide(Option<Journey>);
+
+/// Where a glide started, where it is going, and how far through it is.
+#[derive(Debug, Clone, Copy)]
+struct Journey {
+    from_focus: Vec3,
+    to_focus: Vec3,
+    from_scale: f32,
+    to_scale: f32,
+    /// Seconds spent so far, against [`GLIDE_SECONDS`].
+    elapsed: f32,
+}
+
+impl CameraGlide {
+    /// Whether a journey is under way.
+    ///
+    /// What the engine raises its frame rate for: a tween drawn at the rail's
+    /// ordinary eight frames a second is the thing the old cut was preferred
+    /// over, so the pace is forced while this is true.
+    pub fn in_flight(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Sets off for a world point at a given scale, from wherever the rig is.
+    ///
+    /// A journey that would not move the camera is refused rather than started,
+    /// so re-sending the same destination -- which the interface does whenever
+    /// its effects re-run -- costs nothing and does not force the frame rate up
+    /// for a quarter second of animating nothing.
+    pub fn begin(&mut self, rig: &CameraRig, to_focus: Vec3, to_scale: f32) {
+        let still = rig.focus.distance(to_focus) < ARRIVAL_UNITS
+            && (rig.scale - to_scale).abs() < rig.scale.abs() * ARRIVAL_FRACTION;
+        if still {
+            self.0 = None;
+            return;
+        }
+        self.0 = Some(Journey {
+            from_focus: rig.focus,
+            to_focus,
+            from_scale: rig.scale,
+            to_scale,
+            elapsed: 0.0,
+        });
+    }
+
+    /// Abandons any journey under way, leaving the camera where it has got to.
+    ///
+    /// Called by every other thing that moves the camera. A glide still in
+    /// flight would spend the rest of its quarter second writing over a fresh
+    /// fit, so whoever moves the camera last must win.
+    pub fn cancel(&mut self) {
+        self.0 = None;
+    }
+
+    /// Advances by `delta` seconds and reports where the camera now stands.
+    ///
+    /// Pure, and separated from the system for the reason `input`'s module doc
+    /// gives: this is arithmetic the native suite can pin, and a Bevy schedule
+    /// is not. Returns `None` when there is nothing to move.
+    fn advance(&mut self, delta: f32) -> Option<(Vec3, f32)> {
+        let journey = self.0.as_mut()?;
+        journey.elapsed += delta.max(0.0);
+
+        if journey.elapsed >= GLIDE_SECONDS {
+            // The destination exactly, rather than whatever the easing came to
+            // a hair short of. A camera left a fraction off would sit at a
+            // scale that is nearly -- but not quite -- the one the detail tier
+            // was chosen for.
+            let arrived = (journey.to_focus, journey.to_scale);
+            self.0 = None;
+            return Some(arrived);
+        }
+
+        let t = smoothstep(journey.elapsed / GLIDE_SECONDS);
+        let focus = journey.from_focus.lerp(journey.to_focus, t);
+        // Geometrically, not linearly. Zoom is multiplicative everywhere else
+        // in this engine -- the wheel is `(scrolled * SENSITIVITY).exp()` for
+        // exactly this reason -- so a linear walk from one scale to another
+        // rushes the start of a zoom-in and crawls at the end. Interpolating
+        // the logarithm makes each equal slice of time an equal *factor* of
+        // zoom, which is what reads as a steady approach.
+        let scale = geometric_lerp(journey.from_scale, journey.to_scale, t);
+        Some((focus, scale))
+    }
+}
+
+/// How close counts as already there, in world units.
+///
+/// Guards against starting a journey to where the camera already is. Small
+/// against a holding's ~30 unit footprint, so two genuinely different files are
+/// never mistaken for the same place.
+const ARRIVAL_UNITS: f32 = 0.5;
+
+/// How close two scales count as the same, as a fraction of the current one.
+///
+/// Relative rather than absolute because scale spans orders of magnitude
+/// between a fitted kingdom and one inspected house, so a fixed epsilon would
+/// be meaningless at one end and enormous at the other.
+const ARRIVAL_FRACTION: f32 = 0.001;
+
+/// Smooth start, smooth stop: `3t^2 - 2t^3` on the unit interval.
+///
+/// A linear tween starts and ends with a visible jolt, which over a quarter
+/// second is most of what the eye actually notices.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Interpolates between two scales by a constant *factor* per unit of `t`.
+///
+/// Falls back to a linear step if either end is not a usable scale, which can
+/// only happen for a rig that was never framed -- better a straight line than
+/// a `NaN` on screen.
+fn geometric_lerp(from: f32, to: f32, t: f32) -> f32 {
+    if from <= 0.0 || to <= 0.0 {
+        return from + (to - from) * t;
+    }
+    from * (to / from).powf(t)
+}
+
+/// Moves the camera along whatever journey is under way.
+///
+/// Scheduled after the systems that read the pointer, which is what lets the
+/// King interrupt: a drag or a scroll takes the camera
+/// ([`super::input::Steering`]), and a glide still running would spend the rest
+/// of its quarter second dragging the map back out of his hands. So a taken
+/// camera cancels the journey outright rather than merely pausing it -- he
+/// asked to be somewhere else, and finishing the trip later would be the map
+/// arguing with him a second time.
+///
+/// The rig is written directly rather than through [`CameraRig::pan`] and
+/// [`CameraRig::zoom_by`], deliberately: those are the *King's* verbs, and
+/// going through them would be indistinguishable from him moving the map.
+pub fn advance_glide(
+    time: Res<Time>,
+    steering: Res<super::input::Steering>,
+    mut glide: ResMut<CameraGlide>,
+    mut rig: ResMut<CameraRig>,
+) {
+    if !glide.in_flight() {
+        return;
+    }
+    if steering.taken() {
+        glide.cancel();
+        return;
+    }
+    if let Some((focus, scale)) = glide.advance(time.delta_secs()) {
+        rig.focus = focus;
+        rig.scale = scale;
     }
 }
 
@@ -762,6 +958,12 @@ mod tests {
 
     /// The reason the constant exists: pointing the map at a file has to land
     /// in the tier that draws per-file labels.
+    ///
+    /// This is the guard on [`INSPECT_HOLDING_PIXELS`] itself. The constant was
+    /// pulled back from 84 px to 67 to show more of the town around the file,
+    /// which leaves only three pixels of margin over the 64 px `FileDetail`
+    /// threshold -- so the margin is checked here rather than trusted to
+    /// whoever next edits the number.
     #[test]
     fn inspecting_a_file_reaches_the_file_detail_tier() {
         for span in [200.0f32, 2_000.0, 20_000.0] {
@@ -862,6 +1064,190 @@ mod tests {
             assert_eq!(rig.lod(), LodLevel::Architecture, "span {span}");
             rig.scale = rig.scale_for_holding_pixels(120.0);
             assert_eq!(rig.lod(), LodLevel::FileDetail, "span {span}");
+        }
+    }
+
+    // --- The glide -------------------------------------------------------
+
+    /// A rig pointed at a file, and the journey that would take it there.
+    fn journey_to(point: Vec2) -> (CameraRig, CameraGlide) {
+        let rig = rig();
+        let (focus, scale) = rig.inspect_target(point, INSPECT_HOLDING_PIXELS);
+        let mut glide = CameraGlide::default();
+        glide.begin(&rig, focus, scale);
+        (rig, glide)
+    }
+
+    /// The point of the whole exercise: a glide has to *arrive*, exactly where
+    /// a cut would have, rather than somewhere near it.
+    #[test]
+    fn a_glide_ends_exactly_where_the_cut_would_have() {
+        let target = Vec2::new(900.0, 120.0);
+        let (mut cut, _) = journey_to(target);
+        let (wanted_focus, wanted_scale) = cut.inspect_target(target, INSPECT_HOLDING_PIXELS);
+        cut.focus = wanted_focus;
+        cut.scale = wanted_scale;
+
+        let (mut rig, mut glide) = journey_to(target);
+        // Sixty frames a second, run past the end of the journey.
+        for _ in 0..30 {
+            if let Some((focus, scale)) = glide.advance(1.0 / 60.0) {
+                rig.focus = focus;
+                rig.scale = scale;
+            }
+        }
+
+        assert!(!glide.in_flight(), "the journey never finished");
+        assert!(
+            rig.focus.distance(cut.focus) < 1e-3,
+            "landed at {:?}, wanted {:?}",
+            rig.focus,
+            cut.focus
+        );
+        assert!(
+            (rig.scale - cut.scale).abs() < 1e-6,
+            "landed at scale {}, wanted {}",
+            rig.scale,
+            cut.scale
+        );
+    }
+
+    /// However coarse the frames are, the journey takes the same time -- it is
+    /// driven by elapsed seconds rather than by a count of frames. This is what
+    /// makes it correct at the rail's eight frames a second even before the
+    /// engine raises its pace.
+    #[test]
+    fn a_glide_takes_the_same_time_at_any_frame_rate() {
+        for frame in [1.0 / 120.0, 1.0 / 60.0, 1.0 / 8.0] {
+            let (_, mut glide) = journey_to(Vec2::new(900.0, 120.0));
+            let mut spent = 0.0;
+            while glide.in_flight() {
+                glide.advance(frame);
+                spent += frame;
+                assert!(spent < GLIDE_SECONDS * 4.0, "never finished at {frame}s");
+            }
+            // It cannot finish early, and it overshoots by at most the one
+            // frame that carried it past the end.
+            assert!(spent >= GLIDE_SECONDS, "finished early at {frame}s: {spent}");
+            assert!(
+                spent < GLIDE_SECONDS + frame + 1e-6,
+                "ran long at {frame}s: {spent}"
+            );
+        }
+    }
+
+    /// Zoom is multiplicative, so the half-way point of a glide is the
+    /// *geometric* mean of the two scales. The arithmetic mean would mean the
+    /// first half of a zoom-in covering far more apparent distance than the
+    /// second, which is exactly the rush-then-crawl this avoids.
+    #[test]
+    fn a_glide_zooms_by_a_steady_factor_rather_than_a_steady_amount() {
+        let mut rig = rig();
+        rig.focus = Vec3::ZERO;
+        rig.scale = 8.0;
+        let mut glide = CameraGlide::default();
+        glide.begin(&rig, Vec3::ZERO, 0.5);
+
+        // Smoothstep is symmetric about the midpoint, so half the duration is
+        // half the eased journey -- which is the point being measured.
+        let (_, scale) = glide
+            .advance(GLIDE_SECONDS / 2.0)
+            .expect("a journey was under way");
+
+        let geometric = (8.0f32 * 0.5).sqrt();
+        let arithmetic = (8.0 + 0.5) / 2.0;
+        assert!(
+            (scale - geometric).abs() < 1e-4,
+            "half way came out at {scale}, wanted the geometric mean {geometric}"
+        );
+        assert!(
+            (scale - arithmetic).abs() > 1.0,
+            "half way came out at {scale}, which is the arithmetic mean"
+        );
+    }
+
+    /// It has to start where the camera actually is, or the first frame is a
+    /// jump -- which is the thing being replaced.
+    #[test]
+    fn a_glide_starts_from_where_the_camera_stands() {
+        let (rig, mut glide) = journey_to(Vec2::new(900.0, 120.0));
+        let (focus, scale) = glide.advance(1.0 / 600.0).expect("a journey was under way");
+        assert!(
+            focus.distance(rig.focus) < 1.0,
+            "the first frame jumped from {:?} to {focus:?}",
+            rig.focus
+        );
+        assert!(
+            (scale / rig.scale - 1.0).abs() < 0.01,
+            "the first frame jumped from scale {} to {scale}",
+            rig.scale
+        );
+    }
+
+    /// Asking for the place the camera already stands must not start a
+    /// journey. The interface re-sends `Inspect` whenever its effects re-run,
+    /// and each one would otherwise force the engine to a continuous frame
+    /// rate for a quarter second of animating nothing.
+    #[test]
+    fn a_glide_to_where_the_camera_already_is_never_starts() {
+        let mut rig = rig();
+        let target = Vec2::new(900.0, 120.0);
+        let (focus, scale) = rig.inspect_target(target, INSPECT_HOLDING_PIXELS);
+        rig.focus = focus;
+        rig.scale = scale;
+
+        let mut glide = CameraGlide::default();
+        glide.begin(&rig, focus, scale);
+        assert!(!glide.in_flight());
+    }
+
+    /// And the converse, or the feature would never fire at all.
+    #[test]
+    fn a_glide_to_another_building_does_start() {
+        let (_, glide) = journey_to(Vec2::new(900.0, 120.0));
+        assert!(glide.in_flight());
+    }
+
+    /// The King's hand wins. A cancelled journey leaves the camera where it had
+    /// got to rather than snapping it to either end -- he is looking at the
+    /// map, and it must simply stop moving under him.
+    #[test]
+    fn taking_the_camera_abandons_the_journey_where_it_stands() {
+        let (mut rig, mut glide) = journey_to(Vec2::new(900.0, 120.0));
+        let (focus, scale) = glide
+            .advance(GLIDE_SECONDS / 4.0)
+            .expect("a journey was under way");
+        rig.focus = focus;
+        rig.scale = scale;
+
+        glide.cancel();
+        assert!(!glide.in_flight());
+        assert_eq!(rig.focus, focus, "the camera was moved after the cancel");
+        assert_eq!(rig.scale, scale);
+    }
+
+    /// Smoothstep, not a straight line: it must leave and arrive gently, which
+    /// is most of what the eye notices over a quarter second.
+    #[test]
+    fn the_journey_eases_in_and_out() {
+        // Slower than linear at the start, slower than linear at the end, and
+        // exactly half way at half time.
+        assert!(smoothstep(0.25) < 0.25);
+        assert!(smoothstep(0.75) > 0.75);
+        assert!((smoothstep(0.5) - 0.5).abs() < 1e-6);
+        // And it is pinned at both ends, including outside the interval.
+        assert_eq!(smoothstep(0.0), 0.0);
+        assert_eq!(smoothstep(1.0), 1.0);
+        assert_eq!(smoothstep(-1.0), 0.0);
+        assert_eq!(smoothstep(2.0), 1.0);
+    }
+
+    /// A rig that was never framed must not put a `NaN` on screen.
+    #[test]
+    fn a_nonsense_scale_still_interpolates_to_something_finite() {
+        for (from, to) in [(0.0f32, 4.0f32), (4.0, 0.0), (-1.0, 4.0)] {
+            let mid = geometric_lerp(from, to, 0.5);
+            assert!(mid.is_finite(), "{from} -> {to} gave {mid}");
         }
     }
 }

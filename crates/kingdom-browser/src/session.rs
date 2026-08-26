@@ -27,13 +27,27 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use tokio::{sync::RwLock, task::JoinHandle};
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONSOLE_LOGS: usize = 1_000;
+
+/// How long a browser is given to close politely before it is killed.
+///
+/// Short on purpose. This runs on paths where the decision is already made --
+/// the plan has settled, or the session has gone cold -- so the only question
+/// is whether Chrome gets to flush its profile on the way out. Waiting minutes
+/// for a wedged socket to answer that would hold up every session behind it.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the reaper looks for sessions that have gone cold.
+///
+/// Much shorter than the idle window it enforces, so that a browser is closed
+/// near the moment it qualifies rather than up to a full window later.
+const REAP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The viewport a plan's browser opens at, unless [`VIEWPORT_VAR`] says
 /// otherwise.
@@ -51,6 +65,25 @@ const DEFAULT_VIEWPORT: (u32, u32) = (1440, 900);
 /// Overrides [`DEFAULT_VIEWPORT`], as `WIDTHxHEIGHT` -- for deliberately
 /// testing a narrow layout, which is the one case the default is wrong for.
 pub const VIEWPORT_VAR: &str = "KINGDOM_BROWSER_VIEWPORT";
+
+/// Gives a plan's browser WebGL back, at the price measured below.
+///
+/// Off by default, and that default is the single largest saving in this crate.
+/// See the comment on `disable-software-rasterizer` in [`BrowserSession::launch`]:
+/// a WebGL page costs seven to eight cores with the software rasteriser and
+/// twelve to eighteen percent of one without it.
+///
+/// The one case that wants it back is a plan working on `kingdom-citymap`,
+/// which is invited by `kingdom_citymap::mode` to open `?map=on` and look at
+/// what it drew. Without a GL context that plan sees the loading card forever,
+/// so the escape hatch is not a courtesy -- it is what keeps the map
+/// maintainable by the agents most likely to be asked to change it.
+pub const WEBGL_VAR: &str = "KINGDOM_BROWSER_WEBGL";
+
+/// How long a browser may sit untouched before it is closed, as a duration.
+///
+/// See [`idle_timeout`] for the default and the reasoning.
+pub const IDLE_VAR: &str = "KINGDOM_BROWSER_IDLE";
 
 /// How long the pointer rests on a target before the button goes down.
 ///
@@ -80,6 +113,69 @@ fn parse_viewport(raw: &str) -> Option<(u32, u32)> {
     let width: u32 = width.trim().parse().ok()?;
     let height: u32 = height.trim().parse().ok()?;
     (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Whether this machine's browsers are to have WebGL, per [`WEBGL_VAR`].
+fn webgl_wanted() -> bool {
+    std::env::var(WEBGL_VAR).is_ok_and(|raw| reads_as_yes(&raw))
+}
+
+/// Whether a setting's value is an explicit yes.
+///
+/// Separated from the environment read so it can be tested without mutating
+/// process-wide state, which two tests running in parallel would race over.
+///
+/// Only an unambiguous yes counts. Anything else -- empty, misspelt, `"onn"` --
+/// leaves the cheap default in place, because the cost of misreading this one
+/// is seven cores rather than a missing feature.
+fn reads_as_yes(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "on" | "1" | "true" | "yes"
+    )
+}
+
+/// How long a session may go untouched before the reaper closes it.
+///
+/// Fifteen minutes, not one. Relaunching is cheap in time -- a quarter of a
+/// second to a live CDP socket -- but it is not cheap in *meaning*: a session
+/// carries the cookies and page state that make a multi-step flow testable, and
+/// that is the whole reason sessions are per-plan rather than per-call. The
+/// window is therefore long enough that a model thinking between Tool calls
+/// never loses its login, and short enough that a plan which browsed once this
+/// morning is not still holding nine processes tonight.
+///
+/// `0` disables the reaper, for anyone who would rather keep every browser.
+fn idle_timeout() -> Option<Duration> {
+    const DEFAULT: Duration = Duration::from_secs(15 * 60);
+    let Ok(raw) = std::env::var(IDLE_VAR) else {
+        return Some(DEFAULT);
+    };
+    match parse_idle(&raw) {
+        // An explicit zero is an instruction, not a failure: keep everything.
+        Some(zero) if zero.is_zero() => None,
+        Some(wanted) => Some(wanted),
+        // Unparseable falls back rather than failing, exactly as the viewport
+        // does -- a typo is not worth leaving every browser immortal.
+        None => Some(DEFAULT),
+    }
+}
+
+/// Reads an idle window: bare seconds, or a `s`/`m`/`h` suffix.
+fn parse_idle(raw: &str) -> Option<Duration> {
+    let raw = raw.trim();
+    let (number, scale) = match raw.strip_suffix(['s', 'S']) {
+        Some(number) => (number, 1),
+        None => match raw.strip_suffix(['m', 'M']) {
+            Some(number) => (number, 60),
+            None => match raw.strip_suffix(['h', 'H']) {
+                Some(number) => (number, 60 * 60),
+                None => (raw, 1),
+            },
+        },
+    };
+    let value: u64 = number.trim().parse().ok()?;
+    Some(Duration::from_secs(value.checked_mul(scale)?))
 }
 
 #[derive(Debug, Error)]
@@ -117,9 +213,22 @@ pub enum KeyMethod {
 struct BrowserSession {
     // Dropping this handle closes Chrome. Keeping it beside the page makes that
     // lifetime explicit; retaining only `Page` produces a dead CDP connection.
-    _browser: Browser,
-    _handler: JoinHandle<()>,
-    _console: JoinHandle<()>,
+    //
+    // Not `_browser` any more: [`BrowserSession::shut_down`] needs it by
+    // mutable reference to ask Chrome to leave politely before killing it.
+    browser: Browser,
+    handler: JoinHandle<()>,
+    console_task: JoinHandle<()>,
+    /// This session's user-data directory, so closing can take it with it.
+    profile: PathBuf,
+    /// When this session was last asked to do anything.
+    ///
+    /// Read by the reaper, written by every operation that goes through
+    /// [`BrowserSessionManager::session`]. A `Mutex` rather than the session's
+    /// own `RwLock` because touching must be possible under a *read* guard --
+    /// browser calls hold one for their whole duration, and a clock that
+    /// required exclusive access would serialise them all behind each other.
+    last_used: Mutex<Instant>,
     page: Page,
     console: Arc<Mutex<VecDeque<ConsoleEntry>>>,
     /// The live screencast, if anyone is watching.
@@ -128,6 +237,9 @@ struct BrowserSession {
     /// of them goes and Chrome stops painting frames nobody is looking at. A
     /// strong reference here would keep every screencast alive for the life of
     /// the session, which is the exact cost the lazy start exists to avoid.
+    ///
+    /// It is also what pins a session against the reaper: a browser somebody is
+    /// *watching* is a browser in use, whatever the clock says.
     screencast: tokio::sync::Mutex<std::sync::Weak<ScreencastBroker>>,
     /// Which profiling machines this session has running.
     ///
@@ -160,6 +272,62 @@ impl BrowserSession {
         let (frames, url) = broker.subscribe().await;
         Ok((broker, frames, url))
     }
+
+    /// Marks this session as in use, now.
+    fn touch(&self) {
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+    }
+
+    /// How long this session has been left alone.
+    fn idle_for(&self) -> Duration {
+        self.last_used
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed()
+    }
+
+    /// Whether anybody is watching this session's screencast.
+    ///
+    /// The `Weak` upgrading is the whole answer: viewers hold the only strong
+    /// references, so a broker that still upgrades has at least one viewer.
+    async fn is_watched(&self) -> bool {
+        self.screencast.lock().await.upgrade().is_some()
+    }
+
+    /// Ends this browser and everything it was holding.
+    ///
+    /// Asks Chrome to close first and kills only if that does not take: a
+    /// browser given the chance to exit flushes its profile and reaps its own
+    /// children, where a kill leaves both to the operating system. Bounded,
+    /// because a wedged CDP socket must not stall the reaper behind it.
+    ///
+    /// Deliberately infallible. Every caller is on a path where the work is
+    /// already done -- a plan has settled, or a session has gone cold -- and
+    /// there is nothing useful to do with a failure to close something that is
+    /// being thrown away.
+    async fn shut_down(&mut self) {
+        // Stop reading before stopping the browser, so neither task wakes up to
+        // find its socket gone and logs about it.
+        self.console_task.abort();
+
+        let closed = tokio::time::timeout(SHUTDOWN_TIMEOUT, self.browser.close())
+            .await
+            .is_ok();
+        if !closed {
+            let _ = self.browser.kill().await;
+        }
+        // Either way, collect the child rather than leaving a zombie.
+        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, self.browser.wait()).await;
+
+        self.handler.abort();
+
+        // The profile is this session's alone -- named from the plan id -- so
+        // it goes with it. This is the reclaim that keeps /tmp from filling.
+        let _ = std::fs::remove_dir_all(&self.profile);
+    }
 }
 
 impl BrowserSession {
@@ -175,13 +343,26 @@ impl BrowserSession {
             .new_headless_mode()
             .no_sandbox()
             // chromiumoxide's `arg()` already prepends "--" to the key it is
-            // given, so passing "--disable-gpu" here produced the literal
-            // flag "----disable-gpu" -- unknown to Chrome, and silently
-            // ignored. GPU acceleration was never actually disabled, so
-            // headless Chrome spun up a software (SwiftShader) GPU process
-            // that pegged a CPU core, worst of all while the spyglass
-            // screencast was capturing frames.
+            // given, so passing "--disable-gpu" here produced the literal flag
+            // "----disable-gpu" -- unknown to Chrome, and silently ignored.
+            // Spelled correctly it turns off *hardware* acceleration, which a
+            // headless browser on a server has no use for.
+            //
+            // It does NOT stop the software GPU, whatever an earlier note here
+            // claimed. Measured with this flag exactly as passed below, a WebGL
+            // page still starts a `--type=gpu-process` and that process alone
+            // burns 665% of a core -- nearly seven cores of SwiftShader. The
+            // flag further down is the one that stops it.
             .arg("disable-gpu")
+            // Caps the disk caches. Chromium's own default is a fraction of
+            // free space, which on a developer machine is enormous: six
+            // navigations to Kingdom's own chamber grew one profile to 167 MB,
+            // and the profiles left behind in /tmp reached 672 MB each, almost
+            // all of it `Default/Code Cache`. Capped, the same six navigations
+            // leave 3 MB. A plan's browser is a scratch browser; it does not
+            // need a year of compiled JavaScript.
+            .arg("disk-cache-size=52428800")
+            .arg("media-cache-size=52428800")
             .viewport(chromiumoxide::handler::viewport::Viewport {
                 width,
                 height,
@@ -190,7 +371,22 @@ impl BrowserSession {
                 is_landscape: true,
                 has_touch: false,
             })
-            .user_data_dir(profile);
+            .user_data_dir(profile.clone());
+
+        // The single largest saving in this crate, and the reason it is a
+        // default rather than an option.
+        //
+        // With no GPU, Chrome falls back to ANGLE's SwiftShader and rasterises
+        // WebGL in software, on the CPU of a machine several agents are
+        // sharing. Measured on one WebGL page at 1440x900: 680-840% of a core
+        // with the fallback, 12-18% without it. Ordinary work is untouched --
+        // a page of text with a 2D canvas screenshots to a byte-identical PNG
+        // either way -- because only WebGL is lost.
+        //
+        // [`WEBGL_VAR`] hands it back to the one plan that needs it.
+        if !webgl_wanted() {
+            builder = builder.arg("disable-software-rasterizer");
+        }
 
         if let Some(executable) = chrome_executable()? {
             builder = builder.chrome_executable(executable);
@@ -202,6 +398,12 @@ impl BrowserSession {
                 .await
                 .map_err(|_| BrowserError::ChromeUnavailable("launch timed out".to_string()))?
                 .map_err(|error| BrowserError::ChromeUnavailable(error.to_string()))?;
+
+        // Claim the profile for this server, so [`sweep_orphans`] can tell a
+        // browser that is still owned from one whose owner died. Written only
+        // once the launch succeeded: a profile with no browser in it is not a
+        // thing anyone needs to reason about.
+        claim(&profile);
 
         let handler_task =
             tokio::spawn(async move { while let Some(_event) = handler.next().await {} });
@@ -270,9 +472,11 @@ impl BrowserSession {
         });
 
         Ok(Self {
-            _browser: browser,
-            _handler: handler_task,
-            _console: console_task,
+            browser,
+            handler: handler_task,
+            console_task,
+            profile,
+            last_used: Mutex::new(Instant::now()),
             page,
             console,
             screencast: tokio::sync::Mutex::new(std::sync::Weak::new()),
@@ -287,6 +491,21 @@ impl BrowserSession {
 /// per-Tool call browsers lose exactly the continuity these tools exist to
 /// inspect. The plan id is therefore the session boundary, just as it is for
 /// tmux.
+///
+/// # A session ends
+///
+/// It did not, once, and that was the largest cost this crate imposed: an
+/// insert-only map meant a plan which took one screenshot in the morning still
+/// held nine processes and most of a gigabyte at midnight. There are now three
+/// endings, and between them they cover every way a browser stops being
+/// wanted:
+///
+/// - [`Self::close`], when a plan settles -- the browser's work is over
+///   because the plan's is;
+/// - [`Self::reap_idle`], when nobody has used one for a while and nobody is
+///   watching it;
+/// - [`sweep_orphans`] at startup, for the browsers a previous server did not
+///   live long enough to close.
 pub struct BrowserSessionManager {
     sessions: RwLock<HashMap<String, Arc<RwLock<BrowserSession>>>>,
 }
@@ -307,17 +526,101 @@ impl BrowserSessionManager {
 
     async fn session(&self, plan: &str) -> Result<Arc<RwLock<BrowserSession>>, BrowserError> {
         if let Some(session) = self.sessions.read().await.get(plan).cloned() {
+            // Every operation goes through here, so this is the one place that
+            // has to remember to wind the clock the reaper reads.
+            session.read().await.touch();
             return Ok(session);
         }
         // Keep the write lock through launch. Launch is rare, and allowing two
         // concurrent first Tool calls to race would orphan one Chrome process.
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get(plan).cloned() {
+            session.read().await.touch();
             return Ok(session);
         }
         let session = Arc::new(RwLock::new(BrowserSession::launch(plan).await?));
         sessions.insert(plan.to_string(), Arc::clone(&session));
         Ok(session)
+    }
+
+    /// Closes a plan's browser, if it has one.
+    ///
+    /// The counterpart of `kingdom_app::tools::tmux::dismiss`, and called from
+    /// the same place for the same reason: when a plan settles, the resources
+    /// it was holding are nobody's, and leaving them for the user to notice
+    /// would be this product committing the exact mistake it exists to prevent.
+    ///
+    /// Idempotent and quiet. Closing a plan that never browsed does nothing,
+    /// which is what an honest answer to "end this" looks like when there is
+    /// nothing to end.
+    pub async fn close(&self, plan: &str) {
+        // Taken out of the map first, under the write lock, so that a Tool call
+        // arriving mid-shutdown launches a fresh browser rather than finding a
+        // half-closed one.
+        let removed = self.sessions.write().await.remove(plan);
+        let Some(session) = removed else {
+            return;
+        };
+        session.write().await.shut_down().await;
+    }
+
+    /// Closes every session that has gone cold.
+    ///
+    /// "Cold" is idle for longer than [`IDLE_VAR`] *and* unwatched: a browser
+    /// the user has the spyglass open on is in use by definition, whatever the
+    /// clock says, and closing one out from under him would replace a picture
+    /// with an error while he was looking at it.
+    ///
+    /// Returns which plans were closed, for the test and for anyone who wants
+    /// to log it.
+    pub async fn reap_idle(&self, after: Duration) -> Vec<String> {
+        // Decided under a read lock, so a long-running browser call is not
+        // blocked behind a survey it is not part of.
+        let mut cold = Vec::new();
+        for (plan, session) in self.sessions.read().await.iter() {
+            let guard = session.read().await;
+            if guard.idle_for() >= after && !guard.is_watched().await {
+                cold.push(plan.clone());
+            }
+        }
+
+        // `close` re-checks under the write lock, so a session that was touched
+        // between the survey and here is simply closed a minute later instead.
+        let mut closed = Vec::new();
+        for plan in cold {
+            self.close(&plan).await;
+            closed.push(plan);
+        }
+        closed
+    }
+
+    /// Starts the reaper, and returns the handle that stops it.
+    ///
+    /// Spawned rather than driven by the caller because there is no loop in
+    /// this process that a browser could hang its housekeeping off: Tool calls
+    /// arrive and finish, and the thing being cleaned up is precisely what is
+    /// left when they stop arriving.
+    ///
+    /// Takes `&'static self` because that is how the manager is actually held
+    /// -- one `OnceLock` for the life of the server, shared by the tools and
+    /// the screencast. Asking for an `Arc` instead would mean wrapping a value
+    /// that already outlives everything, purely to satisfy a spawn.
+    ///
+    /// `None` when [`IDLE_VAR`] disables reaping, so "no reaper is running" is
+    /// visible in the type rather than being a task that wakes to do nothing.
+    pub fn start_reaper(&'static self) -> Option<JoinHandle<()>> {
+        let after = idle_timeout()?;
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REAP_INTERVAL).await;
+                self.reap_idle(after).await;
+            }
+        }))
+    }
+
+    /// How many browsers are alive. For diagnostics and tests.
+    pub async fn live(&self) -> usize {
+        self.sessions.read().await.len()
     }
 
     /// Attaches a viewer to a plan's browser, if it already has one.
@@ -745,10 +1048,241 @@ fn cached_chrome() -> Option<PathBuf> {
     None
 }
 
+/// Where a plan's browser keeps its profile.
+///
+/// Derived from the plan id rather than handed out and remembered, on the same
+/// reasoning as tmux's `socket_for`: the answer has to survive a restart of
+/// this process, so that a directory left behind yesterday is recognisable
+/// today. [`sweep_orphans`] depends on exactly that.
 fn profile_dir(plan: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     plan.hash(&mut hasher);
-    Path::new("/tmp").join(format!("kingdom-chrome-{:016x}", hasher.finish()))
+    Path::new("/tmp").join(format!("{PROFILE_PREFIX}{:016x}", hasher.finish()))
+}
+
+/// The prefix every Kingdom profile directory carries.
+///
+/// Named because two things depend on it agreeing: [`profile_dir`] writes it
+/// and [`sweep_orphans`] matches on it. A sweep that disagreed with the naming
+/// would either miss every orphan or, far worse, delete something that was
+/// never ours.
+const PROFILE_PREFIX: &str = "kingdom-chrome-";
+
+/// The file inside a profile that says which server owns it.
+const OWNER_FILE: &str = "kingdom-owner";
+
+/// Records this server as the owner of a profile directory.
+///
+/// Best effort. A profile with no claim reads as unowned, which makes it
+/// sweepable -- the safe direction: the cost of sweeping a live browser is
+/// bounded by the claim being written immediately after launch, while the cost
+/// of *never* sweeping is the eleven gigabytes this was written to reclaim.
+fn claim(profile: &Path) {
+    let _ = std::fs::write(profile.join(OWNER_FILE), std::process::id().to_string());
+}
+
+/// Whether a process is alive, without disturbing it.
+///
+/// `/proc` rather than `kill(pid, 0)`: no unsafe, no signal, and no dependency
+/// on the process being ours to signal.
+fn is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).is_dir()
+}
+
+/// What the sweep may do with one profile directory.
+///
+/// Three outcomes rather than a boolean, because the honest answer differs in a
+/// way that a boolean hid -- and hid dangerously. Discovered by running the
+/// sweep against a real machine: an unclaimed profile is *not* the same thing
+/// as an abandoned one. A server built before profiles were claimed writes
+/// none, and its browsers are alive and in use. Collapsing those two cases
+/// killed forty-six live Chrome processes belonging to a running Kingdom.
+#[derive(Debug, PartialEq, Eq)]
+enum Fate {
+    /// Not ours, or owned by a server that is still running. Untouched.
+    Keep,
+    /// Ours, and its owning server is gone. Whatever still holds it is an
+    /// orphan: kill it, then delete the directory.
+    Abandoned,
+    /// Ours, but with no claim to say whose. Delete it only if nothing is
+    /// holding it, and never kill anything -- the holder may be a live browser
+    /// belonging to a server from before claims existed.
+    Unclaimed,
+}
+
+/// Decides what may be done with one directory.
+///
+/// The whole safety argument of the sweep lives here, which is why it is a
+/// named function with tests rather than an `if` inside a loop:
+///
+/// - the name must be ours, so nothing outside Kingdom is ever a candidate;
+/// - a claim naming a *live* pid means a running server is using it, so it is
+///   left alone. That is what lets two Kingdoms share a machine, which a sweep
+///   matching on Chrome's command line could not do;
+/// - a claim naming a *dead* pid is the case this was built for: that server
+///   died without closing its browsers, and they are still running;
+/// - no claim at all is the ambiguous case, and it is resolved conservatively
+///   by [`Fate::Unclaimed`] rather than by guessing.
+fn fate_of(dir: &Path) -> Fate {
+    let is_ours = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(PROFILE_PREFIX));
+    if !is_ours || !dir.is_dir() {
+        return Fate::Keep;
+    }
+
+    match std::fs::read_to_string(dir.join(OWNER_FILE)) {
+        Ok(owner) => match owner.trim().parse::<u32>() {
+            Ok(pid) if is_alive(pid) => Fate::Keep,
+            Ok(_) => Fate::Abandoned,
+            // A claim we cannot read tells us nothing, so it is treated as no
+            // claim rather than as permission.
+            Err(_) => Fate::Unclaimed,
+        },
+        Err(_) => Fate::Unclaimed,
+    }
+}
+
+/// Kills the browsers a previous server did not live long enough to close, and
+/// deletes what they left behind.
+///
+/// # Why this is necessary at all
+///
+/// chromiumoxide sets `kill_on_drop`, which only fires on a *graceful* drop. A
+/// SIGKILLed server -- or a `cargo leptos watch` restart, which happens on
+/// every save -- leaves the whole Chrome tree running: measured, ten processes
+/// survived the death of the process that spawned them. That is how one machine
+/// accumulated forty-two profile directories totalling thirteen gigabytes.
+///
+/// # Why it is safe
+///
+/// Every decision goes through [`fate_of`], which never kills anything whose
+/// owning server is alive, and never kills anything whose owner is *unknown*.
+/// The worst it can do to a browser it should not have touched is nothing.
+///
+/// Runs at startup, from the server binary. Returns how many profiles were
+/// reclaimed, so the caller can say so in its banner.
+pub fn sweep_orphans() -> usize {
+    sweep_in(Path::new("/tmp"))
+}
+
+/// The sweep, against a given directory.
+///
+/// Split from [`sweep_orphans`] so it can be tested against a directory the
+/// test made, rather than against the real `/tmp` -- where the things it deletes
+/// are the developer's own running browsers.
+fn sweep_in(root: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+
+    let mut reclaimed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let dir = entry.path();
+        match fate_of(&dir) {
+            Fate::Keep => continue,
+            Fate::Abandoned => {
+                kill_holders_of(&dir);
+            }
+            Fate::Unclaimed => {
+                // Somebody is using it, and we cannot prove it is not a live
+                // browser from an older build. Leave both alone.
+                if is_held(&dir) {
+                    continue;
+                }
+            }
+        }
+        if std::fs::remove_dir_all(&dir).is_ok() {
+            reclaimed += 1;
+        }
+    }
+    reclaimed
+}
+
+/// Every live process holding this profile as its `--user-data-dir`.
+///
+/// # Why this is not a simple argument comparison
+///
+/// It was, and it silently never matched anything. Chrome **rewrites its own
+/// `argv` into one contiguous string** to set its process title, so by the time
+/// a Chrome process appears in `/proc` its `cmdline` is a single field of
+/// thirteen hundred bytes rather than the sixty NUL-separated arguments it was
+/// launched with. Comparing whole arguments therefore found nothing, the
+/// "is anything using this?" guard never fired, and the sweep deleted profiles
+/// out from under running browsers.
+///
+/// So the search is a substring search, bounded at the end. The boundary is not
+/// optional: `/tmp/kingdom-chrome-abc` is a prefix of
+/// `/tmp/kingdom-chrome-abcd`, and without it a sweep of the first would
+/// consider the second's browser to be holding it.
+fn holders_of(profile: &Path) -> Vec<u32> {
+    let Some(profile) = profile.to_str() else {
+        return Vec::new();
+    };
+    let wanted = format!("--user-data-dir={profile}");
+
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pid = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            mentions(&cmdline, wanted.as_bytes()).then_some(pid)
+        })
+        .collect()
+}
+
+/// Whether a command line names exactly this argument.
+///
+/// Separated out because it is the whole of the correctness of the sweep's
+/// guard, and because it can be tested against the two shapes a command line
+/// really takes -- NUL-separated as most programs leave it, and one flat string
+/// as Chrome rewrites it.
+///
+/// A match must be followed by a separator or the end of the buffer, so that a
+/// path is never mistaken for one that merely begins with it.
+fn mentions(cmdline: &[u8], argument: &[u8]) -> bool {
+    cmdline
+        .windows(argument.len())
+        .enumerate()
+        .filter(|(_, window)| *window == argument)
+        .any(|(at, _)| {
+            matches!(
+                cmdline.get(at + argument.len()),
+                // The end of the command line, or the end of this argument.
+                None | Some(0) | Some(b' ')
+            )
+        })
+}
+
+/// Whether anything at all is using this profile.
+fn is_held(profile: &Path) -> bool {
+    !holders_of(profile).is_empty()
+}
+
+/// Kills whatever is still holding an abandoned profile.
+///
+/// Deleting the directory alone would leave the orphaned browser running with
+/// its files pulled out from under it -- still holding memory, still burning
+/// CPU, and now unable to say why.
+fn kill_holders_of(profile: &Path) {
+    for pid in holders_of(profile) {
+        // SIGKILL rather than SIGTERM: this process has already lost the server
+        // that could have shut it down politely, and a browser that ignored a
+        // TERM would keep the resources this is reclaiming.
+        //
+        // Safe: `kill` takes a pid and a signal and touches no memory. The pid
+        // came from /proc and may have exited since, which is reported as ESRCH
+        // and deliberately ignored -- there is nothing to do about a process
+        // that died on its own before we asked it to.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
 }
 
 fn key_info(key: &str) -> Result<(String, String, i64), BrowserError> {
@@ -907,5 +1441,254 @@ mod tests {
             matches!(attached, Ok(None)),
             "attaching a viewer must not create a session"
         );
+    }
+
+    /// Closing a plan that never browsed is a no-op, not a failure.
+    ///
+    /// `finish_plan` calls this for *every* settled plan, and most plans never
+    /// open a browser at all. If closing nothing were an error -- or worse, if
+    /// it launched a browser in order to close it -- then merging an ordinary
+    /// plan would start a Chrome.
+    #[tokio::test]
+    async fn closing_a_plan_that_never_browsed_does_nothing() {
+        let manager = BrowserSessionManager::new();
+
+        manager.close("never-browsed").await;
+
+        assert_eq!(manager.live().await, 0, "closing must not create a session");
+    }
+
+    /// The reaper must not close what it cannot see, and must not invent work.
+    ///
+    /// With no sessions there is nothing cold, whatever the window. Pinned
+    /// because the reaper runs on a timer forever: a version of it that did
+    /// something on an empty map would do that thing every minute for the life
+    /// of the server.
+    #[tokio::test]
+    async fn reaping_an_empty_manager_closes_nothing() {
+        let manager = BrowserSessionManager::new();
+
+        let closed = manager.reap_idle(Duration::from_secs(0)).await;
+
+        assert!(closed.is_empty(), "nothing was open, so nothing may close");
+    }
+
+    /// An idle window is read in the spellings a person would write.
+    #[test]
+    fn an_idle_window_can_be_asked_for() {
+        assert_eq!(parse_idle("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_idle("45s"), Some(Duration::from_secs(45)));
+        assert_eq!(parse_idle(" 15m "), Some(Duration::from_secs(900)));
+        assert_eq!(parse_idle("2h"), Some(Duration::from_secs(7200)));
+    }
+
+    /// A window that makes no sense yields nothing, so the caller can fall back.
+    ///
+    /// The same stance as the viewport: the cost of misreading this setting is
+    /// browsers that live forever or die instantly, and both are worse than
+    /// ignoring a typo.
+    #[test]
+    fn an_idle_window_that_makes_no_sense_is_not_offered() {
+        for bad in ["", "soon", "m", "-5", "5 minutes"] {
+            assert_eq!(parse_idle(bad), None, "{bad} was accepted");
+        }
+    }
+
+    /// WebGL comes back only when somebody says so, in so many words.
+    ///
+    /// This guards the largest default in the crate. The negative cases are the
+    /// point: a misspelt value must leave the software rasteriser disabled
+    /// rather than quietly restoring the seven-core behaviour this change
+    /// exists to remove.
+    #[test]
+    fn webgl_is_only_ever_switched_on_deliberately() {
+        for yes in ["on", "1", "true", "YES", " On "] {
+            assert!(reads_as_yes(yes), "{yes} should have been read as yes");
+        }
+        for no in ["", "off", "0", "false", "no", "onn", "yes please"] {
+            assert!(!reads_as_yes(no), "{no} should not have been read as yes");
+        }
+    }
+
+    /// A command line is searched in both the shapes one really takes.
+    ///
+    /// This is the bug that deleted profiles out from under running browsers,
+    /// pinned so it cannot come back. Most programs leave `argv` as the kernel
+    /// stored it, NUL-separated. **Chrome does not**: it rewrites its own argv
+    /// into one contiguous string to set its process title, so its `/proc`
+    /// entry is a single field. A matcher that split on NUL found nothing at
+    /// all in a real Chrome, which made the sweep's "is anybody using this?"
+    /// guard silently always answer no.
+    ///
+    /// The prefix case is the other half: paths here differ only in a hash, so
+    /// one profile's name is very often a prefix of another's.
+    #[test]
+    fn a_command_line_is_searched_in_both_shapes_it_really_takes() {
+        let wanted = b"--user-data-dir=/tmp/kingdom-chrome-abc";
+
+        // As the kernel stores it for an ordinary program.
+        let separated = b"/usr/bin/chromium\0--headless\0--user-data-dir=/tmp/kingdom-chrome-abc\0--no-sandbox\0";
+        assert!(mentions(separated, wanted), "NUL-separated argv missed");
+
+        // As Chrome rewrites it for its process title.
+        let flattened =
+            b"/usr/bin/chromium --headless --user-data-dir=/tmp/kingdom-chrome-abc --no-sandbox";
+        assert!(mentions(flattened, wanted), "flattened argv missed");
+
+        // At the very end, with nothing after it.
+        let at_the_end = b"/usr/bin/chromium --user-data-dir=/tmp/kingdom-chrome-abc";
+        assert!(mentions(at_the_end, wanted), "a trailing argument missed");
+
+        // A different profile that merely begins with this one's name must
+        // not count as using it.
+        let longer = b"/usr/bin/chromium --user-data-dir=/tmp/kingdom-chrome-abcdef --no-sandbox";
+        assert!(
+            !mentions(longer, wanted),
+            "a longer path was mistaken for this one"
+        );
+
+        // And an unrelated browser is not a holder either.
+        let other = b"/usr/bin/chromium --user-data-dir=/tmp/kingdom-chrome-zzz";
+        assert!(!mentions(other, wanted), "an unrelated profile matched");
+    }
+
+    /// The sweep only ever considers directories that are ours.
+    ///
+    /// This is the guard that keeps [`sweep_orphans`] from deleting somebody
+    /// else's data. It matters far more than finding every orphan: missing one
+    /// costs disk space, and a false positive costs a stranger's files.
+    #[test]
+    fn nothing_outside_kingdoms_own_naming_is_ever_touched() {
+        let root = test_dir("naming");
+        let stranger = root.join("important-user-data");
+        std::fs::create_dir_all(&stranger).expect("the test needs a directory");
+
+        assert_eq!(
+            fate_of(&stranger),
+            Fate::Keep,
+            "a directory not named like ours must never be swept"
+        );
+        assert_eq!(sweep_in(&root), 0, "the sweep must have left it alone");
+        assert!(stranger.is_dir(), "the stranger's directory is gone");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A profile claimed by a living server is left alone.
+    ///
+    /// This is what lets two Kingdom servers share a machine: the sweep at
+    /// one's startup must not touch the browsers of the other, which is
+    /// running.
+    #[test]
+    fn a_profile_owned_by_a_living_server_survives() {
+        let root = test_dir("living");
+        let mine = root.join(format!("{PROFILE_PREFIX}0000000000000001"));
+        std::fs::create_dir_all(&mine).expect("the test needs a directory");
+
+        // This very test process is the living owner -- no more convincing
+        // "alive" pid exists than the one running the assertion.
+        claim(&mine);
+
+        assert_eq!(fate_of(&mine), Fate::Keep);
+        assert_eq!(sweep_in(&root), 0);
+        assert!(mine.is_dir(), "a live server's profile was deleted");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A profile whose owner is gone is reclaimed.
+    ///
+    /// The case the sweep exists for: a server killed without closing its
+    /// browsers leaves them running and their profiles behind.
+    #[test]
+    fn a_profile_whose_owner_died_is_reclaimed() {
+        let root = test_dir("dead");
+        let dead = root.join(format!("{PROFILE_PREFIX}0000000000000002"));
+        std::fs::create_dir_all(&dead).expect("the test needs a directory");
+        // A pid that cannot be a Kingdom: pid 0 is the scheduler, and never
+        // appears in /proc as a process directory.
+        std::fs::write(dead.join(OWNER_FILE), "0").expect("the test needs a claim");
+
+        assert_eq!(fate_of(&dead), Fate::Abandoned);
+        assert_eq!(sweep_in(&root), 1);
+        assert!(!dead.exists(), "the abandoned profile was not reclaimed");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An unclaimed profile is deleted only when nothing is using it, and its
+    /// holder is never killed.
+    ///
+    /// Found by running the sweep against a real machine rather than by
+    /// reasoning about it. A server built before profiles carried a claim
+    /// writes none, and its browsers are alive and in use -- forty-six
+    /// processes, in the case that caught this. Treating "no claim" as
+    /// "abandoned" would have killed every one of them.
+    ///
+    /// So the ambiguity is resolved by asking the operating system who is
+    /// actually using the directory, and doing nothing whenever the answer is
+    /// "somebody".
+    #[test]
+    fn an_unclaimed_profile_in_use_is_left_entirely_alone() {
+        let root = test_dir("unclaimed");
+        let held = root.join(format!("{PROFILE_PREFIX}0000000000000003"));
+        let idle = root.join(format!("{PROFILE_PREFIX}0000000000000004"));
+        for dir in [&held, &idle] {
+            std::fs::create_dir_all(dir).expect("the test needs directories");
+        }
+
+        // A real process, really holding the profile, exactly as a browser
+        // from an older build would: the argument is on its command line, and
+        // `holders_of` finds it by reading /proc.
+        //
+        // The loop matters. `sh -c 'sleep 30' ARG` *execs* sleep and replaces
+        // its own command line, taking the argument with it -- which the
+        // assertion below caught. A shell that stays a shell keeps it.
+        let mut holder = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("while :; do sleep 1; done")
+            .arg(format!("--user-data-dir={}", held.display()))
+            .spawn()
+            .expect("the test needs a process to stand in for a browser");
+
+        // The stand-in is only meaningful if it is really running and really
+        // holding the directory -- checked, because a holder that failed to
+        // start would make the rest of this test pass for the wrong reason.
+        assert_eq!(
+            holders_of(&held),
+            vec![holder.id()],
+            "the stand-in process is not holding the profile"
+        );
+
+        assert_eq!(fate_of(&held), Fate::Unclaimed);
+        assert_eq!(fate_of(&idle), Fate::Unclaimed);
+
+        // Only the unheld one is reclaimed.
+        assert_eq!(sweep_in(&root), 1);
+        assert!(held.is_dir(), "a profile in use was deleted");
+        assert!(!idle.exists(), "an unused profile was not reclaimed");
+
+        // And the holder is still running: an unclaimed profile never earns
+        // anything a signal.
+        assert!(
+            holder.try_wait().expect("the holder must be waitable").is_none(),
+            "the sweep killed a process it could not prove was abandoned"
+        );
+
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory of this test's own, named so parallel tests cannot collide.
+    fn test_dir(what: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "kingdom-sweep-{what}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the test needs its own directory");
+        root
     }
 }

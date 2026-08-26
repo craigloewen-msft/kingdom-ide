@@ -2855,8 +2855,13 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // Only once the work has actually landed. A refused merge leaves the plan
     // in play, and killing the model's dev server under a plan the user is
     // about to retry would take away the thing he needs to see to fix it.
+    //
+    // The browser goes with it, for the same reason and on the same terms: a
+    // settled plan's Chrome is holding nine processes and most of a gigabyte on
+    // behalf of work that is over.
     if matches!(finish, Finish::Settled(_)) {
         crate::tools::tmux::dismiss(&plan_id).await;
+        crate::tools::browser::dismiss(&plan_id).await;
     }
 
     let mut kingdom = lock()?;

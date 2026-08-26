@@ -121,6 +121,40 @@ $terrain-edge: #24405f;
 $road-casing:  #0e1728;
 $road-surface: #46587c;
 
+// Syntax colour, keyed by the suffix `Token::css_suffix` emits.
+//
+// Deliberately NOT in `$palette`, for exactly the reason `$terrain` is not:
+// every entry there is a *signal* about agents and work, and a future change
+// reaching into this set for one would say something it did not mean. These
+// belong to the inside of a file, where the only question is "what kind of code
+// is this?".
+//
+// Held well below the saturation of a status colour or a `Language::tint`, and
+// that restraint is the rule rather than a preference. The source panel sits
+// beside the map and the review drawer, where green means an agent is working
+// and gold means the King's move -- so a keyword bright enough to compete with
+// those would spend attention this product exists to protect. Colour here is
+// meant to be read *within* the file at a glance and to disappear the moment
+// the King looks away from it.
+//
+// `plain` is `$ink` itself, so the ordinary case is exactly the single colour
+// the panel showed before highlighting existed, and everything else is a
+// departure from it.
+$syntax: (
+  "plain":    $ink,
+  // The one that must recede: prose the compiler ignores, dimmed nearly to the
+  // faintest ink so code stands out of a heavily-commented file (which, in this
+  // repository, is every file).
+  "comment":  #5a6b87,
+  // Sage rather than a true green, and low enough in saturation that it cannot
+  // be mistaken for the working green at a glance.
+  "string":   #94b8a1,
+  "number":   #c2a173,
+  "keyword":  #a893cf,
+  "function": #7ea6d4,
+  "type":     #6faaa4,
+);
+
 $radius: 8px;
 
 $font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;

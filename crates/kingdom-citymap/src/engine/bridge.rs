@@ -80,12 +80,31 @@ pub enum ViewerCommand {
     /// house is twenty pixels and nothing is labelled. Pointing the map at one
     /// file now means arriving at it, not merely aiming at it.
     ///
-    /// The zoom is a cut rather than a glide, deliberately: the rail's map
-    /// ticks at `engine::RAIL_WAKE`, so a tween would be animated at eight
-    /// frames a second and read worse than the jump does.
+    /// Whether to glide there or cut is the sender's call, and it is a
+    /// question about *distance travelled* rather than about taste. Moving
+    /// between two files of one project is a short hop the eye can follow, and
+    /// a glide is what keeps the King oriented -- he sees which way the camera
+    /// went, so the new building arrives somewhere rather than merely
+    /// replacing what was there. Arriving in a different city is not a
+    /// journey worth animating: the whole frame changes, so a tween across it
+    /// is a smear rather than a movement.
+    ///
+    /// The engine cannot answer that itself -- it does not know what a city
+    /// is, deliberately, which is why the flag arrives already decided. See
+    /// the pointer effect in `view.rs`.
+    ///
+    /// This used to be a cut in every case, on the grounds that the rail's map
+    /// ticks at `engine::RAIL_WAKE` and a tween would be animated at eight
+    /// frames a second. That reasoning was sound and is now answered rather
+    /// than ignored: a glide forces the engine to a continuous pace for the
+    /// quarter second it lasts, exactly as `raise::raise_world` does for the
+    /// length of a raise.
     Inspect {
         /// The world point to centre on.
         point: [f32; 2],
+        /// Whether to travel there over [`super::camera::GLIDE_SECONDS`]
+        /// rather than arriving at once.
+        glide: bool,
     },
     /// Hand the camera back to whatever the interface wants it pointed at.
     ///
@@ -137,6 +156,31 @@ pub enum ViewerCommand {
     /// See [`MapPresence`], and the arm in `engine::apply_commands` for what
     /// each one costs.
     Show(MapPresence),
+}
+
+impl ViewerCommand {
+    /// Whether obeying this would move the camera.
+    ///
+    /// Asked by `engine::apply_commands` so that a camera glide in flight is
+    /// abandoned by anything that re-aims the camera itself: a tween has a
+    /// quarter second of writing left in it, and without this it would spend
+    /// that undoing whatever was just asked for. [`Self::Load`] counts --
+    /// a world going up ends with its own `fit()`, and a glide over the world
+    /// that was torn down means nothing against the one replacing it.
+    ///
+    /// [`Self::Inspect`] is deliberately absent: it is the one command that
+    /// *starts* a journey, and its own arm decides what to do with the one
+    /// already running.
+    pub fn moves_the_camera(&self) -> bool {
+        matches!(
+            self,
+            Self::Load(_)
+                | Self::Fit
+                | Self::ZoomBy(_)
+                | Self::ActualSize
+                | Self::Focus { .. }
+        )
+    }
 }
 
 /// One town with agents working in it.

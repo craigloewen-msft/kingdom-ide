@@ -27,6 +27,22 @@
 //! implementation and the usual bug: it drifts on a fast scroll and fights the
 //! trackpad's own momentum.
 //!
+//! # Why the lines wrap by default
+//!
+//! They did not, and the panel was reported as showing "only the left side".
+//! It was: `.diff-grid` was `width: max-content` with columns of
+//! `minmax(50%, 1fr)`, so the grid grew to the longest line and each column
+//! took half of *that*. Measured on one real line of this repository in a panel
+//! at its 640px default, the columns resolved to 856.8px each -- so the new
+//! side began at x=857 inside a box 640 wide, off screen until the King thought
+//! to scroll sideways. Short files were fine, which is why it survived: the
+//! failure bites exactly on the real code a diff is opened for.
+//!
+//! So the rows wrap, and the grid is the panel's width. A wrapped pair stays
+//! level for free -- a grid row is as tall as its tallest cell -- which is the
+//! part a hand-rolled two-pane view gets wrong. Wrapping can be turned off for
+//! a King who would rather scroll, and the choice is remembered ([`WRAP_KEY`]).
+//!
 //! # Writing against a line
 //!
 //! Either column takes a note, and which one it was matters: a note on the old
@@ -49,9 +65,17 @@
 
 use crate::api::plan_diff;
 use crate::components::note_composer::NoteComposer;
+use crate::components::resizer::{restore_flag, store_flag};
 use kingdom_core::{DiffLine, DiffRow, FileDiff, NoteSide, PlanId, ReviewNote};
 use leptos::prelude::*;
 use std::collections::HashSet;
+
+/// Whether long lines wrap inside their column, remembered between visits.
+///
+/// Its own key rather than a mode of the panel's width: it is a reading
+/// preference that should survive closing the diff, and it is the answer to the
+/// bug in the module note above -- so it is on unless the King turns it off.
+const WRAP_KEY: &str = "kingdom.diff_wrap";
 
 /// Which column a cell belongs to. Two constants rather than an enum: they are
 /// only ever CSS class names, and the view reads better for saying so.
@@ -81,7 +105,17 @@ pub fn DiffView(
     /// can say so.
     notes: Memo<Vec<ReviewNote>>,
     /// The panel's width in pixels, driven by the resizer beside it.
+    ///
+    /// Ignored while focused: there the panel takes the room the conversation
+    /// was in, and a pixel width would be the one number claiming otherwise.
     width: RwSignal<f64>,
+    /// Whether the panel has been given the conversation's room as well as its
+    /// own. Owned by the chamber, because all three panels share one slot and
+    /// therefore one answer -- see `Aside` in `conversation.rs`.
+    focused: Signal<bool>,
+    /// Asks for that, or gives it back. The panel reports a press and decides
+    /// nothing, exactly as it does for `on_close`.
+    on_focus: Callback<()>,
     /// Writes a note: the line, which side of the comparison it is on, the
     /// line's own text, and what the King wrote. All four travel because the
     /// server needs the quote and the view needs the line -- see `ReviewNote`.
@@ -92,6 +126,11 @@ pub fn DiffView(
 ) -> impl IntoView {
     let (diff, set_diff) = signal(None::<FileDiff>);
     let (failed, set_failed) = signal(None::<String>);
+
+    // Whether long lines wrap. On unless the King has said otherwise -- see the
+    // module note: off is the behaviour that hid half of every real diff.
+    let wrapping = RwSignal::new(true);
+    restore_flag(wrapping, WRAP_KEY);
 
     // Which cell has a composer open. One at a time, as the proposal's blocks
     // and the source view's lines are.
@@ -165,13 +204,12 @@ pub fn DiffView(
     view! {
         <div
             class="diff-panel chamber-aside"
-            style:width=move || format!("{}px", width.get())
-            // The panel's own width, published for the note composer below.
-            // The grid it sits in is `max-content` wide -- wider than the panel
-            // whenever a line is long -- so a composer sized as a percentage of
-            // its parent would run off the right edge. This is the one number
-            // that knows how much room there actually is.
-            style:--panel-width=move || format!("{}px", width.get())
+            // Absent while focused, rather than overridden. An inline style
+            // beats the stylesheet, so a width left standing here would be the
+            // one thing keeping the panel narrow -- and `Option` is how tachys
+            // spells "remove this property" without an `!important` on the
+            // other side.
+            style:width=move || (!focused.get()).then(|| format!("{}px", width.get()))
         >
             <div class="diff-bar">
                 <span class="diff-path" title=move || name.get()>{move || name.get()}</span>
@@ -181,6 +219,36 @@ pub fn DiffView(
                 <Show when=move || !base.get().is_empty()>
                     <span class="diff-against">"vs "{move || base.get()}</span>
                 </Show>
+
+                // Wrapping is a property of *reading a diff*, so its control is
+                // here rather than in the chamber's chrome. Named for what it
+                // does rather than for the state it is in, because it is a
+                // switch and reads as one.
+                <button
+                    class="diff-chip"
+                    class:on=move || wrapping.get()
+                    title="Wrap long lines so both sides fit the panel"
+                    on:click=move |_| {
+                        let next = !wrapping.get_untracked();
+                        wrapping.set(next);
+                        store_flag(WRAP_KEY, next);
+                    }
+                >
+                    "Wrap"
+                </button>
+
+                // Naming the state he is *not* in, as the source view's mode
+                // segments and the proposal card's own toggle do: a lone
+                // "Focus" leaves "what am I looking at now?" to be inferred.
+                <button
+                    class="diff-chip"
+                    class:on=move || focused.get()
+                    title="Give this panel the conversation's room as well as its own"
+                    on:click=move |_| on_focus.run(())
+                >
+                    {move || if focused.get() { "Show conversation" } else { "Focus" }}
+                </button>
+
                 <button class="diff-close" title="Close" on:click=move |_| on_close.run(())>
                     "\u{00d7}"
                 </button>
@@ -209,7 +277,7 @@ pub fn DiffView(
 
                 // One grid, both columns. See the module note: two panes kept
                 // in step by a scroll handler drift under momentum.
-                <div class="diff-grid">
+                <div class="diff-grid" class:wrap=move || wrapping.get()>
                     <For
                         each={move || hunks.get().into_iter().enumerate().collect::<Vec<_>>()}
                         key=|(i, hunk): &(usize, kingdom_core::Hunk)| {

@@ -65,7 +65,14 @@ pub fn BrowserView(
     /// The browser deed to caption the picture with, if the court has made one.
     deed: Memo<Option<kingdom_core::ToolCall>>,
     /// The panel's width in pixels, driven by the resizer beside it.
+    ///
+    /// Ignored while focused, for [`super::DiffView`]'s reason.
     width: RwSignal<f64>,
+    /// Whether the panel has been given the conversation's room as well as its
+    /// own. Owned by the chamber -- all three panels share one slot.
+    focused: Signal<bool>,
+    /// Asks for it, or gives it back.
+    on_focus: Callback<()>,
 ) -> impl IntoView {
     let canvas = NodeRef::<leptos::html::Canvas>::new();
     let (sight, set_sight) = signal(ConnectionState::Opening);
@@ -74,13 +81,26 @@ pub fn BrowserView(
     watch_browser(plan, canvas, set_sight, set_url);
 
     view! {
-        <div class="spyglass chamber-aside" style:width=move || format!("{}px", width.get())>
+        <div
+            class="spyglass chamber-aside"
+            style:width=move || (!focused.get()).then(|| format!("{}px", width.get()))
+        >
             <div class="spyglass-bar">
                 <span class="spyglass-url">{move || url.get()}</span>
                 // Said plainly rather than shown as a badge: the user is being
                 // told he is watching and cannot touch, which is a sentence,
                 // not an icon.
                 <span class="spyglass-note">"watching"</span>
+                // The diff's chip, in the diff's place. The three panels share
+                // a slot and should not present three different chromes.
+                <button
+                    class="diff-chip"
+                    class:on=move || focused.get()
+                    title="Give this panel the conversation's room as well as its own"
+                    on:click=move |_| on_focus.run(())
+                >
+                    {move || if focused.get() { "Show conversation" } else { "Focus" }}
+                </button>
             </div>
             <div class="spyglass-stage">
                 <canvas class="spyglass-canvas" node_ref=canvas></canvas>

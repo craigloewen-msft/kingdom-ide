@@ -163,6 +163,14 @@ crates/
                     CHANGING, so it never truncates and never reshapes. Holds
                     the stamp check that stops a save overwriting what the
                     court did while he was typing (ssr only)
+    highlight.rs    Syntax colour: a file's lines split into runs of one kind
+                    each, for the source panel. Server-only ON PURPOSE —
+                    tokenising before the lines go over the wire is what keeps
+                    syntect and 213 syntax definitions out of the wasm bundle,
+                    the same division diff spans already follow. Holds the two
+                    guards `review.rs`'s byte and row caps do not cover: cost is
+                    quadratic in a LINE's width, and a minified bundle is one
+                    very long line that passes both (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)
@@ -206,7 +214,8 @@ crates/
                     public/vendor/ and fetched only when a fence appears),
                     browser_view.rs, resizer.rs (the drag handle the rail, the
                     focused panel and the files rail's split all share — it
-                    drags height as well as width),
+                    drags height as well as width; and, beside it, the
+                    remembering of a panel's own view preferences),
                     city_rail.rs (the files rail's column, split between) over
                     file_tree.rs (the plan's workspace on disk — a file row
                     opens it in the panel) and review_drawer.rs (every
@@ -284,17 +293,34 @@ crates/
                     per-plan session manager. Native only — never in the wasm
                     bundle. The Tool impls over it live in kingdom-app.
     session.rs      Per-plan Chrome, finding one on the machine, and the
-                    operations the tools call. Two things there are load-
+                    operations the tools call. Three things there are load-
                     bearing and easy to undo: HOVER_SETTLE, which rests the
                     pointer on a target before pressing it — chromiumoxide
                     moves and presses in one CDP batch, so a page that decides
                     what a click means from what is *hovered* never sees the
                     move in time, which is why nothing could click the map;
-                    and DEFAULT_VIEWPORT, chosen against Kingdom's own
+                    DEFAULT_VIEWPORT, chosen against Kingdom's own
                     responsive thresholds rather than as a round number
-                    (KINGDOM_BROWSER_VIEWPORT overrides it)
+                    (KINGDOM_BROWSER_VIEWPORT overrides it); and
+                    `disable-software-rasterizer`, which is what actually stops
+                    SwiftShader — NOT `--disable-gpu`, which was long assumed
+                    to and does not. Measured: a WebGL page costs 680–840% of a
+                    core with the software rasteriser and 12–18% without.
+                    KINGDOM_BROWSER_WEBGL=on gives it back, which a plan
+                    working on kingdom-citymap needs.
+
+                    A session also *ends*, which it did not use to: on the
+                    plan settling (browser::dismiss, beside tmux::dismiss),
+                    after KINGDOM_BROWSER_IDLE untouched and unwatched
+                    (default 15m, 0 disables), and — for browsers a killed
+                    server never closed — by sweep_orphans at startup, which
+                    reads the owner pid each profile records and reclaims only
+                    those whose owner is gone
     screencast.rs   CDP screencast, relayed to the spyglass's viewers
-                    (the panel is components/browser_view.rs)
+                    (the panel is components/browser_view.rs). Paced by
+                    holding the CDP ack, which is the only throttle Chrome
+                    offers: unpaced it ran at 68fps and doubled the cost of
+                    the browser it was watching
     profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
     perf.rs         The in-page helper injected before any page script
 
@@ -907,6 +933,53 @@ decision — it is not one of the alternatives, it is the thing they are
 alternatives beside, and the panel is always to its **right** rather than stacked
 above it. It used to stack below 1100px, which put a diff between the King and
 the chamber header and pushed the transcript off the bottom of the screen.
+
+**Any of the three can take the conversation's room as well as its own.** A
+panel 640px wide is not enough to review several files against each other, and
+while he is doing that the transcript is not what he is reading. So a **Focus**
+chip in the panel's bar turns `.chamber-body` from a row into a column: the
+panel takes the full width above, and the conversation keeps the strip beneath
+it. `Escape` leaves, as it leaves every overlay.
+
+Three decisions there are load-bearing. It is **one flag for all three panels**,
+remembered in `localStorage` — a width is about what a particular panel needs to
+be legible, but focus is about what the King is doing, and clicking from a diff
+to the file beside it does not change that. It is **gated on something being in
+the slot** (`Aside::is_showing`), or a flag remembered from last visit would hide
+the transcript of a chamber with an empty column, with the toggle that would put
+it back living in a panel bar that is not on screen. And the **review margin and
+the composer survive it** — that is the whole reason focus shortens the
+conversation column instead of hiding it, since a review that cannot be sent from
+the screen it was written on is not a review mode. The files rail survives for a
+simpler reason: it is outside that box, and it is how reviewing several files
+happens at all. What goes is the header and the log, and the log goes by
+`display: none` so its scroll position is still there when he comes back.
+
+One mechanical detail is worth knowing before changing it. Each panel sets its
+width **inline** from the resizer's signal, and an inline style beats a class
+rule — so focus does not override the width, it *removes* it: the closure yields
+`Option<String>`, which is how tachys spells "reset this property", and no
+`!important` appears on either side. The same move retired `--panel-width`, the
+inline var a note composer used to size itself against; it was the one number
+that claimed to know how much room there was, and it stopped being true the
+moment the panel could grow without that signal moving. `.diff-stage` is now a
+`container-type: inline-size` and the composers are `100cqi`, which asks the box
+itself.
+
+**And the diff shows both of its sides.** It did not, and the cause was one rule
+rather than the layout: `.diff-grid` was `width: max-content` with columns of
+`minmax(50%, 1fr)`, so the grid grew to the longest line and each column took
+half of *that*. At the panel's 640px default one real line of this repository
+resolved the columns to 856.8px each — the new side began at x=857 inside a box
+640 wide, off screen until the King thought to scroll sideways. Short files were
+fine, which is why it survived so long: the failure bites exactly on the real
+code a diff is opened for. The rows now wrap (`minmax(0, 1fr)`, `pre-wrap`,
+`overflow-wrap: anywhere`), and a wrapped pair stays level for free because a
+grid row is as tall as its tallest cell — the part a hand-rolled two-pane view
+gets wrong. A **Wrap** chip turns it off for a King who would rather scroll, and
+the source view is deliberately untouched: `_source.scss` argues that wrapping
+there breaks the correspondence between what he types and the line number he just
+read, and that argument does not apply to a read-only pair of columns.
 
 What yields instead is the **cities rail**, which folds itself to a strip below
 1250px (`app.rs::fold_rail_when_cramped`). A chamber can want four columns at

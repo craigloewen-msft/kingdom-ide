@@ -18,8 +18,13 @@
 //!
 //! **Notes** is the panel's original self: every line is a button that opens a
 //! composer, and what is written lands in the review the King sends to the
-//! court. **Edit** replaces the lines with one textarea and lets him change the
-//! file himself, save it, or delete it.
+//! court. Its lines arrive already split into coloured runs -- see
+//! `kingdom_app::highlight`, which does that on the server so no syntax
+//! definition reaches the browser. **Edit** replaces the lines with
+//! one textarea and lets him change the file himself, save it, or delete it;
+//! there is deliberately no colour there, because a textarea cannot hold one
+//! without a second element behind it kept in sync, and this is a panel for a
+//! quick fix rather than a second editor.
 //!
 //! A mode of one panel rather than a fourth [`Aside`], because it is the same
 //! file in the same slot answering the same question -- and because a King who
@@ -55,7 +60,8 @@
 use crate::api::{plan_file_text, plan_source};
 use crate::components::note_composer::NoteComposer;
 use kingdom_core::{
-    DiffVerdict, FileStamp, FileText, NoteSide, PlanId, ReviewNote, SourceLine, SourceText,
+    CodeSpan, DiffVerdict, FileStamp, FileText, NoteSide, PlanId, ReviewNote, SourceLine,
+    SourceText,
 };
 use leptos::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -86,7 +92,15 @@ pub fn SourceView(
     /// can say so.
     notes: Memo<Vec<ReviewNote>>,
     /// The panel's width in pixels, driven by the resizer beside it.
+    ///
+    /// Ignored while focused, for [`super::DiffView`]'s reason: there the panel
+    /// takes the room the conversation was in.
     width: RwSignal<f64>,
+    /// Whether the panel has been given that room. Owned by the chamber, since
+    /// all three panels share one slot and therefore one answer.
+    focused: Signal<bool>,
+    /// Asks for it, or gives it back.
+    on_focus: Callback<()>,
     /// Writes a note: the line, which version it is of, the line's own text,
     /// and what the King wrote. All four travel because the server needs the
     /// quote and the view needs the line -- see `ReviewNote`.
@@ -408,12 +422,10 @@ pub fn SourceView(
         <div
             class="source-panel chamber-aside"
             class:editing=move || editing.get()
-            style:width=move || format!("{}px", width.get())
-            // The panel's own width, published for the note composers below.
-            // The lines are `max-content` wide -- wider than the panel whenever
-            // a line is long -- so a composer sized against its parent would run
-            // off the right edge. See `_source.scss`.
-            style:--panel-width=move || format!("{}px", width.get())
+            // Absent while focused rather than overridden -- see `DiffView`,
+            // which explains why an inline width has to go rather than be
+            // fought with `!important`.
+            style:width=move || (!focused.get()).then(|| format!("{}px", width.get()))
         >
             // Deliberately the diff's bar, in shape and in height: three panels
             // take this slot and the King should not have to re-learn a chrome
@@ -458,6 +470,18 @@ pub fn SourceView(
                         {move || if fetching_edit.get() { "Opening\u{2026}" } else { "Edit" }}
                     </button>
                 </div>
+
+                // The same chip the diff carries, in the same place: three
+                // panels share this bar, and a control that moved between them
+                // would be one the King has to find again each time.
+                <button
+                    class="diff-chip"
+                    class:on=move || focused.get()
+                    title="Give this panel the conversation's room as well as its own"
+                    on:click=move |_| on_focus.run(())
+                >
+                    {move || if focused.get() { "Show conversation" } else { "Focus" }}
+                </button>
 
                 <button class="diff-close" title="Close" on:click=move |_| on_close.run(())>
                     "\u{00d7}"
@@ -603,13 +627,13 @@ pub fn SourceView(
                             // edit gives the same number different content, and a
                             // key of the number alone would leave the old line
                             // drawn under the new one's note.
-                            key=|line: &SourceLine| (line.number, line.text.clone())
+                            key=|line: &SourceLine| (line.number, line.text())
                             let:line
                         >
                             {
                                 let number = line.number;
-                                let body = line.text.clone();
-                                let quote = StoredValue::new(line.text.clone());
+                                let spans = line.spans.clone();
+                                let quote = StoredValue::new(line.text());
                                 let open = Memo::new(move |_| writing.get() == Some(number));
                                 let noted = Memo::new(move |_| marked.get().contains(&number));
 
@@ -643,7 +667,41 @@ pub fn SourceView(
                                                     ""
                                                 }}
                                             </span>
-                                            <span class="source-text">{body.clone()}</span>
+                                            // Painted run by run, as a diff row
+                                            // is: what colour a piece of code
+                                            // takes was decided on the server,
+                                            // where the syntax definitions are.
+                                            // A file nothing is known about
+                                            // arrives as a single plain span and
+                                            // reads exactly as it always did.
+                                            <span class="source-text">
+                                                <For
+                                                    each={
+                                                        let spans = spans.clone();
+                                                        move || {
+                                                            spans
+                                                                .clone()
+                                                                .into_iter()
+                                                                .enumerate()
+                                                                .collect::<Vec<_>>()
+                                                        }
+                                                    }
+                                                    key=|(i, _): &(usize, CodeSpan)| *i
+                                                    let:span
+                                                >
+                                                    {
+                                                        let (_, span) = span;
+                                                        view! {
+                                                            <span class=format!(
+                                                                "tok tok-{}",
+                                                                span.token.css_suffix(),
+                                                            )>
+                                                                {span.text.clone()}
+                                                            </span>
+                                                        }
+                                                    }
+                                                </For>
+                                            </span>
                                         </button>
 
                                         <Show when=move || open.get()>

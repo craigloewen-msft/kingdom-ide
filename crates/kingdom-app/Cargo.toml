@@ -74,6 +74,26 @@ similar.workspace = true
 # handles image bytes.
 base64 = { version = "0.22", optional = true }
 
+# Syntax colour for the source panel. Server-only, and that is the whole point:
+# `review::source` tokenises a file before it goes over the wire, so a regex
+# engine and 213 syntax definitions stay out of a wasm bundle this workspace
+# works hard to keep small (see `[profile.wasm-dev]` in the root manifest).
+#
+# `default-features = false` drops `onig`, which is a C library needing `cc` --
+# `regex-fancy` is the pure-Rust engine instead, the same reasoning that made
+# `reqwest` use rustls rather than OpenSSL. The default themes and the plist/yaml
+# loaders go too: the syntax set is loaded from a binary dump, and the colours
+# are Kingdom's own in `_tokens.scss` rather than a bundled theme's.
+syntect = { version = "5", default-features = false, features = [
+    "parsing",
+    "regex-fancy",
+], optional = true }
+# The syntaxes `bat` ships, because syntect's own defaults have no TypeScript,
+# no SCSS and no TOML -- three things this repository is itself written in.
+two-face = { version = "0.5", default-features = false, features = [
+    "syntect-fancy",
+], optional = true }
+
 # Client-only.
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -137,6 +157,8 @@ ssr = [
     "dep:regex",
     "dep:libc",
     "dep:base64",
+    "dep:syntect",
+    "dep:two-face",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",

@@ -155,6 +155,21 @@ pub fn CityMap(
     /// the town to the one holding that file's building stands on.
     #[prop(into)]
     focus_file: Signal<Option<String>>,
+    /// The file the King picked by pressing its building, written back for the
+    /// chamber to open.
+    ///
+    /// The return leg of `focus_file`, and the only prop here the map
+    /// *writes*. Written only in [`MapPresence::Rail`], where a building is the
+    /// one thing on screen that names a file: on the King's own map a click
+    /// selects a city, as it always has.
+    ///
+    /// A signal rather than a callback because that is what this seam already
+    /// is -- the map is mounted outside the router's outlet and may never
+    /// unmount, so it cannot be handed a closure belonging to a chamber that
+    /// comes and goes. Cleared by whoever reads it, which is what makes the
+    /// same building openable twice.
+    #[prop(into)]
+    picked_file: RwSignal<Option<String>>,
     /// What the open plan is proposing, if the King is in a chamber.
     ///
     /// Resolved against the manifest here and handed to the engine as plain
@@ -453,16 +468,41 @@ pub fn CityMap(
     // `built` for the same reason as the effect above: a camera pointed at a
     // holding before the world it stands in has finished going up is undone by
     // the raise's closing `fit()`. And `manual` for the same reason too.
+    //
+    // # Gliding, and when not to
+    //
+    // Moving between two files of one city is a short hop, and travelling it
+    // over `camera::GLIDE_SECONDS` is what tells the King *which way* the map
+    // went -- the new building arrives from somewhere rather than replacing
+    // what was there. Arriving in a city for the first time is not a journey
+    // worth animating: the whole frame changes, so a tween across it is a
+    // smear. So the last city an `Inspect` was sent for is remembered, and the
+    // glide is asked for only when this one matches it.
+    //
+    // The decision is made here rather than in the engine because it is a
+    // question about *cities*, and the engine does not know what one is -- the
+    // same boundary the works effect above is written against.
+    let inspected_city = RwSignal::new(None::<CityId>);
     let pointer = bridge.clone();
     Effect::new(move |_| {
+        // Every early return below forgets where the camera was pointed, and
+        // that is the point of writing it here rather than in one branch. Each
+        // one means the camera is about to be somewhere this effect did not put
+        // it -- the King has taken it, the map has moved home and re-framed, or
+        // a world is going up and will end with its own `fit()`. A glide from a
+        // *remembered* building the camera is no longer at would be a quarter
+        // second of travelling from nowhere.
         if manual.get() {
+            inspected_city.set(None);
             return;
         }
         let open = focus_file.get();
         if !presence.get().in_rail() || !built.get() {
+            inspected_city.set(None);
             return;
         }
         let Some(city) = focus_city.get() else {
+            inspected_city.set(None);
             return;
         };
         let framed = manifest.with(|map| {
@@ -473,6 +513,11 @@ pub fn CityMap(
                     map.holding_at(city.as_str(), path)
                         .map(|holding| ViewerCommand::Inspect {
                             point: holding.center,
+                            // Only when the camera is already in this city --
+                            // and only when it is already pointed at a
+                            // *building* there. Coming from the town-wide frame
+                            // is the arrival, not a hop between neighbours.
+                            glide: inspected_city.get_untracked().as_ref() == Some(&city),
                         })
                 }
                 // None open: back out to the town the chamber is about.
@@ -485,12 +530,24 @@ pub fn CityMap(
             }
         });
         let Some(command) = framed else {
+            // Nothing to point at -- a file with no building on the map, most
+            // often. The camera stays where it is, so what it is pointed at is
+            // still true and is deliberately left alone.
             return;
         };
+        // Remembered *after* the send, and only for a command that actually
+        // pointed at a building: pulling back to the town leaves the camera
+        // framing the whole place, so the next file opened there is an arrival
+        // again rather than a hop from wherever the last one stood.
+        inspected_city.set(match command {
+            ViewerCommand::Inspect { .. } => Some(city),
+            _ => None,
+        });
         pointer.send(command);
     });
 
-    // Clicking a building selects its city; clicking empty space clears it.
+    // Clicking a building: on the King's own map it selects the city, and in
+    // the rail it opens the file the building stands for.
     //
     // The engine reports the click itself (`ViewerStatus::clicked`), and the
     // DOM handler now only handles the *absence* of one. It used to pair its
@@ -503,12 +560,21 @@ pub fn CityMap(
     // what makes that work: the engine may publish it *after* the DOM event
     // has already been and gone.
     //
-    // Both halves are suppressed while the map stands in the rail, and that is
-    // not an oversight. In a chamber `conversation.rs` force-sets `selected`
-    // from the open plan on every render, so a click that changed it would be
-    // overwritten a frame later -- and a control that visibly does nothing is
-    // worse than no control. The rail's map is a view; its head carries the way
-    // to the real one. Panning and zooming stay live either way.
+    // # Why the rail answers a click differently
+    //
+    // *Selecting* is still suppressed there, and that is not an oversight. In a
+    // chamber `conversation.rs` force-sets `selected` from the open plan on
+    // every render, so a click that changed it would be overwritten a frame
+    // later -- and a control that visibly does nothing is worse than no
+    // control. The rail's map is a view of one city; its head carries the way
+    // to the real one.
+    //
+    // But *opening a file* is a different act, and nothing overwrites it. A
+    // building in the rail's map is the one thing on screen that names a file
+    // by standing for it, so pressing it asks to read that file -- which the
+    // chamber answers by opening it in the panel, and which then brings the
+    // camera to the building through the pointer effect above. Panning and
+    // zooming stay live in both homes either way.
     let last_click = RwSignal::new(None::<(String, u64)>);
     Effect::new(move |_| {
         let Some(click) = status.with(|state| state.clicked.clone()) else {
@@ -519,22 +585,39 @@ pub fn CityMap(
             return;
         }
         last_click.set(Some(click.clone()));
-        if presence.get_untracked().in_rail() {
-            return;
-        }
-        // A feature's `repository` is the project's directory name, which is
-        // exactly what `CityId::new` is built from in `kingdom_app::scan`.
-        let city = manifest.with_untracked(|map| {
+
+        // The building that was pressed, if the manifest still holds it.
+        let feature = manifest.with_untracked(|map| {
             map.as_ref().and_then(|map| {
                 map.features
                     .iter()
                     .find(|feature| feature.id == click.0)
-                    .map(|feature| CityId::new(feature.repository.clone()))
+                    .cloned()
             })
         });
-        if city.is_some() {
-            selected.set(city);
+        let Some(feature) = feature else {
+            return;
+        };
+
+        if presence.get_untracked().in_rail() {
+            // Only a file of the city this chamber is about. The neighbouring
+            // towns are on screen and just as clickable, and their files do not
+            // exist in this plan's workspace -- so a click on one must do
+            // nothing rather than open a panel reporting a file that is not
+            // there. Selecting that city instead is the very thing the chamber
+            // overwrites, so there is nothing useful to offer here.
+            let ours = focus_city
+                .get_untracked()
+                .is_some_and(|city| city.as_str() == feature.repository);
+            if ours {
+                picked_file.set(Some(feature.path.clone()));
+            }
+            return;
         }
+
+        // A feature's `repository` is the project's directory name, which is
+        // exactly what `CityId::new` is built from in `kingdom_app::scan`.
+        selected.set(Some(CityId::new(feature.repository.clone())));
     });
 
     // Empty space clears the selection. Nothing in the engine reports a click
