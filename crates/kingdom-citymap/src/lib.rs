@@ -61,9 +61,21 @@ pub use view::CityMap;
 /// The map, as the server renders it: the element, and nothing in it.
 ///
 /// `app.rs` is compiled on both targets and names [`CityMap`] in its view tree,
-/// so the name has to exist on the server too. What it must *not* do is render
-/// anything the browser will then disagree with -- so it emits exactly the
-/// markup [`view::CityMap`] does, minus the engine, and hydration matches.
+/// so the name has to exist on the server too.
+///
+/// # Why it need not match the browser's markup
+///
+/// It does not, and cannot: [`view::CityMap`] also renders a loading card and
+/// an error line, both of which are driven by client state. That is safe
+/// because **the map is never server-rendered at all**. `App` gates the whole
+/// interface behind `kingdom.is_open()`, the server answers that with
+/// `ChooseKingdom`, and the only thing that opens a kingdom is an `Effect` --
+/// which does not run during SSR. The delivered document holds the folder
+/// picker and no `repo-city-canvas`.
+///
+/// So this exists to satisfy the compiler rather than the hydrator, and adding
+/// the client-only nodes here would be the riskier move: a static element on
+/// one side and a dynamic one on the other is how a mismatch is actually made.
 ///
 /// The canvas is deliberately still here rather than behind a `Show`: the
 /// engine resolves it by id at boot, and an element that appears only after
@@ -75,6 +87,20 @@ pub fn CityMap(
     /// reads and writes it.
     #[allow(unused_variables)]
     selected: leptos::prelude::RwSignal<Option<kingdom_core::CityId>>,
+    /// Which cities have work under way. Unused here for the same reason: the
+    /// signature must match the browser's, because `app.rs` names this
+    /// component on both targets.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    working: leptos::prelude::Signal<Vec<kingdom_core::CityActivity>>,
+    /// Whether the map is on screen. Unused here for the same reason: only the
+    /// browser has an engine to stop. It is taken anyway so that the two
+    /// `CityMap` signatures stay identical -- `app.rs` compiles against both,
+    /// and a prop on one and not the other is a build failure on whichever
+    /// target is not being looked at.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    visible: leptos::prelude::Signal<bool>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

@@ -3,7 +3,7 @@
 use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, PromptBar, Sidebar};
 use kingdom_citymap::CityMap;
-use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
+use kingdom_core::{CityActivity, CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
@@ -409,6 +409,81 @@ fn fold_rail_when_cramped(
     let _ = (collapsed, preference, decided_at);
 }
 
+/// How often the map asks which cities have agents working in them.
+///
+/// A compromise, and worth naming as one. The chamber is *pushed* to over a
+/// socket; the map is not, because `events.rs` is keyed per plan by design --
+/// its own doc says a kingdom-wide channel "would wake every open tab for every
+/// keystroke of every plan". Two seconds is fast enough that a town lighting up
+/// feels like a response to starting work, and the request is a few dozen bytes
+/// asked only while the King is actually looking at the map.
+#[cfg(feature = "hydrate")]
+const ACTIVITY_POLL_MS: u64 = 2_000;
+
+/// Keeps `working` current while the map is on screen, and stops the moment it
+/// is not.
+///
+/// Stopping matters more than starting. The King spends most of his time in a
+/// chamber, where this answers a question nobody is asking -- and a timer left
+/// running there would poll the server for the life of the session. The
+/// start/stop/`on_cleanup` shape is the one `conversation.rs::elapsed_clock`
+/// already uses for its own interval, for the same reason.
+fn poll_activity(working: RwSignal<Vec<CityActivity>>, showing: Memo<bool>) {
+    #[cfg(feature = "hydrate")]
+    {
+        let running = StoredValue::new(None::<leptos::leptos_dom::helpers::IntervalHandle>);
+
+        let refresh = move || {
+            leptos::task::spawn_local(async move {
+                // A failure is silence, not an error banner. This is ambient
+                // decoration on a map; a server restart mid-poll must not put a
+                // message in front of the King about something he did not ask
+                // for. The next tick asks again.
+                if let Ok(seen) = crate::api::kingdom_activity().await {
+                    working.set(seen);
+                }
+            });
+        };
+
+        let stop = move || {
+            if let Some(handle) = running.try_get_value().flatten() {
+                handle.clear();
+                running.try_set_value(None);
+            }
+        };
+
+        Effect::new(move |_| {
+            // Unconditionally first: this run supersedes the last, whether it is
+            // about to start a new timer or to stop entirely.
+            stop();
+
+            if !showing.get() {
+                // Leaving the map clears what was last seen, so returning to it
+                // cannot show a ring around a town that stopped working while
+                // the King was elsewhere. The first poll is a moment away.
+                working.set(Vec::new());
+                return;
+            }
+
+            // Asked straight away, so the map does not stand quiet for two
+            // seconds after arriving on it.
+            refresh();
+
+            if let Ok(handle) = leptos::leptos_dom::helpers::set_interval_with_handle(
+                refresh,
+                std::time::Duration::from_millis(ACTIVITY_POLL_MS),
+            ) {
+                running.try_set_value(Some(handle));
+            }
+        });
+
+        on_cleanup(stop);
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = (working, showing);
+}
+
 /// Root component: the throne room.
 #[component]
 pub fn App() -> impl IntoView {
@@ -492,11 +567,21 @@ pub fn App() -> impl IntoView {
 /// So the map is mounted **once**, here, as a sibling of the outlet, and is
 /// hidden with CSS when the route is not `/`. It costs one canvas standing idle
 /// behind the chamber and buys a map that is still there when you come back.
+///
+/// Hidden is not the same as stopped, though, so `on_the_map` is handed to the
+/// map as well as to the class: CSS spares the King the pixels, and the prop is
+/// what spares his machine the work of drawing them.
 #[component]
 fn ThroneRoom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let location = use_location();
     let on_the_map = Memo::new(move |_| location.pathname.get() == "/");
+
+    // Which cities have agents in them. Owned here rather than in
+    // `KingdomState` because nothing outside the map reads it, and polled only
+    // while the map is what the King is looking at.
+    let working = RwSignal::new(Vec::<CityActivity>::new());
+    poll_activity(working, on_the_map);
 
     view! {
         <div
@@ -513,7 +598,7 @@ fn ThroneRoom() -> impl IntoView {
             <Sidebar/>
             <main class="main-region">
                 <div class="map-region" class:hidden=move || !on_the_map.get()>
-                    <CityMap selected=state.selected/>
+                    <CityMap selected=state.selected working=working visible=on_the_map/>
                 </div>
                 <Outlet/>
             </main>

@@ -9,6 +9,7 @@
 //! The interface around the map is still Leptos. The two halves talk through
 //! [`bridge::Bridge`].
 
+pub mod activity;
 pub mod bridge;
 pub mod camera;
 pub mod input;
@@ -30,7 +31,11 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy::window::{PresentMode, WindowPlugin, WindowResolution};
+use bevy::winit::{UpdateMode, WinitSettings};
 
+use std::time::Duration;
+
+use activity::Activity;
 use bridge::{Bridge, ViewerCommand};
 use camera::{CameraRig, MapCamera};
 use lod::ActiveLod;
@@ -42,6 +47,15 @@ use spawn::{LoadedMap, MeshCache, SceneRoot};
 /// The canvas is created by Leptos and handed over, rather than injected by
 /// the engine, so the surrounding interface keeps control of the layout.
 pub const CANVAS_SELECTOR: &str = "#repo-city-canvas";
+
+/// How long the engine may sleep when the King is not watching the map.
+///
+/// This is a wake guarantee rather than a frame rate. It bounds how long
+/// [`ViewerCommand::Show`] can sit unread in the bridge, because only a running
+/// update drains it -- so it is also the worst-case delay before the map comes
+/// back when he returns to it. Short enough not to be seen, long enough that an
+/// idle map is doing nothing worth measuring.
+const IDLE_WAKE: Duration = Duration::from_millis(250);
 
 /// Boots the engine into the page.
 ///
@@ -100,6 +114,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<MaterialCache>()
             .init_resource::<LoadedMap>()
             .init_resource::<ActiveLod>()
+            .init_resource::<Activity>()
             .init_resource::<wards::ActiveWard>()
             .init_resource::<input::PointerState>()
             .init_resource::<labels::LabelPool>()
@@ -112,6 +127,13 @@ impl Plugin for RepoCityPlugin {
                     input::handle_scroll,
                     lod::track_lod,
                     lod::apply_lod,
+                    // After `apply_lod`, which walks every entity with a
+                    // `VisibleFrom` and would otherwise be free to hide a ring
+                    // in the same frame this has just shown it. A ring carries
+                    // no `VisibleFrom` precisely so that cannot happen, and the
+                    // ordering is the second half of that guarantee.
+                    activity::apply_activity,
+                    activity::pulse_rings,
                     camera::sync_camera,
                     wards::apply_label_legibility,
                     wards::track_active_ward,
@@ -149,9 +171,11 @@ fn apply_commands(
     mut material_cache: ResMut<MaterialCache>,
     mut loaded: ResMut<LoadedMap>,
     mut rig: ResMut<CameraRig>,
+    mut working: ResMut<Activity>,
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
+    mut winit: ResMut<WinitSettings>,
 ) {
     let queued = bridge.drain_commands();
     if queued.is_empty() {
@@ -198,6 +222,7 @@ fn apply_commands(
                 rig.holding = typical_holding(&manifest);
                 rig.fit_scale = rig.scale;
                 bridge.update_status(|status| {
+                    status.built = true;
                     status.error = None;
                     status.hovered = None;
                     status.selected_ward = None;
@@ -232,6 +257,44 @@ fn apply_commands(
             ViewerCommand::LookAt { point } => rig.look_at(Vec2::from_array(point)),
             ViewerCommand::SelectWard(id) => {
                 bridge.update_status(|status| status.selected_ward = id);
+            }
+            ViewerCommand::SetActivity(towns) => {
+                // Assigned through `Res`'s change detection rather than
+                // compared first: `apply_activity` runs only on a change, and
+                // an equal assignment still marks the resource changed, which
+                // costs one pass over a handful of rings. Guarding it here
+                // would trade that for a comparison on every poll.
+                *working = Activity(towns);
+            }
+            ViewerCommand::Show(showing) => {
+                // Two separate costs, and only stopping both is worth
+                // anything. An inactive camera is skipped by the render graph,
+                // which is the GPU half; the update mode is the CPU half, and
+                // without it the whole schedule would still run sixty times a
+                // second to draw nothing.
+                if let Ok((mut camera, _, _)) = cameras.single_mut() {
+                    camera.is_active = showing;
+                }
+                *winit = if showing {
+                    WinitSettings {
+                        focused_mode: UpdateMode::Continuous,
+                        unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+                    }
+                } else {
+                    // Deliberately a short wait rather than a long one. The
+                    // engine is told to come back *through the bridge*, which
+                    // only `apply_commands` drains and which therefore only
+                    // runs on an update -- so this interval is also the delay
+                    // before a return to the map is noticed. Ticking four
+                    // times a second costs almost nothing, because every
+                    // system in the schedule early-returns when nothing has
+                    // changed, while the expensive half stays off with the
+                    // camera.
+                    WinitSettings {
+                        focused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+                        unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
+                    }
+                };
             }
         }
     }
