@@ -195,7 +195,14 @@ impl Plugin for RepoCityPlugin {
 /// Spawns the camera before any world arrives, so the first frame is empty
 /// space rather than a black screen or, worse, a flash of daylight sky the
 /// manifest is about to replace.
-fn setup(mut commands: Commands) {
+///
+/// It also tells the interface that the engine is standing. On the web that is
+/// news rather than bookkeeping: `App::run()` is reached long before a GPU
+/// device exists, and a `Load` sent in the meantime waits in the bridge queue.
+/// Until this runs, the loading card has a manifest and nobody to give it to,
+/// and [`bridge::ViewerStatus::awake`] is how it can say so.
+fn setup(mut commands: Commands, bridge: Res<Bridge>) {
+    bridge.update_status(|status| status.awake = true);
     camera::spawn_camera(
         &mut commands,
         // `build::scene::SPACE`, which the manifest carries and overrides this
