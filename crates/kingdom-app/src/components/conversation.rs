@@ -732,6 +732,21 @@ fn ConversationBody(
 
     // The file the rail should mark as open, whichever way it is showing.
     let open_file = Memo::new(move |_| aside.get().file());
+
+    // And the same answer, published where the map can read it.
+    //
+    // The map is mounted outside the router's outlet -- it may never unmount,
+    // see `ThroneRoom` -- so a shared signal is the only seam between this
+    // conversation and the pane at the foot of the rail. Exactly what
+    // `state.selected` already is for the city, which is why this sits beside
+    // it rather than being threaded through as a prop.
+    //
+    // Cleared on the way out, so the map does not go on pointing at a building
+    // in a plan the King has left.
+    Effect::new(move |_| state.focus_file.set(open_file.get()));
+    on_cleanup(move || {
+        state.focus_file.try_set(None);
+    });
     // And the two the panels fetch by. Split, because a diff and a whole file
     // are different requests and the wrong panel must not fire one.
     let diff_file = Memo::new(move |_| aside.get().diff_file());

@@ -93,14 +93,23 @@ pub fn CityMap(
     #[allow(unused_variables)]
     #[prop(into)]
     working: leptos::prelude::Signal<Vec<kingdom_core::CityActivity>>,
-    /// Whether the map is on screen. Unused here for the same reason: only the
-    /// browser has an engine to stop. It is taken anyway so that the two
-    /// `CityMap` signatures stay identical -- `app.rs` compiles against both,
-    /// and a prop on one and not the other is a build failure on whichever
-    /// target is not being looked at.
+    /// Where the map is standing. Unused here for the same reason: only the
+    /// browser has an engine to slow down or stop. It is taken anyway so that
+    /// the two `CityMap` signatures stay identical -- `app.rs` compiles against
+    /// both, and a prop on one and not the other is a build failure on
+    /// whichever target is not being looked at. That is also why
+    /// [`map::MapPresence`] lives in `map`, the one module on both targets.
     #[allow(unused_variables)]
     #[prop(into)]
-    visible: leptos::prelude::Signal<bool>,
+    presence: leptos::prelude::Signal<map::MapPresence>,
+    /// The city the rail's map frames. Unused here, for the reason above.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    focus_city: leptos::prelude::Signal<Option<kingdom_core::CityId>>,
+    /// The file the rail's map points at. Unused here, for the reason above.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    focus_file: leptos::prelude::Signal<Option<String>>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

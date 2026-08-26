@@ -10,7 +10,7 @@
 //! conversation. A row that silently changed state on a screen that cannot show
 //! the result would be a dead end.
 
-use crate::app::{KingdomState, DEFAULT_SIDEBAR_WIDTH};
+use crate::app::{KingdomState, DEFAULT_MAP_HEIGHT, DEFAULT_SIDEBAR_WIDTH};
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use kingdom_core::{Attention, City, CityId, Plan, PlanStatus};
 use leptos::ev;
@@ -29,6 +29,21 @@ const BOUNDS: Bounds = Bounds {
 
 const WIDTH_KEY: &str = "kingdom.sidebar_width";
 
+/// How tall the map pane at the foot of the rail may be dragged.
+///
+/// The floor is a few rows of world rather than zero, for the reason the files
+/// rail's split has one: a pane dragged shut cannot be found again. The ceiling
+/// leaves room for the registry, which is what the rail is actually for -- a
+/// map that could eat the whole column would hide the plans it is meant to sit
+/// beside.
+const MAP_BOUNDS: Bounds = Bounds {
+    min: 140.0,
+    max: 620.0,
+    default: DEFAULT_MAP_HEIGHT,
+};
+
+const MAP_HEIGHT_KEY: &str = "kingdom.map_height";
+
 #[component]
 pub fn Sidebar() -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -41,8 +56,16 @@ pub fn Sidebar() -> impl IntoView {
     let city_count = move || state.kingdom.with(|k| k.cities.len());
 
     restore_width(state.sidebar_width, WIDTH_KEY, BOUNDS);
+    restore_width(state.map_height, MAP_HEIGHT_KEY, MAP_BOUNDS);
 
     let collapsed_rail = move || state.rail_collapsed.get();
+
+    // Whether the map is standing at the foot of this rail, which it does only
+    // in a chamber -- on `/` the map has the whole screen and the rail is beside
+    // it rather than around it. The same question `ThroneRoom` asks to place the
+    // overlay, asked here to reserve the room for it.
+    let location = use_location();
+    let map_in_rail = Memo::new(move |_| location.pathname.get() != "/");
 
     // Clearing the kingdom locally is what returns the app to the opening
     // screen; the server call is what stops the next start reopening it.
@@ -137,6 +160,39 @@ pub fn Sidebar() -> impl IntoView {
                     </For>
                 </ul>
             </div>
+
+            // The room the map stands in, and nothing else.
+            //
+            // Deliberately **empty**. The canvas is not a child of this rail --
+            // it may be mounted exactly once for the life of the page, so it is
+            // an overlay positioned by `ThroneRoom` (see its note) -- and this
+            // slot exists only so `.sidebar-body` stops scrolling where the map
+            // begins instead of running underneath it.
+            //
+            // Both read `state.map_height`, so the reserved space and the
+            // rectangle drawn over it are the same number rather than two that
+            // could drift. The alternative was measuring one into the other,
+            // and a measured layout that lags a frame during a drag is a whole
+            // class of bug avoided by not having a second number.
+            //
+            // `Grows::Upwards`, so dragging up makes the map taller: the pane
+            // being measured is the one *below* the handle. That is the mirror
+            // of the files rail's split, and it is which way round it has to be
+            // here -- the registry should absorb a change in window height and
+            // the map should keep what it was given.
+            <Show when=move || map_in_rail.get()>
+                <Resizer
+                    width=state.map_height
+                    grows=Grows::Upwards
+                    bounds=MAP_BOUNDS
+                    storage_key=MAP_HEIGHT_KEY
+                    class="rail-split map-split"
+                />
+                <div
+                    class="rail-map-slot"
+                    style:height=move || format!("{}px", state.map_height.get())
+                ></div>
+            </Show>
 
             // The handle exists only while there is a panel to size: a divider
             // on a folded rail is a control that does nothing.

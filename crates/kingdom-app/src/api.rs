@@ -141,19 +141,6 @@ pub async fn get_kingdom() -> Result<Kingdom, ServerFnError> {
     Ok(lock()?.for_wire())
 }
 
-/// Which cities have a turn running in them right now.
-///
-/// Deliberately its own function rather than a field the map reads off
-/// [`get_kingdom`]: this is polled every couple of seconds while the King is
-/// looking at the map, and `get_kingdom` is the app's largest single transfer
-/// -- every plan at once, which is what its own doc measures at 13.9 MB on a
-/// real kingdom. What comes back here is a handful of names and counts, and is
-/// usually the empty list.
-#[server(GetKingdomActivity, "/api")]
-pub async fn kingdom_activity() -> Result<Vec<kingdom_core::CityActivity>, ServerFnError> {
-    Ok(lock()?.activity())
-}
-
 /// Opens a dev folder as the kingdom: scans it for cities and seats a model.
 #[server(OpenKingdom, "/api")]
 pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {

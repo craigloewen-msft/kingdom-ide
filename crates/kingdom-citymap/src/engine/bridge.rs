@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
-use crate::map::MapManifest;
+use crate::map::{MapManifest, MapPresence};
 
 /// How far the camera is zoomed in, and therefore how much detail is drawn.
 ///
@@ -89,17 +89,21 @@ pub enum ViewerCommand {
     /// polls for the whole picture, so a town missing from the list is a town
     /// with nothing running rather than a town nobody mentioned.
     SetActivity(Vec<TownActivity>),
-    /// Whether the King is actually looking at the map.
+    /// Where the map is standing, and therefore how hard it should work.
     ///
-    /// The map is mounted once for the life of the page and hidden with CSS
-    /// while he is in a plan's chamber -- see `kingdom_app::app::ThroneRoom`
-    /// for why it may never unmount. But `visibility: hidden` stops the pixels
-    /// reaching the screen, not the work of producing them: the engine would
-    /// go on running its render graph over every building on the island,
-    /// behind a conversation, for as long as that conversation lasted. Since
-    /// most of the King's time is spent in a chamber rather than on the map,
-    /// that is most of the time.
-    Show(bool),
+    /// The map is mounted once for the life of the page -- see
+    /// `kingdom_app::app::ThroneRoom` for why it may never unmount -- and moves
+    /// between rectangles rather than between screens. But a rectangle it is
+    /// not being looked at through still costs everything to draw:
+    /// `visibility: hidden` stops the pixels reaching the screen, not the work
+    /// of producing them, and the engine would go on running its render graph
+    /// over every building on the island behind a conversation for as long as
+    /// that conversation lasted.
+    ///
+    /// Three states rather than two, because there are now genuinely three.
+    /// See [`MapPresence`], and the arm in `engine::apply_commands` for what
+    /// each one costs.
+    Show(MapPresence),
 }
 
 /// One town with agents working in it.

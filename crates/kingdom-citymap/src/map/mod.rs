@@ -23,6 +23,57 @@ use serde::{Deserialize, Serialize};
 /// An sRGB colour with alpha.
 pub type MapColor = [u8; 4];
 
+/// Where the map is being shown, and therefore how hard it should work.
+///
+/// The map is mounted exactly once for the life of the page -- see
+/// [`crate::engine`] and `kingdom_app::app::ThroneRoom` for why it may never
+/// unmount -- so it does not move between screens, it moves between
+/// *rectangles*. This says which one it is currently standing in.
+///
+/// # Why this is in `map` and not in `engine::bridge`
+///
+/// It is the odd thing here: this module is otherwise world-space geometry,
+/// and nothing about a viewport belongs in a wire format. It lives here
+/// because it is a **prop type of `CityMap`**, and `lib.rs` carries an `ssr`
+/// stub of that component whose signature must match the browser's
+/// prop-for-prop -- its own doc notes that a prop on one target and not the
+/// other is a build failure on whichever target is not being looked at. `map`
+/// is the only module compiled to both, so it is the only place a shared prop
+/// type can stand.
+///
+/// Deliberately three named states rather than two booleans. "Is it visible"
+/// and "is it the whole screen" are not independent -- there is no fourth
+/// combination -- and a pair of flags encoding three states is the shape that
+/// eventually disagrees with itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MapPresence {
+    /// Not on screen at all: the King is in a chamber with the rail folded
+    /// away. The engine stops.
+    #[default]
+    Hidden,
+    /// A pane at the foot of the cities rail, beside a conversation. Small,
+    /// glanced at rather than flown through, and drawn slowly.
+    Rail,
+    /// The whole main region, which is the map's own screen. Drawn fully.
+    Full,
+}
+
+impl MapPresence {
+    /// Whether the map is on screen at all, in either home.
+    pub fn showing(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+
+    /// Whether this is the small pane in the rail.
+    ///
+    /// The rail's map is scoped to the city a plan works in, and the full one
+    /// is not -- on his own map the King drives the camera and nothing should
+    /// take it from him. So this is the question the focus effects ask.
+    pub fn in_rail(self) -> bool {
+        matches!(self, Self::Rail)
+    }
+}
+
 /// A world-space rectangle on the ground plane.
 ///
 /// `x`/`y` are ground coordinates and `depth` runs along the ground `y` axis.
@@ -83,6 +134,41 @@ pub struct MapManifest {
     pub locations: Vec<MapLocation>,
     /// One entry per file, holding the detail a selection panel shows.
     pub features: Vec<MapFeature>,
+}
+
+impl MapManifest {
+    /// The town a project's directory name stands for, if this map has one.
+    ///
+    /// Matched on [`MapLocation::label`] rather than on its id, and that is
+    /// load-bearing rather than incidental: a manifest's `town-N` identifiers
+    /// are numbered from two different orderings -- `scene::towns` enumerates
+    /// the packing order while `manifest::build_world_manifest` sorts by file
+    /// count -- so `town-0` need not mean the same settlement in both halves of
+    /// one manifest. [`crate::engine::bridge::TownActivity`] records the same
+    /// trap for the same reason, and a test below pins it.
+    ///
+    /// The **name** is what both halves agree on, and it is the same string a
+    /// `CityId` is built from: `kingdom_app::scan` takes a project's
+    /// `path.file_name()` and `build::scan_repository` takes its
+    /// `root.file_name()`.
+    ///
+    /// Takes a `&str` and not a `CityId`, because this module is deliberately
+    /// ignorant of Kingdom's domain -- it is the wire format, and `kingdom-core`
+    /// is a dependency only of `build`.
+    pub fn town_named(&self, name: &str) -> Option<&MapLocation> {
+        self.locations.iter().find(|place| place.label == name)
+    }
+
+    /// Where one file's holding stands, if this map drew one for it.
+    ///
+    /// Both halves of the identity are checked. `path` alone would be ambiguous
+    /// the moment two projects in one kingdom both have a `src/main.rs`, which
+    /// on a kingdom of Rust projects is most of them.
+    pub fn holding_at(&self, repository: &str, path: &str) -> Option<&MapFeature> {
+        self.features
+            .iter()
+            .find(|feature| feature.repository == repository && feature.path == path)
+    }
 }
 
 /// Everything the renderer needs to build the scene, in world space.
@@ -530,6 +616,174 @@ pub struct MapFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A location standing for one town.
+    fn place(id: &str, label: &str, center: [f32; 2]) -> MapLocation {
+        MapLocation {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            detail: String::new(),
+            center,
+            extent: [100.0, 100.0],
+        }
+    }
+
+    /// A feature standing for one file.
+    fn holding(repository: &str, path: &str, center: [f32; 2]) -> MapFeature {
+        MapFeature {
+            id: format!("{repository}/{path}"),
+            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            path: path.to_owned(),
+            repository: repository.to_owned(),
+            folder: String::new(),
+            breadcrumb: Vec::new(),
+            building_kind: String::new(),
+            meaning: String::new(),
+            category: String::new(),
+            bytes: 0,
+            lines: 0,
+            complexity: 0,
+            references: 0,
+            footprint: MapRect::default(),
+            height: 1.0,
+            center,
+        }
+    }
+
+    fn manifest(locations: Vec<MapLocation>, features: Vec<MapFeature>) -> MapManifest {
+        MapManifest {
+            title: String::new(),
+            subtitle: String::new(),
+            world: MapWorld {
+                bounds: MapRect::default(),
+                space: [0, 0, 0, 255],
+                ground: [0, 0, 0, 255],
+                rim: Vec::new(),
+                underside: MapUnderside {
+                    cliff: 0.0,
+                    shelf: 0.0,
+                    taper: 0.0,
+                    depth: 0.0,
+                    cliff_color: [0, 0, 0, 255],
+                    rock: [0, 0, 0, 255],
+                    deep: [0, 0, 0, 255],
+                },
+                sun: MapSun {
+                    direction: [0.0, -1.0, 0.0],
+                    color: [255, 255, 255, 255],
+                    illuminance: 1.0,
+                    ambient: [255, 255, 255, 255],
+                    ambient_brightness: 1.0,
+                },
+                towns: Vec::new(),
+                wards: Vec::new(),
+                plazas: Vec::new(),
+                roads: Vec::new(),
+                buildings: Vec::new(),
+                scenery: Vec::new(),
+                ground_labels: Vec::new(),
+            },
+            districts: Vec::new(),
+            locations,
+            features,
+        }
+    }
+
+    /// The rail's map is framed on the city a conversation is about, and this
+    /// is the lookup that finds it.
+    #[test]
+    fn a_town_is_found_by_the_project_directory_name() {
+        let map = manifest(
+            vec![
+                place("town-0", "kingdom-ide", [10.0, 20.0]),
+                place("town-1", "mommys-heart", [90.0, 80.0]),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            map.town_named("mommys-heart").map(|town| town.center),
+            Some([90.0, 80.0]),
+        );
+        // A folder the map never drew -- an empty project is left out of the
+        // manifest entirely (`manifest_for`) -- must be an absence, not a
+        // wrong town.
+        assert!(map.town_named("not-a-city").is_none());
+    }
+
+    /// The trap `TownActivity` already documents, pinned on this side too.
+    ///
+    /// `scene::towns` numbers its settlements in packing order while
+    /// `manifest::build_world_manifest` numbers its locations by file count, so
+    /// `town-0` need not mean the same place in both halves of one manifest.
+    /// Matching on the id would therefore frame the wrong city -- silently, and
+    /// only on kingdoms whose two orderings happen to disagree. A future
+    /// refactor to id-matching fails here rather than in front of the King.
+    #[test]
+    fn a_town_is_not_found_by_its_position_in_the_list() {
+        // The orderings disagree: the largest project is listed first, and it
+        // is not the one whose id says zero.
+        let map = manifest(
+            vec![
+                place("town-3", "kingdom-ide", [10.0, 20.0]),
+                place("town-0", "scratch", [90.0, 80.0]),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            map.town_named("kingdom-ide").map(|town| town.center),
+            Some([10.0, 20.0]),
+            "the name has to win over the position in the list"
+        );
+    }
+
+    /// Opening a file in the chamber points the rail's map at its building.
+    ///
+    /// Both halves of the identity are checked, and the test is worth having
+    /// for the second: a kingdom of Rust projects has a `src/main.rs` in nearly
+    /// every city, so matching on the path alone would point the map at
+    /// whichever one happened to be built first.
+    #[test]
+    fn a_holding_needs_both_its_city_and_its_path() {
+        let map = manifest(
+            Vec::new(),
+            vec![
+                holding("kingdom-ide", "src/main.rs", [1.0, 2.0]),
+                holding("scratch", "src/main.rs", [300.0, 400.0]),
+            ],
+        );
+
+        assert_eq!(
+            map.holding_at("scratch", "src/main.rs")
+                .map(|feature| feature.center),
+            Some([300.0, 400.0]),
+        );
+        // The right city, a file it does not have. Nothing, rather than the
+        // other city's building.
+        assert!(map.holding_at("scratch", "src/lib.rs").is_none());
+    }
+
+    /// The two questions the presence is asked, and the one that is not a
+    /// synonym for the other.
+    ///
+    /// `Rail` is on screen *and* scoped; `Full` is on screen and not. Reading
+    /// `showing()` where `in_rail()` was meant would scope the King's own map
+    /// and take the camera off him.
+    #[test]
+    fn presence_separates_being_shown_from_being_in_the_rail() {
+        assert!(!MapPresence::Hidden.showing());
+        assert!(!MapPresence::Hidden.in_rail());
+
+        assert!(MapPresence::Rail.showing());
+        assert!(MapPresence::Rail.in_rail());
+
+        assert!(MapPresence::Full.showing());
+        assert!(
+            !MapPresence::Full.in_rail(),
+            "the King's own map must never be scoped out from under him"
+        );
+    }
 
     #[test]
     fn rect_reports_center_and_containment() {

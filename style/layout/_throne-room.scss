@@ -9,8 +9,13 @@
 // chamber keep every pixel the rail was not dragged to. The rail's resizer
 // bounds cap how far that can go.
 //
-// The files rail is not a track here. It belongs to a plan's chamber and is
-// laid out inside it (`_file-tree.scss`), because it describes the city a
+// The map is a third child of this grid and is in neither track: it may be
+// mounted only once (see `ThroneRoom`), so it is positioned over the grid and
+// moves between two rectangles -- the main region on `/`, the foot of the rail
+// in a chamber. `_city-map.scss` has the rest.
+//
+// The files rail is not a track here either. It belongs to a plan's chamber and
+// is laid out inside it (`_file-tree.scss`), because it describes the city a
 // conversation is working in.
 
 .throne-room {
@@ -20,6 +25,11 @@
   grid-template-columns: 290px 1fr;
   grid-template-areas: "sidebar main";
   height: 100vh;
+  // The map is positioned against this box, so it has to be the containing
+  // block. Without it the overlay would resolve against the viewport, which is
+  // the same rectangle today and would stop being it the moment anything is
+  // ever placed around the grid.
+  position: relative;
 }
 
 .main-region {
@@ -28,6 +38,18 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  // The map is a *sibling* of this region now rather than a child, and is
+  // rendered before it -- so on `/` this box paints above the canvas and would
+  // otherwise swallow every drag and scroll meant for it. This gives them back:
+  // the region itself is transparent to the pointer and each routed child takes
+  // its own events. `.realm-view` already uses the identical idiom one level
+  // down, for the identical reason, which is what keeps the decree bar working.
+  //
+  // `.chamber` re-enables them and is opaque, so a conversation still captures
+  // everything inside it.
+  pointer-events: none;
+
+  > * { pointer-events: auto; }
 }
 
 // The realm: the decree bar, over the map standing behind it.
