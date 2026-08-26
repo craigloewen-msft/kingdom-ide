@@ -210,60 +210,86 @@ pub fn FileTree(
     // by definition already visible. It is not now that a file can be opened by
     // pressing its building on the map, or from the review drawer.
     //
+    // # A reveal is an event, not a property of the tree
+    //
+    // This is the distinction the effect turns on, and getting it wrong is what
+    // made a folder impossible to close. *The King opened a new file* is a
+    // moment: it happens once, per path, and it earns the right to move the
+    // tree. *The tree currently has this shape* is a state, and it changes
+    // every time he touches a chevron. An effect that opens ancestors whenever
+    // the tree changes will re-open the very folder he has just closed, in the
+    // same tick, forever -- and will re-centre the list under his pointer every
+    // time an unrelated folder grows it. So the path last revealed is
+    // remembered, and a run that finds nothing new to reveal writes nothing and
+    // scrolls nothing.
+    //
     // Two halves: open the folders on the way down, then scroll to what they
-    // uncovered.
+    // uncovered. The second may have to wait for a listing, which is the one
+    // reason this still watches `rows`.
+
+    // The path this effect has already acted on, and whether its row is still
+    // being waited for. `StoredValue` rather than a signal: nothing renders
+    // from these, and writing them must not schedule anything.
+    let revealed = StoredValue::new(None::<String>);
+    let awaiting_row = StoredValue::new(false);
+
     Effect::new(move |_| {
-        let Some(path) = open_file.get() else {
+        let open = open_file.get();
+
+        // A new file, or the same one still waiting for the folder that holds
+        // it to arrive. Anything else -- and "the King moved a chevron" is the
+        // common case -- is not a reveal, and must leave the tree alone.
+        let fresh = revealed.with_value(|last| is_new_reveal(last.as_deref(), open.as_deref()));
+        if fresh {
+            revealed.set_value(open.clone());
+            awaiting_row.set_value(true);
+        } else if !awaiting_row.get_value() {
+            return;
+        }
+
+        let Some(path) = open else {
+            awaiting_row.set_value(false);
             return;
         };
 
-        // Every folder on the way to the file. `src/engine/camera.rs` needs
-        // `src` and `src/engine` -- the file's own path is not a folder and is
-        // deliberately not included.
-        let mut ancestors = Vec::new();
-        let mut walked = String::new();
-        let mut parts: Vec<&str> = path.split('/').collect();
-        parts.pop();
-        for part in parts {
-            if !walked.is_empty() {
-                walked.push('/');
-            }
-            walked.push_str(part);
-            ancestors.push(walked.clone());
-        }
-
-        // Only the ones that are not already open, so a file opened inside a
-        // folder the King has expanded himself writes nothing and cannot
-        // re-trigger this effect.
-        let shut: Vec<String> = expanded.with_untracked(|open| {
-            ancestors
-                .iter()
-                .filter(|path| !open.contains(*path))
-                .cloned()
-                .collect()
-        });
-        if !shut.is_empty() {
-            expanded.update(|open| {
-                for path in &shut {
-                    open.insert(path.clone());
-                }
+        // Opening the way down happens once per reveal. On a re-run we are here
+        // only to look for a row that had not been listed yet, and the folders
+        // are the King's to close in the meantime.
+        if fresh {
+            // Only the ones that are not already open, so a file opened inside
+            // a folder he has expanded himself writes nothing at all.
+            let shut: Vec<String> = expanded.with_untracked(|open| {
+                ancestors_of(&path)
+                    .into_iter()
+                    .filter(|path| !open.contains(path))
+                    .collect()
             });
-            // A folder whose listing has not arrived yet contributes no rows,
-            // and `walk` places a child only once its parent has landed -- so
-            // these may complete in any order and the tree assembles itself as
-            // they do. `fetch` ignores a path it already holds, so a folder
-            // opened before costs nothing here.
-            for path in shut {
-                fetch(plan.get_value(), path, listings, fetching);
+            if !shut.is_empty() {
+                expanded.update(|open| {
+                    for path in &shut {
+                        open.insert(path.clone());
+                    }
+                });
+                // A folder whose listing has not arrived yet contributes no
+                // rows, and `walk` places a child only once its parent has
+                // landed -- so these may complete in any order and the tree
+                // assembles itself as they do. `fetch` ignores a path it
+                // already holds, so a folder opened before costs nothing here.
+                for path in shut {
+                    fetch(plan.get_value(), path, listings, fetching);
+                }
             }
         }
 
-        // And then bring the row into view. Tracking `rows` as well as the path
-        // is what makes this work for a folder that had to be fetched: the row
-        // does not exist on this run, and the effect re-runs when the listing
-        // lands and builds it.
-        rows.track();
-        reveal_selected_row(body);
+        // And then bring the row into view -- but only once it exists. Tracking
+        // `rows` is what makes this work for a folder that had to be fetched:
+        // the row is not there on this run, and the effect runs again when the
+        // listing lands and builds it. Retiring the wait as soon as it is found
+        // is what stops every later change of shape from scrolling the rail.
+        if rows.with(|rows| rows.iter().any(|row| row.entry.path == path)) {
+            awaiting_row.set_value(false);
+            reveal_selected_row(body);
+        }
     });
 
     // "Never fetched" and "fetched, and empty" read differently: the first is a
@@ -384,6 +410,40 @@ pub fn FileTree(
     }
 }
 
+/// Every folder on the way to a file.
+///
+/// `src/engine/camera.rs` needs `src` and `src/engine` -- the file's own path is
+/// not a folder and is deliberately not included, and a file at the root needs
+/// nothing opened at all.
+///
+/// A free function because it is the pure half of the reveal effect: no signal,
+/// no DOM, and the one part of it a regression would get quietly wrong.
+fn ancestors_of(path: &str) -> Vec<String> {
+    let mut ancestors = Vec::new();
+    let mut walked = String::new();
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in parts {
+        if !walked.is_empty() {
+            walked.push('/');
+        }
+        walked.push_str(part);
+        ancestors.push(walked.clone());
+    }
+    ancestors
+}
+
+/// Whether the panel showing `open` is news, given the path last revealed.
+///
+/// The whole of "a reveal is an event, not a property of the tree" in one
+/// expression. It is trivial and it is the thing that was wrong: the effect
+/// around it re-runs whenever the tree changes shape, so if this ever answers
+/// `true` for a file already revealed, the King's own collapse is undone in the
+/// same tick and the rail scrolls itself while he is only clicking about.
+fn is_new_reveal(revealed: Option<&str>, open: Option<&str>) -> bool {
+    revealed != open
+}
+
 /// Scrolls the row of the open file into view, if it has one and it is off
 /// screen.
 ///
@@ -446,3 +506,68 @@ fn reveal_selected_row(body: NodeRef<leptos::html::Div>) {
 /// screencast, and for the same reason.
 #[cfg(not(feature = "hydrate"))]
 fn reveal_selected_row(_body: NodeRef<leptos::html::Div>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The King's own collapse must win.
+    ///
+    /// The reveal effect re-runs whenever the tree changes shape, and closing a
+    /// folder changes the tree's shape -- so if a file already revealed still
+    /// counts as news, the effect re-opens every folder on the way to it in the
+    /// same tick. The chevron flips and springs back, and the folder holding the
+    /// open file can never be closed at all. That is the bug this predicate
+    /// exists to prevent.
+    #[test]
+    fn a_file_already_revealed_is_not_revealed_again() {
+        // The three moments that *are* news: a file arriving, a different one
+        // replacing it, and the panel closing.
+        assert!(is_new_reveal(None, Some("src/engine/camera.rs")));
+        assert!(is_new_reveal(
+            Some("src/engine/camera.rs"),
+            Some("src/lib.rs")
+        ));
+        assert!(is_new_reveal(Some("src/lib.rs"), None));
+
+        // And the one that is not: the same file, on a run caused by the tree
+        // moving rather than by the King asking for anything.
+        assert!(!is_new_reveal(
+            Some("src/engine/camera.rs"),
+            Some("src/engine/camera.rs")
+        ));
+        assert!(!is_new_reveal(None, None));
+    }
+
+    /// Which folders a reveal opens, and which it must not.
+    ///
+    /// Off by one in either direction and the feature is silently wrong: stop a
+    /// level short and the file's own folder stays shut, so the row the effect
+    /// then waits for never appears and nothing scrolls; go one too far and the
+    /// file itself is added to `expanded`, where a file is meaningless and would
+    /// be fetched as a directory.
+    #[test]
+    fn the_way_down_stops_at_the_folder_that_holds_the_file() {
+        assert_eq!(
+            ancestors_of("src/engine/camera.rs"),
+            vec!["src".to_string(), "src/engine".to_string()]
+        );
+
+        // A file in the root sits in no folder, so a reveal opens nothing and
+        // the effect goes straight to looking for its row.
+        assert!(ancestors_of("README.md").is_empty());
+
+        // Each ancestor is a full path from the root, because that is the key
+        // both `expanded` and `listings` are held under -- a bare segment would
+        // match a folder of the same name anywhere in the tree.
+        assert_eq!(
+            ancestors_of("crates/kingdom-app/src/components/file_tree.rs"),
+            vec![
+                "crates".to_string(),
+                "crates/kingdom-app".to_string(),
+                "crates/kingdom-app/src".to_string(),
+                "crates/kingdom-app/src/components".to_string(),
+            ]
+        );
+    }
+}
