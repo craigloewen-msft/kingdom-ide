@@ -856,7 +856,11 @@ fn bounded(diff: &str) -> String {
 /// build for a reason that has nothing to do with the edit the model believes
 /// it made. Rename within a directory is atomic, so the file is either the old
 /// one or the new one.
-fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+///
+/// `pub(crate)` because [`crate::edit`] saves the King's own edits through it.
+/// The guarantee is the same whoever is typing, and a second implementation
+/// would be a second place to forget why the temp file is there.
+pub(crate) fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

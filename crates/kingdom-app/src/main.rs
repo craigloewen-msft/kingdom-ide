@@ -41,6 +41,13 @@ async fn main() {
             kingdom_app::watch::ROUTE,
             axum::routing::get(kingdom_app::watch::upgrade),
         )
+        // The rail's channel, on the same terms: one socket per browser rather
+        // than one per plan, carrying only what a badge needs. It is what lets
+        // a plan waiting on the King say so from a chamber nobody has open.
+        .route(
+            kingdom_app::watch::KINGDOM_ROUTE,
+            axum::routing::get(kingdom_app::watch::upgrade_kingdom),
+        )
         // The screencast, for the same reason and on the same terms: pixels
         // rather than plans, but equally not a Leptos route.
         .route(

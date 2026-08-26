@@ -15,6 +15,8 @@ pub mod artifact;
 #[cfg(feature = "ssr")]
 pub mod citymap;
 #[cfg(feature = "ssr")]
+pub mod edit;
+#[cfg(feature = "ssr")]
 pub mod events;
 #[cfg(feature = "ssr")]
 pub mod llm;
@@ -36,7 +38,9 @@ pub mod store;
 pub mod tools;
 #[cfg(feature = "ssr")]
 pub mod turns;
-#[cfg(feature = "ssr")]
+// Both targets: the browser builds the socket's address from `watch::ROUTE`,
+// the server answers it. See the module's own note on why the constants cross
+// and the handlers do not.
 pub mod watch;
 #[cfg(feature = "ssr")]
 pub mod worktree;

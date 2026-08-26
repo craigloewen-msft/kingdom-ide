@@ -7,8 +7,8 @@
 
 use crate::api::{
     annotate_file, annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom,
-    plan_briefing, say, send_file_notes, send_notes, set_aside_plan, stop_plan, unqueue,
-    withdraw_file_note, withdraw_note,
+    plan_briefing, plan_delete_file, plan_write_file, say, send_file_notes, send_notes,
+    set_aside_plan, stop_plan, unqueue, withdraw_file_note, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -282,7 +282,15 @@ pub fn Conversation() -> impl IntoView {
     // by another page -- a reload mid-flight, a second tab -- lands here just
     // the same, because the conversation is watching the plan rather than
     // awaiting its own request.
+    //
+    // The badge cache is written from here as well as from the rail's own
+    // socket. Both sockets carry the same fact and neither is authoritative
+    // over the other: this one has the whole plan and can compute it, the
+    // rail's is told it. Writing from both is what stops the rail lagging
+    // behind the chamber the King is looking at -- and they cannot disagree,
+    // because `wants_attention` is the single definition on both ends.
     watch_plan(plan_id, move |updated| {
+        state.note_attention(&updated.id, updated.wants_attention());
         state.kingdom.update(|k| k.insert(updated));
     });
 
@@ -465,6 +473,10 @@ fn ConversationBody(
     // the browser and the server agree on what "awaiting their word" means.
     let proposal =
         Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| p.standing_proposal().cloned())));
+    // What this plan wants of the King, read off the plan itself rather than
+    // from `state.attention`. The chamber holds the whole plan, so it has the
+    // better source; the cache exists for the rail, which does not.
+    let wants = Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| p.wants_attention())));
     // What the model may touch right now. Widens exactly once, on approval.
     let permissions = Memo::new(move |_| {
         live.with(|p| p.as_ref().map(|p| p.permissions))
@@ -483,6 +495,7 @@ fn ConversationBody(
             percent,
             kingdom_core::window_label(usage.window),
             usage.tokens,
+            usage.weight(),
         ))
     });
 
@@ -824,6 +837,63 @@ fn ConversationBody(
         },
     );
 
+    // The King's own edits, saved and deleted. The panel is presentational --
+    // every call in this view is owned here, as the note above it is -- so it
+    // hands up what was typed and this decides what happens to it.
+    //
+    // The path is read here rather than passed up, for `annotate_line`'s reason:
+    // the panel knows the buffer and the chamber knows which file is open, and a
+    // path carried through the panel would be a second copy to keep in step with
+    // `Aside`.
+    //
+    // `saved_stamp` is the answer coming back. A `Callback` cannot return the
+    // result of a server call, and the panel needs the new stamp -- without it
+    // the second save of a session is checked against the stamp of the file
+    // before the first, and refused as stale by the King's own edit.
+    let saved_stamp = RwSignal::new(None::<kingdom_core::FileStamp>);
+    let save_file = Callback::new(move |(content, stamp): (String, kingdom_core::FileStamp)| {
+        let Some(path) = open_file.get_untracked() else {
+            return;
+        };
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match plan_write_file(plan_id.to_string(), path, content, stamp).await {
+                Ok(written) => {
+                    state.error.set(None);
+                    saved_stamp.set(Some(written.stamp));
+                    // The plan is not updated from here: the save appended a
+                    // note server-side, and the watch socket delivers the
+                    // whole plan back. Inserting a stale copy would race it.
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
+    // How many times a file has been deleted. Not read for its value: the files
+    // tree caches every listing and deliberately never refetches, so a deleted
+    // file would sit in it forever. Bumping this clears that cache. On delete
+    // only -- a save changes no listing.
+    let tree_revision = RwSignal::new(0usize);
+    let delete_file = Callback::new(move |stamp: kingdom_core::FileStamp| {
+        let Some(path) = open_file.get_untracked() else {
+            return;
+        };
+        let plan_id = id.get_value();
+        leptos::task::spawn_local(async move {
+            match plan_delete_file(plan_id.to_string(), path, stamp).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                    tree_revision.update(|r| *r += 1);
+                    // The panel was showing a file that no longer exists.
+                    aside.set(Aside::Hidden);
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
+
     // Taking one back. Losing the race is reported rather than swallowed, for
     // the reason `api::withdraw_file_note` gives.
     let withdraw_line_note = Callback::new(move |note_id: String| {
@@ -886,6 +956,7 @@ fn ConversationBody(
                 summary=summary
                 looking=looking
                 activity=activity
+                revision=tree_revision
                 open_file=open_file
                 on_read=read_file
                 on_diff=review_file
@@ -956,12 +1027,25 @@ fn ConversationBody(
                                 // the end of it, so this sits with the other
                                 // provenance facts rather than announcing itself.
                                 <Show when=move || context.get().is_some()>
-                                    {move || context.get().map(|(percent, window, tokens)| view! {
+                                    {move || context.get().map(|(percent, window, tokens, weight)| view! {
                                         <span
                                             class="chamber-context"
                                             title=format!(
                                                 "{tokens} tokens of this model's {window} context \
-                                                 window, as the provider counted them on the last turn",
+                                                 window, as the provider counted them on the last turn.{}",
+                                                // The other limit, and the one that has
+                                                // actually refused a request here. A gateway
+                                                // enforces a token window *and* a body size,
+                                                // and a plan once died three times on the
+                                                // second while this header reported comfort
+                                                // about the first. Stated in the tooltip
+                                                // rather than beside the bar: it is the
+                                                // number to reach for when a turn fails for
+                                                // no visible reason, not one to watch.
+                                                weight.as_ref().map_or_else(
+                                                    String::new,
+                                                    |w| format!(" The last request weighed {w} on the wire."),
+                                                ),
                                             )
                                         >
                                             <span class="context-track">
@@ -978,7 +1062,20 @@ fn ConversationBody(
                                 </Show>
                             </div>
                         </div>
-                        <span class=move || format!("plan-badge plan-{}", status.get().css_suffix())>
+                        // Colour follows what the plan *wants* where it wants something,
+                        // and its status otherwise -- the same rule and the same helper
+                        // shape the rail's `badge_for` uses, so the two surfaces cannot
+                        // disagree about a plan the King is looking at from both.
+                        <span class=move || {
+                            let tint = match (is_subagent, wants.get()) {
+                                // A subagent asks nobody for anything, so its badge is
+                                // purely a status. See `subagent_status`.
+                                (true, _) => status.get().css_suffix(),
+                                (false, Some(needs)) => needs.css_suffix(),
+                                (false, None) => status.get().css_suffix(),
+                            };
+                            format!("plan-badge plan-{tint}")
+                        }>
                             {move || {
                                 // A subagent is never reviewed and never merged: it reports
                                 // to the model that sent it. Same states, honest words.
@@ -988,13 +1085,16 @@ fn ConversationBody(
                                 // it does not say that the wait is on *them*, or that there
                                 // is a button. A label, deliberately, and not a sixth
                                 // `PlanStatus`: nothing about the state machine changed.
-                                match (is_subagent, status.get()) {
-                                    (true, PlanStatus::AwaitingReview) => "Reported",
-                                    (true, PlanStatus::Drafting) => "Working",
-                                    (false, PlanStatus::AwaitingReview) if proposal.get().is_some() => {
-                                        "Proposal"
-                                    }
-                                    (_, s) => s.label(),
+                                //
+                                // "Question" arrives through the same door and is the one
+                                // that could not be said any other way: a plan parked on a
+                                // question is `Drafting` throughout, so the status alone
+                                // reports it as working when it is in fact blocked on him.
+                                match (is_subagent, wants.get(), status.get()) {
+                                    (true, _, PlanStatus::AwaitingReview) => "Reported",
+                                    (true, _, PlanStatus::Drafting) => "Working",
+                                    (false, Some(needs), _) => needs.label(),
+                                    (_, _, s) => s.label(),
                                 }
                             }}
                         </span>
@@ -1398,6 +1498,9 @@ fn ConversationBody(
                         notes=notes_on_source
                         width=source_width
                         on_note=annotate_line
+                        on_save=save_file
+                        on_delete=delete_file
+                        saved=saved_stamp
                         on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
                 </Show>
@@ -1783,17 +1886,68 @@ fn subagent_status(status: PlanStatus) -> &'static str {
 /// question are right above it, and he can scroll.
 ///
 /// See [`is_open_question`] for why only an unanswered one gets this treatment.
+///
+/// # One question at a time
+///
+/// The court may ask up to four things at once, and they are put to the King
+/// **one at a time**, with Back and Next between them and Submit on the last.
+/// Every question ends in Submit -- even a lone one, which costs a second click
+/// and buys three things worth more than it: an option and a sentence of his own
+/// can stand together, `multi_select` becomes answerable at all, and the whole
+/// set is answered as one act rather than four.
+///
+/// That is a correction rather than a preference. Rendering every question at
+/// once made the *first* click send its own label and settle the call, so a
+/// court that asked four things was told the answer to one of them and never
+/// learned the others had been asked.
+///
+/// # Where the King's place is kept
+///
+/// In this component, which survives the push socket for a reason worth stating
+/// because it is not obvious. `Transcript`'s `<For>` is keyed by
+/// `(index, entry_version)`, and `entry_version` is 1 for the whole time a call
+/// is in flight -- so deeds landing elsewhere in the chamber re-render the list
+/// without rebuilding this row. A future change to that key would silently send
+/// him back to question one every time the court did anything.
 #[component]
 fn Question(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let tool_call_id = StoredValue::new(tool_call.id.clone());
     let questions = StoredValue::new(parse_questions(&tool_call.input));
+    let count = questions.with_value(Vec::len);
+
+    // One entry per question, in the order asked. Pre-sized so a step can be
+    // written by index without the wizard having to grow it as it goes.
+    let answers = RwSignal::new(vec![Answering::default(); count]);
+    let (step, set_step) = signal(0usize);
     let (sent, set_sent) = signal(false);
 
-    let reply = move |answer: String| {
+    // Whether the question on screen has been answered. Advancing is gated on
+    // it: the court asked because it could not guess, and the free-text box is
+    // the escape hatch for "none of these" -- so there is always a way forward
+    // that is not silence.
+    let answered = Memo::new(move |_| {
+        answers.with(|all| all.get(step.get()).is_some_and(Answering::is_answered))
+    });
+    let last = Memo::new(move |_| step.get() + 1 >= count);
+    // Whether Back has anywhere to go, and whether the counter is worth drawing.
+    // Memos rather than inline comparisons because `>` inside a `view!`
+    // attribute closes the tag, and parenthesising it to say otherwise draws a
+    // lint. Naming them reads better than either.
+    let first = Memo::new(move |_| step.get() == 0);
+    let several = count > 1;
+
+    let submit = move || {
         let Some(plan_id) = plan.get_untracked() else {
             return;
         };
+        if sent.get_untracked() {
+            return;
+        }
+        let answer = questions.with_value(|asked| compose_answer(asked, &answers.get_untracked()));
+        if answer.is_empty() {
+            return;
+        }
         // Locked as soon as he answers, so a double-click cannot send twice --
         // the second would find nothing waiting and report a confusing failure
         // for an answer that in fact landed.
@@ -1814,84 +1968,260 @@ fn Question(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> im
             <div class="question-head">
                 <span class="question-mark">"\u{2637}"</span>
                 <span class="question-who">"The court asks"</span>
+                // Only when there is more than one. With a single question the
+                // counter is noise, and "1 of 1" reads like a wizard that lost
+                // its other pages.
+                <Show when=move || several>
+                    <span class="question-step">
+                        {move || format!("{} of {}", step.get() + 1, count)}
+                    </span>
+                </Show>
             </div>
 
             {move || {
-                questions
-                    .get_value()
-                    .into_iter()
-                    .map(|q| {
-                        let options = q
-                            .options
-                            .into_iter()
-                            .map(|opt| {
-                                let chosen = opt.label.clone();
-                                let detail = opt.description.clone();
-                                let has_detail = !detail.is_empty();
-                                view! {
-                                    <li>
-                                        <button
-                                            class="question-option"
-                                            disabled=move || sent.get()
-                                            on:click=move |_| reply(chosen.clone())
-                                        >
-                                            <span class="option-label">{opt.label}</span>
-                                            <Show when=move || has_detail>
-                                                <span class="option-detail">
-                                                    {detail.clone()}
-                                                </span>
-                                            </Show>
-                                        </button>
-                                    </li>
-                                }
-                            })
-                            .collect_view();
+                let at = step.get();
+                let Some(q) = questions.with_value(|all| all.get(at).cloned()) else {
+                    // No questions parsed at all. The court is parked on a call
+                    // this browser cannot render, so say so rather than showing
+                    // an empty card with a dead Submit under it -- he still has
+                    // the composer, and the turn can be stopped.
+                    return view! {
+                        <p class="question-text">
+                            "The court asked something this chamber could not read. \
+                             Stop the turn, or say what you want in the composer."
+                        </p>
+                    }
+                    .into_any();
+                };
 
+                let multi = q.multi_select;
+                let options = q
+                    .options
+                    .into_iter()
+                    .map(|opt| {
+                        let chosen = opt.label.clone();
+                        let detail = opt.description.clone();
+                        let has_detail = !detail.is_empty();
+                        let is_chosen = {
+                            let label = opt.label.clone();
+                            Memo::new(move |_| {
+                                answers.with(|all| {
+                                    all.get(at).is_some_and(|a| a.chose(&label))
+                                })
+                            })
+                        };
                         view! {
-                            <div class="question-block">
-                                <p class="question-text">{q.question}</p>
-                                <ul class="question-options">{options}</ul>
-                            </div>
+                            <li>
+                                <button
+                                    class="question-option"
+                                    class:chosen=move || is_chosen.get()
+                                    disabled=move || sent.get()
+                                    on:click=move |_| {
+                                        answers.update(|all| {
+                                            if let Some(a) = all.get_mut(at) {
+                                                a.choose(&chosen, multi);
+                                            }
+                                        });
+                                    }
+                                >
+                                    <span class="option-label">{opt.label}</span>
+                                    <Show when=move || has_detail>
+                                        <span class="option-detail">{detail.clone()}</span>
+                                    </Show>
+                                </button>
+                            </li>
                         }
                     })
-                    .collect_view()
+                    .collect_view();
+
+                view! {
+                    <div class="question-block">
+                        <p class="question-text">{q.question}</p>
+                        <Show when=move || multi>
+                            <p class="question-hint">"Choose as many as apply."</p>
+                        </Show>
+                        <ul class="question-options">{options}</ul>
+
+                        // The listed options are the court's guesses at what the
+                        // King might want. He is the one deciding, so he must be
+                        // able to say something that was not on the list -- and,
+                        // now that answering is separate from sending, to say it
+                        // *alongside* an option rather than instead of one.
+                        <div class="question-own-words">
+                            <input
+                                class="decree-input"
+                                r#type="text"
+                                placeholder="Or say what you want in your own words\u{2026}"
+                                prop:value=move || {
+                                    answers.with(|all| {
+                                        all.get(at).map(|a| a.words.clone()).unwrap_or_default()
+                                    })
+                                }
+                                disabled=move || sent.get()
+                                on:input=move |ev| {
+                                    let words = event_target_value(&ev);
+                                    answers.update(|all| {
+                                        if let Some(a) = all.get_mut(at) {
+                                            a.words = words;
+                                        }
+                                    });
+                                }
+                            />
+                        </div>
+                    </div>
+                }
+                .into_any()
             }}
 
-            // The listed options are the model's guesses at what the user might
-            // want. He is the one deciding, so he must be able to say something
-            // that was not on the list.
-            <QuestionFreeText sent=sent on_answer=Callback::new(reply)/>
+            <div class="question-nav">
+                // Present from the second question on rather than disabled on
+                // the first: a control that can never do anything is one he has
+                // to learn to ignore.
+                <Show when=move || !first.get()>
+                    <button
+                        class="question-back"
+                        disabled=move || sent.get()
+                        on:click=move |_| set_step.update(|s| *s = s.saturating_sub(1))
+                    >
+                        "\u{2190} Back"
+                    </button>
+                </Show>
+                <span class="nav-spacer"></span>
+                <Show
+                    when=move || last.get()
+                    fallback=move || view! {
+                        <button
+                            class="question-next"
+                            disabled=move || sent.get() || !answered.get()
+                            title=move || {
+                                if answered.get() { String::new() }
+                                else { "Choose an option, or say what you want".to_string() }
+                            }
+                            on:click=move |_| set_step.update(|s| *s += 1)
+                        >
+                            "Next \u{2192}"
+                        </button>
+                    }
+                >
+                    <button
+                        class="question-submit"
+                        disabled=move || sent.get() || !answered.get()
+                        title=move || {
+                            if answered.get() { String::new() }
+                            else { "Choose an option, or say what you want".to_string() }
+                        }
+                        on:click=move |_| submit()
+                    >
+                        {move || if sent.get() { "Sent" } else { "Submit" }}
+                    </button>
+                </Show>
+            </div>
         </div>
     }
 }
 
-/// The "something else" line under a question's options.
-#[component]
-fn QuestionFreeText(sent: ReadSignal<bool>, on_answer: Callback<String>) -> impl IntoView {
-    let (text, set_text) = signal(String::new());
+/// What the King has said about one question so far.
+///
+/// Chosen options and his own words are kept apart rather than flattened into
+/// one string, because they are answers to different things: the options are the
+/// court's guesses, and the words are what it failed to guess. Composing them
+/// happens once, at the end, in [`compose_answer`].
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Answering {
+    /// Labels he has chosen, in the order he chose them. A `Vec` rather than a
+    /// set because order is meaning here -- "Postgres, then SQLite" is a
+    /// preference -- and because a question offers at most four options, so
+    /// there is nothing to index.
+    chosen: Vec<String>,
+    /// Anything he typed instead of, or beside, the options.
+    words: String,
+}
 
-    let send = move || {
-        let words = text.get_untracked().trim().to_string();
-        if words.is_empty() || sent.get_untracked() {
+impl Answering {
+    /// True once there is something to send. Either half will do: the options
+    /// are guesses, and being able to reject all of them in his own words is
+    /// the point of the free-text box.
+    fn is_answered(&self) -> bool {
+        !self.chosen.is_empty() || !self.words.trim().is_empty()
+    }
+
+    fn chose(&self, label: &str) -> bool {
+        self.chosen.iter().any(|c| c == label)
+    }
+
+    /// Records a click on one option.
+    ///
+    /// On a `multi_select` question this toggles, so a second click takes a
+    /// choice back -- without it there would be no way to undo a mis-click, and
+    /// the King would have to reload the chamber to unsay something. On an
+    /// ordinary one it replaces, which is what makes the options behave like
+    /// the radio buttons they are.
+    fn choose(&mut self, label: &str, multi: bool) {
+        if !multi {
+            self.chosen = vec![label.to_string()];
             return;
         }
-        set_text.set(String::new());
-        on_answer.run(words);
-    };
-
-    view! {
-        <div class="question-own-words">
-            <input
-                class="decree-input"
-                r#type="text"
-                placeholder="Or say what you want in your own words\u{2026}"
-                prop:value=move || text.get()
-                disabled=move || sent.get()
-                on:input=move |ev| set_text.set(event_target_value(&ev))
-                on:keydown=move |ev| { if ev.key() == "Enter" { send(); } }
-            />
-        </div>
+        match self.chosen.iter().position(|c| c == label) {
+            Some(at) => {
+                self.chosen.remove(at);
+            }
+            None => self.chosen.push(label.to_string()),
+        }
     }
+
+    /// This one answer as a line of prose, or nothing if he said nothing.
+    fn say(&self) -> Option<String> {
+        let words = self.words.trim();
+        match (self.chosen.is_empty(), words.is_empty()) {
+            (true, true) => None,
+            (false, true) => Some(self.chosen.join(", ")),
+            (true, false) => Some(words.to_string()),
+            // Both. He picked something *and* qualified it, which the old
+            // one-click card could not express at all.
+            (false, false) => Some(format!("{} \u{2014} {words}", self.chosen.join(", "))),
+        }
+    }
+}
+
+/// Everything the King said, as the one string the parked call is waiting for.
+///
+/// `ask_user_question` resolves a oneshot carrying a `String`, so however many
+/// questions were asked, exactly one answer goes back. That constraint is what
+/// shapes this.
+///
+/// **A single question sends its bare answer**, with no scaffolding at all, so
+/// the common case reads on the far side exactly as it always did -- the mock's
+/// "You chose X" path and the tool's own test both depend on that, and neither
+/// needed changing.
+///
+/// **Several are labelled and kept in the order they were asked.** Prose rather
+/// than JSON because a model reads this out of a tool result: a labelled block
+/// is what it parses best, and it is also what the King sees quoted back. The
+/// ordering is the same courtesy `file_notes_as_decree` extends -- an answer
+/// shuffled out of the order the questions were put in makes the reader sort it
+/// before it can be used.
+///
+/// A question he answered nothing for is **named as unanswered** rather than
+/// dropped. Silence and omission look identical to a model otherwise, and it
+/// would fill the gap with a guess -- which is the very thing it stopped to ask
+/// in order to avoid.
+fn compose_answer(asked: &[Asked], answers: &[Answering]) -> String {
+    if asked.len() == 1 {
+        return answers.first().and_then(Answering::say).unwrap_or_default();
+    }
+
+    asked
+        .iter()
+        .enumerate()
+        .map(|(i, q)| {
+            let said = answers
+                .get(i)
+                .and_then(Answering::say)
+                .unwrap_or_else(|| "(no answer)".to_string());
+            format!("{}: {}\n{}", i + 1, q.question, said)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// One thing the model wants decided.
@@ -1899,6 +2229,12 @@ fn QuestionFreeText(sent: ReadSignal<bool>, on_answer: Callback<String>) -> impl
 struct Asked {
     question: String,
     options: Vec<AskedOption>,
+    /// Whether several options may be chosen at once.
+    ///
+    /// Declared in the tool's schema since the tool existed and never read
+    /// until now: the old card sent whichever option was clicked first, so a
+    /// question asking for several could only ever be answered with one.
+    multi_select: bool,
 }
 
 #[derive(Clone)]
@@ -1940,7 +2276,17 @@ fn parse_questions(input: &serde_json::Value) -> Vec<Asked> {
                     })
                 })
                 .collect();
-            Some(Asked { question, options })
+            Some(Asked {
+                question,
+                options,
+                // Absent means one answer. A model that wants several says so;
+                // guessing otherwise would let the King pick two things for a
+                // question with one slot.
+                multi_select: q
+                    .get("multi_select")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            })
         })
         .collect()
 }
@@ -1949,8 +2295,13 @@ fn parse_questions(input: &serde_json::Value) -> Vec<Asked> {
 ///
 /// Once answered it is ordinary history and renders as any other tool call,
 /// which is what stops him answering the same question twice.
+///
+/// The same test [`kingdom_core::Plan::open_question`] applies, asked of one
+/// entry rather than of a whole plan: the transcript is walked here anyway, so
+/// this is the cheaper half of the same definition. Both read
+/// [`kingdom_core::ASK_USER_QUESTION`], so a rename cannot leave one behind.
 fn is_open_question(entry: &kingdom_core::ToolCall) -> bool {
-    entry.tool == "ask_user_question" && entry.in_flight()
+    entry.tool == kingdom_core::ASK_USER_QUESTION && entry.in_flight()
 }
 
 /// Distinguishes an entry from a later version of *itself*.
@@ -2688,6 +3039,189 @@ mod tests {
             timing(&asked, Some(Timestamp(3_600_000))),
             Some(("60m".to_string(), false)),
             "a settled call shows what it took, with no budget and no alarm"
+        );
+    }
+
+    fn asked(question: &str, multi: bool) -> Asked {
+        Asked {
+            question: question.to_string(),
+            options: vec![
+                AskedOption {
+                    label: "Left".into(),
+                    description: String::new(),
+                },
+                AskedOption {
+                    label: "Right".into(),
+                    description: String::new(),
+                },
+            ],
+            multi_select: multi,
+        }
+    }
+
+    fn chose(labels: &[&str]) -> Answering {
+        Answering {
+            chosen: labels.iter().map(|l| l.to_string()).collect(),
+            words: String::new(),
+        }
+    }
+
+    /// A lone question answers exactly as it always did: the bare label, with no
+    /// scaffolding around it.
+    ///
+    /// This is what makes the wizard a change to the *asking* and not to the
+    /// answering. The mock's "You chose X" reply and `ask_user_question`'s own
+    /// test both read this string, and neither needed touching.
+    #[test]
+    fn one_question_still_sends_the_bare_answer() {
+        assert_eq!(
+            compose_answer(&[asked("Which way?", false)], &[chose(&["Left"])]),
+            "Left"
+        );
+    }
+
+    /// The fault this replaces. Four questions asked, and the old card sent
+    /// whichever option was clicked first -- so three answers were discarded and
+    /// the court never learned it had asked for them.
+    ///
+    /// Every answer must be present, each against the question it answers, in
+    /// the order they were put. The order is the same courtesy the King's other
+    /// margin extends: an answer shuffled out of sequence has to be sorted by
+    /// the reader before it can be used.
+    #[test]
+    fn several_questions_are_all_answered_in_the_order_they_were_asked() {
+        let questions = [
+            asked("Which database?", false),
+            asked("Which cache?", false),
+            asked("Deploy where?", false),
+        ];
+        let answers = [chose(&["Postgres"]), chose(&["Redis"]), chose(&["Fly"])];
+
+        let composed = compose_answer(&questions, &answers);
+
+        assert!(composed.contains("1: Which database?\nPostgres"));
+        assert!(composed.contains("2: Which cache?\nRedis"));
+        assert!(composed.contains("3: Deploy where?\nFly"));
+        assert!(
+            composed.find("Postgres") < composed.find("Redis")
+                && composed.find("Redis") < composed.find("Fly"),
+            "answers must arrive in the order the questions were put"
+        );
+    }
+
+    /// Silence must be named rather than dropped. A model handed two answers to
+    /// three questions cannot tell an unanswered one from a question it never
+    /// asked, so it fills the gap with the guess it stopped to avoid making.
+    #[test]
+    fn a_question_left_unanswered_says_so() {
+        let questions = [
+            asked("Which database?", false),
+            asked("Which cache?", false),
+        ];
+        let answers = [chose(&["Postgres"]), Answering::default()];
+
+        let composed = compose_answer(&questions, &answers);
+        assert!(composed.contains("2: Which cache?\n(no answer)"));
+    }
+
+    /// What the always-Submit shape buys: an option and a qualification of it
+    /// can stand together. The old card could express only one or the other,
+    /// because clicking an option *was* the send.
+    #[test]
+    fn an_option_and_the_kings_own_words_can_stand_together() {
+        let both = Answering {
+            chosen: vec!["The careful way".into()],
+            words: "  but skip the migration  ".into(),
+        };
+        assert_eq!(
+            both.say().as_deref(),
+            Some("The careful way \u{2014} but skip the migration"),
+            "the words are trimmed and joined to the choice rather than replacing it"
+        );
+
+        let only_words = Answering {
+            chosen: Vec::new(),
+            words: "neither, do it in place".into(),
+        };
+        assert_eq!(only_words.say().as_deref(), Some("neither, do it in place"));
+        assert_eq!(Answering::default().say(), None);
+    }
+
+    /// `multi_select` toggles and an ordinary question replaces.
+    ///
+    /// The toggle is the half worth pinning: without it there is no way to take
+    /// back a mis-click, and the King would have to reload the chamber to unsay
+    /// something -- on a card whose whole purpose is that he is the one
+    /// deciding.
+    #[test]
+    fn choosing_toggles_when_several_are_allowed_and_replaces_when_not() {
+        let mut multi = Answering::default();
+        multi.choose("Left", true);
+        multi.choose("Right", true);
+        assert_eq!(multi.chosen, vec!["Left", "Right"]);
+
+        multi.choose("Left", true);
+        assert_eq!(multi.chosen, vec!["Right"], "a second click takes it back");
+
+        let mut single = Answering::default();
+        single.choose("Left", false);
+        single.choose("Right", false);
+        assert_eq!(
+            single.chosen,
+            vec!["Right"],
+            "one slot means the second choice replaces the first"
+        );
+    }
+
+    /// Either half is enough to move on. The options are the court's guesses,
+    /// so being able to reject all of them in his own words is the point of the
+    /// free-text box -- gating Next on an *option* would trap him on a question
+    /// none of whose answers are right.
+    #[test]
+    fn a_question_is_answered_by_a_choice_or_by_words() {
+        assert!(!Answering::default().is_answered());
+        assert!(chose(&["Left"]).is_answered());
+        assert!(Answering {
+            chosen: Vec::new(),
+            words: "something else".into(),
+        }
+        .is_answered());
+        assert!(
+            !Answering {
+                chosen: Vec::new(),
+                words: "   ".into(),
+            }
+            .is_answered(),
+            "whitespace is not an answer"
+        );
+    }
+
+    /// `multi_select` reaches the view. It has been in the tool's schema since
+    /// the tool existed and was read by nothing, which is why a question asking
+    /// for several answers could only ever be given one.
+    #[test]
+    fn a_multi_select_question_is_parsed_as_one() {
+        let parsed = parse_questions(&json!({
+            "questions": [
+                {
+                    "question": "Which of these?",
+                    "header": "Which",
+                    "multi_select": true,
+                    "options": [{ "label": "A" }, { "label": "B" }]
+                },
+                {
+                    "question": "And this one?",
+                    "header": "This",
+                    "options": [{ "label": "Yes" }, { "label": "No" }]
+                }
+            ]
+        }));
+
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].multi_select);
+        assert!(
+            !parsed[1].multi_select,
+            "a question that does not ask for several must not be given several"
         );
     }
 

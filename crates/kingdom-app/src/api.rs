@@ -272,6 +272,10 @@ pub fn open_last_kingdom() -> Result<Option<Kingdom>, String> {
 pub async fn leave_kingdom() -> Result<(), ServerFnError> {
     *lock()? = Kingdom::unopened();
     crate::profile::forget_kingdom();
+    // The dedupe is keyed by plan id and would otherwise carry a closed
+    // kingdom's answers into the next one, so plans that had not changed since
+    // would open silently and their badges never arrive.
+    crate::events::forget_pulses();
     Ok(())
 }
 
@@ -511,6 +515,10 @@ pub async fn begin_plan(
     let root = std::path::PathBuf::from(&kingdom.root);
     remember(&root, &mut plan);
     kingdom.plans.push(plan.clone());
+    // Opening does not go through `update`, so nothing else would announce it.
+    // Without this a plan opened in one tab is invisible in another's rail
+    // until something refetches the kingdom.
+    crate::events::pulse(&plan);
 
     Ok(plan)
 }
@@ -772,6 +780,151 @@ pub async fn plan_source(
     let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
 
     Ok(crate::review::source(&workspace, &inside).await)
+}
+
+// -- The King's own edits -----------------------------------------------------
+//
+// Three functions rather than one, because reading, writing and deleting fail
+// differently and a caller that cannot tell them apart cannot report them. The
+// reasoning for all three -- why the text is fetched whole rather than rebuilt
+// from the rendered lines, and what the stamp is defending against -- is in
+// [`crate::edit`], which is where it stays true if these move.
+
+/// One file of a plan's workspace, whole and byte-exact, for the King to edit.
+///
+/// The sibling of [`plan_source`], and deliberately not the same call: that one
+/// answers "what does this file look like?" with numbered, truncatable lines,
+/// and this answers "what is in this file?" with the bytes. Saving a buffer
+/// rebuilt from the first would rewrite every CRLF file as LF -- see
+/// [`kingdom_core::FileText`].
+///
+/// Held to the same wall as its four siblings: the path goes through
+/// [`within_workspace`] before anything opens it.
+#[server(PlanFileText, "/api")]
+pub async fn plan_file_text(
+    plan: String,
+    path: String,
+) -> Result<kingdom_core::FileText, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = {
+        let kingdom = lock()?;
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+        grounded(&kingdom.root, &plan.workspace)
+    };
+
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    Ok(crate::edit::text(&workspace, &inside).await)
+}
+
+/// The King saves an edit of his own.
+///
+/// # Why this does not consult [`kingdom_core::Permissions`]
+///
+/// Permissions bound what the **court** may do -- `Propose` withholds an
+/// unrestricted `patch` precisely so a model cannot change the project before
+/// its plan is accepted. None of that is about the King, who owns the workspace
+/// and may edit a file in it whenever he likes. Gating this on the plan's
+/// permissions would mean the man reviewing a proposal cannot fix the typo he
+/// just found in it.
+///
+/// What it *does* refuse is a **settled** plan, exactly as [`annotate_file`]
+/// does and for its reason: the worktree has been disposed of, so there is no
+/// file there to write.
+///
+/// A successful save appends a [`kingdom_core::NoteKind::Workspace`] note. Two
+/// things follow from that, both wanted: the King can see in the transcript that
+/// he edited a file himself, in order among the court's deeds, and the note
+/// lengthens the transcript -- which is the change signal the review drawer and
+/// the source panel already refetch on, so his own edit refreshes the drawer's
+/// counts by the same route the court's edits do.
+///
+/// The **model** is not told. Notes are excluded from `Plan::turns` by design,
+/// and the court finds out the honest way: `tools/patch.rs` reads a file fresh
+/// on every call and refuses an anchor that is no longer there, which is a
+/// louder signal than a sentence it might have skimmed.
+#[server(PlanWriteFile, "/api")]
+pub async fn plan_write_file(
+    plan: String,
+    path: String,
+    content: String,
+    stamp: kingdom_core::FileStamp,
+) -> Result<kingdom_core::FileText, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = writable_workspace(&plan_id)?;
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    let written = crate::edit::write(&workspace, &inside, &content, stamp)
+        .await
+        .map_err(ServerFnError::new)?;
+
+    // After the write, not before: a note saying a file was saved must not
+    // stand in front of a save that failed.
+    let mut kingdom = lock()?;
+    update(&mut kingdom, &plan_id, |p| {
+        p.note(
+            kingdom_core::NoteKind::Workspace,
+            format!("You edited {inside} yourself."),
+        );
+    });
+
+    Ok(written)
+}
+
+/// The King deletes a file himself.
+///
+/// The sibling of [`plan_write_file`] in every respect -- the same settled-plan
+/// guard, the same stamp, the same note -- and it is separate because it fails
+/// differently and because the panel does a different thing afterwards: there is
+/// no file left to show, so it closes.
+#[server(PlanDeleteFile, "/api")]
+pub async fn plan_delete_file(
+    plan: String,
+    path: String,
+    stamp: kingdom_core::FileStamp,
+) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = writable_workspace(&plan_id)?;
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    crate::edit::remove(&workspace, &inside, stamp)
+        .await
+        .map_err(ServerFnError::new)?;
+
+    let mut kingdom = lock()?;
+    update(&mut kingdom, &plan_id, |p| {
+        p.note(
+            kingdom_core::NoteKind::Workspace,
+            format!("You deleted {inside} yourself."),
+        );
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+}
+
+/// The workspace of a plan the King may still change files in.
+///
+/// Shared by the write and the delete so the refusal is worded once. A settled
+/// plan's worktree has been removed from disk, so the honest answer is not "that
+/// failed" but "there is nothing there any more" -- the same distinction
+/// [`send_file_notes`] draws.
+#[cfg(feature = "ssr")]
+fn writable_workspace(plan_id: &PlanId) -> Result<kingdom_core::Workspace, ServerFnError> {
+    let kingdom = lock()?;
+    let Some(plan) = kingdom.plan(plan_id) else {
+        return Err(ServerFnError::new("That plan is no longer in the records."));
+    };
+
+    if plan.status.is_settled() {
+        return Err(ServerFnError::new(format!(
+            "That plan is {} and its workspace has been cleared, so there is no \
+             longer a file here to change.",
+            plan.status.label().to_lowercase()
+        )));
+    }
+
+    Ok(grounded(&kingdom.root, &plan.workspace))
 }
 
 /// Puts a workspace on the actual disk, when its path does not already say
@@ -1374,7 +1527,12 @@ pub(crate) async fn converse(
         let tools = ToolSpec::for_model(model.as_ref(), permissions);
         let shop = Sandbox::new(workspace.clone())
             .for_plan(plan_id.clone())
-            .under(permissions);
+            .under(permissions)
+            // The fourth narrowing, and the one that could not live in
+            // `for_model`: `browser_take_screenshot` is offered to every model
+            // -- the King sees the picture either way -- but only a sighted one
+            // is handed the base64 with it. See `Sandbox::sighted`.
+            .seen_by_a_sighted_model(model.can_see());
 
         let brief = Brief {
             system_prompt: SystemPrompt::assemble(
@@ -1484,11 +1642,21 @@ pub(crate) async fn converse(
         //
         // Both numbers or neither: a count with no window is a percentage of
         // nothing. See `kingdom_core::ContextUsage`.
+        //
+        // The byte weight rides along rather than being written separately,
+        // for the same reason and one more: it is the *other* limit a gateway
+        // enforces, and the two are only comparable when they describe the same
+        // request. Written here, they always do.
         if let Some(tokens) = answer.tokens {
             let window = model.context_window();
+            let bytes = answer.bytes;
             let mut kingdom = lock()?;
             update(&mut kingdom, &plan_id, |p| {
-                p.context = Some(kingdom_core::ContextUsage { tokens, window });
+                p.context = Some(kingdom_core::ContextUsage {
+                    tokens,
+                    window,
+                    bytes,
+                });
             });
         }
 
@@ -1896,7 +2064,7 @@ fn describe(tool: &str, input: &serde_json::Value) -> String {
     // and "who is blocked behind whom" is one of the three questions this
     // product exists to answer. It gets said in those words rather than being
     // rendered as another tool name.
-    if tool == "ask_user_question" {
+    if tool == kingdom_core::ASK_USER_QUESTION {
         return "Waiting on the King".to_string();
     }
 
@@ -2911,15 +3079,20 @@ mod tests {
     /// places an outsider names a path and the server opens it, so both are held
     /// to the same wall as the first two.
     ///
+    /// The King's own editing added three more -- `plan_file_text`,
+    /// `plan_write_file` and `plan_delete_file` -- and they raise the stakes:
+    /// the earlier four only *read* a file the King should not see, and these
+    /// would overwrite or delete one. Every one of the seven calls
+    /// `within_workspace` and none has a resolver of its own, which is the
+    /// property this pins.
+    ///
     /// The refusal is what matters: a path that walks out of the workspace must
     /// be turned away *before* git or the filesystem is reached, because
-    /// `git show` and `std::fs::read` will both happily read a file the King
-    /// never meant to expose. One test for both because they share one
-    /// predicate -- `plan_diff` and `plan_source` each call `within_workspace`
-    /// and neither has a resolver of its own, which is the property being
-    /// pinned. Tested through the predicate rather than through the server
-    /// functions, which need a scanned kingdom and the process-global lock to
-    /// reach -- the same split the sandbox test above uses.
+    /// `git show`, `std::fs::read` and `std::fs::remove_file` will each happily
+    /// take a file the King never meant to name. Tested through the predicate
+    /// rather than through the server functions, which need a scanned kingdom
+    /// and the process-global lock to reach -- the same split the sandbox test
+    /// above uses.
     #[test]
     fn a_file_cannot_be_asked_for_outside_the_workspace() {
         use kingdom_core::Workspace;
@@ -2955,6 +3128,39 @@ mod tests {
             within_workspace(&workspace, "src/../../etc/passwd").is_err(),
             "a path that walks out mid-way must be refused, not prefix-matched"
         );
+    }
+
+    /// Every path-taking route goes through the one predicate.
+    ///
+    /// The test above pins what the predicate *decides*; this pins that nothing
+    /// decides it privately. It is a source check rather than a behavioural one
+    /// because the failure it guards against is a future route resolving a path
+    /// itself -- which no amount of exercising the existing routes would catch.
+    /// The three writing routes are the ones worth being loud about: a read
+    /// outside the workspace exposes a file, and a write outside it destroys
+    /// one.
+    #[test]
+    fn every_route_that_opens_a_named_file_resolves_it_through_one_predicate() {
+        let source = include_str!("api.rs");
+
+        for route in [
+            "pub async fn plan_diff(",
+            "pub async fn plan_source(",
+            "pub async fn plan_file_text(",
+            "pub async fn plan_write_file(",
+            "pub async fn plan_delete_file(",
+        ] {
+            let start = source
+                .find(route)
+                .unwrap_or_else(|| panic!("{route} has been renamed; this test must follow it"));
+            // To the end of that function: the next item at column zero.
+            let body = &source[start..];
+            let end = body.find("\n}\n").unwrap_or(body.len());
+            assert!(
+                body[..end].contains("within_workspace("),
+                "{route} must resolve its path through within_workspace, not privately"
+            );
+        }
     }
 
     /// The prompt viewer must show what the model is actually given.

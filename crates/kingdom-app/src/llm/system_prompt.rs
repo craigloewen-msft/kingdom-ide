@@ -119,6 +119,9 @@ impl SystemPrompt {
         out.push_str(MERMAID);
 
         out.push_str("\n\n");
+        out.push_str(BATCHING);
+
+        out.push_str("\n\n");
         out.push_str(SHARED_MACHINE);
 
         if !self.guidance.is_empty() {
@@ -193,6 +196,39 @@ const MERMAID: &str = "The chamber renders Markdown mermaid code fences as diagr
      useful. When a node label contains parentheses, quotes, or other punctuation, wrap \
      the label text in double quotes (e.g. `A[\"svc.Get(\\\"x\\\")\"]`) so Mermaid does not \
      read the punctuation as diagram syntax.";
+
+/// That a round is the unit of cost, so independent calls belong together.
+///
+/// No Phoenix counterpart, kept for the same reason [`SHARED_MACHINE`] is: it
+/// states a fact about *Kingdom's* transport rather than improving on Phoenix's
+/// wording. `copilot::armed` sets `parallel_tool_calls` and its comment already
+/// says what that buys -- "(N-1) round trips whenever the model recognises a
+/// batch as independent... every round resends the entire transcript, so a round
+/// avoided is the whole conversation not re-sent." The capability was armed and
+/// nothing had ever asked a model to use it.
+///
+/// Measured before it was written: across the four most recently approved plans,
+/// 702 rounds produced 840 tool calls -- 1.20 per round, with 84% of rounds
+/// carrying exactly one and not a single round in any of them carrying three.
+/// Merging only the consecutive read-only rounds would have saved 6% of them,
+/// and because the prefix is re-sent every round the byte saving is larger than
+/// the round saving.
+///
+/// **Expect little of it.** `workspace_block`'s second clause is the cautionary
+/// case: it fixed the `cd`-prefix habit outright for two plans and then lost to
+/// a stronger prior the moment a plan worked across two repositories. A sentence
+/// in a system prompt competes with everything else in the window. This one
+/// costs three lines and may buy nothing.
+///
+/// The second clause is not padding. Told only to batch, a model batches a read
+/// with the write that depends on it and then reasons from a result it never
+/// saw; saying plainly when *not* to is what makes the instruction safe to
+/// follow.
+const BATCHING: &str = "If you intend to call several tools and there are no dependencies \
+     between the calls, make all of the independent calls in the same reply rather than one \
+     per reply. Every round re-sends the whole conversation, so four reads asked for together \
+     cost a fraction of the same four asked for one at a time. When a call needs the result of \
+     an earlier one, wait for it -- correctness first.";
 
 /// That the machine has other tenants, the King's own server among them.
 ///
@@ -697,6 +733,45 @@ mod tests {
         let rendered = prompt_with(Permissions::Full, false).render();
         assert!(rendered.contains("Never kill a process you did not start"));
         assert!(rendered.contains("3000"));
+    }
+
+    /// The court is asked to batch calls that do not depend on each other.
+    ///
+    /// The [`SHARED_MACHINE`] case rather than the `label`/`since` case: no
+    /// Phoenix counterpart, kept because it states a fact about Kingdom's own
+    /// transport. `copilot::armed` sets `parallel_tool_calls` and nothing had
+    /// ever asked a model to use it -- four real plans averaged 1.20 tool calls
+    /// per round, with 84% of rounds carrying exactly one.
+    ///
+    /// Both halves are pinned. The instruction alone would have a model batch a
+    /// read with the write that depends on it, which trades a token bill for a
+    /// correctness bug, so the caveat is as load-bearing as the ask.
+    ///
+    /// It must also stay *before* the remit --
+    /// [`the_remit_is_the_last_thing_the_model_reads`] enforces the other side
+    /// of that, and this is the block most likely to be appended in the wrong
+    /// place because it reads like a closing instruction.
+    #[test]
+    fn the_court_is_asked_to_batch_independent_calls() {
+        let rendered = prompt_with(Permissions::Full, false).render();
+
+        assert!(
+            rendered.contains("make all of the independent calls in the same reply"),
+            "`parallel_tool_calls` is armed and only the prompt can ask for it: {rendered}"
+        );
+        assert!(
+            rendered.contains("When a call needs the result of an earlier one, wait for it"),
+            "batching without the caveat buys tokens at the price of correctness"
+        );
+
+        let batching = rendered.find("independent calls").expect("just asserted");
+        let remit = rendered
+            .find("You are in Work mode")
+            .expect("the remit renders for Full");
+        assert!(
+            batching < remit,
+            "the remit is last; this must not be appended after it"
+        );
     }
 
     /// The workspace block says commands *start* here, not merely where here is.

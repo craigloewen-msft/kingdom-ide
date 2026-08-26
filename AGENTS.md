@@ -128,7 +128,10 @@ crates/
     review.rs       What a plan changed, and how one file differs, as pure
                     data. The rows arrive already paired for a side-by-side
                     view; every decision needing a repository is made in
-                    kingdom-app::review
+                    kingdom-app::review. FileText/FileStamp live here too: one
+                    file whole and byte-exact for the King to edit, and the
+                    cheap "is this still what I opened?" a save is checked
+                    against
     naming.rs       slugify — a plan's title turned into its branch name
     sample.rs       Placeholder starter plans
     mockdata/       The Proving Grounds: synthetic fixtures, in Rust
@@ -142,8 +145,10 @@ crates/
     lib.rs          wasm entry point     (feature: hydrate)
     api.rs          #[server] functions  — the browser/server bridge
     scan.rs         Filesystem scanning  (ssr only)
-    events.rs       Publishing a plan's changes to its watchers (ssr only)
-    watch.rs        The chamber's push socket (ssr only)
+    events.rs       Publishing a plan's changes to its watchers, and a digest of
+                    every plan to the rail (ssr only)
+    watch.rs        The chamber's push socket, and the rail's (the route
+                    constants cross to wasm; the handlers are ssr only)
     screencast.rs   The King's live view of a plan's browser (ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
@@ -152,6 +157,12 @@ crates/
                     kingdom's records are kept (ssr only)
     review.rs       What a plan has changed against the default branch, and one
                     file's diff, read out of its workspace with git (ssr only)
+    edit.rs         The King's own edits: one file read whole and byte-exact,
+                    written back, or removed. review.rs reads a file for
+                    LOOKING AT (numbered, truncatable); this reads one for
+                    CHANGING, so it never truncates and never reshapes. Holds
+                    the stamp check that stops a save overwriting what the
+                    court did while he was typing (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)
@@ -194,7 +205,9 @@ crates/
                     file_tree.rs (the plan's workspace on disk — a file row
                     opens it in the panel) and review_drawer.rs (every
                     file this plan has changed),
-                    source_view.rs (one file read whole) and diff_view.rs (one
+                    source_view.rs (one file read whole, and — in its other
+                    mode — open for the King to edit, save or delete) and
+                    diff_view.rs (one
                     changed file, old beside new) — those two and the spyglass
                     are alternatives for one panel, see `Aside`, and every line
                     of either takes a note,
@@ -493,10 +506,125 @@ fudged with a constant, because the ratio is entirely content-dependent (base64
 escapes to nothing, a build log nearly doubles), and a test now pins the estimate
 against a genuinely assembled body.
 
-What is **not** fixed is that the chamber header still reports tokens. The King
-watched 257k of 1M tick by while the gateway refused him on bytes, and the bar
-was telling the truth about the wrong quantity. Reporting wire bytes beside it is
-its own task.
+The chamber header now reports **both** limits. `ContextUsage` carries `bytes`
+beside `tokens` — the measurement `copilot.rs` already took so a 413 could name
+its own size, kept rather than discarded — and the header's tooltip says what the
+last request weighed on the wire. The King watched 257k of 1M tick by while the
+gateway refused him on bytes, and the bar was telling the truth about the wrong
+quantity. It is in the tooltip rather than beside the bar because it is the
+number to reach for when a turn fails for no visible reason, not one to watch;
+`bytes: 0` reads as *unmeasured* and draws nothing, which is what every plan
+recorded before the field existed loads as.
+
+**A request stopped carrying thinking nobody was using.** The other half of the
+same lesson as the pictures above, found by auditing four plans that did *not*
+die. `shedding` consulted `LIVE_REPLIES` only when a body exceeded
+`Budget::FULL`, so a conversation comfortably under budget re-sent every signed
+reasoning blob it had ever produced, forever. On real plans that was the single
+largest thing in a request — 638 KB of 1.15 MB on one, 651 KB of 1.45 MB on
+another — and in both cases **100%** of it older than `LIVE_REPLIES` and
+therefore dead by that constant's own definition. Cumulatively it was 46–53% of
+everything those turns put on the wire.
+
+So `opaque_from_reply` is now set in the *initial* `Shedding`, exactly as
+`images_from_reply` already was, and for the reason stated there: a conversation
+that merely happens to fit today would otherwise keep every blob until the day it
+does not. The pressure loop no longer needs a step for signatures — the bound it
+would have walked to is already applied — and it must never reach past it, since
+dropping a *live* signature is silent (`Reasoning::without_opaque`) where
+trimming a result says so.
+
+**And a round is now understood to be the unit of cost.** `copilot::armed` has
+set `parallel_tool_calls` all along, with a comment explaining that it saves
+(N−1) round trips whenever a model recognises a batch as independent — and
+nothing had ever asked a model to use it. Across those same four plans, 702
+rounds produced 840 tool calls: 1.20 per round, 84% of rounds carrying exactly
+one, and not a single round in any of them carrying three. `BATCHING` is the
+sentence that asks, kept for the `SHARED_MACHINE` reason rather than Phoenix's
+(Phoenix sends no such line; this is a fact about Kingdom's transport). Its
+second clause — *wait when a call needs an earlier result* — is as load-bearing
+as the ask, because batching a read with the write that depends on it trades a
+token bill for a correctness bug.
+
+The honest caveat is that a prompt line is a weak instrument: `workspace_block`'s
+own second clause fixed the redundant-`cd` habit outright and then lost to a
+stronger prior the moment a plan worked across two repositories, and the same
+audit found 71% of one plan's `bash` calls had the prefix back. Measured after
+the change, a four-file read arrived as one round of four calls.
+
+**A screenshot no longer costs two rounds.** `browser_take_screenshot` returned a
+path and left the model to spend a whole round on `read_image` for a file it had
+just asked to be created, reasoning that "the bytes must not be spent on a model
+that may not need them". The records disagreed: across a real kingdom, 131
+screenshots drew 128 `read_image` calls. 98% is not a model deciding, and the
+call now hands back the picture with the path.
+
+Nothing about the weight changes — `shown` puts an image on the wire only while
+it is within `RECENT_REPLIES`, so a picture delivered this way decays exactly as
+one delivered by `read_image` did, one round earlier and one round cheaper. The
+half of the old reasoning that was right is kept: a **blind** model still gets
+the path alone. That check could not live in `ToolSpec::for_model`, which
+narrows by withholding a tool — this tool is worth offering either way, since the
+King sees the picture regardless — so `Sandbox` carries `sighted` and `api.rs`
+sets it from the same `Model::can_see` the tool list is built from.
+
+**A question is asked one at a time, and the rail says one is standing.** Two
+halves of the same fault. `ask_user_question` may put up to four questions, and
+the chamber used to render all of them with every option live — so the *first*
+click sent its own label and settled the call, and the other three answers were
+discarded without the court ever learning they had been asked. They are now put
+to the King one at a time (`Question` in `conversation.rs`), with Back and Next
+between them and **Submit** in place of Next on the last. `compose_answer` folds
+the lot into the single `String` the parked oneshot takes.
+
+Every question ends in Submit, including a lone one. That costs the old
+one-click path a second click and buys three things worth more: `multi_select`
+becomes answerable at all (it had been in the schema, and read by nothing), an
+option and a sentence of his own can stand *together*, and the set is answered
+as one act. A single question still sends its **bare answer** with no
+scaffolding, so the far side reads exactly as it always did — the mock's "You
+chose X" path and the tool's own test needed no change. Several are labelled and
+kept in the order asked, and a question he left alone is named as `(no answer)`
+rather than dropped: silence and omission look identical to a model, which then
+fills the gap with the guess it stopped to avoid making.
+
+The King's place in the wizard is local state, and it survives the push socket
+for a reason that is not obvious: `Transcript`'s `<For>` is keyed by
+`(index, entry_version)` and an in-flight call holds version 1 throughout, so
+deeds landing elsewhere re-render the list without rebuilding that row. A change
+to that key would silently send him back to question one every time the court
+did anything.
+
+**And the rail could not have told him.** A plan parked on a question is still
+`PlanStatus::Drafting` — asking moves nothing — so a badge read off the status
+said "Drafting" in the working green, the same thing it says for a plan happily
+running a build. `Attention` answers the different question *whose move is it*,
+and is deliberately **not** a sixth `PlanStatus`: a status is where a plan is in
+its life, and a sixth variant would ripple through `ALL`, the map legend,
+`is_settled` and every match on plan state to say one word.
+`Plan::wants_attention` is the single definition, read by the rail, the chamber
+header and the pulse alike.
+
+**A second socket carries it, and it carries a digest.** `events.rs` argues at
+length that whole plans on the wire are free — and that argument holds only for a
+channel keyed *per plan*, where one watcher is looking at exactly what is sent.
+The rail asks "which of my thirty plans needs me?", and answering it the same way
+would wake every open tab with every transcript on every round to repaint a
+badge. So `/watch/kingdom` carries `PlanPulse` — id, city, title, status, what it
+is doing, what it wants — and is **deduped** against the last pulse sent for that
+plan. The digest makes a message cheap; the dedupe makes most rounds send nothing
+at all. Dedupe narrows what is *sent*, never what a message *says*: a pulse is a
+whole digest, so a listener that falls behind has still missed only intermediate
+states, which is the same property that makes lag survivable on the plan channel.
+
+Two details there are load-bearing. The badge cache in `KingdomState` stores an
+`Option` *inside* the map, because "the server says this plan wants nothing" and
+"nothing has been said about this plan" must stay different answers — a question
+answered in another tab pulses `None`, and treating that as silence would fall
+back to a transcript fetched before the answer and go on showing a question
+nobody is asking. And **both** sockets write it: the chamber's, which holds the
+whole plan and computes it, and the rail's, which is told. They cannot disagree,
+because `wants_attention` is the one definition on both ends.
 
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
@@ -612,18 +740,23 @@ survive.
 - Restoring an archived plan. Its outcome records the branch, the tip and a
   patch, so everything a restore would need is kept — but nothing has asked for
   the button yet, and guessing at that UI is how the lease machinery happened.
-- Live updates beyond a plan's own chamber, other than the one thing the map now
-  polls for. The chamber is pushed to over a
-  WebSocket (`events.rs`, `watch.rs`), and the plan's browser is mirrored over a
-  second one (`screencast.rs`) — but the **rail** still only learns of a
-  change when something refetches the kingdom, and so does everything about the
-  map except which towns are working. That one fact is *polled*, every two
-  seconds and only while the map is on screen (`app.rs::poll_activity` over
-  `api::kingdom_activity`), because `events.rs` is keyed per plan by design and
-  a kingdom-wide channel is a real change rather than a smaller one. The
-  spyglass is deliberately
-  *not* surfaced on the map for that reason: a city lighting up because a plan
-  holds a live browser needs both this, and a plan that knows it owns a session.
+- Live updates on the **map**. The chamber is pushed to over a WebSocket
+  (`events.rs`, `watch.rs`), the plan's browser is mirrored over a second one
+  (`screencast.rs`), and the **rail** now has one of its own — a kingdom-wide
+  socket carrying a `PlanPulse` per plan (`watch.rs::KINGDOM_ROUTE`), which is
+  what lets a plan that has stopped to ask something say so from a chamber
+  nobody has open.
+
+  The map does not read it yet. Which towns are working is still *polled*, every
+  two seconds and only while the map is on screen (`app.rs::poll_activity` over
+  `api::kingdom_activity`) — written when `events.rs` was keyed per plan by
+  design and a kingdom-wide channel was "a real change rather than a smaller
+  one". That change has since landed, so the poll is now a survivor rather than
+  a necessity, and folding it onto the pulse is a tidy-up someone should do. The
+  rest of the map is a Bevy canvas, and colouring holdings from plan state is
+  its own piece of work. The spyglass is still deliberately *not* surfaced
+  there: a city lighting up because a plan holds a live browser needs a plan
+  that knows it owns a session.
 
   Both halves of "is the King looking at the map?" hang off the **same**
   `on_the_map` memo in `ThroneRoom`: it stops the activity poll
@@ -773,11 +906,83 @@ edits, which is right while the King is only reading and wrong the moment he is
 typing against line 34 — the lines would shift under him and the note would land
 on something he never read.
 
-**The court can see, and can be seen.** `read_image` closes the loop
-`browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
-carries images beside its text. Two things about that are load-bearing and easy
-to undo by accident. Images are *not* persisted — `store.rs` strips them, because
-a plan's record is rewritten on every update and would otherwise grow by a
+**And he can change the file himself.** The source panel has two modes. *Notes*
+is the panel above: every line takes a comment for the court. *Edit* replaces the
+lines with one box, and he can save the file or delete it — `plan_file_text` →
+`plan_write_file` / `plan_delete_file` over `edit.rs`. A mode of one panel rather
+than a fourth `Aside`, because it is the same file in the same slot; a King who
+spots a typo while reading should not have to close what he is looking at to fix
+it. It is deliberately **not** offered on the diff: editing one column of a
+comparison is ambiguous about which column, and the comparison goes stale under
+the cursor as it is typed into.
+
+Those routes are the fifth, sixth and seventh places an outsider names a path and
+the server opens it, and they raise the stakes — the earlier four only *read* a
+file the King should not see, and these overwrite or delete one. All seven go
+through `within_workspace` and none has a resolver of its own, which a test now
+pins by reading the source. They refuse a **settled** plan, as `annotate_file`
+does and for its reason, and they deliberately do **not** consult `Permissions`:
+that is what bounds the *court*, and gating it would mean the man reviewing a
+proposal cannot fix the typo he just found in it.
+
+Four decisions there are load-bearing.
+
+**The buffer is fetched, not rebuilt from the rendered lines.** `FileText` is a
+second type beside `SourceText` precisely so it can be whole and byte-exact where
+that one is numbered and truncated. Joining `SourceText`'s lines back with `\n`
+would need no request at all and would rewrite every CRLF file as LF and add or
+remove a final newline, because those lines come from `str::lines()` — a
+whole-file diff the King never asked for, landing in his agent's branch. A cap on
+`FileText` would be the same class of harm: a truncated buffer saved back is a
+file with its tail deleted, so a file too long to edit is *refused* rather than
+part-shown.
+
+**And the line endings are restored on the way out**, which is the same lesson
+one layer lower and was found only by driving the real panel. A **DOM textarea
+normalises CRLF to LF in its `value`**: the bytes reach the browser intact, the
+King types one character, and what comes back has had every `\r` stripped by the
+platform before any of Kingdom's code ran. The server-side round-trip test passed
+throughout — it never went near a DOM. So `edit::write` gives the text the
+convention the file on disk already had, guarded twice: only if the file *was*
+CRLF, and only if what arrived has no `\r` at all, which is the signature of a
+wholesale strip rather than of a deliberately mixed file. Nothing in the browser
+can be trusted to preserve this, and nothing in the browser needs to.
+
+**A save cannot overwrite work it never saw.** Every read carries a `FileStamp`
+— length and an FNV-1a hash, the not-cryptographic-and-doesn't-need-to-be trick
+`profile::hash` already uses — and a write or delete sends it back to be checked.
+The King reads a file while his agent works in the same workspace, so without
+this a save at the wrong moment silently destroys a round of the agent's work,
+which is the exact collision this product exists to surface rather than to cause.
+Optimistic rather than a lock, because a lock has to be released by something and
+the something is a browser tab that may simply be closed. A missing file stamps
+as `ABSENT`, which is what makes deleting an already-deleted file a refusal
+rather than a silent success.
+
+**Unsaved text is never dropped on the floor.** Dirty buffers are stashed by path
+for the chamber's lifetime, so glancing at another file mid-edit and coming back
+restores what was typed. No modal and no `confirm()` — there is nothing to lose,
+so there is nothing to ask about. Edit mode also suspends the refetch, which is
+the composer's rule above for a sharper version of its reason: text moving under
+a cursor is worse than under a quote.
+
+Two smaller things. A save appends a `NoteKind::Workspace` note, which the King
+reads and the model never sees — notes are excluded from `Plan::turns` by design,
+and the court finds out the honest way, since `patch` reads a file fresh on every
+call and refuses an anchor that is no longer there. That note also lengthens the
+transcript, which is the change signal the review drawer already refetches on, so
+his own edit refreshes the drawer's counts by the route the court's edits use.
+And a **delete** bumps a `revision` the files tree watches: that tree caches every
+listing and deliberately never re-lists, so without it a deleted file would sit
+in the rail forever. On delete only — a save changes no listing.
+
+**The court can see, and can be seen.** `read_image` was the tool that closed the
+loop `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
+carries images beside its text. That machinery is now used by the screenshot tool
+directly (see above) and `read_image` remains for every *other* picture — a
+diagram or a mockup already in the workspace. Two things about it are load-bearing
+and easy to undo by accident. Images are *not* persisted — `store.rs` strips them,
+because a plan's record is rewritten on every update and would otherwise grow by a
 megabyte per screenshot forever. And chat-completions has no image part on a
 tool result, so `copilot.rs` sends the picture as a following `user` message,
 built only on the wire and never as a `Turn` — the Responses API is the real fix
@@ -787,6 +992,9 @@ A model that cannot see is never offered `read_image` (`ToolSpec::for_model`,
 beside the existing `can_act` narrowing). The vision flag is read from three
 places in Copilot's `/models` payload because the catalogue is not ours; if it
 ever reads as blind for everything, that is where to look.
+`browser_take_screenshot` is the one tool that check does *not* withhold — it is
+worth having either way, since the King sees the picture regardless — so it asks
+`Sandbox::sighted` at run time instead.
 
 **The King reads what the court said, not only what it ran.** A model narrates
 the move it is about to make in the *same reply* as the tool calls, and that

@@ -81,6 +81,13 @@ $statuses: (
   "failed":   $failed,
   "merged":   $merged,
   "archived": $idle,
+
+  // Not a `PlanStatus` — see `Attention` in kingdom-core. A plan that has
+  // stopped to ask something is still `Drafting`, so without an entry of its own
+  // it would be painted the working green while it sits blocked on the King.
+  // Gold because that is already the question's colour in the chamber, and
+  // because gold is the King's own: it means *your* move.
+  "asking":   $gold,
 );
 
 // The land the realm stands on, shore to peak.

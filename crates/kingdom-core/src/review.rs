@@ -156,6 +156,97 @@ pub struct SourceLine {
     pub text: String,
 }
 
+/// One file whole and exact, for the King to edit.
+///
+/// The sibling of [`SourceText`], and deliberately a second type rather than a
+/// field on it, because the two answer different questions. `SourceText` is
+/// *numbered, truncated, renderable* -- it is cut at a row cap so the browser
+/// survives a 40,000-line file. This is *whole and byte-exact*, and a cap on it
+/// would be a file saved back with its tail deleted.
+///
+/// # Why the text is carried rather than rebuilt from the lines
+///
+/// The panel already holds a [`SourceText`], and joining its lines with `\n`
+/// would need no request at all. It would also be wrong: those lines come from
+/// `str::lines()`, which drops the trailing newline and eats a `\r`. Rebuilt
+/// and saved, every CRLF file in the project would silently become LF and every
+/// file would gain or lose a final newline -- a whole-file diff the King never
+/// asked for, landing in his agent's branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileText {
+    /// Path relative to the plan's workspace, as everything else here names a
+    /// file.
+    pub path: String,
+    /// What tints the header, so an editor opened on a `.rs` file reads the
+    /// same as the tree it was opened from.
+    pub language: Language,
+    /// The file, exactly as it is on disk. Empty when [`FileText::verdict`]
+    /// says it could not be read.
+    pub text: String,
+    /// What was on disk when this was read, so a save can tell whether it still
+    /// is. See [`FileStamp`].
+    pub stamp: FileStamp,
+    /// Whether the text above is the whole file, and therefore whether it may
+    /// be edited at all.
+    ///
+    /// [`DiffVerdict`] reused for [`SourceText`]'s reason. Only
+    /// [`DiffVerdict::Shown`] is editable: a binary file, one too large to hold
+    /// in a textarea, and one that could not be read are each a refusal with a
+    /// sentence attached rather than an empty buffer to save over the original.
+    pub verdict: DiffVerdict,
+}
+
+/// What a file looked like when it was read, cheaply.
+///
+/// The King reads a file while his agent is working in the same workspace, so
+/// between opening the editor and pressing Save the court may have rewritten
+/// the thing under him. Without this, that save silently destroys a round of
+/// the agent's work -- the exact collision this product exists to make visible.
+///
+/// Length **and** hash, because either alone is a worse answer: a length misses
+/// an edit that happens to preserve it, and a hash alone is one number to
+/// collide on. FNV-1a is not cryptographic and does not need to be. Nothing is
+/// being defended against a forger; this separates "the same bytes" from "some
+/// other bytes" for one file on one machine, and the same reasoning already
+/// stands behind `profile::hash`.
+///
+/// A file that is **not there** has a stamp too -- length zero, hash zero --
+/// which is what lets a delete be checked the same way a write is, and what
+/// makes deleting an already-deleted file a refusal rather than a silent
+/// success.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStamp {
+    /// The file's length in bytes.
+    pub bytes: u64,
+    /// FNV-1a over those bytes.
+    pub hash: u64,
+}
+
+impl FileStamp {
+    /// The stamp of a file that is not there.
+    pub const ABSENT: FileStamp = FileStamp { bytes: 0, hash: 0 };
+
+    /// Stamps the bytes as they stand.
+    ///
+    /// In `kingdom-core` rather than beside the reader in `kingdom-app` on
+    /// purpose: the browser holds the stamp it was given and hands it back, and
+    /// a second implementation on the far side of the wire is how the two come
+    /// to disagree about whether a file has moved. One function, both targets --
+    /// the same reasoning [`crate::proposal`] is shared for.
+    pub fn of(bytes: &[u8]) -> Self {
+        // FNV-1a, 64-bit. Not cryptographic, and this is not that job.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        FileStamp {
+            bytes: bytes.len() as u64,
+            hash,
+        }
+    }
+}
+
 /// One file's difference from the base, ready to render in two columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileDiff {

@@ -16,8 +16,9 @@
 //! since been built, and the reasoning no longer holds.
 
 use super::{Refusal, Sandbox, Tool};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use kingdom_browser::{BrowserError, BrowserSessionManager, KeyMethod};
-use kingdom_core::{ToolArtifact, ToolOutcome, WaitBudget};
+use kingdom_core::{ToolArtifact, ToolImage, ToolOutcome, WaitBudget};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
@@ -225,8 +226,8 @@ impl Tool for BrowserTakeScreenshot {
     }
     fn description(&self) -> String {
         "Capture the page or one element to a PNG file in the workspace. The \
-         King is shown it in the chamber. Returns its path; call read_image on \
-         that path if you need to look at it yourself."
+         King is shown it in the chamber, and the picture comes back with this \
+         call -- you do not need read_image to look at what you just captured."
             .into()
     }
     fn input_schema(&self) -> Value {
@@ -247,22 +248,52 @@ impl Tool for BrowserTakeScreenshot {
         {
             Ok(image) => {
                 let path = artifact(shop, "browser-screenshot", "png");
+                let artifacts = shop
+                    .relative(&path)
+                    .map(|path| {
+                        vec![ToolArtifact {
+                            path,
+                            media_type: "image/png".to_string(),
+                        }]
+                    })
+                    .unwrap_or_default();
+
                 match write_artifact(&path, &image.png).await {
-                    // Named as well as saved. The *text* is unchanged -- the
-                    // model still gets a path and still calls `read_image`,
-                    // because the bytes must not be spent on a model that may
-                    // not need them. The name is for the chamber, which renders
-                    // the picture inline; see `ToolArtifact`.
+                    // Saved, named *and* handed over. The file is written
+                    // regardless -- the chamber renders it from disk and the
+                    // King's copy must outlive the request -- but the bytes now
+                    // ride back with the call that produced them.
+                    //
+                    // This used to return the path alone and leave the model to
+                    // spend a second round on `read_image`, on the reasoning
+                    // that "the bytes must not be spent on a model that may not
+                    // need them". The records say it always needed them: across
+                    // every plan in a real kingdom, 131 screenshots were
+                    // followed by 128 `read_image` calls. 98% is not a model
+                    // deciding; it is a round trip with a foregone conclusion,
+                    // and 27 of them fell inside four plans alone.
+                    //
+                    // Nothing about the *weight* changes. `copilot::shown` puts
+                    // an image on the wire only while it is within
+                    // `RECENT_REPLIES`, so a picture delivered here decays
+                    // exactly as one delivered by `read_image` did -- it simply
+                    // starts one round earlier and costs one round less.
+                    //
+                    // The half of the old reasoning that was right is kept: a
+                    // model that cannot see is handed the path and nothing more.
+                    // `read_image` is unchanged and remains the way to look at a
+                    // file this call did not create.
+                    Ok(()) if shop.sighted() => ToolOutcome::seen(
+                        format!("Screenshot saved to {}, and attached.", path.display()),
+                        vec![ToolImage {
+                            media_type: "image/png".to_string(),
+                            data: BASE64.encode(&image.png),
+                        }],
+                    )
+                    .leaving(artifacts),
                     Ok(()) => ToolOutcome::produced(
                         format!("Screenshot saved to {}.", path.display()),
-                        shop.relative(&path)
-                            .map(|path| {
-                                vec![ToolArtifact {
-                                    path,
-                                    media_type: "image/png".to_string(),
-                                }]
-                            })
-                            .unwrap_or_default(),
+                        artifacts,
                     ),
                     Err(error) => outcome(Err(error)),
                 }
