@@ -146,12 +146,29 @@ impl Tool for BrowserNavigate {
             Ok(v) => v,
             Err(e) => return bad(self.name(), e),
         };
-        outcome(
-            browsers()
-                .navigate(&plan(shop), &input.url, timeout)
-                .await
-                .map(|_| format!("Navigated to {}.", input.url)),
-        )
+        if let Err(error) = browsers().navigate(&plan(shop), &input.url, timeout).await {
+            return outcome(Err(error));
+        }
+        // The viewport is reported with the landing, so a model reasoning about
+        // layout has the number without spending a whole round asking the page
+        // for `innerWidth`. Asked *after* the navigation, since it is this
+        // page's size that was wanted, and best effort: a page that will not
+        // answer is still a page that was navigated to.
+        let size = browsers()
+            .evaluate(
+                &plan(shop),
+                "`${innerWidth}x${innerHeight}`",
+                false,
+                timeout,
+            )
+            .await
+            .ok()
+            .map(|value| value.trim_matches('"').to_string())
+            .filter(|value| value.contains('x'));
+        ToolOutcome::done(match size {
+            Some(size) => format!("Navigated to {}. Viewport {size}.", input.url),
+            None => format!("Navigated to {}.", input.url),
+        })
     }
 
     fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
@@ -399,11 +416,42 @@ impl Tool for BrowserWaitForSelector {
 
 #[derive(Deserialize)]
 struct ClickInput {
-    selector: String,
+    selector: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
     #[serde(default)]
     wait: bool,
     timeout: Option<String>,
 }
+
+/// What a click was aimed at: an element, or a place.
+#[derive(Debug)]
+enum Target {
+    Selector(String),
+    Point(f64, f64),
+}
+
+/// Reads the target out of the arguments, or says why it could not.
+///
+/// Exactly one of the two forms, and a refusal that names which mistake was
+/// made rather than restating the schema -- a model told "invalid arguments"
+/// retries the same call, where one told it gave both corrects itself.
+fn target_of(input: &ClickInput) -> Result<Target, String> {
+    match (&input.selector, input.x, input.y) {
+        (Some(selector), None, None) => Ok(Target::Selector(selector.clone())),
+        (None, Some(x), Some(y)) => Ok(Target::Point(x, y)),
+        (Some(_), _, _) => {
+            Err("give either `selector` or `x`/`y`, not both: a click has one target.".to_string())
+        }
+        (None, None, None) => {
+            Err("give a `selector`, or `x` and `y` to click a point in the viewport.".to_string())
+        }
+        (None, _, _) => {
+            Err("clicking a point needs both `x` and `y`; only one was given.".to_string())
+        }
+    }
+}
+
 pub struct BrowserClick;
 #[async_trait::async_trait]
 impl Tool for BrowserClick {
@@ -411,26 +459,49 @@ impl Tool for BrowserClick {
         "browser_click"
     }
     fn description(&self) -> String {
-        "Click by selector with CDP mouse events, not JavaScript click(), so framework and browser handlers receive trusted input.".into()
+        "Click by selector with CDP mouse events, not JavaScript click(), so \
+         framework and browser handlers receive trusted input. Give `x`/`y` \
+         instead of a selector to click a point in the viewport -- that is the \
+         only way to hit something inside a <canvas>, where every drawn thing \
+         is the same element. The pointer settles on the target before the \
+         press, so hover-driven interfaces react as they would to a person."
+            .into()
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","required":["selector"],"properties":{"selector":{"type":"string"},"wait":{"type":"boolean"},"timeout":{"type":"string","description":"Default 30s."}}})
+        json!({"type":"object","properties":{
+            "selector":{"type":"string","description":"The element to click. Omit when clicking a point."},
+            "x":{"type":"number","description":"Viewport x, in CSS pixels. Use with `y`, instead of a selector."},
+            "y":{"type":"number","description":"Viewport y, in CSS pixels. Use with `x`, instead of a selector."},
+            "wait":{"type":"boolean","description":"Wait for the selector to be visible first. Ignored for a point."},
+            "timeout":{"type":"string","description":"Default 30s."}}})
     }
     async fn run(&self, input: Value, shop: &Sandbox) -> ToolOutcome {
         let i: ClickInput = match parse(self.name(), input) {
             Ok(v) => v,
             Err(e) => return e,
         };
+        let target = match target_of(&i) {
+            Ok(v) => v,
+            Err(e) => return bad(self.name(), e),
+        };
         let t = match duration(i.timeout.as_deref(), DEFAULT_SETTLE) {
             Ok(v) => v,
             Err(e) => return bad(self.name(), e),
         };
-        outcome(
-            browsers()
-                .click(&plan(shop), &i.selector, i.wait, t)
-                .await
-                .map(|_| format!("Clicked `{}`.", i.selector)),
-        )
+        match target {
+            Target::Selector(selector) => outcome(
+                browsers()
+                    .click(&plan(shop), &selector, i.wait, t)
+                    .await
+                    .map(|_| format!("Clicked `{selector}`.")),
+            ),
+            Target::Point(x, y) => outcome(
+                browsers()
+                    .click_at(&plan(shop), x, y, t)
+                    .await
+                    .map(|_| format!("Clicked ({x}, {y}).")),
+            ),
+        }
     }
 
     fn waits_for(&self, input: &Value) -> Option<WaitBudget> {
@@ -597,5 +668,47 @@ impl Tool for BrowserClearConsoleLogs {
                 .await
                 .map(|n| format!("Cleared {n} console log entries.")),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clicking(value: Value) -> Result<Target, String> {
+        let input: ClickInput = serde_json::from_value(value).expect("the fixture parses");
+        target_of(&input)
+    }
+
+    /// Either form works, and nothing else is needed to express it.
+    #[test]
+    fn a_click_may_name_an_element_or_a_place() {
+        assert!(matches!(
+            clicking(json!({"selector": ".start-btn"})),
+            Ok(Target::Selector(s)) if s == ".start-btn"
+        ));
+        assert!(matches!(
+            clicking(json!({"x": 640.0, "y": 400.0})),
+            Ok(Target::Point(x, y)) if x == 640.0 && y == 400.0
+        ));
+    }
+
+    /// A click has one target, and a half-given point is not one.
+    ///
+    /// Each refusal names the *specific* mistake rather than restating the
+    /// schema, for the reason `Refusal`'s own docs give: a model told only that
+    /// its arguments were invalid retries the identical call, where one told it
+    /// gave both forms drops one and gets on with it.
+    #[test]
+    fn a_click_with_no_single_target_is_refused_by_name() {
+        let both = clicking(json!({"selector": "#map", "x": 1.0, "y": 2.0}))
+            .expect_err("two targets is not a click");
+        assert!(both.contains("not both"), "{both}");
+
+        let neither = clicking(json!({})).expect_err("no target is not a click");
+        assert!(neither.contains("`x` and `y`"), "{neither}");
+
+        let half = clicking(json!({"x": 640.0})).expect_err("half a point is not a click");
+        assert!(half.contains("both"), "{half}");
     }
 }

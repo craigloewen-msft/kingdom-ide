@@ -181,7 +181,13 @@ crates/
     skills.rs       Finding a project's skills on disk (ssr only)
     tools/          What the court can do with its own hands (ssr only)
                     mod.rs (Tool trait, Sandbox = the workspace boundary,
-                    and the one place Permissions become a list of tools),
+                    the one place Permissions become a list of tools, and
+                    child_environment — what a plan's bash/tmux children get
+                    beyond what the server inherited. Empty for an ordinary
+                    project; for a Kingdom checkout it pins KINGDOM_MODEL=mock
+                    and a KINGDOM_HOME inside the workspace, because a
+                    rehearsal server otherwise inherits the King's credential
+                    and writes its throwaway records into his own profile),
                     think, read_file, read_image, search, skill, bash, tmux,
                     patch, browser, profile (browser_profile),
                     propose_plan (the gateway from proposing to working: the
@@ -264,7 +270,15 @@ crates/
                     per-plan session manager. Native only — never in the wasm
                     bundle. The Tool impls over it live in kingdom-app.
     session.rs      Per-plan Chrome, finding one on the machine, and the
-                    operations the tools call
+                    operations the tools call. Two things there are load-
+                    bearing and easy to undo: HOVER_SETTLE, which rests the
+                    pointer on a target before pressing it — chromiumoxide
+                    moves and presses in one CDP batch, so a page that decides
+                    what a click means from what is *hovered* never sees the
+                    move in time, which is why nothing could click the map;
+                    and DEFAULT_VIEWPORT, chosen against Kingdom's own
+                    responsive thresholds rather than as a round number
+                    (KINGDOM_BROWSER_VIEWPORT overrides it)
     screencast.rs   CDP screencast, relayed to the spyglass's viewers
                     (the panel is components/browser_view.rs)
     profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
@@ -1100,8 +1114,11 @@ cargo leptos watch      # same, with rebuild on change
 cargo test -p kingdom-core
 cargo test -p kingdom-app --features ssr --no-default-features
 
-# No test launches a browser, so the suite needs nothing installed and stays
-# fast. Kingdom finds Chrome itself at runtime: whatever is on `PATH` or in the
+# No test launches a browser *by default*, so the suite needs nothing installed
+# and stays fast. The exception is opt-in and marked as such:
+cargo test -p kingdom-browser -- --ignored   # launches a real Chrome
+
+# Kingdom finds Chrome itself at runtime: whatever is on `PATH` or in the
 # usual install locations, and failing that a Chromium that Playwright or
 # Puppeteer already downloaded. Set KINGDOM_CHROME_EXECUTABLE only to override
 # that on a machine where the guess is wrong.
