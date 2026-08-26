@@ -334,6 +334,40 @@
   }
 }
 
+// What stands where the map would be, when the engine has been stood down
+// under an automated browser. See `kingdom_citymap::mode`.
+//
+// Centred in the region the same way the survey card is, and on the same void
+// the region already paints -- there is no canvas underneath this, so the
+// background is the region's own. `pointer-events: none` for the reason the
+// survey card has it: the decree bar stands above the map and nothing here may
+// swallow a click meant for it.
+.city-map-stood-down {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.stood-down-notice {
+  margin: 0;
+  color: t.$ink-dim;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.stood-down-way-out {
+  margin: 0;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 12px;
+}
+
 .city-map-error {
   position: absolute;
   inset-inline: 0;

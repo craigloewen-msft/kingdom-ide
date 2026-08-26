@@ -60,6 +60,14 @@ web-sys = { version = "0.3", features = [
     "ReadableStream",
     "ReadableStreamDefaultReader",
     "ReadableStreamReadResult",
+    # `Navigator`/`NavigatorAutomationInformation` are what `mode` is decided
+    # from, and `Location`/`UrlSearchParams` are what the override is read
+    # from. See `view::map_mode`.
+    "Location",
+    "Navigator",
+    "NavigatorAutomationInformation",
+    "UrlSearchParams",
+    "Window",
 ], optional = true }
 
 [dev-dependencies]

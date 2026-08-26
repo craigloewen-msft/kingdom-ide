@@ -55,6 +55,11 @@ pub mod build;
 #[cfg(any(feature = "hydrate", test))]
 pub mod engine;
 pub mod map;
+// The same gate as `engine`, for a related reason: deciding whether to draw at
+// all is a decision about a browser, but it is made out of two plain values and
+// is worth pinning without one.
+#[cfg(any(feature = "hydrate", test))]
+pub mod mode;
 pub mod progress;
 
 #[cfg(feature = "hydrate")]
