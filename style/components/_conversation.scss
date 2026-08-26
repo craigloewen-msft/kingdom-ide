@@ -819,7 +819,21 @@
 // the context he needs.
 .chat-question {
   align-self: stretch;
-  flex-shrink: 0;
+  // This card sits in `.chat-deed-row`, which is a flex *row* — so shrinking is
+  // horizontal here, not vertical. It was written as `flex-shrink: 0` back when
+  // the card hung directly off `.chamber-log`, a column, where that meant "keep
+  // my height". The row inverted the axis without changing the spelling, and
+  // the declaration quietly started meaning "be as wide as my longest line" —
+  // so one long question sized the card to its own text and dragged the whole
+  // transcript's horizontal scroll out with it.
+  //
+  // `flex-shrink: 1` rather than `flex: 1` on purpose: both stop the blow-out,
+  // but growing as well would push every short question out to the full column
+  // width, and a two-line question does not want a chamber-wide card. This lets
+  // a card that fits stay the size it is and only the oversized one come back.
+  // `min-width: 0` is what lets it shrink past its content at all.
+  flex-shrink: 1;
+  min-width: 0;
   padding: 14px;
   border: 1px solid rgba(t.$gold, 0.5);
   border-radius: t.$radius;
@@ -866,11 +880,17 @@
   border-top: 1px solid t.$edge;
 }
 
+// Wrapped hard, like `.thought-body` above. Shrinking the card is not enough on
+// its own: a path, a URL or a pasted blob is one unbreakable word whose
+// `min-content` width can exceed the column, and it would push the card back out
+// however willing to shrink it now is. `anywhere` rather than `break-word` so
+// the break happens only where a word genuinely cannot fit.
 .question-text {
   margin: 0 0 10px;
   color: t.$ink;
   font-size: 13px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .question-options {
@@ -914,15 +934,19 @@
   &:disabled { cursor: default; }
 }
 
+// Both wrapped for the same reason as `.question-text`: an option's label or its
+// explanation is model-supplied text and can carry an unbreakable token.
 .option-label {
   color: t.$ink;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .option-detail {
   color: t.$ink-faint;
   font-size: 11px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 // The options are the court's guesses. The King is the one deciding, so he must
