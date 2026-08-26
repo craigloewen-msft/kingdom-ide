@@ -7,6 +7,7 @@
 use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use core::ops::Range;
 use crate::map::{MapBuilding, MapManifest, MapScenery, MapWard, MapWorld};
 
 use super::activity;
@@ -14,6 +15,7 @@ use super::bridge::{Bridge, LodLevel};
 use super::camera;
 use super::materials::{MaterialCache, Surface, to_color};
 use super::meshes::{self, BuildingShape};
+use super::raise::Step;
 use super::text;
 use super::wards;
 
@@ -132,7 +134,116 @@ pub fn clear_world(
     material_cache.clear();
 }
 
-/// Spawns a manifest's world. Returns the root entity.
+/// Spawns the empty root a world is built under.
+///
+/// Taken apart from [`spawn_world`] because a world is normally raised over
+/// several frames -- see [`super::raise`] -- and the root has to exist, hidden,
+/// before the first slice of it does.
+pub fn spawn_root(commands: &mut Commands, visibility: Visibility) -> Entity {
+    commands
+        .spawn((SceneRoot, Transform::default(), visibility))
+        .id()
+}
+
+/// Shows a world that was raised under a hidden root.
+pub fn reveal(commands: &mut Commands, root: Entity) {
+    commands.entity(root).insert(Visibility::Inherited);
+}
+
+/// Builds one slice of one step of a world.
+///
+/// The single door the sliced path goes through, so that "what does this step
+/// build" is answered in one place rather than once here and once in
+/// [`spawn_world`].
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_step(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    mesh_cache: &mut MeshCache,
+    material_cache: &mut MaterialCache,
+    root: Entity,
+    world: &MapWorld,
+    step: Step,
+    slice: Range<usize>,
+) {
+    match step {
+        Step::Base => spawn_base(commands, meshes, materials, material_cache, root, world),
+        Step::Towns => spawn_towns(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+        Step::Wards => spawn_wards(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+        Step::Plazas => spawn_plazas(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+        Step::Roads => spawn_roads(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+        Step::Holdings => spawn_buildings(
+            commands,
+            meshes,
+            materials,
+            mesh_cache,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+        Step::Groves => spawn_scenery(
+            commands,
+            meshes,
+            materials,
+            mesh_cache,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+        Step::Names => spawn_ground_labels(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            root,
+            world,
+            slice,
+        ),
+    }
+}
+
+/// Spawns a manifest's world in one go. Returns the root entity.
+///
+/// The engine does not take this path -- it raises a world in slices so the
+/// browser can paint a loading bar between them. It is kept because it is the
+/// definition of "the whole world", and because every stage below is reached
+/// through exactly the same functions the sliced path uses, so the two cannot
+/// build different settlements.
 pub fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -141,13 +252,45 @@ pub fn spawn_world(
     material_cache: &mut MaterialCache,
     world: &MapWorld,
 ) -> Entity {
-    let root = commands
-        .spawn((SceneRoot, Transform::default(), Visibility::default()))
-        .id();
+    let root = spawn_root(commands, Visibility::default());
 
-    spawn_sun(commands, root, world);
-    spawn_terrain(commands, meshes, materials, material_cache, root, world);
-    spawn_roads(commands, meshes, materials, material_cache, root, world);
+    spawn_base(commands, meshes, materials, material_cache, root, world);
+    spawn_towns(
+        commands,
+        meshes,
+        materials,
+        material_cache,
+        root,
+        world,
+        0..world.towns.len(),
+    );
+    spawn_wards(
+        commands,
+        meshes,
+        materials,
+        material_cache,
+        root,
+        world,
+        0..world.wards.len(),
+    );
+    spawn_plazas(
+        commands,
+        meshes,
+        materials,
+        material_cache,
+        root,
+        world,
+        0..world.plazas.len(),
+    );
+    spawn_roads(
+        commands,
+        meshes,
+        materials,
+        material_cache,
+        root,
+        world,
+        0..world.roads.len(),
+    );
     spawn_buildings(
         commands,
         meshes,
@@ -156,6 +299,7 @@ pub fn spawn_world(
         material_cache,
         root,
         world,
+        0..world.buildings.len(),
     );
     spawn_scenery(
         commands,
@@ -165,8 +309,17 @@ pub fn spawn_world(
         material_cache,
         root,
         world,
+        0..world.scenery.len(),
     );
-    spawn_ground_labels(commands, meshes, materials, material_cache, root, world);
+    spawn_ground_labels(
+        commands,
+        meshes,
+        materials,
+        material_cache,
+        root,
+        world,
+        0..world.ground_labels.len(),
+    );
 
     root
 }
@@ -185,8 +338,9 @@ fn spawn_ground_labels(
     cache: &mut MaterialCache,
     root: Entity,
     world: &MapWorld,
+    slice: Range<usize>,
 ) {
-    for label in &world.ground_labels {
+    for label in world.ground_labels.get(slice).unwrap_or_default() {
         if label.text.trim().is_empty() || label.size <= 0.0 {
             continue;
         }
@@ -271,7 +425,12 @@ fn spawn_sun(commands: &mut Commands, root: Entity, world: &MapWorld) {
     ));
 }
 
-fn spawn_terrain(
+/// The disk itself: the sun above it and the rock under it.
+///
+/// Its own stage rather than part of the town loop because it is a fixed,
+/// small number of meshes -- there is nothing here to count, so nothing to
+/// slice.
+fn spawn_base(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -279,60 +438,80 @@ fn spawn_terrain(
     root: Entity,
     world: &MapWorld,
 ) {
+    spawn_sun(commands, root, world);
+
     // The world is a disk hanging in space: the ground it stands on, and the
     // rock below holding it up. There is nothing beyond the rim -- no plane
     // running to the horizon -- so the silhouette of the disk is the edge of
     // everything there is.
     let rim = to_points(&world.rim);
-    if rim.len() >= 3 {
-        commands.spawn((
-            ChildOf(root),
-            Mesh3d(meshes.add(meshes::ground_polygon(&rim))),
-            MeshMaterial3d(cache.get(materials, world.ground, Surface::Matte)),
-            Transform::from_xyz(0.0, layer::LAND, 0.0),
-            Pickable::IGNORE,
-        ));
-
-        // The cliff, the shelf and the spire are three meshes so each takes
-        // its own colour, and all three are drawn **unlit**.
-        //
-        // That is not a shortcut. The sun points almost straight down, so no
-        // surface under the disk receives any of it, and the scene is exposed
-        // for a 9,000-lux sun against a 420-lux ambient fill -- which renders
-        // the whole underside as a black silhouette whatever colour it is
-        // given. Lighting it properly would mean a second light aimed up at
-        // the rock, and that light would also fall on the town. Unlit rock,
-        // shaded by hand from the manifest's three colours, keeps the sun
-        // calibrated for the kingdom above and still reads as depth.
-        for (mesh, color) in [
-            (
-                meshes::rim_cliff(&rim, world.underside.cliff),
-                world.underside.cliff_color,
-            ),
-            (
-                meshes::disk_shelf(&rim, &world.underside),
-                world.underside.rock,
-            ),
-            (
-                meshes::disk_spire(&rim, &world.underside),
-                world.underside.deep,
-            ),
-        ] {
-            commands.spawn((
-                ChildOf(root),
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(cache.get(materials, color, Surface::Unlit)),
-                Transform::from_xyz(0.0, layer::LAND, 0.0),
-                // The spire would otherwise cast a long shadow into empty
-                // space, at the cost of the one cascade WebGL2 allows.
-                NotShadowCaster,
-                NotShadowReceiver,
-                Pickable::IGNORE,
-            ));
-        }
+    if rim.len() < 3 {
+        return;
     }
 
-    for town in &world.towns {
+    commands.spawn((
+        ChildOf(root),
+        Mesh3d(meshes.add(meshes::ground_polygon(&rim))),
+        MeshMaterial3d(cache.get(materials, world.ground, Surface::Matte)),
+        Transform::from_xyz(0.0, layer::LAND, 0.0),
+        Pickable::IGNORE,
+    ));
+
+    // The cliff, the shelf and the spire are three meshes so each takes
+    // its own colour, and all three are drawn **unlit**.
+    //
+    // That is not a shortcut. The sun points almost straight down, so no
+    // surface under the disk receives any of it, and the scene is exposed
+    // for a 9,000-lux sun against a 420-lux ambient fill -- which renders
+    // the whole underside as a black silhouette whatever colour it is
+    // given. Lighting it properly would mean a second light aimed up at
+    // the rock, and that light would also fall on the town. Unlit rock,
+    // shaded by hand from the manifest's three colours, keeps the sun
+    // calibrated for the kingdom above and still reads as depth.
+    for (mesh, color) in [
+        (
+            meshes::rim_cliff(&rim, world.underside.cliff),
+            world.underside.cliff_color,
+        ),
+        (
+            meshes::disk_shelf(&rim, &world.underside),
+            world.underside.rock,
+        ),
+        (
+            meshes::disk_spire(&rim, &world.underside),
+            world.underside.deep,
+        ),
+    ] {
+        commands.spawn((
+            ChildOf(root),
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(cache.get(materials, color, Surface::Unlit)),
+            Transform::from_xyz(0.0, layer::LAND, 0.0),
+            // The spire would otherwise cast a long shadow into empty
+            // space, at the cost of the one cascade WebGL2 allows.
+            NotShadowCaster,
+            NotShadowReceiver,
+            Pickable::IGNORE,
+        ));
+    }
+}
+
+/// One town's ground, and the ring that lights up while an agent works there.
+///
+/// `slice` is which towns to build, so a world can go up over several frames.
+/// Every stage below takes one for the same reason, and an out-of-range slice
+/// yields nothing rather than panicking: the range is arithmetic done
+/// elsewhere, and a loading bar is not worth a crash.
+fn spawn_towns(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut MaterialCache,
+    root: Entity,
+    world: &MapWorld,
+    slice: Range<usize>,
+) {
+    for town in world.towns.get(slice).unwrap_or_default() {
         if town.polygon.len() < 3 {
             continue;
         }
@@ -347,8 +526,19 @@ fn spawn_terrain(
 
         spawn_town_ring(commands, meshes, materials, root, town);
     }
+}
 
-    for ward in &world.wards {
+/// Each folder's ground, and the kerb around it.
+fn spawn_wards(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut MaterialCache,
+    root: Entity,
+    world: &MapWorld,
+    slice: Range<usize>,
+) {
+    for ward in world.wards.get(slice).unwrap_or_default() {
         if ward.polygon.len() < 3 {
             continue;
         }
@@ -372,8 +562,19 @@ fn spawn_terrain(
 
         spawn_ward_outline(commands, meshes, materials, cache, root, ward);
     }
+}
 
-    for plaza in &world.plazas {
+/// The paved squares at the heart of each settlement.
+fn spawn_plazas(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut MaterialCache,
+    root: Entity,
+    world: &MapWorld,
+    slice: Range<usize>,
+) {
+    for plaza in world.plazas.get(slice).unwrap_or_default() {
         let rect = plaza.rect;
         let mesh = meshes::ground_polygon(&[
             Vec2::new(rect.x, rect.y),
@@ -486,8 +687,9 @@ fn spawn_roads(
     cache: &mut MaterialCache,
     root: Entity,
     world: &MapWorld,
+    slice: Range<usize>,
 ) {
-    for road in &world.roads {
+    for road in world.roads.get(slice).unwrap_or_default() {
         if road.points.len() < 2 {
             continue;
         }
@@ -514,6 +716,9 @@ fn spawn_roads(
     }
 }
 
+// Eight, because a stage takes the slice of itself to build on top of the
+// caches and the world it reads. See `spawn_step`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_buildings(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -522,8 +727,9 @@ fn spawn_buildings(
     material_cache: &mut MaterialCache,
     root: Entity,
     world: &MapWorld,
+    slice: Range<usize>,
 ) {
-    for building in &world.buildings {
+    for building in world.buildings.get(slice).unwrap_or_default() {
         spawn_building(
             commands,
             meshes,
@@ -606,6 +812,7 @@ fn spawn_building(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_scenery(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -614,6 +821,7 @@ fn spawn_scenery(
     material_cache: &mut MaterialCache,
     root: Entity,
     world: &MapWorld,
+    slice: Range<usize>,
 ) {
     // Scenery is modelled once at unit size and scaled into place.
     let foliage = mesh_cache
@@ -629,7 +837,7 @@ fn spawn_scenery(
         .get_or_insert_with(|| meshes.add(meshes::tree_trunk(1.0, 1.0)))
         .clone();
 
-    for item in &world.scenery {
+    for item in world.scenery.get(slice).unwrap_or_default() {
         match *item {
             MapScenery::Tree {
                 position,
