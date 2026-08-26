@@ -28,5 +28,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+# One call: SIGKILL to a browser whose owning server died. `sweep_orphans`
+# finds it by reading /proc, so this is the only unsafe line in the crate --
+# there is no safe std way to signal a process we did not spawn.
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

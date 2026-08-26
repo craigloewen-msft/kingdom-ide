@@ -293,17 +293,34 @@ crates/
                     per-plan session manager. Native only — never in the wasm
                     bundle. The Tool impls over it live in kingdom-app.
     session.rs      Per-plan Chrome, finding one on the machine, and the
-                    operations the tools call. Two things there are load-
+                    operations the tools call. Three things there are load-
                     bearing and easy to undo: HOVER_SETTLE, which rests the
                     pointer on a target before pressing it — chromiumoxide
                     moves and presses in one CDP batch, so a page that decides
                     what a click means from what is *hovered* never sees the
                     move in time, which is why nothing could click the map;
-                    and DEFAULT_VIEWPORT, chosen against Kingdom's own
+                    DEFAULT_VIEWPORT, chosen against Kingdom's own
                     responsive thresholds rather than as a round number
-                    (KINGDOM_BROWSER_VIEWPORT overrides it)
+                    (KINGDOM_BROWSER_VIEWPORT overrides it); and
+                    `disable-software-rasterizer`, which is what actually stops
+                    SwiftShader — NOT `--disable-gpu`, which was long assumed
+                    to and does not. Measured: a WebGL page costs 680–840% of a
+                    core with the software rasteriser and 12–18% without.
+                    KINGDOM_BROWSER_WEBGL=on gives it back, which a plan
+                    working on kingdom-citymap needs.
+
+                    A session also *ends*, which it did not use to: on the
+                    plan settling (browser::dismiss, beside tmux::dismiss),
+                    after KINGDOM_BROWSER_IDLE untouched and unwatched
+                    (default 15m, 0 disables), and — for browsers a killed
+                    server never closed — by sweep_orphans at startup, which
+                    reads the owner pid each profile records and reclaims only
+                    those whose owner is gone
     screencast.rs   CDP screencast, relayed to the spyglass's viewers
-                    (the panel is components/browser_view.rs)
+                    (the panel is components/browser_view.rs). Paced by
+                    holding the CDP ack, which is the only throttle Chrome
+                    offers: unpaced it ran at 68fps and doubled the cost of
+                    the browser it was watching
     profile.rs      Metrics, CPU/trace/coverage, the per-run perf reading
     perf.rs         The in-page helper injected before any page script
 

@@ -35,6 +35,44 @@ static BROWSERS: OnceLock<BrowserSessionManager> = OnceLock::new();
 pub(crate) fn browsers() -> &'static BrowserSessionManager {
     BROWSERS.get_or_init(BrowserSessionManager::new)
 }
+
+/// Closes a plan's browser when the plan itself is over.
+///
+/// The exact counterpart of [`crate::tools::tmux::dismiss`], called from the
+/// same place on the same terms, and here for the same reason: a browser that
+/// outlives the plan that opened it is nine processes and the better part of a
+/// gigabyte held by nobody, with nothing left in the records that knows what it
+/// was for. That is the orphaned-resource collision this product exists to
+/// prevent, so it must not be left for the user to notice.
+///
+/// Deliberately infallible and quiet, exactly as `tmux::dismiss` is. It runs on
+/// the success path of merging or archiving, where the work has already landed;
+/// failing a completed merge because a CDP socket would not close would be a
+/// far worse outcome than a stray Chrome, which the next server's
+/// `sweep_orphans` reclaims anyway.
+pub async fn dismiss(plan: &kingdom_core::PlanId) {
+    browsers().close(plan.as_str()).await;
+}
+
+/// Starts the housekeeping a long-lived server needs: a sweep, then a reaper.
+///
+/// Called once from `main`. Two different failures, in the order they happened:
+/// the sweep clears what a *previous* server left behind when it died without
+/// closing anything, and the reaper stops *this* server accumulating the same
+/// thing while it runs.
+///
+/// Returns how many orphaned profiles the sweep reclaimed, so the banner can
+/// say so -- a number the user should see, because it is the size of a problem
+/// that used to be invisible.
+pub fn start_housekeeping() -> usize {
+    let reclaimed = kingdom_browser::sweep_orphans();
+    // The handle is dropped deliberately: the reaper lives as long as the
+    // server does, and there is no shutdown path that would want to stop it
+    // early. Dropping a `JoinHandle` detaches the task rather than cancelling
+    // it.
+    let _ = browsers().start_reaper();
+    reclaimed
+}
 fn plan(shop: &Sandbox) -> String {
     shop.plan().to_string()
 }

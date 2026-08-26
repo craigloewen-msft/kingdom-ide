@@ -1,11 +1,36 @@
 //! Whether the map draws itself at all.
 //!
 //! The engine is a renderer, and a renderer in a browser nobody is watching is
-//! pure cost. Kingdom's own `browser_*` tools drive a headless Chrome, which
-//! has no GPU and falls back to ANGLE's SwiftShader -- software rasterisation
-//! of every frame, on the CPU, of a machine several agents are sharing. So a
-//! map opened by automation is stood down: the notice is drawn and the engine
-//! never boots.
+//! pure cost. Kingdom's own `browser_*` tools drive a headless Chrome, and a
+//! map opened by automation is therefore stood down: the notice is drawn and
+//! the engine never boots.
+//!
+//! # How much this saves, measured
+//!
+//! A great deal, and it is worth knowing the figure before anyone is tempted to
+//! simplify this away. The chamber in a headless Chrome that reports
+//! `navigator.webdriver` costs about 5% of a core; the same chamber in one that
+//! does not -- so the engine boots -- cost 790%. Nearly eight cores, on a
+//! machine several agents are sharing.
+//!
+//! # It is now a belt beside a brace
+//!
+//! `kingdom_browser` disables Chrome's software rasteriser outright
+//! (`disable-software-rasterizer`), so a plan's browser has no WebGL context to
+//! give the engine even if this decided otherwise. Note that this is *not*
+//! achieved by `--disable-gpu`, which was long assumed to do it and does not:
+//! measured, a WebGL page under `--disable-gpu` alone still ran a GPU process
+//! burning 665% of a core in SwiftShader.
+//!
+//! The stand-down still earns its keep and is still the primary mechanism. It
+//! is what lets the map say something useful instead of failing to acquire a
+//! context, and it is decided in the browser, where the one fact that settles
+//! it can actually be read.
+//!
+//! `KINGDOM_BROWSER_WEBGL=on` gives the rasteriser back, for exactly the case
+//! `OVERRIDE` below exists to serve: an agent working on this crate needs both
+//! -- the query parameter to make the engine boot, and the environment variable
+//! to give it something to boot onto.
 //!
 //! # Why the decision is made here and not on the server
 //!
@@ -44,6 +69,11 @@ impl MapMode {
 /// plan working on `kingdom-citymap` needs to be able to look at what it drew.
 /// `?map=off` is its cheap mirror, for anyone working on Kingdom in an ordinary
 /// browser who would rather their fans were quiet.
+///
+/// Since the software rasteriser is off by default, a plan that wants to *see*
+/// the map needs `KINGDOM_BROWSER_WEBGL=on` in the server's environment as well
+/// as this parameter. With only this one the engine boots, finds no WebGL
+/// context, and the loading card stays up.
 pub const OVERRIDE: &str = "map";
 
 /// Decides from the two facts the browser can report.
