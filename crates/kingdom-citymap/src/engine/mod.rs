@@ -193,6 +193,7 @@ fn apply_commands(
                 rig.holding = typical_holding(&manifest);
                 rig.fit_scale = rig.scale;
                 bridge.update_status(|status| {
+                    status.built = true;
                     status.error = None;
                     status.hovered = None;
                     status.selected_ward = None;
