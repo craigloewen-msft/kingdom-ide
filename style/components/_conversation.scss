@@ -53,6 +53,54 @@
   min-height: 0;
 }
 
+// --- Focus -----------------------------------------------------------------
+//
+// The King reviewing several files is not reading the panel *against* the
+// transcript, which is the assumption the row above is built on. So the row
+// becomes a column: the panel takes the width the conversation had and most of
+// the height, and the conversation keeps the strip it needs to answer from.
+//
+// What survives is chosen, not left over. The **review margin and the
+// composer** stay, because a review that cannot be sent from the screen it was
+// written on is not a review mode -- that is the whole reason this shortens the
+// column instead of hiding it. The **files rail** stays because it is outside
+// this box entirely, and it is how reviewing several files happens at all.
+//
+// The header and the log go. The log is `display: none` rather than collapsed,
+// which keeps its scroll position: leaving focus puts the King back where he
+// was in a long chamber rather than at the top of it.
+.chamber-body.focused {
+  flex-direction: column;
+
+  // Above the conversation, not below: the panel is what he is here for, and
+  // the composer belongs at the foot of the screen where it always is.
+  .chamber-aside {
+    order: -1;
+    flex: 1 1 auto;
+    min-height: 0;
+    // The width is gone from the markup as well (the panel stops setting it
+    // inline), so this is the belt to that pair of braces. `max-width` undoes
+    // the narrow-screen cap in `_spyglass.scss`, which would otherwise hold a
+    // focused panel to half the chamber -- the opposite of what was asked for.
+    width: auto;
+    max-width: none;
+    border-left: none;
+    border-bottom: 1px solid t.$edge;
+  }
+
+  .chamber-column {
+    flex: 0 0 auto;
+    max-height: 45%;
+  }
+
+  .chamber-header,
+  .chamber-log { display: none; }
+
+  // Nothing left to drag: the panel's width is not what decides the split any
+  // more, and a handle that moved a number nothing reads is worse than none.
+  .spyglass-resizer { display: none; }
+}
+
 // --- Header ----------------------------------------------------------------
 
 .chamber-header {

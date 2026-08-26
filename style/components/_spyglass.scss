@@ -172,6 +172,12 @@
 // two left rails have already taken their own room by this point. Half each is
 // the honest split when there is not enough for the width the King dragged;
 // above the breakpoint his width is honoured untouched.
+//
+// A **focused** panel is exempt, and `.chamber-body.focused` in
+// `_conversation.scss` says so explicitly with `max-width: none`. There is no
+// transcript beside it to protect: it is stacked above the conversation rather
+// than sharing a row with it, so a cap of half the chamber would be half a
+// screen of nothing.
 
 @media (max-width: 1400px) {
   .chamber-aside { max-width: 50%; }

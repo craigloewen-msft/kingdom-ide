@@ -12,7 +12,7 @@ use crate::api::{
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
-use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
+use crate::components::resizer::{restore_flag, restore_width, store_flag, Bounds, Grows, Resizer};
 use crate::components::BrowserView;
 use crate::components::CityRail;
 use crate::components::DiffView;
@@ -56,6 +56,16 @@ enum Aside {
 impl Aside {
     fn is_browser(&self) -> bool {
         matches!(self, Aside::Browser)
+    }
+
+    /// Whether anything is in the slot at all.
+    ///
+    /// What focus is gated on: focus is a property of *a panel being open*, so
+    /// a chamber with nothing beside the transcript must not hide the
+    /// transcript for an empty column -- which is what a flag remembered from
+    /// last visit would otherwise do the moment the King walked in.
+    fn is_showing(&self) -> bool {
+        !matches!(self, Aside::Hidden)
     }
 
     /// The file being compared, if a diff is what is showing.
@@ -126,6 +136,15 @@ const SOURCE_BOUNDS: Bounds = Bounds {
 };
 
 const SOURCE_WIDTH_KEY: &str = "kingdom.source_width";
+
+/// Whether the panel takes the conversation's room as well as its own.
+///
+/// One key for all three panels rather than one each, unlike the widths above
+/// -- and deliberately so. A width is about what a *particular* panel needs to
+/// be legible; focus is about what the King is doing, which is reviewing rather
+/// than conversing, and that does not change when he clicks from a diff to the
+/// file beside it.
+const FOCUS_KEY: &str = "kingdom.aside_focus";
 
 /// The browser deed the panel should caption itself with, if any.
 ///
@@ -693,12 +712,39 @@ fn ConversationBody(
     // whether Chrome is painting for an audience.
     let aside = RwSignal::new(Aside::Hidden);
 
+    // Whether that panel takes the conversation's room as well as its own.
+    //
+    // Remembered between visits, and shared by all three panels -- see
+    // [`FOCUS_KEY`]. Kept apart from `aside` rather than folded into it: what is
+    // showing and how much room it is given are two questions, and a King who
+    // closes a diff and opens the next one is still reviewing.
+    let focused = RwSignal::new(false);
+    restore_flag(focused, FOCUS_KEY);
+
+    // ...and whether it is actually in force. Gated on something being in the
+    // slot, for the reason `Aside::is_showing` gives.
+    let showing_focused = Memo::new(move |_| focused.get() && aside.get().is_showing());
+    let focused_now = Signal::derive(move || showing_focused.get());
+
     // The system prompt this plan's model is given, once it has been asked for.
     // `None` means it has never been fetched: the panel opening is what fetches
     // it, so a user who never asks pays nothing for the guidance walk that
     // assembling one costs on the server.
     let (briefing, set_briefing) = signal(None::<Result<String, String>>);
     let (reading_orders, set_reading_orders) = signal(false);
+
+    // Focusing puts the header away, and the orders toggle is in it -- so an
+    // overlay left standing could not be dismissed by the control that opened
+    // it. Closed here rather than by a rule in the stylesheet, because it is
+    // the *state* that would be stranded, not merely the pixels.
+    let toggle_focus = Callback::new(move |_: ()| {
+        let next = !focused.get_untracked();
+        focused.set(next);
+        store_flag(FOCUS_KEY, next);
+        if next {
+            set_reading_orders.set(false);
+        }
+    });
 
     let fetch_briefing = move || {
         set_briefing.set(None);
@@ -711,13 +757,30 @@ fn ConversationBody(
         });
     };
 
-    // Escape closes it, as it closes every overlay. Registered once and gated
-    // inside rather than attached while the panel is open: a listener whose
-    // lifetime is tied to a `Show` has to be torn down from a branch that is no
-    // longer rendering, which is how a stray handler outlives its view.
+    // Escape closes it, as it closes every overlay -- and leaves focus, which is
+    // the same gesture applied to the other thing covering the conversation.
+    // Registered once and gated inside rather than attached while the panel is
+    // open: a listener whose lifetime is tied to a `Show` has to be torn down
+    // from a branch that is no longer rendering, which is how a stray handler
+    // outlives its view.
+    //
+    // The orders overlay wins when both stand, because it is the nearer of the
+    // two and the King reaches for Escape to dismiss what is in front of him.
     let escape = window_event_listener(leptos::ev::keydown, move |ev| {
-        if ev.key() == "Escape" && reading_orders.get_untracked() {
+        if ev.key() != "Escape" {
+            return;
+        }
+        // A note composer handles its own Escape and calls `prevent_default`.
+        // Without this, abandoning a half-written note would also throw the
+        // King out of the panel he was writing it in.
+        if ev.default_prevented() {
+            return;
+        }
+        if reading_orders.get_untracked() {
             set_reading_orders.set(false);
+        } else if focused.get_untracked() {
+            focused.set(false);
+            store_flag(FOCUS_KEY, false);
         }
     });
     on_cleanup(move || escape.remove());
@@ -983,7 +1046,13 @@ fn ConversationBody(
             // stacked, because the transcript and the thing it describes are
             // read together -- stacking them made each one shorter to make room
             // for the other.
-            <div class="chamber-body">
+            //
+            // ...until the King asks to focus, which is the case where that
+            // reasoning runs out: reviewing several files is not done *against*
+            // the transcript, so the panel takes the width and the conversation
+            // keeps only the strip it needs to answer from. See `.focused` in
+            // `_conversation.scss`.
+            <div class="chamber-body" class:focused=move || showing_focused.get()>
                 <div class="chamber-column">
                     <header class="chamber-header" class:subagent=is_subagent>
                         // For a subagent, "back" is the plan that sent it rather than the
@@ -1502,6 +1571,8 @@ fn ConversationBody(
                         plan=id.get_value()
                         deed=browser_deed
                         width=spyglass_width
+                        focused=focused_now
+                        on_focus=toggle_focus
                     />
                 </Show>
 
@@ -1519,6 +1590,8 @@ fn ConversationBody(
                         version=diff_version
                         notes=notes_on_diff
                         width=diff_width
+                        focused=focused_now
+                        on_focus=toggle_focus
                         on_note=annotate_line
                         on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
@@ -1538,6 +1611,8 @@ fn ConversationBody(
                         version=source_version
                         notes=notes_on_source
                         width=source_width
+                        focused=focused_now
+                        on_focus=toggle_focus
                         on_note=annotate_line
                         on_save=save_file
                         on_delete=delete_file
@@ -3126,6 +3201,41 @@ mod tests {
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("forge"),
         )
+    }
+
+    /// Focus is a property of a panel being *open*.
+    ///
+    /// The flag is remembered between visits, so without this gate a King who
+    /// left a diff focused would walk back into a chamber whose transcript was
+    /// hidden for an empty column -- with the toggle that would put it back
+    /// living in a panel bar that is not on screen. The one thing that turns a
+    /// remembered preference into a chamber he cannot read.
+    #[test]
+    fn nothing_in_the_slot_is_nothing_to_focus() {
+        assert!(!Aside::Hidden.is_showing());
+
+        assert!(Aside::Browser.is_showing());
+        assert!(Aside::Diff("src/lib.rs".into()).is_showing());
+        assert!(Aside::Source("src/lib.rs".into()).is_showing());
+    }
+
+    /// The panel gives up its inline width exactly when it is focused.
+    ///
+    /// An inline style beats the stylesheet, so a width left standing is the
+    /// one thing that would silently hold a focused panel at the pixels the
+    /// resizer last set -- the feature reverting with nothing to see for it.
+    /// This is the expression the three panels' `style:width` closures share,
+    /// and the direction of the `!` is what a regression gets backwards.
+    #[test]
+    fn a_focused_panel_surrenders_its_pixel_width() {
+        fn inline_width(focused: bool, width: f64) -> Option<String> {
+            (!focused).then(|| format!("{width}px"))
+        }
+
+        assert_eq!(inline_width(false, 640.0).as_deref(), Some("640px"));
+        // `None` is what tachys renders as "remove this property", which is why
+        // no `!important` is needed on the other side.
+        assert_eq!(inline_width(true, 640.0), None);
     }
 
     /// The whole of the scroll decision, tested without a DOM.
