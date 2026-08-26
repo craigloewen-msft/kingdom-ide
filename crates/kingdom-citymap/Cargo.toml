@@ -43,8 +43,24 @@ leptos = { version = "0.8", optional = true }
 # the document.
 gloo-net = { version = "0.6", optional = true }
 gloo-timers = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", features = ["Element", "HtmlCanvasElement"], optional = true }
+# Reading the manifest a chunk at a time, so the loading bar can report the
+# fetch as it happens. `Uint8Array` is a chunk; the rest of the plumbing is in
+# `web-sys` below.
+js-sys = { version = "0.3", optional = true }
+# Parsing the bytes that stream assembles. `gloo-net`'s own `json()` does this
+# too -- it is `serde_json::from_str(&text().await?)` -- so nothing new is being
+# paid for; the parse has simply moved to where the bytes are.
+serde_json = { workspace = true, optional = true }
+web-sys = { version = "0.3", features = [
+    "Element",
+    "HtmlCanvasElement",
+    # The streamed read of the manifest, in `view::read_whole`.
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamReadResult",
+], optional = true }
 
 [dev-dependencies]
 # The copied tests run natively, and they compile the whole `engine` module, so
@@ -88,7 +104,10 @@ hydrate = [
     "dep:leptos",
     "dep:gloo-net",
     "dep:gloo-timers",
+    "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:serde_json",
     "dep:web-sys",
     "dep:kingdom-core",
     "leptos/csr",

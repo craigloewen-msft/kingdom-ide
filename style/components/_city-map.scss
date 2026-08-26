@@ -164,13 +164,20 @@
   font-size: 12px;
 }
 
-// A surveyor's line under the card, with a light running along it.
+// The bar under the card: a surveyor's line, with either a light running along
+// it or a measured length of it filled in.
+//
+// One element for both, because there are two ways this can be drawn and only
+// one of them is ever right at a given moment -- see `view::Survey`. Without a
+// fraction to show it is the sweep this card has always had; with one, the
+// same layer stops sweeping and is scaled to the fraction instead.
 .survey-rule {
   position: relative;
   width: 132px;
-  height: 1px;
+  height: 2px;
   margin-top: 14px;
   overflow: hidden;
+  border-radius: 1px;
   background: rgba(t.$edge-bright, 0.8);
 
   > span {
@@ -180,6 +187,30 @@
     // Translating a full-width layer, rather than animating a width or an
     // offset, for the compositor reason above.
     animation: survey-sweep 1.8s ease-in-out infinite;
+  }
+}
+
+// Measured: the same layer, filled from the left and scaled to how far along
+// the work is.
+//
+// `scaleX` rather than `width`, and this is the one place on the card where
+// that rule is load-bearing rather than tidy. The bar's whole job is to keep
+// moving across work that is on the main thread, and a transform is composited
+// off it -- so the fill still glides between two engine updates instead of
+// stepping only when the browser next gets a frame to itself.
+.survey-rule.measured {
+  > span {
+    animation: none;
+    // Grown from the left, so the bar fills rather than expanding about its
+    // middle.
+    transform-origin: 0 50%;
+    // Scaled by the inline style the component writes; 0 until it does, so a
+    // bar with no fraction yet is empty rather than full.
+    transform: scaleX(0);
+    background: linear-gradient(90deg, t.$gold-dim, t.$gold);
+    // Long enough to smooth the step between two engine updates, short enough
+    // that the bar is never visibly behind the work it reports.
+    transition: transform 140ms linear;
   }
 }
 
@@ -199,6 +230,11 @@
 // Held still for anyone who asked for that. The card still says which phase
 // the map is in, which is the part that carries the information -- the towers
 // only ever said "something is happening", and the words say it too.
+//
+// The *measured* bar is deliberately exempt: its length is information rather
+// than animation, and holding it at zero would leave a bar that never fills.
+// Only the transition between lengths is dropped, so it steps instead of
+// gliding.
 @media (prefers-reduced-motion: reduce) {
   .survey-tower,
   .survey-rule > span {
@@ -207,6 +243,11 @@
 
   .survey-tower { opacity: 0.8; }
   .survey-rule > span { opacity: 0.5; }
+
+  .survey-rule.measured > span {
+    opacity: 1;
+    transition: none;
+  }
 }
 
 .city-map-error {

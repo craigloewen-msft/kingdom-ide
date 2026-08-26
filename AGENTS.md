@@ -234,8 +234,13 @@ crates/
                     same reason: `build` walks the disk and must never reach
                     wasm; `engine` is Bevy and must never reach the server.
     map/            The manifest: world-space geometry, plain serialisable
-                    data. The ONLY part on both targets — it is the seam the
-                    two halves meet at
+                    data. The one *seam* on both targets — where the two halves
+                    meet
+    progress.rs     How much of that manifest has arrived, as a fraction and a
+                    line of text. Also on both targets, for a smaller reason:
+                    only the browser reads it, but `cargo test` builds this
+                    crate with no features, and `view.rs` is hydrate-only, so
+                    arithmetic left there is never compiled by the suite
     build/          Scanning a kingdom and laying it out (ssr). Repo City's
                     own `Survey` was deliberately NOT taken: it finds projects
                     by looking for `.git` and so drops a folder without one,
@@ -248,8 +253,12 @@ crates/
                     geometry. `stars.rs` is the one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
                     would have no parallax and would *zoom* with the kingdom —
-                    it rides on the camera in pixels instead
-    view.rs         `CityMap` — the canvas, and the click that selects a city
+                    it rides on the camera in pixels instead. `raise.rs` builds
+                    a world a slice at a time instead of in one call, so the
+                    browser gets the frame back and the loading bar can move —
+                    see §4
+    view.rs         `CityMap` — the canvas, the click that selects a city, and
+                    the loading card with the bar on it
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -659,6 +668,59 @@ offering it scoped to a draft says *you may write down what you would change*.
 `system_prompt.rs` says the rest in words, and says plainly that the shell is a
 boundary the model is trusted to keep rather than one that is enforced. Closing
 that properly means an OS-level sandbox, which is a deliberate later decision.
+
+**The map says how far along it is, and had to be rebuilt to be able to.** The
+loading card named its two phases and animated three towers; it reported no
+progress, because there was none to be had. Both phases now carry a real bar,
+and the second one is the whole of the work.
+
+The fetch was the easy half: `view::read_whole` reads the body a chunk at a time
+instead of calling `Response::json`, and counts bytes against `content-length`.
+`progress::Transfer` turns that into a fraction and a line — *2.1 MB of 4.2 MB*.
+It refuses to answer rather than guessing when the two numbers cannot be
+compared: no declared length, or a count that has passed it. That second case is
+not hypothetical — putting compression in front of `/kingdom/map.json` would
+make `content-length` the compressed size while the reader counts decompressed
+bytes, and a bar reading 640% is worse than one that admits it does not know.
+
+The raise is the half that mattered. **A bar over `spawn_world` could not have
+moved at all**: measured on a real dev folder, building ~20k entities held the
+main thread in blocks of 1.3–1.7 seconds, and a sampling loop started at
+navigation did not get its first turn until t≈10.9 s. Nothing repaints in there
+— which is exactly why the card's SCSS already insisted every animation on it be
+`transform`/`opacity`, since those composite off the main thread. A *number* has
+no such escape. So `engine::raise` cuts the build into slices against an 8 ms
+deadline, publishes the fraction to the bridge between them, and lets the frame
+go. The bar moves because the browser is free to draw it.
+
+Five things there are load-bearing. `spawn.rs`'s stages take a `Range` and
+`spawn_step` is the one door both paths go through, so the sliced build and
+`spawn_world` cannot raise different settlements. The root is spawned
+**hidden** and revealed on the last slice: the card is a translucent gradient
+rather than an opaque screen, and scenery spawns visible and is only culled when
+`apply_lod` next runs — so the King would otherwise watch trees appear and then
+vanish. `ActiveLod` and `Activity` are **marked changed** at completion, because
+both systems early-return unless their resource moved and every entity of the
+new world was spawned after the last change. Winit is held at the watching pace
+while a raise is in flight, since walking into a chamber mid-raise would
+otherwise drop the engine to four ticks a second and turn three seconds into a
+minute — `winit_for` is one definition so the two systems cannot disagree. And
+`built` still means *standing*, so the card's dismissal and the bridge's test
+for it are untouched.
+
+The weights in `Step::weight` are **estimates** and the design assumes so:
+being wrong makes the bar advance unevenly and nothing else, and `fraction`
+reaches exactly 1.0 whatever they say. `status_matches` compares the fraction
+within 0.5% for the reason it already tolerates sub-pixel camera drift — tens of
+thousands of entities against a bar a few hundred pixels wide — but starting and
+finishing are always heard, because `None` means *nothing is going up* and
+rounding that together with a build at 0% would leave the bar indeterminate for
+the whole first slice.
+
+What is deliberately **not** done here is compressing that route. It would cut
+4.35 MB to ~694 KB and help the fetch more than any bar does, but it is a server
+change with its own trade-offs and it is what `Transfer`'s clamp is written to
+survive.
 
 **Not built at all:**
 - **Subagents with tools, and subagents that spawn subagents.** A subagent is
