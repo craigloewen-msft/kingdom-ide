@@ -1,11 +1,13 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, KingdomMap, PromptBar, Sidebar};
+use crate::components::{Conversation, PromptBar, Sidebar};
+use kingdom_citymap::CityMap;
 use kingdom_core::{CityId, Kingdom, ModelChoice, WorkspaceMode};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
+use leptos_router::hooks::use_location;
 use leptos_router::path;
 
 /// The HTML document shell wrapped around the app during SSR.
@@ -472,9 +474,25 @@ pub fn App() -> impl IntoView {
 /// working in, so it belongs to the chamber and is rendered there -- on the map
 /// it had no conversation to belong to and nothing to say but an instruction to
 /// go and pick a city, next to the very screen for picking one.
+///
+/// # Why the map is here and not on its route
+///
+/// [`CityMap`] hands its canvas to Bevy, and on the web `App::run()` never
+/// returns -- it gives control to `requestAnimationFrame` and keeps the element
+/// it resolved at startup. If the router unmounted that canvas on the way to a
+/// plan and mounted a fresh one on the way back, the engine would go on drawing
+/// into the detached one and the King would return to a blank map. Booting a
+/// second engine is not the fix either: that would want a second winit event
+/// loop inside one wasm instance.
+///
+/// So the map is mounted **once**, here, as a sibling of the outlet, and is
+/// hidden with CSS when the route is not `/`. It costs one canvas standing idle
+/// behind the chamber and buys a map that is still there when you come back.
 #[component]
 fn ThroneRoom() -> impl IntoView {
     let state = expect_context::<KingdomState>();
+    let location = use_location();
+    let on_the_map = Memo::new(move |_| location.pathname.get() == "/");
 
     view! {
         <div
@@ -490,20 +508,24 @@ fn ThroneRoom() -> impl IntoView {
         >
             <Sidebar/>
             <main class="main-region">
+                <div class="map-region" class:hidden=move || !on_the_map.get()>
+                    <CityMap selected=state.selected/>
+                </div>
                 <Outlet/>
             </main>
         </div>
     }
 }
 
-/// `/` -- the whole fixture, with the prompt bar beneath it.
+/// `/` -- the decree bar, over the map standing behind it.
+///
+/// The map itself is mounted by [`ThroneRoom`] rather than here; see the note
+/// there. What this route contributes is the bar beneath it, which is the only
+/// part of the realm view that may come and go.
 #[component]
 fn Realm() -> impl IntoView {
     view! {
         <div class="realm-view">
-            <div class="map-region">
-                <KingdomMap/>
-            </div>
             <PromptBar/>
         </div>
     }

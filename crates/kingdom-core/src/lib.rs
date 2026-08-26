@@ -20,7 +20,6 @@
 //! See `AGENTS.md` at the repository root for the philosophy behind this.
 
 pub mod ids;
-pub mod layout;
 pub mod mockdata;
 pub mod model;
 pub mod naming;
@@ -28,8 +27,6 @@ pub mod permissions;
 pub mod proposal;
 pub mod review;
 pub mod sample;
-pub mod skyline;
-pub mod terrain;
 
 pub use ids::*;
 pub use model::*;

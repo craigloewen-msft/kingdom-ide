@@ -30,13 +30,23 @@
   overflow: hidden;
 }
 
-// The realm: map above, decree bar pinned beneath it. A flex column rather
-// than its own grid area, so both routes share one outer grid.
+// The realm: the decree bar, over the map standing behind it.
+//
+// The map is no longer a child here -- it is mounted once by `ThroneRoom` and
+// pinned to the whole region, because it may never unmount (see `_city-map.scss`
+// and the component's own note). So this is what remains of the route: a column
+// that reserves nothing and lets the bar sit at the bottom, above the canvas.
 .realm-view {
+  position: relative;
   display: flex;
   flex-direction: column;
+  justify-content: flex-end;
   height: 100%;
   min-height: 0;
+  // Nothing here should swallow a drag meant for the map; the bar puts it back.
+  pointer-events: none;
+
+  > * { pointer-events: auto; }
 }
 
 // While the rail is being dragged the pointer sweeps across the map; without
