@@ -14,6 +14,11 @@ pub(crate) const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
     ".git",
+    // A city's own `.kingdom/` holds the worktrees plans are cut into, which
+    // are entire further copies of the project. Expensive to walk on the map,
+    // and on the rail actively confusing: a plan browsing its own workspace
+    // would be offered every *other* plan's checkout beneath it.
+    ".kingdom",
     ".svn",
     "dist",
     "build",

@@ -37,8 +37,8 @@ pub fn Sidebar() -> impl IntoView {
     // kingdom state, and nothing outside the rail cares about it.
     let collapsed = RwSignal::new(HashSet::<CityId>::new());
 
-    let cities = move || state.kingdom.get().cities;
-    let city_count = move || state.kingdom.get().cities.len();
+    let cities = move || state.kingdom.with(|k| k.cities.clone());
+    let city_count = move || state.kingdom.with(|k| k.cities.len());
 
     restore_width(state.sidebar_width, WIDTH_KEY, BOUNDS);
 
@@ -75,13 +75,13 @@ pub fn Sidebar() -> impl IntoView {
             <header class="kingdom-header">
                 <div class="crown-small">"♚"</div>
                 <div class="kingdom-id">
-                    <div class="kingdom-name">{move || state.kingdom.get().name}</div>
+                    <div class="kingdom-name">{move || state.kingdom.with(|k| k.name.clone())}</div>
                     // A proving ground is *designed* to be indistinguishable
                     // from a real kingdom on the map, which makes an unlabelled
                     // one a trap -- for the user glancing at it, and for anyone
                     // reading a screenshot of it later. So the label sits with
                     // the kingdom's identity, not somewhere it scrolls away.
-                    <Show when=move || state.kingdom.get().sandbox>
+                    <Show when=move || state.kingdom.with(|k| k.sandbox)>
                         <div
                             class="sandbox-tag"
                             title="Synthetic data. Nothing in this kingdom is real work."
@@ -89,8 +89,8 @@ pub fn Sidebar() -> impl IntoView {
                             "PROVING GROUNDS"
                         </div>
                     </Show>
-                    <div class="kingdom-path" title=move || state.kingdom.get().root>
-                        {move || state.kingdom.get().root}
+                    <div class="kingdom-path" title=move || state.kingdom.with(|k| k.root.clone())>
+                        {move || state.kingdom.with(|k| k.root.clone())}
                     </div>
                 </div>
                 // The way out. A kingdom now reopens itself on every start, so
@@ -169,18 +169,23 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
         let id = id.clone();
         Memo::new(move |_| {
             let show_all = state.show_all_plans.get();
-            state
-                .kingdom
-                .get()
-                .plans
-                .into_iter()
-                // Subagents are excluded here as they are on the map: the rail
-                // is the list of what the *user* asked for, and filling it with
-                // work the model sent itself makes it worse at that job. A
-                // subagent is reached from the conversation of the plan that
-                // sent it.
-                .filter(|p| p.city == id && !p.is_subagent() && (show_all || p.is_live()))
-                .collect::<Vec<_>>()
+            // `with` rather than `get`, and it matters more here than anywhere:
+            // this runs once *per city*, so `get` cloned the entire kingdom --
+            // every plan and every transcript in it -- once for each row in the
+            // rail, on every watch-socket push. Six cities meant six full
+            // copies to build six short lists.
+            state.kingdom.with(|k| {
+                k.plans
+                    .iter()
+                    // Subagents are excluded here as they are on the map: the rail
+                    // is the list of what the *user* asked for, and filling it with
+                    // work the model sent itself makes it worse at that job. A
+                    // subagent is reached from the conversation of the plan that
+                    // sent it.
+                    .filter(|p| p.city == id && !p.is_subagent() && (show_all || p.is_live()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
         })
     };
 

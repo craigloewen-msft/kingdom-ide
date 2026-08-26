@@ -28,10 +28,11 @@ pub fn PromptBar() -> impl IntoView {
     // The prompt targets whichever city is selected, so choosing on the map and
     // typing here are one continuous gesture.
     let target_name = Memo::new(move |_| {
+        let id = state.selected.get()?;
+        // `with`, not `get`: reading one name should not clone the kingdom.
         state
-            .selected
-            .get()
-            .and_then(|id| state.kingdom.get().city(&id).map(|c: &City| c.name.clone()))
+            .kingdom
+            .with(|k| k.city(&id).map(|c: &City| c.name.clone()))
     });
 
     // What the chip shows, and what the next prompt will carry: the user's own
@@ -203,6 +204,17 @@ pub fn PromptBar() -> impl IntoView {
 /// Capped because the composer shares the screen with the thing being decided
 /// on -- the map here, the chamber log there -- and a pasted essay must not
 /// swallow it. Past the cap the box scrolls instead.
+///
+/// **The reset-then-measure is not redundant, and cannot be skipped.** Reading
+/// `scroll_height` after setting `height:auto` forces a synchronous reflow, and
+/// this runs on every keystroke -- so it looks like an obvious thing to guard
+/// with "only measure if the height would change". It is not, because
+/// `scroll_height` never reports less than the height already set. A box grown
+/// to 80px reports 80 even when its content now needs 20, so the guard reads as
+/// "nothing to do" in exactly the case that needs doing, and the composer grows
+/// with a long decree and never shrinks back after it is sent. Deciding it
+/// wants to be *shorter* requires the reset; there is no cheaper question to
+/// ask first.
 pub(crate) fn autogrow(el: &web_sys::HtmlTextAreaElement) {
     const MAX_PX: i32 = 160;
 

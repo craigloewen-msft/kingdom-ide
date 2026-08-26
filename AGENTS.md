@@ -191,13 +191,20 @@ crates/
                     focused panel and the files rail's split all share — it
                     drags height as well as width),
                     city_rail.rs (the files rail's column, split between) over
-                    ward_tree.rs (the city's tree) and review_drawer.rs (every
+                    file_tree.rs (the plan's workspace on disk — a file row
+                    opens it in the panel) and review_drawer.rs (every
                     file this plan has changed),
-                    diff_view.rs (one of those files, old beside new — it and
-                    the spyglass are alternatives for one panel, see `Aside`),
+                    source_view.rs (one file read whole) and diff_view.rs (one
+                    changed file, old beside new) — those two and the spyglass
+                    are alternatives for one panel, see `Aside`, and every line
+                    of either takes a note,
+                    note_composer.rs (the one box a note is written in, shared
+                    with the proposal's margin),
+                    review_notes.rs (those notes gathered, and the one button
+                    that sends the whole review),
                     proposal/ (the plan put to the King: mod.rs is the card,
                     body.rs draws it as blocks he can write against, notes.rs
-                    is one note and the gathered margin, diff.rs reads a
+                    is the gathered margin, diff.rs reads a
                     revision against the plan it revises)
 
   kingdom-citymap/  The map: every project drawn as a town on one island.
@@ -405,6 +412,71 @@ gateway). `answer_from` also logs a bounded slice of the body on any parse
 failure: this module logged *nothing*, which is why diagnosing the original bug
 ended in "unknowable".
 
+**And a request too large to send is not the end of one either.** The same
+failure through a different door: a plan died on `413 Request Entity Too Large`
+and stayed dead, because 413 is a 4xx, `Refused` is fatal, and every "keep
+going" rebuilt a byte-identical body from the same transcript and was rejected
+identically. Three deaths in ninety seconds.
+
+The cause was that **a picture was replayed forever**. `read_image` puts base64
+on the live plan, `store::save` strips it on the way to *disk* but nothing takes
+it out of memory, and `copilot::messages` sent `shown()` for every tool call in
+the transcript on every round. Six screenshots became 4.02 MB of a 5.3 MB body,
+each already looked at and answered rounds earlier. So images now ride only while
+they are new (`RECENT_REPLIES`), which is the code catching up with what
+`ToolArtifact`'s own doc already claimed — `images` is "what the model was shown,
+true for one turn".
+
+Three things there are load-bearing. The window is **unconditional** rather than
+a response to pressure: a conversation that merely happens to fit today would
+otherwise keep every picture until the day it does not, and the King would meet
+this mid-investigation instead of never. A dropped picture is **admitted** in the
+tool result, for the reason `replayed` marks a truncation — a model that believes
+it can still see a screenshot describes it from memory and is confidently wrong
+about the UI it was asked to verify, while one told the attachment is gone simply
+takes another. And a **blind** model hears nothing either way, since it never had
+the image and the notice would only invite a screenshot it cannot read.
+
+Beyond that, `Budget` bounds the assembled body. `MOST_REPLAYED` already capped
+one result at 12 KB; nothing capped the sum, which is how 300 results comfortably
+under that cap still added up to a refusal. Over budget, `shedding` drops in
+order of what it costs to lose: stale pictures, then old `reasoning.opaque`, then
+the tails of old results. `opaque` is the delicate one — `Reasoning::without_opaque`
+records that a gateway *silently discards* thinking whose signature did not come
+back, so it is never taken from a reply recent enough to still be live
+(`LIVE_REPLIES`), and a test pins that under deliberate pressure.
+
+The number in `Budget::FULL` is a **guess**, and the design assumes so. The only
+hard fact is that 5.3 MB was refused; the real limit is unpublished and varies.
+So 413 gets `ModelError::TooLarge` — not transient, because resending the
+identical body is pointless, but `is_shrinkable`, which is a different question
+with a different remedy. `converse` halves the budget and asks again with no
+backoff (nothing is unwell; the next request is simply smaller), down to a floor
+past which the honest answer is to fail and say what was too big. Being wrong in
+either direction is survivable, which is what makes a guess acceptable here.
+
+Two smaller things. The body is measured before it goes so a 413 can report its
+own size, because "Request Entity Too Large" with no number attached is what made
+this feel unknowable. And `shedding` tallies each reply *once* and then asks that
+tally repeatedly — weighing candidates by re-walking the transcript re-serialised
+every tool call's arguments a dozen times over, which cost 110 ms on a real plan
+against 3 ms for the whole assembly.
+
+The tally counts **wire** bytes, not `str::len`, and that distinction bit once
+already during this very change. The body is JSON, where every quote and newline
+costs an extra byte, and tool output is mostly quotes and newlines: counting raw
+lengths under-reported the real transcript by 1.69x, so a request the budget
+called 3 MB went out at 5.1 MB — the size that was refused to begin with. A
+budget with no headroom is not a budget. `escaped_len` is counted rather than
+fudged with a constant, because the ratio is entirely content-dependent (base64
+escapes to nothing, a build log nearly doubles), and a test now pins the estimate
+against a genuinely assembled body.
+
+What is **not** fixed is that the chamber header still reports tokens. The King
+watched 257k of 1M tick by while the gateway refused him on bytes, and the bar
+was telling the truth about the wrong quantity. Reporting wire bytes beside it is
+its own task.
+
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
 deliberately *out* of the transcript and therefore out of `Plan::turns`) and
@@ -517,12 +589,24 @@ re-reading, and on writing tests are gone, and so is the `NUDGE` machinery in
 tool call now simply ends the turn, as it does in Phoenix.
 
 **The King can read what a plan changed, not only what it said.** The files rail
-is **split**: the city's tree above, and below it a **review drawer** listing
-every file this plan has touched with its `+`/`−` counts. Both are on screen at
-once, with a draggable divider between them, because the question "what did my
-agent change?" is answered *against* "what is in this project?" — tabs made
-holding both in view impossible. Clicking a file opens a side-by-side diff in the
-panel the spyglass occupies.
+is **split**: the plan's own file tree above, and below it a **review drawer**
+listing every file this plan has touched with its `+`/`−` counts. Both are on
+screen at once, with a draggable divider between them, because the question "what
+did my agent change?" is answered *against* "what is in this project?" — tabs made
+holding both in view impossible. A row in either opens the file in the panel the
+spyglass occupies: the drawer opens a side-by-side **diff**, and the tree opens
+the file **whole**, because most files in a project have no diff at all and the
+tree offers all of them.
+
+The tree reads **the plan's workspace, not the city's checkout**, and that was a
+correction rather than a choice. An isolated plan works in a worktree, so keyed
+on the city the rail listed one copy of the project while the court edited
+another — tolerable while it was read-only decoration, and not tolerable once a
+row opens a file the King writes notes against: line 34 of the city's checkout is
+not line 34 of the worktree, so the court would be sent an objection about code
+it cannot see. `list_directory` is keyed on the plan for that reason, and
+`SKIP_DIRS` gained `.kingdom` with it, since a city's worktree folder holds
+entire further copies of the project.
 
 Three decisions there are load-bearing. **The comparison is against
 `merge-base(default, HEAD)`, not against `main`** — `git diff main` is
@@ -538,14 +622,14 @@ needs the differ that knows a replacement was a replacement, so `review.rs` does
 it and the browser renders two columns without re-deciding anything — a flat
 sequence of tagged lines would be mispaired on any uneven replace.
 
-The diff and the spyglass are **alternatives for one panel**, held in a single
-`Aside` value in `conversation.rs`: opening either closes the other, because
-there is one signal holding one value rather than two booleans that must remember
-to close each other. The transcript is deliberately outside that decision — it is
-not one of the alternatives, it is the thing they are alternatives beside, and
-the panel is always to its **right** rather than stacked above it. It used to
-stack below 1100px, which put a diff between the King and the chamber header and
-pushed the transcript off the bottom of the screen.
+The diff, the source view and the spyglass are **alternatives for one panel**,
+held in a single `Aside` value in `conversation.rs`: opening any closes the
+others, because there is one signal holding one value rather than booleans that
+must remember to close each other. The transcript is deliberately outside that
+decision — it is not one of the alternatives, it is the thing they are
+alternatives beside, and the panel is always to its **right** rather than stacked
+above it. It used to stack below 1100px, which put a diff between the King and
+the chamber header and pushed the transcript off the bottom of the screen.
 
 What yields instead is the **cities rail**, which folds itself to a strip below
 1250px (`app.rs::fold_rail_when_cramped`). A chamber can want four columns at
@@ -562,6 +646,46 @@ nothing there. `sample::starter_plans` builds a `Workspace` from `City::path`,
 which is *relative* to the kingdom root, and hands it to a field documented as
 absolute; `api::grounded` closes that at the one boundary that holds the root,
 and a test pins it.
+
+**And he can write in the margin of the code, not only of the plan.** Every line
+of both panels takes a note. They gather into one **review** above the composer,
+and one button sends the lot as a single `Speaker::User` turn: `ReviewNote` →
+`annotate_file` → `send_file_notes` → `file_notes_as_decree`. That is
+deliberately the same shape marginal notes on a *proposal* already had, part for
+part, because it is the same act performed against code instead of prose — and
+four of its decisions are carried over for their original reasons. The notes live
+on the plan, so one typed and not sent survives a reload and a second tab. They
+are kept out of the transcript and therefore out of `Plan::turns`, so a
+half-written second thought cannot reach a model. `quote` travels beside `line`,
+because a line number is a reference into a file about to be rewritten. And
+`take_review_notes` drains rather than reads, so nothing can compose the decree
+and leave the notes standing to be sent twice.
+
+What is **not** carried over is where they live: on the `Plan` rather than on a
+`Proposal`. These are written against work in progress, so they must survive
+approval — reviewing what the court has *built* is the case they exist for, and by
+then there is no standing proposal to hang them on. That is also why the two
+margins are kept apart when both stand: a proposal note asks the court to revise
+a document and propose again, a line note asks it to change code, and one decree
+meaning two things is worse than two buttons.
+
+Three smaller things are load-bearing. `send_file_notes` reuses `receive`, the
+branch `say` already splits out, so a review sent into a working chamber queues
+and is heard at the next round boundary with no second code path to get wrong.
+The decree is **grouped by file and ordered by line** rather than left in the
+order the notes were written, because a model given nine notes shuffled across
+four files has to sort them before it can start — and the margin groups the same
+way, so the King checks his review against something that reads in the order he
+will be answered in. And a note on the **old** column of a diff carries
+`NoteSide::Base` and is reported as "in the version before your changes": a note
+on a deleted line is an ordinary review comment, and a bare line number would
+point the court at whatever now occupies that position.
+
+One behaviour is worth stating because it looks like an oversight. **A panel with
+a composer open does not refetch.** Both panels otherwise follow the court's
+edits, which is right while the King is only reading and wrong the moment he is
+typing against line 34 — the lines would shift under him and the note would land
+on something he never read.
 
 **The court can see, and can be seen.** `read_image` closes the loop
 `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`

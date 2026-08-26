@@ -90,6 +90,26 @@ pub fn kingdom_snapshot() -> Option<Kingdom> {
     lock().ok().map(|kingdom| kingdom.clone())
 }
 
+/// A plan on its way to a browser and nowhere else.
+///
+/// Every `#[server]` function below hands back the plan it just changed, and
+/// the browser does exactly what the watch socket's receiver does with it:
+/// `Kingdom::insert`. So they are the same wire, and they carry the same
+/// needless weight -- [`Plan::for_wire`] has the measurements.
+///
+/// It matters most on [`say`], which is the King *typing*: without this, every
+/// message he sends is answered with a copy of the entire transcript including
+/// megabytes of provider signatures, parsed and cloned in the same frame as his
+/// next keystroke.
+///
+/// Named rather than inlined so that the rule is visible at each call site, and
+/// so a function that is ever consumed server-side is an obvious exception
+/// rather than a silent one. Nothing here changes what is stored.
+#[cfg(feature = "ssr")]
+fn to_browser(plan: Plan) -> Plan {
+    plan.for_wire()
+}
+
 /// Writes a plan to the records, turning a failed write into something the user
 /// can see rather than something that fails his prompt.
 ///
@@ -111,9 +131,14 @@ fn remember(root: &std::path::Path, plan: &mut Plan) {
 }
 
 /// Returns the currently open kingdom, or an empty one if none is open.
+///
+/// [`Kingdom::for_wire`], because this is the app's opening fetch and the
+/// largest single transfer it makes: every plan at once, where a push carries
+/// one. Stripping the model's opaque thinking here is what takes a real
+/// kingdom's page from 13.9 MB down. Server state is untouched.
 #[server(GetKingdom, "/api")]
 pub async fn get_kingdom() -> Result<Kingdom, ServerFnError> {
-    Ok(lock()?.clone())
+    Ok(lock()?.for_wire())
 }
 
 /// Opens a dev folder as the kingdom: scans it for cities and seats a model.
@@ -131,7 +156,10 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
     }
 
     enforce_sandbox(&root)?;
-    assemble(&root, None)
+    // `for_wire` on the way out only. `assemble` has already stored the whole
+    // kingdom, opaque thinking and all; what is narrowed is the copy this
+    // browser is handed.
+    assemble(&root, None).map(|k| k.for_wire())
 }
 
 /// Seeds a proving ground if needed and opens it.
@@ -143,7 +171,11 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 #[server(EnterProvingGrounds, "/api")]
 pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
     let name = fixture.unwrap_or_else(|| kingdom_core::mockdata::DEFAULT_FIXTURE.to_string());
-    open_fixture(&name).map_err(ServerFnError::new)
+    // `for_wire` here and not inside `open_fixture`, which the boot path also
+    // calls with no browser in sight. See `get_kingdom`.
+    open_fixture(&name)
+        .map(|k| k.for_wire())
+        .map_err(ServerFnError::new)
 }
 
 /// Seeds a named proving ground if it is not already standing, and opens it.
@@ -491,12 +523,28 @@ pub async fn list_branches(city: String) -> Result<Vec<String>, ServerFnError> {
     Ok(crate::worktree::branches(&root).await)
 }
 
-/// One directory of a city, listed on demand for the files rail.
+/// One directory of a plan's workspace, listed on demand for the files rail.
 ///
-/// `path` is relative to the city root; empty lists the root itself. Returns
-/// directories first, then files, each case-insensitively by name -- the order
-/// a person expects to read a tree in, which the map's own tree deliberately
-/// does not use (it sorts by size, because a skyline is drawn largest-first).
+/// `path` is relative to the workspace root; empty lists the root itself.
+/// Returns directories first, then files, each case-insensitively by name -- the
+/// order a person expects to read a tree in, which the map's own tree
+/// deliberately does not use (it sorts by size, because a skyline is drawn
+/// largest-first).
+///
+/// # Why the plan's workspace and not the city's checkout
+///
+/// This panel lives inside a plan's chamber, and an isolated plan works in a
+/// **worktree**. Keyed on the city, the rail listed one copy of the project
+/// while the court edited another -- tolerable while the tree was read-only
+/// decoration, and not tolerable now that the King can write "line 34 is wrong"
+/// against it. Line 34 of the city's checkout and line 34 of the plan's
+/// worktree are different lines, so the model would be sent an objection about
+/// code it cannot see. That is the same class of silent wrongness the merge-base
+/// decision in [`crate::review`] exists to prevent, and it is answered the same
+/// way: read the workspace the work is actually happening in.
+///
+/// The workspace goes through [`grounded`] first, because the *placeholder*
+/// plans a kingdom opens with carry a path relative to the kingdom root.
 ///
 /// # Why this exists rather than reading [`kingdom_core::City::structure`]
 ///
@@ -513,48 +561,47 @@ pub async fn list_branches(city: String) -> Result<Vec<String>, ServerFnError> {
 ///
 /// This is the second place in Kingdom where an outsider names a path and the
 /// server opens it, so it is held to the same rule as the first: the path is
-/// resolved through a [`crate::tools::Sandbox`] rooted at the city, exactly as
-/// [`crate::artifact`] does, so `a/../../etc` is refused lexically before the
-/// filesystem sees it. It lists **names only** and reads no file contents,
-/// which is the property that keeps it from becoming a file server.
+/// resolved through a [`crate::tools::Sandbox`] rooted at the workspace, exactly
+/// as [`crate::artifact`] does, so `a/../../etc` is refused lexically before the
+/// filesystem sees it. It lists **names only** and reads no file contents; what
+/// reads one is [`plan_source`], which has its own guards.
 #[server(ListDirectory, "/api")]
 pub async fn list_directory(
-    city: String,
+    plan: String,
     path: String,
 ) -> Result<Vec<kingdom_core::DirEntry>, ServerFnError> {
-    use kingdom_core::CityId;
-
-    let city_id = CityId::new(city);
-    let city_root = {
+    let plan_id = PlanId::new(plan);
+    let root = {
         let kingdom = lock()?;
-        let Some(city) = kingdom.city(&city_id) else {
-            // A city Kingdom does not know has no directory to read. An empty
-            // listing rather than an error: the rail asks about whatever is
-            // selected, and a selection that has gone stale is ordinary.
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            // A plan Kingdom does not know has no directory to read. An empty
+            // listing rather than an error: the rail asks about whatever
+            // chamber is open, and a plan that has gone from the records while
+            // a tab sat on it is ordinary.
             return Ok(Vec::new());
         };
-        std::path::Path::new(&kingdom.root).join(&city.path)
+        std::path::PathBuf::from(grounded(&kingdom.root, &plan.workspace).path)
     };
 
-    read_directory(&city_root, &path).map_err(ServerFnError::new)
+    read_directory(&root, &path).map_err(ServerFnError::new)
 }
 
-/// Everything [`list_directory`] decides once the city's root is known.
+/// Everything [`list_directory`] decides once the workspace root is known.
 ///
 /// Split out so the boundary and the ordering can be tested against a real
 /// directory without a kingdom in global state -- the same split, for the same
 /// reason, as `artifact::from_workspace`.
 #[cfg(feature = "ssr")]
 fn read_directory(
-    city_root: &std::path::Path,
+    workspace_root: &std::path::Path,
     path: &str,
 ) -> Result<Vec<kingdom_core::DirEntry>, String> {
     use kingdom_core::{DirEntry, Language, Workspace};
 
-    let shop = crate::tools::Sandbox::new(Workspace::in_place(city_root.to_string_lossy()));
+    let shop = crate::tools::Sandbox::new(Workspace::in_place(workspace_root.to_string_lossy()));
     let dir = shop
         .resolve(path)
-        .map_err(|_| format!("{path} is outside this city."))?;
+        .map_err(|_| format!("{path} is outside this plan's workspace."))?;
 
     let Ok(entries) = std::fs::read_dir(&dir) else {
         // A folder that cannot be read is an empty one as far as the rail is
@@ -674,6 +721,46 @@ pub async fn plan_diff(
     Ok(crate::review::diff(&workspace, &inside).await)
 }
 
+/// One file of a plan's workspace, as it stands, for the King to read and write
+/// against.
+///
+/// The sibling of [`plan_diff`] and the answer to a different question: that one
+/// shows what *changed*, and this shows what *is*. Most files in a project have
+/// no diff at all, and the files tree offers all of them.
+///
+/// # The boundary
+///
+/// The fourth place in Kingdom where an outsider names a path and the server
+/// opens it, held to the same rule as the other three: resolved through
+/// [`within_workspace`], so `a/../../etc/passwd` is refused lexically before the
+/// filesystem sees it, and what reaches [`crate::review::source`] is the
+/// workspace-relative form the sandbox agreed to rather than the string as it
+/// arrived.
+///
+/// Unlike [`crate::artifact`] it does **not** narrow by media type, and the
+/// difference is deliberate: this is a source view for the King's own eyes, and
+/// a project's files are exactly what it is for. What keeps it from being a
+/// general file server is the sandbox and the size and binary guards in
+/// `review::source`, not a list of extensions.
+#[server(PlanSource, "/api")]
+pub async fn plan_source(
+    plan: String,
+    path: String,
+) -> Result<kingdom_core::SourceText, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = {
+        let kingdom = lock()?;
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+        grounded(&kingdom.root, &plan.workspace)
+    };
+
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    Ok(crate::review::source(&workspace, &inside).await)
+}
+
 /// Puts a workspace on the actual disk, when its path does not already say
 /// where it is.
 ///
@@ -777,6 +864,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
         let running = crate::turns::is_running(&plan_id);
         receive(p, prompt, running);
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -849,7 +937,7 @@ pub async fn unqueue(plan: String, queued_id: String) -> Result<Plan, ServerFnEr
         ));
     }
 
-    Ok(updated)
+    Ok(to_browser(updated))
 }
 
 /// The user calls a halt on a turn that is running.
@@ -916,6 +1004,7 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
         // The turn will publish its own stopped state in a moment. Returning
         // the plan as it stands keeps this caller honest about what it knows.
         return snapshot(&plan_id)
+            .map(to_browser)
             .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."));
     }
 
@@ -936,6 +1025,7 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
              set right. Say something to send the court round again.",
         );
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -1127,7 +1217,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
     // visible and the plan is restartable, rather than needing a server restart
     // to reach `store::reconcile`.
     match handle.await {
-        Ok(result) => result,
+        Ok(result) => result.map(to_browser),
         Err(e) => {
             let mut kingdom = lock()?;
             let repaired = update(&mut kingdom, &plan_id, |p| {
@@ -1140,7 +1230,9 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
                      still in its workspace. Say something to set it going again.",
                 );
             });
-            repaired.ok_or_else(|| ServerFnError::new(format!("drafting task failed: {e}")))
+            repaired
+                .map(to_browser)
+                .ok_or_else(|| ServerFnError::new(format!("drafting task failed: {e}")))
         }
     }
 }
@@ -1284,6 +1376,11 @@ pub(crate) async fn converse(
             // Later rounds have a reply behind them and nothing to explain.
             aside: (after_silence && round == 0).then(|| AFTER_SILENCE.to_string()),
             tools: tools.clone(),
+            // Every turn starts willing to carry the lot. A turn that is refused
+            // for size lowers this and asks again; it deliberately does not
+            // persist, because the next turn may be shorter than this one and
+            // starting it pre-shrunk would shed a picture nobody needed to lose.
+            budget: crate::llm::Budget::FULL,
         };
 
         // Raced against the halt so a Stop lands while the model is still
@@ -1301,6 +1398,12 @@ pub(crate) async fn converse(
         // this loop used to return `settle(Err)` on the first of them, killing
         // a plan mid-investigation over a hiccup. A refusal or a missing
         // credential still fails at once: see `ModelError::is_transient`.
+        //
+        // A request the gateway would not read is the third case, and it is
+        // neither of those. Resending it unchanged is pointless, so it is not
+        // transient; but the request is ours, so `brief` is rebuilt with a
+        // tighter budget and asked again. That is why `brief` is `mut` here.
+        let mut brief = brief;
         let mut attempt = 0;
         let answer = loop {
             let outcome = tokio::select! {
@@ -1311,6 +1414,24 @@ pub(crate) async fn converse(
 
             match outcome {
                 Ok(answer) => break answer,
+                // Too large, and there is still something left to shed. No
+                // backoff: nothing is unwell and there is nothing to wait for --
+                // the next request is simply a smaller one, and pausing before
+                // sending it would only make a recoverable turn feel broken.
+                Err(e) if e.is_shrinkable() => {
+                    let Some(tighter) = brief.budget.tighter() else {
+                        // Everything sheddable is already shed. Saying so beats
+                        // reporting the gateway's bare refusal, which names no
+                        // number and suggests no remedy.
+                        return settle(plan_id, Err(e));
+                    };
+                    brief.budget = tighter;
+
+                    let mut kingdom = lock()?;
+                    update(&mut kingdom, &plan_id, |p| {
+                        p.working_on = Some("Trimming the request and asking again".into());
+                    });
+                }
                 Err(e) if worth_asking_again(&e, attempt) => {
                     attempt += 1;
                     // Told while it is happening rather than afterwards: a turn
@@ -1931,7 +2052,9 @@ pub async fn answer_question(
         ));
     }
 
-    snapshot(&plan_id).ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
+    snapshot(&plan_id)
+        .map(to_browser)
+        .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
 /// The King accepts the standing proposal, and the court gains its hands.
@@ -2032,6 +2155,7 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
         p.say(Speaker::User, kingdom_core::APPROVAL);
         p.status = PlanStatus::Drafting;
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan vanished as it was being approved."))
 }
 
@@ -2048,6 +2172,7 @@ pub async fn set_aside_plan(plan: String) -> Result<Plan, ServerFnError> {
     let mut kingdom = lock()?;
 
     update(&mut kingdom, &plan_id, |p| p.set_aside_proposal())
+        .map(to_browser)
         .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -2095,7 +2220,7 @@ pub async fn annotate_proposal(
         ));
     }
 
-    Ok(updated)
+    Ok(to_browser(updated))
 }
 
 /// The King takes a note back before the court has been told of it.
@@ -2121,7 +2246,7 @@ pub async fn withdraw_note(plan: String, note_id: String) -> Result<Plan, Server
         ));
     }
 
-    Ok(updated)
+    Ok(to_browser(updated))
 }
 
 /// The King sends his notes back for the court to answer.
@@ -2169,6 +2294,7 @@ pub async fn send_notes(plan: String) -> Result<Plan, ServerFnError> {
         let running = crate::turns::is_running(&plan_id);
         receive(p, notes_as_decree(&notes), running);
     })
+    .map(to_browser)
     .ok_or_else(|| ServerFnError::new("That plan vanished as its notes were sent."))
 }
 
@@ -2213,6 +2339,226 @@ fn notes_as_decree(notes: &[kingdom_core::ProposalNote]) -> String {
         decree.push('\n');
         decree.push_str(note.body.trim());
         decree.push('\n');
+    }
+
+    decree
+}
+
+/// The King writes a note against one line of one file.
+///
+/// The sibling of [`annotate_proposal`], and it takes the same path for the same
+/// reasons: through [`update`], so the note is stored and pushed to every
+/// watcher like everything else, which is what makes a note written in one tab
+/// appear in the other.
+///
+/// `line`, `side` and `quote` all travel because they answer different
+/// questions. The line and the side put the note beside the right row while the
+/// panel is open; the quote is what is actually put to the model, and is the
+/// half that cannot go stale -- see [`kingdom_core::ReviewNote::quote`], which
+/// matters more here than it does for a proposal because the court may be
+/// rewriting the file while the note is being typed.
+#[server(AnnotateFile, "/api")]
+pub async fn annotate_file(
+    plan: String,
+    path: String,
+    line: u32,
+    side: kingdom_core::NoteSide,
+    quote: String,
+    note: String,
+) -> Result<Plan, ServerFnError> {
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Err(ServerFnError::new("An empty note says nothing."));
+    }
+
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut written = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        written = p.annotate_file(path, line, side, quote, note).is_some();
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    // The only way to fail here is a plan that has been settled since the panel
+    // was opened -- its workspace is gone, so the file the note names is gone
+    // too. Reported rather than swallowed, because a note silently written onto
+    // nothing is one the King believes he has made.
+    if !written {
+        return Err(ServerFnError::new(
+            "This plan has been closed and its workspace cleared, so there is no \
+             longer a file here to write against.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The King takes a line note back before the court has been told of it.
+///
+/// The sibling of [`withdraw_note`], and it loses its race the same way: the
+/// review may have been sent while this request was in flight. Saying so is the
+/// point -- quietly doing nothing would leave him believing he had withdrawn
+/// something the model is already reading.
+#[server(WithdrawFileNote, "/api")]
+pub async fn withdraw_file_note(plan: String, note_id: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    let mut withdrawn = false;
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        withdrawn = p.unannotate_file(&note_id);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    if !withdrawn {
+        return Err(ServerFnError::new(
+            "That note is no longer in the review. It may already have gone to the court.",
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// The King sends his line notes to the court as one review.
+///
+/// The sibling of [`send_notes`] and identical in shape, which is the point: the
+/// review is drained and becomes **one** [`kingdom_core::Speaker::User`] turn,
+/// composed by [`file_notes_as_decree`]. One turn rather than one per note
+/// because they are one review -- a model handed nine separate messages would
+/// answer the last and treat the rest as history.
+///
+/// Deliberately reuses [`receive`], the branch [`say`] already splits out.
+/// Notes sent into a working chamber queue and are heard at the next round
+/// boundary with no second code path to get wrong, and a plan wedged by a stale
+/// busy mark is un-wedged by the same line that un-wedges it for `say`.
+///
+/// Makes no model call. The chamber dispatches `draft_plan` afterwards, exactly
+/// as it does after speaking -- which is what lets the King watch his review
+/// land rather than watching a spinner for the first round of work.
+#[server(SendFileNotes, "/api")]
+pub async fn send_file_notes(plan: String) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    // Checked before the drain rather than inside it, so a refusal can say why
+    // and the notes are still there to try again with.
+    match kingdom.plan(&plan_id) {
+        None => return Err(ServerFnError::new("That plan is no longer in the records.")),
+        Some(existing) if existing.review_notes().is_empty() => {
+            return Err(ServerFnError::new(
+                "There is nothing to send. Write against a line of a file first.",
+            ))
+        }
+        // A settled plan's workspace is gone, so there is nothing left to change
+        // in answer to the review -- the same guard `say` keeps, for the same
+        // reason. The notes are deliberately left standing rather than drained
+        // into a refusal.
+        Some(existing) if existing.status.is_settled() => {
+            return Err(ServerFnError::new(format!(
+                "That plan is {} and its workspace has been cleared, so there is \
+                 nothing left to change. Start a new decree to carry the work on.",
+                existing.status.label().to_lowercase()
+            )))
+        }
+        Some(_) => {}
+    }
+
+    update(&mut kingdom, &plan_id, |p| {
+        let notes = p.take_review_notes();
+        if notes.is_empty() {
+            return;
+        }
+        // Asked inside the closure, under the same lock `converse` deregisters
+        // under -- see `say` for why sampling it at the call site would leave a
+        // window where words are queued for a turn that has already gone.
+        let running = crate::turns::is_running(&plan_id);
+        receive(p, file_notes_as_decree(&notes), running);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan vanished as its review was sent."))
+}
+
+/// The King's line notes as one thing he said.
+///
+/// Ordinary prose in his own voice, grouped by file and ordered by line, each
+/// note quoting the line it answers. No new message kind and nothing for a
+/// provider to learn -- the same call [`notes_as_decree`] makes, and true in the
+/// same way: he did write these.
+///
+/// **Grouped by file rather than left in the order they were written.** A review
+/// is read as a set of changes to make, and a model given nine notes shuffled
+/// across four files has to sort them before it can start. Ordering within a
+/// file is by line, so the model reads a file the way it will edit it.
+///
+/// A [`kingdom_core::NoteSide::Base`] note says in words which version it is
+/// about. A note on a deleted line is an ordinary review comment -- "why did this
+/// go?" -- and a bare line number would point the court at whatever now occupies
+/// that position.
+///
+/// Split out and tested because the shape is the whole payload: a decree that
+/// separated a note from its line would be read as an objection with no target.
+#[cfg(feature = "ssr")]
+fn file_notes_as_decree(notes: &[kingdom_core::ReviewNote]) -> String {
+    use kingdom_core::NoteSide;
+
+    let mut decree = String::new();
+    decree.push_str(match notes.len() {
+        1 => {
+            "I have read the code and written a note against one line. \
+             Make the change it asks for.\n"
+        }
+        _ => {
+            "I have read the code and written notes against some lines. \
+             Make the changes they ask for.\n"
+        }
+    });
+
+    // Grouped without sorting the caller's slice: files appear in the order the
+    // King first wrote against them, which is the order he was reading in, and
+    // within a file the notes are ordered by line.
+    let mut files: Vec<&str> = Vec::new();
+    for note in notes {
+        if !files.contains(&note.path.as_str()) {
+            files.push(&note.path);
+        }
+    }
+
+    for path in files {
+        decree.push_str("\n## ");
+        decree.push_str(path);
+        decree.push('\n');
+
+        let mut on_this_file: Vec<&kingdom_core::ReviewNote> =
+            notes.iter().filter(|n| n.path == path).collect();
+        on_this_file.sort_by_key(|n| n.line);
+
+        for note in on_this_file {
+            decree.push('\n');
+            decree.push_str(&match note.side {
+                NoteSide::Working => format!("Line {}:\n", note.line),
+                NoteSide::Base => {
+                    format!("Line {}, in the version before your changes:\n", note.line)
+                }
+            });
+            // Every line of the quote is prefixed, not just the first: a quote
+            // whose second line is unprefixed reads as the quote ending and the
+            // King speaking, which is the model's cue to act on it. The same
+            // rule `notes_as_decree` is tested for.
+            for line in note.quote.lines() {
+                decree.push_str("> ");
+                decree.push_str(line);
+                decree.push('\n');
+            }
+            // A line that is empty, or all whitespace, has no lines to iterate,
+            // so the quote would vanish and the note would read as being about
+            // nothing. Said instead.
+            if note.quote.lines().next().is_none() {
+                decree.push_str("> (blank line)\n");
+            }
+            decree.push('\n');
+            decree.push_str(note.body.trim());
+            decree.push('\n');
+        }
     }
 
     decree
@@ -2362,7 +2708,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         crate::tools::propose_plan::discard_draft(&workspace);
     }
 
-    Ok(plan)
+    Ok(to_browser(plan))
 }
 
 /// Every model the user can choose between, and what each will accept.
@@ -2548,17 +2894,21 @@ mod tests {
         assert_eq!(grounded("/dev", &absolute), absolute);
     }
 
-    /// The review drawer's diff is the third place an outsider names a path and
-    /// the server opens it, so it is held to the same wall as the first two.
+    /// The review drawer's diff and the source view are the third and fourth
+    /// places an outsider names a path and the server opens it, so both are held
+    /// to the same wall as the first two.
     ///
     /// The refusal is what matters: a path that walks out of the workspace must
-    /// be turned away *before* git is invoked, because `git show` and
-    /// `std::fs::read` will both happily read a file the King never meant to
-    /// expose. Tested through the predicate rather than through `plan_diff`,
-    /// which needs a scanned kingdom and the process-global lock to reach --
-    /// the same split the sandbox test above uses.
+    /// be turned away *before* git or the filesystem is reached, because
+    /// `git show` and `std::fs::read` will both happily read a file the King
+    /// never meant to expose. One test for both because they share one
+    /// predicate -- `plan_diff` and `plan_source` each call `within_workspace`
+    /// and neither has a resolver of its own, which is the property being
+    /// pinned. Tested through the predicate rather than through the server
+    /// functions, which need a scanned kingdom and the process-global lock to
+    /// reach -- the same split the sandbox test above uses.
     #[test]
-    fn a_diff_cannot_be_asked_for_outside_the_workspace() {
+    fn a_file_cannot_be_asked_for_outside_the_workspace() {
         use kingdom_core::Workspace;
 
         let workspace = Workspace::in_place("/dev/testburg");
@@ -2584,7 +2934,13 @@ mod tests {
         );
         assert!(
             within_workspace(&workspace, "").is_err(),
-            "the workspace root is not a file to diff"
+            "the workspace root is not a file to read or diff"
+        );
+        // Lexically inside, actually outside -- the case a `starts_with` on the
+        // strings as typed would admit.
+        assert!(
+            within_workspace(&workspace, "src/../../etc/passwd").is_err(),
+            "a path that walks out mid-way must be refused, not prefix-matched"
         );
     }
 
@@ -2680,6 +3036,10 @@ mod tests {
         std::fs::create_dir_all(root.join(".github")).unwrap();
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        // A city's own worktree folder: entire further copies of the project,
+        // which is noise on the map and actively confusing in a rail whose
+        // whole job is showing the King the workspace he is working in.
+        std::fs::create_dir_all(root.join(".kingdom/worktrees")).unwrap();
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
         std::fs::write(root.join("README.md"), "").unwrap();
         std::fs::write(root.join(".gitignore"), "").unwrap();
@@ -2698,8 +3058,10 @@ mod tests {
         // hides `.github` and `.gitignore` is not the repository the King is
         // looking at.
         assert!(
-            !names.contains(&"target") && !names.contains(&"node_modules"),
-            "build detritus is hidden"
+            !names.contains(&"target")
+                && !names.contains(&"node_modules")
+                && !names.contains(&".kingdom"),
+            "build detritus and Kingdom's own worktrees are hidden: {names:?}"
         );
 
         let github = listed.iter().find(|e| e.name == ".github").unwrap();
@@ -2714,11 +3076,11 @@ mod tests {
         );
     }
 
-    /// Paths in a listing are relative to the city root, so the entry the King
-    /// clicks is the one that can be listed a level down without the browser
-    /// ever knowing an absolute path.
+    /// Paths in a listing are relative to the workspace root, so the entry the
+    /// King clicks is the one that can be listed a level down -- or read whole
+    /// by `plan_source` -- without the browser ever knowing an absolute path.
     #[test]
-    fn a_nested_listing_names_its_entries_from_the_city_root() {
+    fn a_nested_listing_names_its_entries_from_the_workspace_root() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src/inner")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
@@ -2733,14 +3095,14 @@ mod tests {
     /// opens it, so it is pinned here as it is in `artifact.rs`: `..` must be
     /// refused lexically, not prefix-matched and then handed to the filesystem.
     #[test]
-    fn a_path_that_leaves_the_city_is_refused() {
+    fn a_path_that_leaves_the_workspace_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
 
         for escape in ["../..", "src/../../etc", "/etc"] {
             assert!(
                 read_directory(dir.path(), escape).is_err(),
-                "{escape} leaves the city and must be refused"
+                "{escape} leaves the workspace and must be refused"
             );
         }
     }
@@ -2916,6 +3278,173 @@ mod tests {
             plan.turns()
                 .any(|t| matches!(&t, kingdom_core::Turn::Message(m)
                 if m.body.contains("Which thing?"))),
+            "once sent, it is an ordinary thing the King said"
+        );
+    }
+
+    /// A review of code reaches the court as one decree, grouped by file, each
+    /// note standing beside the line it answers.
+    ///
+    /// The pairing is the whole payload, exactly as it is for marginal notes:
+    /// an objection separated from its line is one the model has to guess the
+    /// target of, and a plausible edit to the wrong line looks exactly like
+    /// work.
+    #[test]
+    fn a_code_review_reaches_the_court_grouped_by_file_and_ordered_by_line() {
+        use kingdom_core::{NoteSide, ReviewNote};
+
+        let note = |path: &str, line: u32, side, quote: &str, body: &str| ReviewNote {
+            id: format!("{path}-{line}"),
+            path: path.to_string(),
+            line,
+            side,
+            quote: quote.to_string(),
+            body: body.to_string(),
+            at: None,
+        };
+
+        let decree = file_notes_as_decree(&[
+            note(
+                "src/lex.rs",
+                42,
+                NoteSide::Working,
+                "let n = i + 1;",
+                "This is the off-by-one.",
+            ),
+            note(
+                "src/main.rs",
+                7,
+                NoteSide::Working,
+                "run();",
+                "Handle the error.",
+            ),
+            // Deliberately out of order and on an already-seen file: the
+            // grouping has to gather it and the sort has to place it.
+            note(
+                "src/lex.rs",
+                9,
+                NoteSide::Working,
+                "use std::io;",
+                "Unused.",
+            ),
+        ]);
+
+        assert!(
+            decree.starts_with("I have read the code and written notes"),
+            "a review arrives as one review, not as three separate remarks: {decree}"
+        );
+
+        // Grouped: one heading per file, in the order he first wrote against
+        // them.
+        let lex = decree.find("## src/lex.rs").expect("a heading per file");
+        let main = decree.find("## src/main.rs").expect("a heading per file");
+        assert!(lex < main, "files keep the order he read them in: {decree}");
+        assert_eq!(
+            decree.matches("## src/lex.rs").count(),
+            1,
+            "two notes on one file share one heading: {decree}"
+        );
+
+        // Ordered within a file, so the model reads it the way it will edit it.
+        let nine = decree.find("Line 9:").expect("line 9 is reported");
+        let forty_two = decree.find("Line 42:").expect("line 42 is reported");
+        assert!(nine < forty_two, "lines ascend within a file: {decree}");
+        assert!(
+            nine > lex && forty_two < main,
+            "both sit under their own file"
+        );
+
+        // Each note stands beside the line it answers.
+        assert!(
+            decree.contains("> let n = i + 1;\n\nThis is the off-by-one."),
+            "{decree}"
+        );
+    }
+
+    /// The two shapes that would otherwise be read as something the King said.
+    ///
+    /// A wrapped quote with only its first line prefixed reads as the quote
+    /// ending and the King speaking -- which is the model's cue to *act* on the
+    /// code rather than to read it. And a note on a blank line has no lines to
+    /// iterate at all, so the quote would vanish and the note would arrive about
+    /// nothing.
+    #[test]
+    fn a_quoted_line_cannot_be_mistaken_for_the_kings_own_words() {
+        use kingdom_core::{NoteSide, ReviewNote};
+
+        let note = |line: u32, side, quote: &str| ReviewNote {
+            id: "n".into(),
+            path: "src/lex.rs".into(),
+            line,
+            side,
+            quote: quote.to_string(),
+            body: "Fix this.".into(),
+            at: None,
+        };
+
+        let wrapped = file_notes_as_decree(&[note(
+            3,
+            NoteSide::Working,
+            "fn long_signature(\n    a: usize,",
+        )]);
+        assert!(
+            wrapped.contains("> fn long_signature(\n>     a: usize,\n"),
+            "{wrapped}"
+        );
+        assert!(
+            wrapped.starts_with("I have read the code and written a note"),
+            "one note is not addressed in the plural: {wrapped}"
+        );
+
+        let blank = file_notes_as_decree(&[note(3, NoteSide::Working, "")]);
+        assert!(
+            blank.contains("> (blank line)"),
+            "a note on a blank line still says what it is against: {blank}"
+        );
+
+        // A note on the old side of a diff says which version it is about. A
+        // bare line number would point the court at whatever now occupies that
+        // position in the file.
+        let deleted = file_notes_as_decree(&[note(88, NoteSide::Base, "self.cleanup();")]);
+        assert!(
+            deleted.contains("Line 88, in the version before your changes:"),
+            "{deleted}"
+        );
+    }
+
+    /// A review is not something the King has said until he sends it, and
+    /// sending it takes the path every other message takes.
+    #[test]
+    fn a_code_review_is_not_a_turn_until_it_is_sent() {
+        use kingdom_core::NoteSide;
+
+        let mut plan = a_plan();
+        plan.annotate_file(
+            "src/lex.rs",
+            42,
+            NoteSide::Working,
+            "let n = i + 1;",
+            "This is the off-by-one.",
+        )
+        .expect("a plan in play can be annotated");
+
+        assert!(
+            !plan
+                .turns()
+                .any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+                if m.body.contains("off-by-one"))),
+            "the note's text must not reach a model before it is sent"
+        );
+
+        // Sent, by the path `send_file_notes` takes: drained, composed,
+        // received.
+        let notes = plan.take_review_notes();
+        receive(&mut plan, file_notes_as_decree(&notes), false);
+
+        assert!(
+            plan.turns()
+                .any(|t| matches!(&t, kingdom_core::Turn::Message(m)
+                if m.body.contains("off-by-one"))),
             "once sent, it is an ordinary thing the King said"
         );
     }

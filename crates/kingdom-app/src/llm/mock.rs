@@ -630,6 +630,7 @@ mod tests {
             ))],
             aside: None,
             tools: Vec::new(),
+            budget: crate::llm::Budget::FULL,
         }
     }
 

@@ -10,7 +10,7 @@
 //! two answers to "where does a block begin" is precisely how his note and the
 //! court's quote come to describe different paragraphs.
 
-use super::notes::NoteComposer;
+use crate::components::note_composer::NoteComposer;
 use crate::components::Prose;
 use kingdom_core::proposal::Block;
 use leptos::prelude::*;

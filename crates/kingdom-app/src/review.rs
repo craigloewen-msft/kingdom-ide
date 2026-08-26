@@ -37,7 +37,7 @@
 
 use kingdom_core::{
     ChangeKind, ChangeSummary, ChangedFile, DiffLine, DiffRow, DiffVerdict, FileDiff, Hunk,
-    Language, Span, Workspace,
+    Language, SourceLine, SourceText, Span, Workspace,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -204,6 +204,103 @@ pub async fn diff(workspace: &Workspace, path: &str) -> FileDiff {
         base: against.label,
         hunks,
         verdict,
+    }
+}
+
+/// One file as it stands in the plan's workspace, line by line.
+///
+/// **No git.** This is the file as it *is*, not as it differs, which is the
+/// whole reason it exists beside [`diff`]: most files in a project have never
+/// been touched by the plan, and the tree offers all of them. Reading through
+/// git would give an empty answer for exactly those.
+///
+/// Shares [`diff`]'s guards rather than inventing its own -- [`MOST_BYTES`],
+/// [`looks_binary`] and [`MOST_ROWS`] -- because "can the browser survive
+/// rendering this?" is the same question whichever panel is asking, and a
+/// second set of thresholds would be a second place to get it wrong.
+///
+/// `path` is relative to the workspace and has already been through a
+/// [`crate::tools::Sandbox`] by the time this is called -- see the caller in
+/// `api.rs`, which is where the boundary is enforced, exactly as it is for
+/// [`diff`] and `list_directory`.
+pub async fn source(workspace: &Workspace, path: &str) -> SourceText {
+    let full = Path::new(&workspace.path).join(path);
+
+    let unreadable = |why: String| SourceText {
+        path: path.to_string(),
+        language: Language::from_path(path),
+        lines: Vec::new(),
+        verdict: DiffVerdict::Unreadable(why),
+    };
+
+    // Asked before the read rather than after it: a directory read as bytes is
+    // an error whose message names an errno, and "is a directory" is the
+    // answer worth giving.
+    match tokio::fs::metadata(&full).await {
+        Ok(meta) if meta.is_dir() => {
+            return unreadable("that is a folder, not a file".into());
+        }
+        Ok(meta) if meta.len() > MOST_BYTES => {
+            return SourceText {
+                path: path.to_string(),
+                language: Language::from_path(path),
+                lines: Vec::new(),
+                verdict: DiffVerdict::TooLarge,
+            };
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Named plainly rather than reported as an io error. The ordinary
+            // way to reach this is a file the court deleted while the King had
+            // it open, and "No such file or directory (os error 2)" describes
+            // that badly.
+            return unreadable("that file is no longer in this workspace".into());
+        }
+        Err(e) => return unreadable(e.to_string()),
+    }
+
+    let bytes = match tokio::fs::read(&full).await {
+        Ok(bytes) => bytes,
+        Err(e) => return unreadable(e.to_string()),
+    };
+
+    if looks_binary(&bytes) {
+        return SourceText {
+            path: path.to_string(),
+            language: Language::from_path(path),
+            lines: Vec::new(),
+            verdict: DiffVerdict::Binary,
+        };
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    // `lines()` and not `split('\n')`: a trailing newline ends the last line
+    // rather than opening an empty one, which is how an editor numbers a file
+    // and how `count_lines` already counts it.
+    let all: Vec<&str> = text.lines().collect();
+
+    let dropped = all.len().saturating_sub(MOST_ROWS);
+    let lines = all
+        .into_iter()
+        .take(MOST_ROWS)
+        .enumerate()
+        .map(|(i, text)| SourceLine {
+            // 1-based, as an editor counts -- and as a note against it will
+            // name it back to the court.
+            number: (i + 1) as u32,
+            text: text.to_string(),
+        })
+        .collect();
+
+    SourceText {
+        path: path.to_string(),
+        language: Language::from_path(path),
+        lines,
+        verdict: if dropped > 0 {
+            DiffVerdict::Truncated(dropped as u32)
+        } else {
+            DiffVerdict::Shown
+        },
     }
 }
 
@@ -1112,5 +1209,107 @@ mod tests {
         assert_eq!(count_lines(b"one\n"), 1);
         assert_eq!(count_lines(b"one\ntwo"), 2);
         assert_eq!(count_lines(b"one\ntwo\n"), 2);
+    }
+
+    // -- Reading one file whole ----------------------------------------------
+
+    /// Numbering is 1-based, and a trailing newline does not invent a last
+    /// empty line.
+    ///
+    /// The numbering is the load-bearing half: the number rendered in the
+    /// gutter is the number a note against that line reports back to the court,
+    /// so an off-by-one here would send the model an objection about the line
+    /// above the one the King read.
+    #[tokio::test]
+    async fn a_file_is_numbered_as_an_editor_numbers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lex.rs"), "one\ntwo\nthree\n").unwrap();
+
+        let read = source(&workspace(dir.path()), "lex.rs").await;
+
+        assert_eq!(read.verdict, DiffVerdict::Shown);
+        assert_eq!(read.language, Language::Rust);
+        assert_eq!(
+            read.lines.iter().map(|l| l.number).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "a trailing newline ends the last line rather than opening another"
+        );
+        assert_eq!(read.lines[0].text, "one");
+        assert_eq!(read.lines[2].text, "three");
+
+        // And with no trailing newline, the last line is still a line.
+        std::fs::write(dir.path().join("lex.rs"), "one\ntwo").unwrap();
+        let read = source(&workspace(dir.path()), "lex.rs").await;
+        assert_eq!(read.lines.len(), 2);
+    }
+
+    /// The three things that are not a file to read, each named rather than
+    /// rendered as an empty document.
+    ///
+    /// An empty answer is ambiguous -- an empty file, a binary one and a missing
+    /// one would all draw identically -- which is the same objection
+    /// `ChangeSummary::note` exists to answer.
+    #[tokio::test]
+    async fn what_cannot_be_read_says_which_rather_than_rendering_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let space = workspace(dir.path());
+
+        std::fs::write(dir.path().join("seal.png"), [0x89, 0x50, 0x00, 0x01]).unwrap();
+        let binary = source(&space, "seal.png").await;
+        assert_eq!(binary.verdict, DiffVerdict::Binary);
+        assert!(binary.lines.is_empty());
+
+        let missing = source(&space, "never.rs").await;
+        assert!(
+            matches!(missing.verdict, DiffVerdict::Unreadable(_)),
+            "{:?}",
+            missing.verdict
+        );
+
+        // A folder is the ordinary mistake: the tree lists both kinds of row.
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let folder = source(&space, "src").await;
+        assert!(
+            matches!(&folder.verdict, DiffVerdict::Unreadable(why) if why.contains("folder")),
+            "{:?}",
+            folder.verdict
+        );
+
+        // An empty file is a real answer and must NOT be confused with any of
+        // the above: no lines, but shown.
+        std::fs::write(dir.path().join("empty.rs"), "").unwrap();
+        let empty = source(&space, "empty.rs").await;
+        assert_eq!(empty.verdict, DiffVerdict::Shown);
+        assert!(empty.lines.is_empty());
+    }
+
+    /// A file too large to send is refused before it is read, and one too long
+    /// to draw is cut off and says by how much.
+    ///
+    /// Both share the diff's own thresholds: the browser's limit is the same
+    /// limit whichever panel is rendering into it.
+    #[tokio::test]
+    async fn an_oversized_file_is_refused_and_a_long_one_is_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let space = workspace(dir.path());
+
+        let huge = "x".repeat(MOST_BYTES as usize + 1);
+        std::fs::write(dir.path().join("bundle.js"), &huge).unwrap();
+        assert_eq!(
+            source(&space, "bundle.js").await.verdict,
+            DiffVerdict::TooLarge
+        );
+
+        let long: String = (0..MOST_ROWS + 40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("long.rs"), &long).unwrap();
+        let read = source(&space, "long.rs").await;
+
+        assert_eq!(read.lines.len(), MOST_ROWS);
+        assert_eq!(read.verdict, DiffVerdict::Truncated(40));
+        assert_eq!(
+            read.lines.last().unwrap().number,
+            MOST_ROWS as u32,
+            "a truncated file still numbers the lines it did draw honestly"
+        );
     }
 }

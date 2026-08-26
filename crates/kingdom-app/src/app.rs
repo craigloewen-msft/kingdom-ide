@@ -34,7 +34,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 
 /// Width the files rail opens at. Narrower than the cities rail by default and
-/// capped lower (see `ward_tree.rs`): a tree of names needs less room than a
+/// capped lower (see `city_rail.rs`): a tree of names needs less room than a
 /// rail of titles and badges, and neither column may become the widest thing on
 /// screen.
 ///
@@ -443,7 +443,11 @@ pub fn App() -> impl IntoView {
         <Title text="Kingdom IDE"/>
 
         <Show
-            when=move || state.kingdom.get().is_open()
+            // `with`, not `get`: this is the app's outermost gate and re-runs on
+            // every push, and `is_open` only asks whether the root is a
+            // non-empty string -- `get` cloned every city and every plan to
+            // answer it.
+            when=move || state.kingdom.with(|k| k.is_open())
             fallback=move || view! { <ChooseKingdom/> }
         >
             // The rail lives on the parent route so it never unmounts: moving

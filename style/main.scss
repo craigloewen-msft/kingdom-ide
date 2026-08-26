@@ -19,15 +19,17 @@
 
 @use "components/choose-kingdom";
 @use "components/sidebar";
-@use "components/ward-tree";
+@use "components/file-tree";
 @use "components/review";
 @use "components/city-map";
 @use "components/decree-bar";
 @use "components/conversation";
 @use "components/proposal";
+@use "components/notes";
 @use "components/prose";
 @use "components/spyglass";
 @use "components/diff";
+@use "components/source";
 @use "components/orders";
 
 @use "status";

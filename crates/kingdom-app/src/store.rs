@@ -846,6 +846,63 @@ mod tests {
         );
     }
 
+    /// The signature the browser is never sent still reaches disk.
+    ///
+    /// The other half of the wire-size fix, and the one with teeth. A plan's
+    /// record is what the model is replayed from on the next round, and the
+    /// opaque half of its thinking must go back to the gateway *byte for byte
+    /// and under its own key* or the thinking block it signs is silently
+    /// discarded. So the strip applied on the way to a browser must never have
+    /// followed the plan here.
+    ///
+    /// It is worth its own test because the failure is invisible: nothing
+    /// errors, no request is rejected, and the only symptom is long
+    /// investigations wandering and re-reading what they have already read.
+    #[test]
+    fn the_signature_a_browser_never_sees_still_reaches_disk() {
+        let (_dir, _profile, root) = kingdom();
+        let root = root.as_path();
+
+        let mut thinking = kingdom_core::Reasoning {
+            text: Some("Two callers, so the signature is the risk.".to_string()),
+            ..Default::default()
+        };
+        thinking.opaque.insert(
+            "signature".to_string(),
+            serde_json::json!("c2lnbmVkLXRoaW5raW5n"),
+        );
+
+        let mut thought = plan("plan-1");
+        thought.begin_tool_call(
+            kingdom_core::ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
+                "reply-1",
+                Some(thinking),
+                None,
+            ),
+        );
+
+        save(root, &thought).unwrap();
+
+        let reloaded = load(root);
+        let tool_call = reloaded[0]
+            .turns()
+            .find_map(|t| match t {
+                kingdom_core::Turn::Tool(d) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("the deed itself is still recorded");
+
+        assert_eq!(
+            tool_call
+                .reasoning
+                .as_ref()
+                .and_then(|r| r.opaque.get("signature")),
+            Some(&serde_json::json!("c2lnbmVkLXRoaW5raW5n")),
+            "the record is what the model is replayed from: its signature must survive, \
+             under the key it arrived under"
+        );
+    }
+
     /// A plan document written before tool calls could carry images -- no
     /// `images` key anywhere -- must still load. Written as literal JSON rather
     /// than by round-tripping today's types, because a round trip would

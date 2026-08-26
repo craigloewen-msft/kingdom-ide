@@ -126,7 +126,14 @@ impl BrowserSession {
         let mut builder = BrowserConfig::builder()
             .new_headless_mode()
             .no_sandbox()
-            .arg("--disable-gpu")
+            // chromiumoxide's `arg()` already prepends "--" to the key it is
+            // given, so passing "--disable-gpu" here produced the literal
+            // flag "----disable-gpu" -- unknown to Chrome, and silently
+            // ignored. GPU acceleration was never actually disabled, so
+            // headless Chrome spun up a software (SwiftShader) GPU process
+            // that pegged a CPU core, worst of all while the spyglass
+            // screencast was capturing frames.
+            .arg("disable-gpu")
             .viewport(chromiumoxide::handler::viewport::Viewport {
                 width: 1024,
                 height: 768,
