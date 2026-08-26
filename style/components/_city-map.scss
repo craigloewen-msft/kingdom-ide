@@ -15,8 +15,8 @@
 .map-region {
   position: absolute;
   inset: 0;
-  // Deep ocean under the canvas: the renderer paints its own sea, and this is
-  // what shows for the moment before the first frame arrives.
+  // The void under the canvas: the renderer paints its own empty space, and
+  // this is what shows for the moment before the first frame arrives.
   background: t.$void;
 }
 

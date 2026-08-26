@@ -13,7 +13,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use crate::map::BuildingKind;
+use crate::map::{BuildingKind, MapUnderside};
 
 /// A mesh under construction.
 ///
@@ -111,10 +111,19 @@ impl MeshBuilder {
         }
         let ring = upward_ring(polygon);
         self.ground_polygon(&ring, top_y);
+        self.wall_ring(&ring, base_y, top_y);
+    }
 
-        if top_y <= base_y {
+    /// Adds the walls of a prism without capping it.
+    ///
+    /// A skirt hanging below a surface that is already drawn wants exactly
+    /// this: capping it would put a second horizontal face in the same plane as
+    /// the ground above and the two would fight for the depth buffer.
+    pub fn wall_ring(&mut self, polygon: &[Vec2], base_y: f32, top_y: f32) {
+        if polygon.len() < 3 || top_y <= base_y {
             return;
         }
+        let ring = upward_ring(polygon);
         for index in 0..ring.len() {
             let current = ring[index];
             let next = ring[(index + 1) % ring.len()];
@@ -127,10 +136,34 @@ impl MeshBuilder {
         }
     }
 
+    /// Adds a band between two closed polygons at different heights.
+    ///
+    /// The two must have the same number of points, in the same order, which is
+    /// what lets a frustum be built from a rim and a scaled copy of it without
+    /// anything having to match vertices up.
+    pub fn skirt(&mut self, top: &[Vec2], top_y: f32, bottom: &[Vec2], bottom_y: f32) {
+        if top.len() < 3 || top.len() != bottom.len() {
+            return;
+        }
+        // Both rings are reordered by the same rule, so they stay in step.
+        let top_ring = upward_ring(top);
+        let bottom_ring = upward_ring(bottom);
+        for index in 0..top_ring.len() {
+            let next = (index + 1) % top_ring.len();
+            self.quad(
+                Vec3::new(bottom_ring[index].x, bottom_y, bottom_ring[index].y),
+                Vec3::new(bottom_ring[next].x, bottom_y, bottom_ring[next].y),
+                Vec3::new(top_ring[next].x, top_y, top_ring[next].y),
+                Vec3::new(top_ring[index].x, top_y, top_ring[index].y),
+            );
+        }
+    }
+
     /// Adds a flat horizontal polygon, used for ground surfaces.
     ///
-    /// Handles concave outlines: wards, shorelines, and moats are deliberately
-    /// irregular, and a triangle fan would fold them back over themselves.
+    /// Handles concave outlines: wards and outlines from the layout are
+    /// deliberately irregular, and a triangle fan would fold them back over
+    /// themselves.
     pub fn ground_polygon(&mut self, polygon: &[Vec2], y: f32) {
         if polygon.len() < 3 {
             return;
@@ -159,6 +192,25 @@ impl MeshBuilder {
                 ring_point(center, radius, index + 1, segments, base_y),
             );
             self.triangle(from, to, apex);
+        }
+    }
+
+    /// Adds a cone hanging downward, with its apex *below* the ring.
+    ///
+    /// Not [`Self::cone`] with the arguments swapped: that winds each face
+    /// `from -> to -> apex` against a ring [`ring_point`] deliberately builds
+    /// clockwise so an upright cone's walls face outward. Move the apex
+    /// underneath and the same winding faces inward, and back-face culling eats
+    /// the whole spire. This walks the ring the other way instead.
+    pub fn spire(&mut self, center: Vec2, radius: f32, base_y: f32, tip_y: f32, segments: usize) {
+        let segments = segments.max(3);
+        let tip = Vec3::new(center.x, tip_y, center.y);
+        for index in 0..segments {
+            let (from, to) = (
+                ring_point(center, radius, index, segments, base_y),
+                ring_point(center, radius, index + 1, segments, base_y),
+            );
+            self.triangle(to, from, tip);
         }
     }
 
@@ -241,9 +293,9 @@ fn upward_ring(polygon: &[Vec2]) -> Vec<Vec2> {
 /// Splits a simple polygon into triangles by ear clipping.
 ///
 /// Returns indices into `polygon`, wound counter-clockwise in the polygon's own
-/// coordinates. Wards, shorelines, and moats are deliberately irregular and
-/// frequently concave, so a fan from one vertex would produce triangles that
-/// spill outside the outline.
+/// coordinates. Wards and the outlines the layout produces are frequently
+/// concave, so a fan from one vertex would produce triangles that spill outside
+/// the outline.
 fn triangulate(polygon: &[Vec2]) -> Vec<[usize; 3]> {
     let count = polygon.len();
     if count < 3 {
@@ -802,6 +854,95 @@ pub fn ground_polygon(polygon: &[Vec2]) -> Mesh {
     builder.build()
 }
 
+/// The lit band straight down from the rim: the edge you could fall off.
+///
+/// Separate from [`disk_underside`] so it can take its own colour. The two
+/// meet exactly at `-depth` and never overlap, so neither has to be lifted off
+/// the other to keep the depth buffer honest.
+pub fn rim_cliff(rim: &[Vec2], depth: f32) -> Mesh {
+    let mut builder = MeshBuilder::new();
+    builder.wall_ring(rim, -depth.max(0.0), 0.0);
+    builder.build()
+}
+
+/// The frustum under the cliff, pulling in toward the spire.
+///
+/// Separate from the spire so the two can take different colours: both are
+/// drawn unlit, so a flat band and a darker point below it is the only way the
+/// underside reads as falling away rather than as one silhouette.
+pub fn disk_shelf(rim: &[Vec2], underside: &MapUnderside) -> Mesh {
+    let mut builder = MeshBuilder::new();
+    if rim.len() < 3 {
+        return builder.build();
+    }
+    let center = centroid(rim);
+    builder.skirt(
+        rim,
+        cliff_bottom(underside),
+        &shelf_ring(rim, center, underside),
+        shelf_bottom(underside),
+    );
+    builder.build()
+}
+
+/// The spire falling from the shelf to a point.
+///
+/// Nothing caps the bottom. The camera is held at a fixed downward pitch, so
+/// the underside of the spire can never come into view -- the same reason
+/// [`MeshBuilder::box_from_to`] omits the bottom face of every building.
+pub fn disk_spire(rim: &[Vec2], underside: &MapUnderside) -> Mesh {
+    let mut builder = MeshBuilder::new();
+    if rim.len() < 3 {
+        return builder.build();
+    }
+    let center = centroid(rim);
+    let shelf = shelf_ring(rim, center, underside);
+    let radius = shelf
+        .iter()
+        .map(|point| point.distance(center))
+        .fold(0.0f32, f32::max);
+    let bottom = shelf_bottom(underside);
+    builder.spire(
+        center,
+        radius,
+        bottom,
+        bottom.min(-underside.depth.max(0.0)),
+        SPIRE_SEGMENTS,
+    );
+    builder.build()
+}
+
+fn cliff_bottom(underside: &MapUnderside) -> f32 {
+    -underside.cliff.max(0.0)
+}
+
+fn shelf_bottom(underside: &MapUnderside) -> f32 {
+    cliff_bottom(underside).min(-underside.shelf.max(0.0))
+}
+
+/// The rim pulled in to where the spire hangs from.
+fn shelf_ring(rim: &[Vec2], center: Vec2, underside: &MapUnderside) -> Vec<Vec2> {
+    let taper = underside.taper.clamp(0.05, 1.0);
+    rim.iter()
+        .map(|point| center + (*point - center) * taper)
+        .collect()
+}
+
+/// How many sides the spire is built with.
+///
+/// Fewer than the rim above it on purpose: the spire is seen edge-on at a
+/// distance where a faceted silhouette reads as rock, and matching the rim's
+/// segment count would spend triangles on a curve nobody can resolve.
+const SPIRE_SEGMENTS: usize = 32;
+
+/// The average of a polygon's points, which the underside tapers toward.
+fn centroid(polygon: &[Vec2]) -> Vec2 {
+    if polygon.is_empty() {
+        return Vec2::ZERO;
+    }
+    polygon.iter().copied().sum::<Vec2>() / polygon.len() as f32
+}
+
 /// A ribbon following a polyline, used for roads.
 pub fn ribbon(points: &[Vec2], width: f32) -> Mesh {
     let mut builder = MeshBuilder::new();
@@ -988,6 +1129,160 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A ring of world-space points, standing in for the rim of a disk.
+    fn ring(radius: f32, segments: usize) -> Vec<Vec2> {
+        (0..segments)
+            .map(|index| {
+                let angle = index as f32 / segments as f32 * std::f32::consts::TAU;
+                Vec2::new(angle.cos(), angle.sin()) * radius
+            })
+            .collect()
+    }
+
+    fn underside() -> MapUnderside {
+        MapUnderside {
+            cliff: 20.0,
+            shelf: 90.0,
+            taper: 0.6,
+            depth: 400.0,
+            cliff_color: [96, 84, 68, 255],
+            rock: [48, 42, 38, 255],
+            deep: [30, 26, 24, 255],
+        }
+    }
+
+    /// A skirt hangs below ground that is already drawn, so capping it would
+    /// put a second horizontal face in the same plane and the two would fight.
+    #[test]
+    fn a_wall_ring_has_walls_and_no_cap() {
+        let mut builder = MeshBuilder::new();
+        builder.wall_ring(&ring(50.0, 8), -10.0, 0.0);
+        let mesh = builder.build();
+
+        // Eight walls, four vertices each. A cap would add more.
+        assert_eq!(vertex_count(&mesh), 32);
+        for face in triangles(&mesh) {
+            let normal = winding_normal(face);
+            assert!(
+                normal.y.abs() < 1e-3,
+                "a wall faced {normal:?}, which is not vertical"
+            );
+        }
+        assert_normals_are_unit_length(&mesh);
+    }
+
+    /// The whole reason [`MeshBuilder::spire`] exists rather than reusing
+    /// `cone`: hang the apex underneath with `cone`'s winding and back-face
+    /// culling eats the entire spire.
+    #[test]
+    fn a_spire_faces_outward() {
+        let mut builder = MeshBuilder::new();
+        builder.spire(Vec2::ZERO, 100.0, -50.0, -400.0, 16);
+        let mesh = builder.build();
+
+        for face in triangles(&mesh) {
+            let normal = winding_normal(face);
+            let outward = Vec3::new(
+                (face[0].x + face[1].x + face[2].x) / 3.0,
+                0.0,
+                (face[0].z + face[1].z + face[2].z) / 3.0,
+            )
+            .normalize_or_zero();
+            assert!(
+                normal.dot(outward) > 0.0,
+                "a spire face at {outward:?} pointed inward as {normal:?}"
+            );
+        }
+    }
+
+    /// The underside is what makes the map an object rather than a cut-out, so
+    /// it has to actually reach the depth the manifest asked for.
+    #[test]
+    fn the_underside_hangs_to_the_depth_it_was_given() {
+        let underside = underside();
+        let mesh = disk_spire(&ring(500.0, 32), &underside);
+        let lowest = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions")
+            .iter()
+            .fold(f32::MAX, |low, point| low.min(point[1]));
+
+        assert!(
+            (lowest + underside.depth).abs() < 1e-3,
+            "the spire reached {lowest}, not {}",
+            -underside.depth
+        );
+        assert_normals_are_unit_length(&mesh);
+    }
+
+    /// The cliff meets the rock exactly, so neither has to be lifted off the
+    /// other to keep the depth buffer honest.
+    #[test]
+    fn the_cliff_ends_where_the_rock_begins() {
+        let underside = underside();
+        let rim = ring(500.0, 32);
+        let cliff = rim_cliff(&rim, underside.cliff);
+
+        let (top, bottom) = cliff
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions")
+            .iter()
+            .fold((f32::MIN, f32::MAX), |(top, bottom), point| {
+                (top.max(point[1]), bottom.min(point[1]))
+            });
+        assert!((top - 0.0).abs() < 1e-3, "the cliff started at {top}");
+        assert!((bottom + underside.cliff).abs() < 1e-3);
+
+        let rock_top = disk_shelf(&rim, &underside)
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions")
+            .iter()
+            .fold(f32::MIN, |top, point| top.max(point[1]));
+        assert!(
+            (rock_top - bottom).abs() < 1e-3,
+            "the rock started at {rock_top} while the cliff ended at {bottom}"
+        );
+    }
+
+    /// A world with no rim at all must be an empty mesh rather than a panic.
+    #[test]
+    fn an_underside_with_no_rim_builds_nothing() {
+        assert_eq!(disk_shelf(&[], &underside()).count_vertices(), 0);
+        assert_eq!(disk_spire(&[], &underside()).count_vertices(), 0);
+        assert_eq!(rim_cliff(&[], 10.0).count_vertices(), 0);
+    }
+
+    /// The three pieces have to meet exactly, since each is a different colour
+    /// and any gap between them shows the void straight through the world.
+    #[test]
+    fn the_shelf_meets_the_spire_where_it_meets_the_cliff() {
+        let underside = underside();
+        let rim = ring(500.0, 32);
+        let (shelf_top, shelf_bottom) = span(&disk_shelf(&rim, &underside));
+        let (spire_top, _) = span(&disk_spire(&rim, &underside));
+
+        assert!((shelf_top + underside.cliff).abs() < 1e-3);
+        assert!((shelf_bottom + underside.shelf).abs() < 1e-3);
+        assert!(
+            (spire_top - shelf_bottom).abs() < 1e-3,
+            "the spire started at {spire_top} while the shelf ended at {shelf_bottom}"
+        );
+    }
+
+    /// The highest and lowest points of a mesh.
+    fn span(mesh: &Mesh) -> (f32, f32) {
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions")
+            .iter()
+            .fold((f32::MIN, f32::MAX), |(top, bottom), point| {
+                (top.max(point[1]), bottom.min(point[1]))
+            })
     }
 
     #[test]

@@ -56,7 +56,7 @@ const MAX_FILES: usize = 1_500;
 /// since, and one unreadable project should not cost the King the other eleven.
 ///
 /// Returns `None` when nothing at all could be read, because a manifest with no
-/// towns has no island, no bounds and nothing for the camera to frame.
+/// towns has no disk, no bounds and nothing for the camera to frame.
 pub fn manifest_for(kingdom: &Kingdom) -> Option<MapManifest> {
     let root = Path::new(&kingdom.root);
     let options = ScanOptions {

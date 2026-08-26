@@ -32,11 +32,11 @@ use crate::map::MapManifest;
 /// counter means an idle map costs nothing.
 const POLL_INTERVAL_MS: u32 = 50;
 
-/// The map: every city in the kingdom, as an island of towns.
+/// The map: every city in the kingdom, as a disk of towns hanging in space.
 ///
 /// Fetches its manifest from [`crate::ROUTE`] on mount and hands it to the
 /// engine. `selected` is the King's chosen city, shared with the rest of the
-/// app — clicking a building sets it, clicking open sea clears it.
+/// app — clicking a building sets it, clicking empty space clears it.
 #[component]
 pub fn CityMap(
     /// The city the King has selected, if any.
@@ -93,7 +93,7 @@ pub fn CityMap(
         .forget();
     });
 
-    // Clicking a building selects its city; clicking open sea clears it.
+    // Clicking a building selects its city; clicking empty space clears it.
     //
     // The engine observes `Pointer<Over>`/`Pointer<Out>` but has no click
     // handler of its own, so the DOM's click is paired with whatever the engine
@@ -126,7 +126,7 @@ pub fn CityMap(
                 id="repo-city-canvas"
                 class="city-map-canvas"
                 on:click=select
-                aria-label="The kingdom: every project, drawn as an island of towns"
+                aria-label="The kingdom: every project, drawn as a disk of towns in space"
             ></canvas>
             {move || load_error.get().map(|error| view! {
                 <p class="city-map-error">{error}</p>

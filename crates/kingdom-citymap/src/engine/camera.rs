@@ -181,17 +181,74 @@ impl CameraRig {
         self.scale = next;
     }
 
+    /// Frames a set of world points, choosing the scale that just contains
+    /// them all.
+    ///
+    /// The box-shaped [`Self::frame_range`] cannot describe the disk: its
+    /// underside is a *point* at the centre, and reserving a full world-width
+    /// box down at the spire's tip leaves a third of the viewport empty. Points
+    /// say what is actually there.
+    pub fn frame_points(&mut self, points: &[Vec3], viewport: Vec2) {
+        if points.is_empty() {
+            return;
+        }
+        let (right, up) = screen_axes();
+        let forward = isometric_rotation() * Vec3::NEG_Z;
+
+        // The projection is orthographic, so a point's screen position is just
+        // its coordinates in the camera's own basis and the depth is free.
+        let mut min = Vec2::splat(f32::MAX);
+        let mut max = Vec2::splat(f32::MIN);
+        let mut depth = 0.0;
+        for point in points {
+            let screen = Vec2::new(point.dot(right), point.dot(up));
+            min = min.min(screen);
+            max = max.max(screen);
+            depth += point.dot(forward);
+        }
+        depth /= points.len() as f32;
+
+        let size = max - min;
+        let usable = (viewport - Vec2::splat(FIT_PADDING)).max(Vec2::splat(1.0));
+        self.scale = (size.x / usable.x).max(size.y / usable.y).max(f32::EPSILON);
+
+        // The basis is orthonormal, so the world point that projects to the
+        // middle of that box is simply its coordinates read back out.
+        let middle = (min + max) * 0.5;
+        self.focus = right * middle.x + up * middle.y + forward * depth;
+    }
+
     /// Frames a world-space box, choosing the scale that just contains it.
     pub fn frame(&mut self, center: Vec2, extent: Vec2, top: f32, viewport: Vec2) {
-        let focus = Vec3::new(center.x, top * 0.5, center.y);
-        let half = Vec3::new(extent.x * 0.5, top * 0.5, extent.y * 0.5);
+        self.frame_range(center, extent, 0.0, top, viewport);
+    }
+
+    /// Frames a world-space box that may hang below the ground plane.
+    ///
+    /// The world used to start at `y = 0` and rise, so a frame could assume its
+    /// bottom. The disk hangs a spire under the ground, and a fit that assumed
+    /// nothing was down there would crop it off the bottom of the screen on
+    /// load -- which is exactly the part of the world that shows it is an
+    /// object floating in space rather than a picture of one.
+    pub fn frame_range(
+        &mut self,
+        center: Vec2,
+        extent: Vec2,
+        bottom: f32,
+        top: f32,
+        viewport: Vec2,
+    ) {
+        let middle = (top + bottom) * 0.5;
+        let half_height = (top - bottom).abs() * 0.5;
+        let focus = Vec3::new(center.x, middle, center.y);
+        let half = Vec3::new(extent.x * 0.5, half_height, extent.y * 0.5);
         let (right, up) = screen_axes();
 
         // The box is symmetric about its centre and the projection is affine,
         // so the projected extent is symmetric too: measuring the corners on
         // one side is enough.
         let mut half_width = 0.0f32;
-        let mut half_height = 0.0f32;
+        let mut half_screen_height = 0.0f32;
         for corner in [
             Vec3::new(half.x, half.y, half.z),
             Vec3::new(half.x, half.y, -half.z),
@@ -199,12 +256,12 @@ impl CameraRig {
             Vec3::new(half.x, -half.y, -half.z),
         ] {
             half_width = half_width.max(corner.dot(right).abs());
-            half_height = half_height.max(corner.dot(up).abs());
+            half_screen_height = half_screen_height.max(corner.dot(up).abs());
         }
 
         let usable = (viewport - Vec2::splat(FIT_PADDING)).max(Vec2::splat(1.0));
         let scale = (half_width * 2.0 / usable.x)
-            .max(half_height * 2.0 / usable.y)
+            .max(half_screen_height * 2.0 / usable.y)
             .max(f32::EPSILON);
 
         self.focus = focus;
@@ -316,6 +373,7 @@ pub fn sync_camera(
     rig: Res<CameraRig>,
     bridge: Res<Bridge>,
     mut camera: Query<(&mut Transform, &mut Projection), With<MapCamera>>,
+    mut stars: Query<&mut Transform, (With<super::stars::StarField>, Without<MapCamera>)>,
     windows: Query<&Window>,
 ) {
     let Ok((mut transform, mut projection)) = camera.single_mut() else {
@@ -325,6 +383,7 @@ pub fn sync_camera(
     let distance = rig.distance();
     transform.translation = rig.focus + rotation * Vec3::new(0.0, 0.0, distance);
     transform.rotation = rotation;
+    let mut far = distance;
     if let Projection::Orthographic(orthographic) = projection.as_mut() {
         orthographic.scale = rig.scale;
         // The clip range hugs the world rather than spanning a fixed depth, so
@@ -333,6 +392,17 @@ pub fn sync_camera(
         let reach = rig.span * 1.2 + 200.0;
         orthographic.near = (distance - reach).max(0.1);
         orthographic.far = distance + reach;
+        far = orthographic.far;
+    }
+
+    // The star field is authored in pixels and rides on the camera, so it is
+    // scaled by however many world units a pixel is currently worth -- which is
+    // what keeps a star the same speck at every zoom. It sits just inside the
+    // far plane, which moves with the zoom, so the whole world draws in front
+    // of it.
+    if let Ok(mut field) = stars.single_mut() {
+        field.scale = Vec3::splat(rig.scale.max(f32::EPSILON));
+        field.translation = Vec3::new(0.0, 0.0, -far * 0.98);
     }
 
     let viewport = windows
@@ -503,6 +573,113 @@ mod tests {
             "pulled back to {} but fitting needs {fitted}",
             rig.scale
         );
+    }
+
+    /// The spire hangs below the ground, and it is the part that shows the
+    /// kingdom is an object floating in space. A fit that assumed the world
+    /// started at `y = 0` would crop it off the bottom of the screen on load.
+    #[test]
+    fn a_fitted_view_holds_both_the_rooftops_and_the_spire() {
+        let viewport = Vec2::new(1_400.0, 900.0);
+        let radius = 600.0f32;
+        let extent = Vec2::splat(radius * 2.0);
+        let (top, bottom) = (60.0f32, -radius * 1.05);
+
+        let mut rig = rig();
+        rig.frame_range(Vec2::ZERO, extent, bottom, top, viewport);
+
+        // Project the extremes of the world the same way the camera does, and
+        // check both land inside the viewport it just chose.
+        let (right, up) = screen_axes();
+        let half = (viewport - Vec2::splat(FIT_PADDING)) * 0.5 * rig.scale;
+        for corner in [
+            Vec3::new(-radius, top, -radius),
+            Vec3::new(radius, top, radius),
+            Vec3::new(0.0, bottom, 0.0),
+            Vec3::new(radius, bottom, radius),
+        ] {
+            let offset = corner - rig.focus;
+            assert!(
+                offset.dot(right).abs() <= half.x + 1e-2
+                    && offset.dot(up).abs() <= half.y + 1e-2,
+                "{corner:?} fell outside the fitted view"
+            );
+        }
+    }
+
+    /// The old signature has to keep meaning exactly what it meant, since every
+    /// other caller still frames a world standing on the ground.
+    #[test]
+    fn framing_to_the_ground_is_framing_from_zero() {
+        let viewport = Vec2::new(1_400.0, 900.0);
+        let mut framed = rig();
+        let mut ranged = rig();
+
+        framed.frame(Vec2::new(120.0, -40.0), Vec2::splat(900.0), 60.0, viewport);
+        ranged.frame_range(
+            Vec2::new(120.0, -40.0),
+            Vec2::splat(900.0),
+            0.0,
+            60.0,
+            viewport,
+        );
+
+        assert_eq!(framed.scale, ranged.scale);
+        assert_eq!(framed.focus, ranged.focus);
+    }
+
+    /// The disk's underside is a *point*, not a slab. Framing it as a box
+    /// reserves a full world-width band down at the spire's tip, most of it
+    /// empty, and pushes the kingdom into the top of the screen.
+    #[test]
+    fn framing_points_is_tighter_than_framing_the_box_around_them() {
+        let viewport = Vec2::new(1_400.0, 900.0);
+        let radius = 600.0f32;
+        let depth = radius * 1.05;
+
+        // A disk seen from above, plus the one point hanging under its centre.
+        let mut points: Vec<Vec3> = (0..48)
+            .map(|index| {
+                let angle = index as f32 / 48.0 * std::f32::consts::TAU;
+                Vec3::new(angle.cos() * radius, 60.0, angle.sin() * radius)
+            })
+            .collect();
+        points.push(Vec3::new(0.0, -depth, 0.0));
+
+        let mut pointwise = rig();
+        pointwise.frame_points(&points, viewport);
+
+        let mut boxed = rig();
+        boxed.frame_range(Vec2::ZERO, Vec2::splat(radius * 2.0), -depth, 60.0, viewport);
+
+        assert!(
+            pointwise.scale < boxed.scale,
+            "points fitted at {} but a box at {}",
+            pointwise.scale,
+            boxed.scale
+        );
+
+        // And everything still fits.
+        let (right, up) = screen_axes();
+        let half = (viewport - Vec2::splat(FIT_PADDING)) * 0.5 * pointwise.scale;
+        for point in &points {
+            let offset = *point - pointwise.focus;
+            assert!(
+                offset.dot(right).abs() <= half.x + 1e-2
+                    && offset.dot(up).abs() <= half.y + 1e-2,
+                "{point:?} fell outside the fitted view"
+            );
+        }
+    }
+
+    /// Nothing to frame must leave the camera where it was rather than send it
+    /// to an undefined place.
+    #[test]
+    fn framing_nothing_changes_nothing() {
+        let mut rig = rig();
+        let before = (rig.focus, rig.scale);
+        rig.frame_points(&[], Vec2::new(1_400.0, 900.0));
+        assert_eq!((rig.focus, rig.scale), before);
     }
 
     #[test]
