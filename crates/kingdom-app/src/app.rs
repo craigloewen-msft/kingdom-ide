@@ -441,7 +441,11 @@ pub fn App() -> impl IntoView {
         <Title text="Kingdom IDE"/>
 
         <Show
-            when=move || state.kingdom.get().is_open()
+            // `with`, not `get`: this is the app's outermost gate and re-runs on
+            // every push, and `is_open` only asks whether the root is a
+            // non-empty string -- `get` cloned every city and every plan to
+            // answer it.
+            when=move || state.kingdom.with(|k| k.is_open())
             fallback=move || view! { <ChooseKingdom/> }
         >
             // The rail lives on the parent route so it never unmounts: moving

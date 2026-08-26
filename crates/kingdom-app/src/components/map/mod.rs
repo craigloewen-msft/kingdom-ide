@@ -111,14 +111,18 @@ pub fn KingdomMap() -> impl IntoView {
     // and how much letterboxing there is.
     let viewport_px = RwSignal::new((1200.0_f64, 800.0_f64));
 
-    let kingdom = Memo::new(move |_| state.kingdom.get());
+    // The map draws *cities*, never plans -- so it tracks the cities alone.
+    // This used to hold the whole `Kingdom`, which meant every watch-socket
+    // push cloned all 29 plans and their transcripts into the map's memo and
+    // then re-ran the realm fitting below, on a screen where nothing about a
+    // plan is drawn. Narrowing what is tracked is also what stops a running
+    // turn re-settling the terrain.
+    let cities = Memo::new(move |_| state.kingdom.with(|k| k.cities.clone()));
+    let root = Memo::new(move |_| state.kingdom.with(|k| k.root.clone()));
 
     // The realm is the expensive part -- terrain fitting, settling, roads -- so
     // it is derived once per kingdom rather than per render.
-    let realm = Memo::new(move |_| {
-        let k = kingdom.get();
-        settle_kingdom(&k.root, &k.cities)
-    });
+    let realm = Memo::new(move |_| cities.with(|c| root.with(|r| settle_kingdom(r, c))));
 
     let bands = Memo::new(move |_| contours(&realm.get().terrain, &BANDS, TERRAIN_RES));
 
@@ -291,8 +295,7 @@ pub fn KingdomMap() -> impl IntoView {
     // pairing is what makes zoom feel like moving through a world rather than
     // scaling a picture.
     let visit: Callback<CityId> = Callback::new(move |id: CityId| {
-        let k = kingdom.get_untracked();
-        if let Some(i) = k.cities.iter().position(|c| c.id == id) {
+        if let Some(i) = cities.with_untracked(|c| c.iter().position(|c| c.id == id)) {
             if let Some(p) = realm.get_untracked().placements.get(i) {
                 travel(Some((p.x, p.y)));
             }
@@ -585,15 +588,16 @@ fn Cities(realm: Memo<Realm>, detail: Memo<Detail>, visit: Callback<CityId>) -> 
 
     let entries = Memo::new(move |_| {
         let r = realm.get();
-        let mut list: Vec<(usize, City, kingdom_core::layout::CityPlacement)> = state
-            .kingdom
-            .get()
-            .cities
-            .into_iter()
-            .zip(r.placements.iter().copied())
-            .enumerate()
-            .map(|(i, (c, p))| (i, c, p))
-            .collect();
+        let mut list: Vec<(usize, City, kingdom_core::layout::CityPlacement)> =
+            state.kingdom.with(|k| {
+                k.cities
+                    .iter()
+                    .cloned()
+                    .zip(r.placements.iter().copied())
+                    .enumerate()
+                    .map(|(i, (c, p))| (i, c, p))
+                    .collect()
+            });
 
         // SVG has no depth buffer, so draw order is the depth cue -- the same
         // reason `skyline::order_for_painting` exists, one level up. On a flat

@@ -33,8 +33,13 @@ async fn watch(mut socket: WebSocket, id: PlanId) {
     // The opening snapshot is what makes reconnection free: a conversation that
     // has been offline is handed current truth as its first message, with
     // nothing to replay and no sequence to reconcile.
+    //
+    // `for_wire` for the same reason every proclamation is: this is the largest
+    // message the socket ever sends -- a whole plan, at whatever length its
+    // transcript has reached -- and the opaque half of the model's thinking is
+    // no part of what the chamber draws.
     if let Some(plan) = crate::api::snapshot(&id) {
-        if send(&mut socket, &plan).await.is_err() {
+        if send(&mut socket, &plan.for_wire()).await.is_err() {
             crate::events::forget_if_unwatched(&id);
             return;
         }
