@@ -120,6 +120,11 @@ pub fn CityMap(
     #[allow(unused_variables)]
     #[prop(into)]
     focus_file: leptos::prelude::Signal<Option<String>>,
+    /// The file the King picked off the map. Unused here, for the reason
+    /// above -- and doubly so: the server never renders a map to press.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    picked_file: leptos::prelude::RwSignal<Option<String>>,
     /// What the open plan is proposing. Unused here, for the reason above --
     /// only the browser has a manifest to resolve it against and an engine to
     /// raise it with.
