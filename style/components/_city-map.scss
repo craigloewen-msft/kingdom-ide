@@ -102,6 +102,21 @@
   color: t.$ink-dim;
 }
 
+// What the works standing on the map add up to.
+//
+// The map says *where* the work is; this says *how much*, which is the one
+// thing geometry is bad at -- a scaffold is a proportion, not a number. The two
+// counts reuse `.count-added` / `.count-removed` from `_review.scss`, so the
+// same change is the same two colours in the drawer and on the map.
+.map-rail-works {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
 .map-rail-open {
   flex: 0 0 auto;
   padding: 0 4px;

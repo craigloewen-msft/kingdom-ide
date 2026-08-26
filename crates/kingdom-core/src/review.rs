@@ -76,6 +76,17 @@ pub struct ChangedFile {
 }
 
 impl ChangedFile {
+    /// Everything that moved in this file: lines added plus lines removed.
+    ///
+    /// One number for "how much happened here", which is the question the map
+    /// asks -- a house that gained forty lines and one that lost forty are both
+    /// heavily worked, and drawing only growth would leave a gutted file looking
+    /// untouched. The two halves stay separate in the fields above, because the
+    /// drawer shows them apart and the map colours them apart.
+    pub fn churn(&self) -> u32 {
+        self.added + self.removed
+    }
+
     /// The directory part and the file name, split for rendering: the drawer
     /// dims the folder and brightens the name, because in a narrow column the
     /// name is what is being looked for.
@@ -378,6 +389,81 @@ mod tests {
             ..file
         };
         assert_eq!(root.split(), ("", "README.md"));
+    }
+
+    fn changed(path: &str, added: u32, removed: u32, binary: bool) -> ChangedFile {
+        ChangedFile {
+            path: path.into(),
+            old_path: None,
+            kind: ChangeKind::Modified,
+            added,
+            removed,
+            binary,
+            language: Language::Rust,
+        }
+    }
+
+    /// Both halves count. A file that was gutted is as heavily worked as one
+    /// that doubled, and the map would show an emptied house as untouched if
+    /// this counted only growth.
+    #[test]
+    fn churn_counts_what_moved_in_both_directions() {
+        assert_eq!(changed("a.rs", 40, 0, false).churn(), 40);
+        assert_eq!(changed("b.rs", 0, 40, false).churn(), 40);
+        assert_eq!(changed("c.rs", 12, 30, false).churn(), 42);
+        assert_eq!(changed("d.rs", 0, 0, false).churn(), 0);
+    }
+
+    /// The scale the map draws every scaffold against, so what it picks decides
+    /// whether the picture is readable.
+    ///
+    /// The normaliser itself lives in `kingdom_citymap::map::works`, not here:
+    /// it has to be taken over the files actually *drawn*, and only the map
+    /// knows which those are. What this pins is the fact it is built from.
+    #[test]
+    fn the_busiest_file_is_the_one_that_moved_most() {
+        let files = vec![
+            changed("small.rs", 3, 1, false),
+            changed("big.rs", 200, 90, false),
+            changed("middling.rs", 30, 0, false),
+        ];
+        let busiest = files.iter().map(ChangedFile::churn).max();
+        assert_eq!(busiest, Some(290));
+
+        let summary = ChangeSummary {
+            base: "main".into(),
+            files,
+            note: None,
+        };
+        // Not the total across the plan: against that, forty evenly-worked
+        // files would each draw a fortieth of the scale and the map would say
+        // nothing happened anywhere.
+        assert!(290 < summary.added() + summary.removed());
+    }
+
+    /// A checked-in asset reports counts that are not line counts. Left in, one
+    /// of them would flatten every real file on the map against it -- so the
+    /// map filters them out before scaling. Pinned here because `binary` is the
+    /// flag it filters on.
+    #[test]
+    fn a_binary_file_is_marked_so_it_can_be_left_out() {
+        let files = vec![
+            changed("logo.png", 999_999, 0, true),
+            changed("main.rs", 25, 5, false),
+        ];
+        let honest = files
+            .iter()
+            .filter(|f| !f.binary)
+            .map(ChangedFile::churn)
+            .max();
+        assert_eq!(honest, Some(30));
+    }
+
+    /// Nothing changed is a real answer, and the map divides by this.
+    #[test]
+    fn an_empty_summary_has_no_busiest_file() {
+        let summary = ChangeSummary::nothing("main", "nothing yet");
+        assert_eq!(summary.files.iter().map(ChangedFile::churn).max(), None);
     }
 
     /// A row with both sides unchanged is context; anything else is not, and

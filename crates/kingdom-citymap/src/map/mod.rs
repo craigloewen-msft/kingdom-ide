@@ -20,6 +20,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod works;
+
+pub use works::{Work, WorkSite};
+
 /// An sRGB colour with alpha.
 pub type MapColor = [u8; 4];
 
@@ -168,6 +172,111 @@ impl MapManifest {
         self.features
             .iter()
             .find(|feature| feature.repository == repository && feature.path == path)
+    }
+
+    /// The ward standing for a folder of one repository, if the map drew one.
+    ///
+    /// The folder is named the way [`MapWard::path`] and [`MapFeature::folder`]
+    /// both are -- relative to the repository root, no leading slash -- so the
+    /// folder of a file the King's agent has just created can be looked up
+    /// directly from its path.
+    ///
+    /// # Why the repository is needed as well
+    ///
+    /// [`Self::holding_at`]'s reason, and it bites harder here: a `MapWard`'s
+    /// `path` is repository-relative by deliberate decision (`layout::move_city`
+    /// says so), so in a kingdom of Rust projects every town contributes a ward
+    /// whose path is exactly `src`. Matching on the path alone would put a new
+    /// file in whichever city's `src` happened to be built first.
+    ///
+    /// The identity that disambiguates them is which repository's *buildings*
+    /// stand on the ward -- see [`Self::ward_belongs_to`]. Ward ids do encode
+    /// the town (`layout::move_city` prefixes them), but that is an
+    /// implementation detail of the layout rather than a promise of the wire
+    /// format, so it is not parsed.
+    ///
+    /// Returns `None` for a folder the layout merged away, which is ordinary --
+    /// not every folder becomes a ward, exactly as [`MapCrumb::ward_id`] is
+    /// `None` for the steps that did not.
+    pub fn ward_at(&self, repository: &str, folder: &str) -> Option<&MapWard> {
+        self.world
+            .wards
+            .iter()
+            .filter(|ward| ward.path == folder)
+            .find(|ward| self.ward_belongs_to(&ward.id, repository))
+    }
+
+    /// Whether a named repository's files stand on a ward, or anywhere below it.
+    ///
+    /// Settled through the **buildings**, which are the only structural link
+    /// between a ward and a repository: a [`MapBuilding`] names both the ward it
+    /// stands on and the feature it was built from, and the feature names its
+    /// repository. A feature's `folder` cannot serve here -- it is
+    /// repository-relative, so every town's `src` features report the same
+    /// folder and two towns' `src` wards would be indistinguishable, which is
+    /// exactly the confusion this function exists to resolve.
+    ///
+    /// Descendants are searched because a building records only the *innermost*
+    /// ward it stands in, so a folder holding nothing but sub-folders has no
+    /// building of its own -- and answering `false` for one would leave a new
+    /// file in `crates/` with nowhere to stand.
+    ///
+    /// The manifest arrives over the network, so the walk keeps a visited set:
+    /// a `parent` chain that loops terminates by construction rather than by a
+    /// bound that has to be chosen. `engine::wards::lineage` guards the same
+    /// links walked the other way.
+    fn ward_belongs_to(&self, ward_id: &str, repository: &str) -> bool {
+        let owns = |id: &str| {
+            self.world.buildings.iter().any(|building| {
+                building.ward_id.as_deref() == Some(id)
+                    && self.features.iter().any(|feature| {
+                        feature.id == building.feature_id && feature.repository == repository
+                    })
+            })
+        };
+
+        let mut seen: Vec<&str> = vec![ward_id];
+        let mut frontier: Vec<&str> = vec![ward_id];
+        while let Some(current) = frontier.pop() {
+            if owns(current) {
+                return true;
+            }
+            for child in self.wards_inside(current) {
+                if !seen.contains(&child.id.as_str()) {
+                    seen.push(&child.id);
+                    frontier.push(&child.id);
+                }
+            }
+        }
+        false
+    }
+
+    /// Every plot already spoken for on a ward, as ground a newcomer must avoid.
+    ///
+    /// The **lot** rather than the footprint, which is the whole point: a lot is
+    /// the plot including the open ground around the house, so a ghost house
+    /// placed clear of every lot lands on genuinely free land rather than in
+    /// somebody's garden.
+    ///
+    /// Only the wards' *own* holdings are returned -- a building records the
+    /// innermost ward it stands in ([`MapBuilding::ward_id`]) -- so a placer
+    /// working on a folder that has sub-folders must ask about those too. The
+    /// caller does exactly that, because it also has to keep out of the
+    /// sub-wards' ground itself.
+    pub fn lots_in<'a>(&'a self, ward_id: &'a str) -> impl Iterator<Item = MapRect> + 'a {
+        self.world
+            .buildings
+            .iter()
+            .filter(move |building| building.ward_id.as_deref() == Some(ward_id))
+            .map(|building| building.lot)
+    }
+
+    /// The wards nested directly inside one, whose ground is not free either.
+    pub fn wards_inside<'a>(&'a self, ward_id: &'a str) -> impl Iterator<Item = &'a MapWard> + 'a {
+        self.world
+            .wards
+            .iter()
+            .filter(move |ward| ward.parent.as_deref() == Some(ward_id))
     }
 }
 
@@ -629,13 +738,20 @@ mod tests {
     }
 
     /// A feature standing for one file.
+    ///
+    /// `folder` is derived from the path exactly as `manifest::feature_from_building`
+    /// derives it, because `ward_at` reads it -- a helper that left it empty
+    /// would be testing against a manifest the builder never produces.
     fn holding(repository: &str, path: &str, center: [f32; 2]) -> MapFeature {
         MapFeature {
             id: format!("{repository}/{path}"),
             name: path.rsplit('/').next().unwrap_or(path).to_owned(),
             path: path.to_owned(),
             repository: repository.to_owned(),
-            folder: String::new(),
+            folder: match path.rfind('/') {
+                Some(at) => path[..at].to_owned(),
+                None => String::new(),
+            },
             breadcrumb: Vec::new(),
             building_kind: String::new(),
             meaning: String::new(),
@@ -762,6 +878,184 @@ mod tests {
         // The right city, a file it does not have. Nothing, rather than the
         // other city's building.
         assert!(map.holding_at("scratch", "src/lib.rs").is_none());
+    }
+
+    fn test_ward(id: &str, path: &str, parent: Option<&str>) -> MapWard {
+        MapWard {
+            id: id.to_owned(),
+            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            path: path.to_owned(),
+            parent: parent.map(str::to_owned),
+            files: 1,
+            rect: MapRect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                depth: 50.0,
+            },
+            polygon: Vec::new(),
+            depth: path.matches('/').count() as u32,
+            ground: [0, 0, 0, 255],
+            edge: [0, 0, 0, 255],
+        }
+    }
+
+    fn test_building(feature_id: &str, ward_id: &str, lot: MapRect) -> MapBuilding {
+        MapBuilding {
+            feature_id: feature_id.to_owned(),
+            ward_id: Some(ward_id.to_owned()),
+            kind: BuildingKind::Guildhall,
+            footprint: lot,
+            lot,
+            height: 10.0,
+            palette: MapPalette::default(),
+            complexity: 1,
+            seed: 0,
+        }
+    }
+
+    fn town(name: &str) -> MapTown {
+        MapTown {
+            id: format!("town-{name}"),
+            name: name.to_owned(),
+            rect: MapRect::default(),
+            polygon: Vec::new(),
+            ground: [0, 0, 0, 255],
+            edge: [0, 0, 0, 255],
+        }
+    }
+
+    /// A new file's folder is looked up by path, which is all the review
+    /// summary gives us.
+    #[test]
+    fn a_folder_resolves_to_the_ward_drawn_for_it() {
+        let mut map = manifest(Vec::new(), vec![holding("solo", "src/main.rs", [1.0, 1.0])]);
+        map.world.wards = vec![test_ward("ward-0", "src", None)];
+        map.world.towns = vec![town("solo")];
+        // The building is what ties a ward to a repository -- see
+        // `ward_belongs_to`. A feature with no building is a file the layout
+        // did not draw.
+        map.world.buildings = vec![test_building(
+            "solo/src/main.rs",
+            "ward-0",
+            MapRect::default(),
+        )];
+
+        assert_eq!(map.ward_at("solo", "src").map(|w| w.id.as_str()), Some("ward-0"));
+        // A folder the layout merged away is an ordinary absence, exactly as a
+        // breadcrumb step with no `ward_id` is.
+        assert!(map.ward_at("solo", "src/deep/nested").is_none());
+        // And a city this map never drew must not be answered with another
+        // city's ground -- the bug a single-town fast path introduced here.
+        assert!(map.ward_at("nowhere", "src").is_none());
+    }
+
+    /// The trap `holding_at` documents, in the form it takes for folders -- and
+    /// it bites harder here, because *every* Rust project has a `src`.
+    #[test]
+    fn two_towns_with_the_same_folder_name_are_told_apart() {
+        let mut map = manifest(
+            Vec::new(),
+            vec![
+                holding("alpha", "src/main.rs", [1.0, 1.0]),
+                holding("beta", "src/main.rs", [9.0, 9.0]),
+            ],
+        );
+        map.world.towns = vec![town("alpha"), town("beta")];
+        // Ward ids carry the town prefix `layout::move_city` applies; the path
+        // deliberately does not.
+        map.world.wards = vec![
+            test_ward("alpha/ward-0", "src", None),
+            test_ward("beta/ward-0", "src", None),
+        ];
+        map.world.buildings = vec![
+            test_building("alpha/src/main.rs", "alpha/ward-0", MapRect::default()),
+            test_building("beta/src/main.rs", "beta/ward-0", MapRect::default()),
+        ];
+
+        assert_eq!(
+            map.ward_at("beta", "src").map(|w| w.id.as_str()),
+            Some("beta/ward-0"),
+            "a new file must not be placed in another city's src"
+        );
+        assert_eq!(
+            map.ward_at("alpha", "src").map(|w| w.id.as_str()),
+            Some("alpha/ward-0")
+        );
+    }
+
+    /// A folder holding nothing but sub-folders has no building of its own, so
+    /// the ownership test has to look below it -- or a new file in `crates/`
+    /// would have nowhere to stand.
+    #[test]
+    fn a_folder_of_folders_still_belongs_to_its_repository() {
+        let mut map = manifest(Vec::new(), vec![holding("alpha", "crates/core/lib.rs", [1.0, 1.0])]);
+        map.world.towns = vec![town("alpha"), town("beta")];
+        map.world.wards = vec![
+            test_ward("alpha/ward-0", "crates", None),
+            test_ward("alpha/ward-1", "crates/core", Some("alpha/ward-0")),
+        ];
+        // The building sits in the *inner* ward, which is the only one it names.
+        map.world.buildings = vec![test_building(
+            "alpha/crates/core/lib.rs",
+            "alpha/ward-1",
+            MapRect::default(),
+        )];
+
+        assert_eq!(
+            map.ward_at("alpha", "crates").map(|w| w.id.as_str()),
+            Some("alpha/ward-0")
+        );
+    }
+
+    /// The manifest arrives over the network, and a parent chain that loops
+    /// must not hang the browser.
+    ///
+    /// [`MapManifest::ward_belongs_to`] searches a ward's descendants, so the
+    /// links here are genuinely walked -- and the visited set is what makes the
+    /// walk terminate. `engine::wards::lineage` pins the same guarantee on the
+    /// same links walked upward.
+    #[test]
+    fn a_looping_folder_tree_cannot_hang_the_lookup() {
+        let mut map = manifest(Vec::new(), Vec::new());
+        map.world.towns = vec![town("alpha"), town("beta")];
+        let mut a = test_ward("a", "knot", Some("b"));
+        a.parent = Some("b".to_owned());
+        let mut b = test_ward("b", "other", Some("a"));
+        b.parent = Some("a".to_owned());
+        map.world.wards = vec![a, b];
+
+        // No buildings at all, so the answer is "not this repository's" -- the
+        // point of the test is that it *returns*.
+        assert!(map.ward_at("alpha", "knot").is_none());
+    }
+
+    /// The ground a placer has to keep off: the lots on a ward, and the wards
+    /// nested inside it.
+    #[test]
+    fn a_ward_reports_the_ground_already_spoken_for() {
+        let mut map = manifest(Vec::new(), Vec::new());
+        let lot = MapRect {
+            x: 4.0,
+            y: 5.0,
+            width: 6.0,
+            depth: 7.0,
+        };
+        map.world.wards = vec![
+            test_ward("ward-0", "src", None),
+            test_ward("ward-1", "src/engine", Some("ward-0")),
+            test_ward("ward-2", "docs", None),
+        ];
+        map.world.buildings = vec![
+            test_building("f0", "ward-0", lot),
+            test_building("f1", "ward-1", MapRect::default()),
+        ];
+
+        let lots: Vec<MapRect> = map.lots_in("ward-0").collect();
+        assert_eq!(lots, vec![lot], "only this ward's own holdings");
+
+        let inside: Vec<&str> = map.wards_inside("ward-0").map(|w| w.id.as_str()).collect();
+        assert_eq!(inside, ["ward-1"], "and only its direct children");
     }
 
     /// The two questions the presence is asked, and the one that is not a

@@ -779,6 +779,22 @@ fn ConversationBody(
     let summary = RwSignal::new(None::<kingdom_core::ChangeSummary>);
     let looking = RwSignal::new(false);
 
+    // And the same answer, published where the map can raise it as building
+    // works over the city.
+    //
+    // Beside the `focus_file` effect above and for its reason: the map is
+    // mounted outside the router's outlet and may never unmount, so a shared
+    // signal on `KingdomState` is the only seam between this chamber and it.
+    //
+    // This costs no request of its own -- the rail is already fetching the
+    // summary for the drawer and the badge, and this is the same value read a
+    // third time. Cleared on the way out, so a plan the King has left does not
+    // leave scaffolding standing over its city.
+    Effect::new(move |_| state.works.set(summary.get()));
+    on_cleanup(move || {
+        state.works.try_set(None);
+    });
+
     // The open file's counts, as a stamp. When the court edits the file the
     // King is reading, these move and the panel fetches again -- at no cost,
     // because the rail has already asked the question.

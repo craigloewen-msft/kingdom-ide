@@ -241,7 +241,13 @@ crates/
                     wasm; `engine` is Bevy and must never reach the server.
     map/            The manifest: world-space geometry, plain serialisable
                     data. The one *seam* on both targets — where the two halves
-                    meet
+                    meet. `works.rs` is the exception that proves it: what a
+                    plan proposes, resolved from a `ChangeSummary` into ground
+                    to build on, and the placer that finds free land inside a
+                    folder for a file that has no house yet. It lives here
+                    rather than in `engine` so `cargo test` can pin it without
+                    a browser — a ghost house landing on a real one is then a
+                    test failure rather than something noticed by eye
     progress.rs     How much of that manifest has arrived, as a fraction and a
                     line of text. Also on both targets, for a smaller reason:
                     only the browser reads it, but `cargo test` builds this
@@ -256,7 +262,11 @@ crates/
                     `activity.rs` is the one part fed from outside the manifest:
                     which towns have agents working in them, traced as a pulsing
                     ring, polled rather than pushed and never cached with the
-                    geometry. `stars.rs` is the one part not in the world at all:
+                    geometry. `works.rs` is the second, for the same reason and
+                    on the same channel: the open plan's changes, raised over the
+                    city as scaffolding, skirts of cleared ground, and ghost
+                    houses for files that do not exist yet. `stars.rs` is the
+                    one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
                     would have no parallax and would *zoom* with the kingdom —
                     it rides on the camera in pixels instead. `raise.rs` builds

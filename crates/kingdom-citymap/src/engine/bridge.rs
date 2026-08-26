@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::map::{MapManifest, MapPresence};
+use crate::map::{MapManifest, MapPresence, Work};
 use bevy::prelude::*;
 
 /// How far the camera is zoomed in, and therefore how much detail is drawn.
@@ -109,6 +109,19 @@ pub enum ViewerCommand {
     /// polls for the whole picture, so a town missing from the list is a town
     /// with nothing running rather than a town nobody mentioned.
     SetActivity(Vec<TownActivity>),
+    /// What the open plan is proposing, as ground to raise works on.
+    ///
+    /// Replaces rather than amends, for [`Self::SetActivity`]'s reason and one
+    /// more: a file the court has since reverted must *stop* being drawn, and
+    /// an amending command has no way to say that. An empty list is the ordinary
+    /// way to say "nothing is under construction" -- it is what leaving a
+    /// chamber sends.
+    ///
+    /// Everything here is already world-space geometry. The resolving from a
+    /// changed file to a rectangle happens in `view.rs`, which is the boundary
+    /// the engine's ignorance of Kingdom's domain is kept at -- exactly as
+    /// [`TownActivity`] is a bare name and a count rather than a `CityId`.
+    SetWorks(Vec<Work>),
     /// Where the map is standing, and therefore how hard it should work.
     ///
     /// The map is mounted once for the life of the page -- see

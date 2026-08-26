@@ -21,6 +21,7 @@ pub mod spawn;
 pub mod stars;
 pub mod text;
 pub mod wards;
+pub mod works;
 
 mod lod;
 
@@ -146,6 +147,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<Raise>()
             .init_resource::<Standing>()
             .init_resource::<wards::ActiveWard>()
+            .init_resource::<works::Works>()
             .init_resource::<input::PointerState>()
             .init_resource::<input::Steering>()
             .init_resource::<labels::LabelPool>()
@@ -174,6 +176,11 @@ impl Plugin for RepoCityPlugin {
                     // ordering is the second half of that guarantee.
                     activity::apply_activity,
                     activity::pulse_rings,
+                    // Beside the activity systems and after `apply_lod` for the
+                    // same reason: the works carry no `VisibleFrom`, so nothing
+                    // may hide them in the frame this has just raised them in.
+                    works::apply_works,
+                    works::pulse_works,
                     camera::sync_camera,
                     wards::apply_label_legibility,
                     wards::track_active_ward,
@@ -211,6 +218,7 @@ fn apply_commands(
     mut raise: ResMut<Raise>,
     mut rig: ResMut<CameraRig>,
     mut working: ResMut<Activity>,
+    mut works: ResMut<works::Works>,
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
@@ -243,6 +251,12 @@ fn apply_commands(
                 // exists is meaningless, so a new world arrives to a map that
                 // is following again.
                 steering.release();
+                // And works raised over a settlement that is being torn down
+                // would hang in the air above whatever replaces it. The
+                // interface re-sends them if the plan is still open.
+                if !works.is_quiet() {
+                    *works = works::Works::default();
+                }
                 spawn::clear_world(
                     &mut commands,
                     &existing,
@@ -332,6 +346,18 @@ fn apply_commands(
                 // costs one pass over a handful of rings. Guarding it here
                 // would trade that for a comparison on every poll.
                 *working = Activity(towns);
+            }
+            ViewerCommand::SetWorks(raised) => {
+                // Guarded, unlike `SetActivity` above, and the asymmetry is
+                // deliberate. An equal assignment there costs one pass over a
+                // handful of rings; here `apply_works` despawns and rebuilds
+                // every scaffold on the map, so a redundant set would tear down
+                // and re-raise the whole construction site. The comparison is
+                // over a few dozen plain structs -- far cheaper than the work it
+                // avoids.
+                if works.0 != raised {
+                    *works = works::Works(raised);
+                }
             }
             ViewerCommand::Show(presence) => {
                 // Two separate costs, and only stopping both is worth
