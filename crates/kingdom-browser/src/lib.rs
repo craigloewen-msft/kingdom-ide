@@ -28,4 +28,6 @@ mod session;
 
 pub use profile::{PerfReading, ProfilingState};
 pub use screencast::{ScreencastBroker, ScreencastEvent};
-pub use session::{BrowserError, BrowserSessionManager, ConsoleEntry, KeyMethod, Screenshot};
+pub use session::{
+    sweep_orphans, BrowserError, BrowserSessionManager, ConsoleEntry, KeyMethod, Screenshot,
+};

@@ -93,6 +93,15 @@ async fn main() {
         None => println!(),
     }
 
+    // Clears the browsers a previous server died without closing, and starts
+    // the reaper that stops this one accumulating its own. Reported only when
+    // it found something: on a clean machine there is nothing to say, and a
+    // line saying "reclaimed 0" every boot is noise.
+    let reclaimed = kingdom_app::tools::browser::start_housekeeping();
+    if reclaimed > 0 {
+        println!("     Reclaimed {reclaimed} abandoned browser profile(s) from a previous run\n");
+    }
+
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind");
