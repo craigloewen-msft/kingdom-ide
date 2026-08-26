@@ -71,11 +71,31 @@ pub enum ViewerCommand {
         /// The world-space width and depth to fit.
         extent: [f32; 2],
     },
-    /// Centre on a world point without changing the zoom.
-    LookAt {
+    /// Centre on a world point and zoom in far enough to read what stands
+    /// there.
+    ///
+    /// This is what opening a file in a chamber sends. It was a bare
+    /// `LookAt` -- centre, keep the zoom -- which slid a town-wide frame
+    /// sideways and left the King looking at the coarsest detail tier, where a
+    /// house is twenty pixels and nothing is labelled. Pointing the map at one
+    /// file now means arriving at it, not merely aiming at it.
+    ///
+    /// The zoom is a cut rather than a glide, deliberately: the rail's map
+    /// ticks at `engine::RAIL_WAKE`, so a tween would be animated at eight
+    /// frames a second and read worse than the jump does.
+    Inspect {
         /// The world point to centre on.
         point: [f32; 2],
     },
+    /// Hand the camera back to whatever the interface wants it pointed at.
+    ///
+    /// The counterpart to a takeover: dragging or scrolling the map suspends
+    /// the following (see [`super::input::Steering`]), and this ends that
+    /// suspension. Sent by the King pressing the free-look chip, and by the
+    /// map changing home -- a camera framed for the whole region is simply
+    /// wrong in a pane at the foot of the rail, so a re-fit there is fitting
+    /// rather than following.
+    ReleaseCamera,
     /// Pin or unpin a ward from outside the map, which is what a breadcrumb
     /// step does.
     ///
@@ -236,6 +256,14 @@ pub struct ViewerStatus {
     pub lod: LodLevel,
     /// The world-space rect the camera covers, for the minimap indicator.
     pub camera_rect: [f32; 4],
+    /// Whether the King has taken the camera by hand.
+    ///
+    /// Set the moment a drag pans or a wheel zooms, and cleared by
+    /// [`ViewerCommand::ReleaseCamera`] or by `input::RELEASE_AFTER` of
+    /// stillness. While it is set the interface stops re-framing the map on
+    /// the selected city and the open file -- see the two focus effects in
+    /// `view.rs` -- and draws the chip that says so.
+    pub manual: bool,
     /// Set when the engine could not build the world it was given.
     pub error: Option<String>,
 }
@@ -319,6 +347,7 @@ fn status_matches(left: &ViewerStatus, right: &ViewerStatus) -> bool {
         && left.hovered_ward == right.hovered_ward
         && left.selected_ward == right.selected_ward
         && left.lod == right.lod
+        && left.manual == right.manual
         && left.error == right.error
         && (left.zoom - right.zoom).abs() < 0.005
         && left
@@ -495,6 +524,25 @@ mod tests {
 
         bridge.update_status(|status| status.selected_ward = Some("ward-2".to_owned()));
         assert_ne!(after_ward, bridge.revision());
+    }
+
+    /// The chip is drawn from this flag, so a takeover the revision never
+    /// moves for is a takeover the King is never told about -- the trap
+    /// `status_matches` is annotated for, on the newest field.
+    #[test]
+    fn taking_the_camera_wakes_the_interface() {
+        let bridge = Bridge::new();
+        assert!(!bridge.status().manual, "the map follows at boot");
+
+        let start = bridge.revision();
+        bridge.update_status(|status| status.manual = true);
+        let taken = bridge.revision();
+        assert_ne!(start, taken);
+
+        // And handing it back, or the chip would stay on screen for the life
+        // of the page.
+        bridge.update_status(|status| status.manual = false);
+        assert_ne!(taken, bridge.revision());
     }
 
     #[test]

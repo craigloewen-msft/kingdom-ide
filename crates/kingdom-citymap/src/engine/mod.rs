@@ -147,6 +147,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<Standing>()
             .init_resource::<wards::ActiveWard>()
             .init_resource::<input::PointerState>()
+            .init_resource::<input::Steering>()
             .init_resource::<labels::LabelPool>()
             .add_systems(Startup, (setup, labels::spawn_label_pool))
             .add_systems(
@@ -159,6 +160,11 @@ impl Plugin for RepoCityPlugin {
                     raise::raise_world,
                     input::track_pointer,
                     input::handle_scroll,
+                    // After the two systems that can take the camera, so a
+                    // takeover is published on the frame it happens rather
+                    // than one later -- and so the release cannot undo a pan
+                    // that arrived in the same frame it fell due.
+                    input::release_when_still,
                     lod::track_lod,
                     lod::apply_lod,
                     // After `apply_lod`, which walks every entity with a
@@ -210,6 +216,7 @@ fn apply_commands(
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
     mut winit: ResMut<WinitSettings>,
     mut standing: ResMut<Standing>,
+    mut steering: ResMut<input::Steering>,
 ) {
     let queued = bridge.drain_commands();
     if queued.is_empty() {
@@ -232,6 +239,10 @@ fn apply_commands(
                 // clearing the old world, lighting the scene, and spawning the
                 // root the new one goes up under.
                 raise.abandon();
+                // A camera the King took hold of over a world that no longer
+                // exists is meaningless, so a new world arrives to a map that
+                // is following again.
+                steering.release();
                 spawn::clear_world(
                     &mut commands,
                     &existing,
@@ -302,7 +313,15 @@ fn apply_commands(
                     viewport,
                 );
             }
-            ViewerCommand::LookAt { point } => rig.look_at(Vec2::from_array(point)),
+            ViewerCommand::Inspect { point } => {
+                rig.look_at(Vec2::from_array(point));
+                // The zoom is the whole point of this command: `look_at` alone
+                // slid a town-wide frame sideways and left a house twenty
+                // pixels wide, which is the coarsest detail tier. See the
+                // variant's own doc.
+                rig.zoom_to_holding_pixels(camera::INSPECT_HOLDING_PIXELS);
+            }
+            ViewerCommand::ReleaseCamera => steering.release(),
             ViewerCommand::SelectWard(id) => {
                 bridge.update_status(|status| status.selected_ward = id);
             }

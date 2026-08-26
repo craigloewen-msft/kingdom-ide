@@ -262,9 +262,13 @@ crates/
                     it rides on the camera in pixels instead. `raise.rs` builds
                     a world a slice at a time instead of in one call, so the
                     browser gets the frame back and the loading bar can move —
-                    see §4
-    view.rs         `CityMap` — the canvas, the click that selects a city, and
-                    the loading card with the bar on it
+                    see §4. `input.rs` holds `Steering`: a drag or a wheel takes
+                    the camera away from the interface, so the map stops
+                    re-framing itself on the open file until the King hands it
+                    back or leaves it still for `RELEASE_AFTER`
+    view.rs         `CityMap` — the canvas, the click that selects a city, the
+                    loading card with the bar on it, and the free-look chip that
+                    says the camera is his and offers it back
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
