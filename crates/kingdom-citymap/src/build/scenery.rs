@@ -2,8 +2,8 @@
 //!
 //! The settlement layout owns buildings, roads, plazas, and wards. This module
 //! fills only the land that remains: trees use a deterministic Poisson sampler
-//! clipped to the real shoreline, while shoreline posts are laid out by arc
-//! length so irregular island vertices do not create irregular markers.
+//! clipped to the real rim, while rim posts are laid out by arc length so
+//! uneven outline vertices do not create uneven markers.
 
 use crate::map::{MapColor, MapPlaza, MapRect, MapRoad, MapScenery, MapWard};
 
@@ -12,7 +12,7 @@ use crate::build::layout::stable_hash;
 const TREE_TRUNK: MapColor = [82, 59, 37, 255];
 const POST: MapColor = [111, 103, 79, 255];
 
-const SHORE_INSET: f32 = 10.0;
+const RIM_INSET: f32 = 10.0;
 /// How far a canopy must stay clear of the nearest building lot.
 ///
 /// A tree touching a wall reads as an accident rather than as planting, and at
@@ -228,8 +228,8 @@ impl SegmentIndex {
 /// exclusion field, because genuinely unused ward interiors make the small
 /// green pockets that dense repositories otherwise lack.
 pub struct SceneryInput<'a> {
-    /// The island outline, in world coordinates.
-    pub shoreline: &'a [[f32; 2]],
+    /// The edge of the world, in world coordinates.
+    pub rim: &'a [[f32; 2]],
     /// Every building lot already placed.
     pub building_lots: &'a [MapRect],
     pub roads: &'a [MapRoad],
@@ -279,7 +279,7 @@ pub fn scenery(input: SceneryInput<'_>) -> Vec<MapScenery> {
     // sampler. Thinning the whole island keeps the woodland even; truncating a
     // saturated scatter would leave the far side of a large realm bare.
     let thinning = (natural as f32 / target.max(1) as f32).sqrt().max(1.0);
-    let Some(bounds) = bounds(input.shoreline) else {
+    let Some(bounds) = bounds(input.rim) else {
         return Vec::new();
     };
     let reach = BUILDING_CLEARANCE + MAX_TREE_RADIUS;
@@ -310,7 +310,7 @@ pub fn scenery(input: SceneryInput<'_>) -> Vec<MapScenery> {
             .then_with(|| left.position[1].total_cmp(&right.position[1]))
     });
 
-    let mut output = Vec::with_capacity(trees.len() + input.shoreline.len());
+    let mut output = Vec::with_capacity(trees.len() + input.rim.len());
     output.extend(trees.into_iter().map(|tree| MapScenery::Tree {
         position: tree.position,
         height: tree.height,
@@ -318,7 +318,7 @@ pub fn scenery(input: SceneryInput<'_>) -> Vec<MapScenery> {
         foliage: tree.foliage,
         trunk: TREE_TRUNK,
     }));
-    output.extend(shoreline_posts(input.shoreline));
+    output.extend(rim_posts(input.rim));
     output
 }
 
@@ -417,11 +417,11 @@ fn open_ground(
 
 fn candidate_at(point: [f32; 2], land: &Land<'_>, seed: u64) -> Option<TreeCandidate> {
     let input = land.input;
-    if !point_in_polygon(point, input.shoreline) {
+    if !point_in_polygon(point, input.rim) {
         return None;
     }
-    let shore_distance = distance_to_polyline(point, input.shoreline, true);
-    if shore_distance < SHORE_INSET {
+    let rim_distance = distance_to_polyline(point, input.rim, true);
+    if rim_distance < RIM_INSET {
         return None;
     }
 
@@ -434,8 +434,8 @@ fn candidate_at(point: [f32; 2], land: &Land<'_>, seed: u64) -> Option<TreeCandi
     let mut spacing = BASE_TREE_SPACING
         * (MIN_SPACING_FACTOR
             + value_noise(point, seed) * (MAX_SPACING_FACTOR - MIN_SPACING_FACTOR));
-    let shore_clearance = ((shore_distance - SHORE_INSET) / 80.0).clamp(0.0, 1.0);
-    spacing *= 1.0 + (1.0 - shore_clearance) * 0.8;
+    let rim_clearance = ((rim_distance - RIM_INSET) / 80.0).clamp(0.0, 1.0);
+    spacing *= 1.0 + (1.0 - rim_clearance) * 0.8;
     spacing = (spacing * land.thinning)
         .max(radius * 2.05)
         .max(land.min_spacing());
@@ -486,7 +486,7 @@ fn clear_of_trees(
 
 /// How many trees the free land would hold at full density.
 fn natural_tree_count(input: &SceneryInput<'_>) -> usize {
-    let land = polygon_area(input.shoreline);
+    let land = polygon_area(input.rim);
     if land <= 0.0 {
         return 0;
     }
@@ -514,8 +514,8 @@ fn natural_tree_count(input: &SceneryInput<'_>) -> usize {
     (free / TREE_AREA).round().max(0.0) as usize
 }
 
-fn shoreline_posts(shoreline: &[[f32; 2]]) -> Vec<MapScenery> {
-    let perimeter = polygon_perimeter(shoreline);
+fn rim_posts(rim: &[[f32; 2]]) -> Vec<MapScenery> {
+    let perimeter = polygon_perimeter(rim);
     if perimeter == 0.0 {
         return Vec::new();
     }
@@ -523,7 +523,7 @@ fn shoreline_posts(shoreline: &[[f32; 2]]) -> Vec<MapScenery> {
     let spacing = perimeter / count as f32;
     (0..count)
         .map(|index| MapScenery::Post {
-            position: point_at_distance(shoreline, spacing * index as f32),
+            position: point_at_distance(rim, spacing * index as f32),
             height: 16.0,
             color: POST,
         })
@@ -841,7 +841,7 @@ mod tests {
     use super::*;
     use crate::map::RoadKind;
 
-    const SHORELINE: [[f32; 2]; 8] = [
+    const RIM: [[f32; 2]; 8] = [
         [70.0, 260.0],
         [170.0, 90.0],
         [415.0, 55.0],
@@ -860,7 +860,7 @@ mod tests {
         seed_key: &'a str,
     ) -> SceneryInput<'a> {
         SceneryInput {
-            shoreline: &SHORELINE,
+            rim: &RIM,
             building_lots,
             roads,
             plazas,
@@ -999,12 +999,12 @@ mod tests {
     }
 
     #[test]
-    fn no_tree_lands_outside_the_shoreline_polygon() {
-        let output = scenery(fixture(&[], &[], &[], &[], "shoreline"));
+    fn no_tree_lands_outside_the_rim_polygon() {
+        let output = scenery(fixture(&[], &[], &[], &[], "rim"));
 
         for (position, _) in tree_positions(&output) {
             assert!(
-                point_in_polygon(position, &SHORELINE),
+                point_in_polygon(position, &RIM),
                 "tree at {position:?} escaped the island"
             );
         }
@@ -1014,7 +1014,7 @@ mod tests {
     fn every_quadrant_gets_a_reasonable_share_of_trees() {
         let output = scenery(fixture(&[], &[], &[], &[], "quadrants"));
         let trees = tree_positions(&output);
-        let bounds = bounds(&SHORELINE).unwrap();
+        let bounds = bounds(&RIM).unwrap();
         let mid_x = (bounds.min[0] + bounds.max[0]) * 0.5;
         let mid_y = (bounds.min[1] + bounds.max[1]) * 0.5;
         let mut quadrants = [0usize; 4];
@@ -1042,12 +1042,12 @@ mod tests {
         // does not. The thing that must not happen is the sampler filling one
         // corner at full density and running out before it reaches the rest —
         // so density is traded away evenly, across the whole coastline.
-        let huge: Vec<[f32; 2]> = SHORELINE
+        let huge: Vec<[f32; 2]> = RIM
             .iter()
             .map(|[x, y]| [x * 18.0, y * 18.0])
             .collect();
         let input = SceneryInput {
-            shoreline: &huge,
+            rim: &huge,
             building_lots: &[],
             roads: &[],
             plazas: &[],
@@ -1172,15 +1172,15 @@ mod tests {
     }
 
     #[test]
-    fn posts_are_evenly_spaced_along_the_shoreline() {
+    fn posts_are_evenly_spaced_along_the_rim() {
         let output = scenery(fixture(&[], &[], &[], &[], "posts"));
         let posts = post_positions(&output);
-        let perimeter = polygon_perimeter(&SHORELINE);
+        let perimeter = polygon_perimeter(&RIM);
         let expected = perimeter / posts.len() as f32;
 
         for index in 0..posts.len() {
-            let start = distance_along_polygon(&SHORELINE, posts[index]);
-            let end = distance_along_polygon(&SHORELINE, posts[(index + 1) % posts.len()]);
+            let start = distance_along_polygon(&RIM, posts[index]);
+            let end = distance_along_polygon(&RIM, posts[(index + 1) % posts.len()]);
             let interval = if end >= start {
                 end - start
             } else {

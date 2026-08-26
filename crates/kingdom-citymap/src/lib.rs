@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
-//! The kingdom map: every project on the machine, drawn as an isometric island
-//! of towns.
+//! The kingdom map: every project on the machine, drawn as an isometric disk
+//! of towns floating in space.
 //!
 //! This crate replaced a hand-written SVG map (`kingdom_core::{layout, terrain,
 //! skyline}` and `kingdom_app::components::map`, all deleted). It is **Repo
@@ -108,7 +108,7 @@ pub fn CityMap(
             <canvas
                 id="repo-city-canvas"
                 class="city-map-canvas"
-                aria-label="The kingdom: every project, drawn as an island of towns"
+                aria-label="The kingdom: every project, drawn as a disk of towns in space"
             ></canvas>
         </div>
     }

@@ -4,7 +4,7 @@
 //! arrives as a footprint, a height, and an archetype, and the geometry is
 //! generated here — once per distinct shape, then shared.
 
-use bevy::light::CascadeShadowConfigBuilder;
+use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use crate::map::{MapBuilding, MapManifest, MapScenery, MapWard, MapWorld};
@@ -100,23 +100,22 @@ impl MeshCache {
 /// depth. The camera looks down at a shallow angle, so a few hundredths of a
 /// world unit is enough to settle the order without being visible.
 mod layer {
-    pub const SEA: f32 = 0.0;
-    pub const SHALLOWS: f32 = 0.02;
-    pub const LAND: f32 = 0.04;
-    pub const TOWN: f32 = 0.06;
-    pub const WARD: f32 = 0.10;
-    pub const PLAZA: f32 = 0.16;
-    pub const ROAD: f32 = 0.20;
+    /// The rim's own ground. Everything else stacks on it.
+    pub const LAND: f32 = 0.0;
+    pub const TOWN: f32 = 0.02;
+    pub const WARD: f32 = 0.06;
+    pub const PLAZA: f32 = 0.12;
+    pub const ROAD: f32 = 0.16;
     /// Folder names sit above every ground surface, including the roads that
     /// cross their ward, so a name is never half-swallowed by a path.
     /// A folder's outline sits above every other ground surface but below the
     /// names, so a kerb still reads where a road runs along a ward's boundary.
-    pub const WARD_EDGE: f32 = 0.23;
+    pub const WARD_EDGE: f32 = 0.19;
     /// A working town's ring sits above every kerb inside it, so the fact that
     /// an agent is here is never half-hidden by the folder tree it is working
     /// in. Below the ground labels, which are what a name is for.
-    pub const TOWN_GLOW: f32 = 0.245;
-    pub const GROUND_LABEL: f32 = 0.26;
+    pub const TOWN_GLOW: f32 = 0.205;
+    pub const GROUND_LABEL: f32 = 0.22;
 }
 
 /// Removes the previous world, if any.
@@ -280,43 +279,57 @@ fn spawn_terrain(
     root: Entity,
     world: &MapWorld,
 ) {
-    // The sea runs far past the world so the horizon never shows a cut edge:
-    // an orthographic isometric camera turns a square into a diamond, and its
-    // corners would otherwise fall outside the terrain entirely.
-    let bounds = world.bounds;
-    let margin = bounds.width.max(bounds.depth) * 3.0;
-    let sea = meshes::ground_polygon(&[
-        Vec2::new(bounds.x - margin, bounds.y - margin),
-        Vec2::new(bounds.max_x() + margin, bounds.y - margin),
-        Vec2::new(bounds.max_x() + margin, bounds.max_y() + margin),
-        Vec2::new(bounds.x - margin, bounds.max_y() + margin),
-    ]);
-    commands.spawn((
-        ChildOf(root),
-        Mesh3d(meshes.add(sea)),
-        MeshMaterial3d(cache.get(materials, world.water, Surface::Water)),
-        Transform::from_xyz(0.0, layer::SEA, 0.0),
-        Pickable::IGNORE,
-    ));
-
-    // Open sea, then the shallows lapping around the island, then the island
-    // itself. Stacking them in that order is what makes the settlement read as
-    // land surrounded by water rather than a lake in a field.
-    for (polygon, color, surface, height) in [
-        (&world.moat, world.shallows, Surface::Water, layer::SHALLOWS),
-        (&world.shoreline, world.ground, Surface::Matte, layer::LAND),
-    ] {
-        if polygon.len() < 3 {
-            continue;
-        }
-        let mesh = meshes::ground_polygon(&to_points(polygon));
+    // The world is a disk hanging in space: the ground it stands on, and the
+    // rock below holding it up. There is nothing beyond the rim -- no plane
+    // running to the horizon -- so the silhouette of the disk is the edge of
+    // everything there is.
+    let rim = to_points(&world.rim);
+    if rim.len() >= 3 {
         commands.spawn((
             ChildOf(root),
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(cache.get(materials, color, surface)),
-            Transform::from_xyz(0.0, height, 0.0),
+            Mesh3d(meshes.add(meshes::ground_polygon(&rim))),
+            MeshMaterial3d(cache.get(materials, world.ground, Surface::Matte)),
+            Transform::from_xyz(0.0, layer::LAND, 0.0),
             Pickable::IGNORE,
         ));
+
+        // The cliff, the shelf and the spire are three meshes so each takes
+        // its own colour, and all three are drawn **unlit**.
+        //
+        // That is not a shortcut. The sun points almost straight down, so no
+        // surface under the disk receives any of it, and the scene is exposed
+        // for a 9,000-lux sun against a 420-lux ambient fill -- which renders
+        // the whole underside as a black silhouette whatever colour it is
+        // given. Lighting it properly would mean a second light aimed up at
+        // the rock, and that light would also fall on the town. Unlit rock,
+        // shaded by hand from the manifest's three colours, keeps the sun
+        // calibrated for the kingdom above and still reads as depth.
+        for (mesh, color) in [
+            (
+                meshes::rim_cliff(&rim, world.underside.cliff),
+                world.underside.cliff_color,
+            ),
+            (
+                meshes::disk_shelf(&rim, &world.underside),
+                world.underside.rock,
+            ),
+            (
+                meshes::disk_spire(&rim, &world.underside),
+                world.underside.deep,
+            ),
+        ] {
+            commands.spawn((
+                ChildOf(root),
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(cache.get(materials, color, Surface::Unlit)),
+                Transform::from_xyz(0.0, layer::LAND, 0.0),
+                // The spire would otherwise cast a long shadow into empty
+                // space, at the cost of the one cascade WebGL2 allows.
+                NotShadowCaster,
+                NotShadowReceiver,
+                Pickable::IGNORE,
+            ));
+        }
     }
 
     for town in &world.towns {

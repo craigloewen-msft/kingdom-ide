@@ -207,7 +207,12 @@ crates/
                     is the gathered margin, diff.rs reads a
                     revision against the plan it revises)
 
-  kingdom-citymap/  The map: every project drawn as a town on one island.
+  kingdom-citymap/  The map: every project drawn as a town on one disk, hanging
+                    in space. Repo City drew an island in a sea; the sea gave
+                    the world no silhouette, so the ground is now a circle with
+                    a cliff, a frustum and a spire under it — `MapUnderside`,
+                    proportional to the disk's own radius so a large kingdom
+                    and a small one hang the same way.
                     **Vendored** — this is Repo City
                     (github.com/craigloewen-msft/repo-city-visualizer, MIT),
                     copied in at 449f090 rather than depended on, so there is
@@ -227,7 +232,10 @@ crates/
                     `activity.rs` is the one part fed from outside the manifest:
                     which towns have agents working in them, traced as a pulsing
                     ring, polled rather than pushed and never cached with the
-                    geometry
+                    geometry. `stars.rs` is the one part not in the world at all:
+                    the projection is orthographic, so a star out in the scene
+                    would have no parallax and would *zoom* with the kingdom —
+                    it rides on the camera in pixels instead
     view.rs         `CityMap` — the canvas, and the click that selects a city
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
