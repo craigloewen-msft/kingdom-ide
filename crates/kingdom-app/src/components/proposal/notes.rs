@@ -1,106 +1,18 @@
-//! Writing in the margin of a plan, and sending what was written.
+//! The gathered notes on a plan, and the one button that sends them.
 //!
-//! Two components that between them own everything about a note except where it
-//! is anchored: [`NoteComposer`] is the box that opens against a block, and
-//! [`NoteMargin`] is the gathered notes with the one button that puts them to
-//! the court.
+//! What is left here after [`crate::components::note_composer`] took the box
+//! itself: [`NoteMargin`] is the notes standing against this proposal, with the
+//! one way to put them to the court. The composer moved out when line review
+//! arrived and needed the same box against a line of code -- one component, so
+//! the two kinds of note behave identically.
 //!
 //! Neither talks to the server. Every call in this view is owned by
 //! `ConversationBody`, as it already was before annotation existed, and these
 //! reach it through callbacks -- so a note written here and a note withdrawn
 //! three components away take the same path and land in the same place.
 
-use crate::components::prompt_bar::autogrow;
 use kingdom_core::ProposalNote;
 use leptos::prelude::*;
-
-/// Writing one note, against one block.
-///
-/// Opens in place under the block it is about. Deliberately not a dialog: the
-/// text being objected to has to stay on screen while the objection is written,
-/// or the King is composing from memory about something he can no longer see --
-/// the same reasoning `Question` is inline rather than modal for.
-#[component]
-pub fn NoteComposer(
-    /// What the note is against, for the placeholder. The block's own words are
-    /// the clearest possible label for where the note will land.
-    #[prop(into)]
-    quote: String,
-    /// The note, as written. The parent owns sending it, because the parent is
-    /// what knows the line it belongs to.
-    on_write: Callback<String>,
-    on_cancel: Callback<()>,
-) -> impl IntoView {
-    let (text, set_text) = signal(String::new());
-    let box_ref = NodeRef::<leptos::html::Textarea>::new();
-
-    // Grows with the note, as every other composer in the chamber does.
-    Effect::new(move |_| {
-        text.track();
-        if let Some(el) = box_ref.get() {
-            autogrow(&el);
-        }
-    });
-
-    // Focused on open, because the King clicked to write: making him click a
-    // second time in the box he just summoned is a step that says nothing.
-    Effect::new(move |_| {
-        if let Some(el) = box_ref.get() {
-            let _ = el.focus();
-        }
-    });
-
-    let write = move || {
-        let note = text.get().trim().to_string();
-        if note.is_empty() {
-            return;
-        }
-        set_text.set(String::new());
-        on_write.run(note);
-    };
-
-    let placeholder = {
-        let opening: String = quote.chars().take(40).collect();
-        format!("What would you change about \u{201c}{opening}\u{2026}\u{201d}?")
-    };
-
-    view! {
-        <div class="note-composer">
-            <textarea
-                class="note-input"
-                node_ref=box_ref
-                rows="2"
-                placeholder=placeholder
-                prop:value=move || text.get()
-                on:input=move |ev| set_text.set(event_target_value(&ev))
-                on:keydown=move |ev| {
-                    // Enter writes and Shift+Enter makes a line, as the chamber's
-                    // composer does. Escape closes -- a note begun by accident
-                    // must be abandonable without reaching for the mouse.
-                    if ev.key() == "Enter" && !ev.shift_key() {
-                        ev.prevent_default();
-                        write();
-                    } else if ev.key() == "Escape" {
-                        ev.prevent_default();
-                        on_cancel.run(());
-                    }
-                }
-            />
-            <div class="note-composer-actions">
-                <button
-                    class="note-write"
-                    disabled=move || text.get().trim().is_empty()
-                    on:click=move |_| write()
-                >
-                    "Add note"
-                </button>
-                <button class="note-cancel" on:click=move |_| on_cancel.run(())>
-                    "Cancel"
-                </button>
-            </div>
-        </div>
-    }
-}
 
 /// The notes standing against this proposal, and the one way to send them.
 ///

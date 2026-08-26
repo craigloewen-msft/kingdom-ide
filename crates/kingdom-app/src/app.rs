@@ -32,7 +32,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 290.0;
 
 /// Width the files rail opens at. Narrower than the cities rail by default and
-/// capped lower (see `ward_tree.rs`): a tree of names needs less room than a
+/// capped lower (see `city_rail.rs`): a tree of names needs less room than a
 /// rail of titles and badges, and neither column may become the widest thing on
 /// screen.
 ///

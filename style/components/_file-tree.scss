@@ -1,15 +1,15 @@
-// The files rail: the selected city's tree as it stands on disk.
+// The files rail: the plan's workspace as it stands on disk.
 //
 // A supporting column *inside a plan's chamber*, left of the transcript. It
 // borrows the cities rail's surface and edge so the two read as one band of
 // chrome down the left, and it stays quieter than the rail beside it -- names
-// in dim ink, one small tinted dot per file, and no hover affordance on
-// anything that cannot be pressed.
+// in dim ink, one small tinted dot per file, and no ornament on a row beyond
+// what says which kind of thing it is.
 
 @use "../abstracts/tokens" as t;
 @use "../abstracts/mixins" as m;
 
-.ward-tree {
+.file-tree {
   position: relative;  // anchors the resizer to the right edge
   // Width comes from the resizer's signal, set inline, exactly as the
   // spyglass's does. `flex: 0 0 auto` so the transcript yields the room rather
@@ -23,7 +23,7 @@
   min-width: 0;
 }
 
-.ward-tree-resizer {
+.file-tree-resizer {
   position: absolute;
   top: 0;
   right: -3px;      // straddle the border so the grab area is easy to hit
@@ -44,7 +44,7 @@
 
 // Which city the tree belongs to. Without it a rail showing `src/` and
 // `Cargo.toml` could be any of them.
-.ward-tree-city {
+.file-tree-city {
   @include m.truncate;
   flex: 1;
   min-width: 0;
@@ -54,40 +54,51 @@
 
 // --- Body ------------------------------------------------------------------
 
-.ward-tree-body { flex: 1; overflow-y: auto; min-height: 0; }
+.file-tree-body { flex: 1; overflow-y: auto; min-height: 0; }
 
-.ward-tree-hint {
+.file-tree-hint {
   margin: 0;
   padding: 14px 12px;
   font-size: 12px;
   color: t.$ink-faint;
 }
 
-.ward-list { list-style: none; margin: 0; padding: 4px 0; }
-.ward-list li { list-style: none; }
+.file-list { list-style: none; margin: 0; padding: 4px 0; }
+.file-list li { list-style: none; }
 
-.ward-row {
+.file-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   padding-right: 8px;
   padding-top: 3px;
   padding-bottom: 3px;
   // padding-left carries the indent and is set inline, so nesting depth is
   // arithmetic rather than a rule per level.
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
 
-  // A file is not pressable, and must not pretend to be: no pointer cursor and
-  // no hover fill. Opening a file is not built, and a row that looks like it
-  // does something is a worse lie than a row that plainly does not.
-  cursor: default;
+  // Every row does something now: a folder opens in place, a file opens in the
+  // panel beside the transcript. So the hover fill is unconditional, where it
+  // used to be on `.is-dir` alone.
+  cursor: pointer;
 
-  &.is-dir {
-    cursor: pointer;
-    &:hover { background: t.$panel-2; }
+  &:hover { background: t.$panel-2; }
+
+  // The file the panel is currently reading. The review drawer's selected row
+  // wears the same gold, so the two panes of the rail say "this is the one" in
+  // one voice.
+  &.selected {
+    background: rgba(t.$gold, 0.12);
+
+    .file-name { color: t.$gold; }
   }
 }
 
-.ward-chevron {
+.file-chevron {
   flex-shrink: 0;
   width: 10px;
   color: t.$ink-faint;
@@ -98,7 +109,7 @@
   &.empty { visibility: hidden; }
 }
 
-.ward-folder {
+.file-folder {
   flex-shrink: 0;
   font-size: 11px;
   color: t.$ink-faint;
@@ -107,7 +118,7 @@
 
 // The same language colours the skyline tints a building with, so a `.rs` file
 // reads the same in the rail as it does on the map.
-.ward-dot {
+.file-dot {
   flex-shrink: 0;
   width: 6px;
   height: 6px;
@@ -117,14 +128,14 @@
 
 // Truncate rather than scroll sideways: a deep path must never widen the
 // column, and the full path is on the row's `title`.
-.ward-name {
+.file-name {
   @include m.truncate;
   flex: 1;
   min-width: 0;
   font-size: 12px;
   color: t.$ink-dim;
 
-  .ward-row.is-dir & { color: t.$ink; }
+  .file-row.is-dir & { color: t.$ink; }
 }
 
 // --- Too narrow to stand beside the transcript -------------------------------
@@ -141,6 +152,6 @@
 // conversation the narrowest thing on screen, so the supporting column goes.
 
 @media (max-width: 900px) {
-  .ward-tree,
-  .ward-tree-resizer { display: none; }
+  .file-tree,
+  .file-tree-resizer { display: none; }
 }

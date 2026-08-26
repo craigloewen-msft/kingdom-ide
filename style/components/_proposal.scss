@@ -262,73 +262,12 @@
   > :last-child { margin-bottom: 0; }
 }
 
-// --- Writing one note -------------------------------------------------------
+// --- Writing one note, and the notes gathered -------------------------------
 //
-// Inline, under the block it is about, for the reason `.chat-question` is
-// inline rather than modal: the text being objected to has to stay on screen
-// while the objection is written.
-.note-composer {
-  margin: 8px 0 4px;
-  padding: 10px;
-  border: 1px solid rgba(t.$gold, 0.4);
-  border-radius: t.$radius;
-  background: t.$panel;
-}
-
-.note-input {
-  width: 100%;
-  max-height: 160px;
-  padding: 6px 8px;
-  border: 1px solid t.$edge;
-  border-radius: 6px;
-  background: t.$panel-2;
-  color: t.$ink;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.5;
-  resize: none;
-
-  &:focus {
-    outline: none;
-    border-color: t.$gold-dim;
-  }
-}
-
-.note-composer-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.note-write {
-  padding: 5px 12px;
-  border: 1px solid t.$gold-dim;
-  border-radius: 6px;
-  background: rgba(t.$gold, 0.12);
-  color: t.$gold;
-  font-size: 12px;
-
-  &:hover:not(:disabled) { background: rgba(t.$gold, 0.2); }
-
-  &:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-}
-
-.note-cancel {
-  padding: 5px 12px;
-  border: 1px solid t.$edge;
-  border-radius: 6px;
-  background: transparent;
-  color: t.$ink-faint;
-  font-size: 12px;
-
-  &:hover {
-    border-color: t.$edge-bright;
-    color: t.$ink;
-  }
-}
+// Moved to `_notes.scss` when line review arrived and needed the same box
+// against a line of code. `.note-composer`, `.note-input`, `.note-item` and
+// `.note-send` are shared by both margins now; what is still here is only what
+// belongs to a *proposal's* margin.
 
 // --- The gathered margin ----------------------------------------------------
 //
@@ -336,6 +275,11 @@
 // works in: read, object, then decide. Drawn only when there is something in
 // it — an empty list beside a dead "send" button would be a standing invitation
 // to press something that does nothing.
+//
+// The rows inside it (`.note-list`, `.note-item`, `.note-quote`) and the send
+// button are in `_notes.scss`, shared with the code review's margin. What is
+// here is only the frame, which the two do not share: this one sits inside a
+// card and that one stands on its own above the composer.
 .note-margin {
   flex-shrink: 0;
   margin: 12px 0 14px;
@@ -351,80 +295,12 @@
   font-size: 11px;
 }
 
-.note-list {
+// A long list of notes scrolls rather than growing the card past the screen.
+// On this margin only: the review's list is capped by its own wrapper, which
+// has to hold the file headings as well as the rows.
+.note-margin .note-list {
   max-height: 180px;
-  margin: 0 0 10px;
-  padding: 0;
   overflow-y: auto;
-  list-style: none;
-}
-
-.note-item {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 8px;
-  padding: 6px 0;
-  border-top: 1px solid t.$edge;
-
-  &:first-child { border-top: none; }
-}
-
-// What the note is against. Clamped to one line: this is a label saying where
-// the note landed, not the passage itself, which is a scroll away above.
-.note-quote {
-  grid-column: 1;
-  overflow: hidden;
-  color: t.$ink-faint;
-  font-family: t.$font-mono;
-  font-size: 11px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.note-body {
-  grid-column: 1;
-  color: t.$ink;
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-word;
-}
-
-.note-withdraw {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  align-self: center;
-  padding: 2px 6px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: t.$ink-faint;
-  font-size: 14px;
-  line-height: 1;
-
-  &:hover {
-    background: rgba(t.$failed, 0.15);
-    color: t.$failed;
-  }
-}
-
-// Gold-edged but not filled: sending notes back is a real act, but it is not
-// the act of handing over the ability to change files. `.proposal-accept` keeps
-// that weight to itself.
-.note-send {
-  padding: 7px 14px;
-  border: 1px solid t.$gold-dim;
-  border-radius: t.$radius;
-  background: transparent;
-  color: t.$gold;
-  font-size: 12px;
-  font-weight: 600;
-
-  &:hover:not(:disabled) { background: rgba(t.$gold, 0.12); }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
 }
 
 // --- What a revision changed ------------------------------------------------

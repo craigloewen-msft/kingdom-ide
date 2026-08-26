@@ -124,6 +124,38 @@ impl ChangeKind {
     }
 }
 
+/// One file as it stands, ready to render line by line.
+///
+/// What the King reads when he opens a file from the tree rather than from the
+/// review drawer: not a comparison, just the file. Most files in a project have
+/// no diff at all, and the tree offers all of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceText {
+    /// Path relative to the plan's workspace, as everything else here names a
+    /// file.
+    pub path: String,
+    /// What tints the header, reusing the map's own language colours so a `.rs`
+    /// file reads the same here as it does in the tree it was opened from.
+    pub language: Language,
+    pub lines: Vec<SourceLine>,
+    /// Whether the lines below are the whole file.
+    ///
+    /// [`DiffVerdict`] reused rather than duplicated: its question is "is what
+    /// follows the whole truth?", and every one of its answers -- binary, too
+    /// large, truncated, unreadable -- reads correctly for a plain read. A
+    /// second near-identical enum would be two places to add a fifth answer to.
+    pub verdict: DiffVerdict,
+}
+
+/// One line of a file, as an editor would show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLine {
+    /// The line's number in its own file, 1-based. Carried rather than derived
+    /// from the index because a truncated file still has to number honestly.
+    pub number: u32,
+    pub text: String,
+}
+
 /// One file's difference from the base, ready to render in two columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileDiff {

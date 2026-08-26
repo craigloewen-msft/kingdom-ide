@@ -7,7 +7,7 @@
 //! This module owns the column itself -- its width, its drag handle -- and
 //! stacks both of the things worth putting in it, one above the other:
 //!
-//! - **Wards**, the city's tree as it stands on disk ([`super::WardTree`]).
+//! - **Files**, the plan's workspace as it stands on disk ([`super::FileTree`]).
 //! - **Review**, every file this plan has changed ([`super::ReviewDrawer`]).
 //!
 //! # Why a split rather than tabs
@@ -32,7 +32,7 @@
 use crate::app::{KingdomState, DEFAULT_TREE_WIDTH};
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
 use crate::components::review_drawer::fetch_changes;
-use crate::components::{ReviewDrawer, WardTree};
+use crate::components::{FileTree, ReviewDrawer};
 use kingdom_core::{ChangeSummary, PlanId};
 use leptos::prelude::*;
 
@@ -82,10 +82,20 @@ pub fn CityRail(
     /// note in `review_drawer.rs`.
     activity: Memo<usize>,
     /// The file the panel beside the transcript is showing, if it is showing a
-    /// diff at all.
+    /// file at all -- read whole or as a diff. Both panes highlight against it.
     open_file: Memo<Option<String>>,
-    /// Called with a path when the King picks a file to read.
-    on_open: Callback<String>,
+    /// Called with a path when the King picks a file out of the **tree**, which
+    /// opens it whole.
+    on_read: Callback<String>,
+    /// Called with a path when he picks one out of the **drawer**, which opens
+    /// it as a diff.
+    ///
+    /// Two callbacks and not one, because the two rows mean different things:
+    /// the tree offers every file in the project and the drawer offers the ones
+    /// this plan changed, so "show me this" answers with the file in the first
+    /// case and with what moved in the second. Deciding which is the chamber's
+    /// -- see `Aside` in `conversation.rs`.
+    on_diff: Callback<String>,
 ) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     restore_width(state.tree_width, WIDTH_KEY, BOUNDS);
@@ -126,22 +136,26 @@ pub fn CityRail(
         // The width is set inline from the signal, as the focused panel's is:
         // this is a flex child of the chamber rather than a grid track, so the
         // resizer drives the element itself.
-        <aside class="ward-tree" style:width=move || format!("{}px", state.tree_width.get())>
+        <aside class="file-tree" style:width=move || format!("{}px", state.tree_width.get())>
             // --- The tree, above -------------------------------------------
             //
             // The only one of the two with a fixed height: the drawer takes the
             // remainder, so the divider has exactly one number behind it.
             <section
-                class="rail-pane rail-wards"
+                class="rail-pane rail-files"
                 style:height=move || format!("{}px", tree_height.get())
             >
                 <div class="rail-pane-head">
-                    <span class="rail-pane-label">"Wards"</span>
-                    <span class="ward-tree-city" title=move || city_name.get()>
+                    <span class="rail-pane-label">"Files"</span>
+                    <span class="file-tree-city" title=move || city_name.get()>
                         {move || city_name.get().unwrap_or_default()}
                     </span>
                 </div>
-                <WardTree/>
+                <FileTree
+                    plan=plan.clone()
+                    open_file=open_file
+                    on_open=on_read
+                />
             </section>
 
             // The divider. Between the two panes rather than at the rail's edge,
@@ -182,7 +196,7 @@ pub fn CityRail(
                     summary=summary
                     looking=looking
                     open_file=open_file
-                    on_open=on_open
+                    on_open=on_diff
                 />
             </section>
 
@@ -191,7 +205,7 @@ pub fn CityRail(
                 grows=Grows::Rightwards
                 bounds=BOUNDS
                 storage_key=WIDTH_KEY
-                class="ward-tree-resizer"
+                class="file-tree-resizer"
             />
         </aside>
     }
