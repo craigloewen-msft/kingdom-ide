@@ -18,6 +18,11 @@ pub mod citymap;
 pub mod edit;
 #[cfg(feature = "ssr")]
 pub mod events;
+// Syntax colour for the source panel. Server-only on purpose: tokenising before
+// the lines go over the wire is what keeps a regex engine and 213 syntax
+// definitions out of the wasm bundle. See the module's own note.
+#[cfg(feature = "ssr")]
+pub mod highlight;
 #[cfg(feature = "ssr")]
 pub mod llm;
 #[cfg(feature = "ssr")]

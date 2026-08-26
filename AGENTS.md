@@ -163,6 +163,14 @@ crates/
                     CHANGING, so it never truncates and never reshapes. Holds
                     the stamp check that stops a save overwriting what the
                     court did while he was typing (ssr only)
+    highlight.rs    Syntax colour: a file's lines split into runs of one kind
+                    each, for the source panel. Server-only ON PURPOSE —
+                    tokenising before the lines go over the wire is what keeps
+                    syntect and 213 syntax definitions out of the wasm bundle,
+                    the same division diff spans already follow. Holds the two
+                    guards `review.rs`'s byte and row caps do not cover: cost is
+                    quadratic in a LINE's width, and a minified bundle is one
+                    very long line that passes both (ssr only)
     store.rs        The kingdom's records on disk (ssr only)
     turns.rs        Which plans have a turn running *in this process*, and the
                     King's way of stopping one (ssr only)

@@ -37,7 +37,7 @@
 
 use kingdom_core::{
     ChangeKind, ChangeSummary, ChangedFile, DiffLine, DiffRow, DiffVerdict, FileDiff, Hunk,
-    Language, SourceLine, SourceText, Span, Workspace,
+    Language, SourceText, Span, Workspace,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -223,6 +223,12 @@ pub async fn diff(workspace: &Workspace, path: &str) -> FileDiff {
 /// rendering this?" is the same question whichever panel is asking, and a
 /// second set of thresholds would be a second place to get it wrong.
 ///
+/// The lines come back coloured, from [`crate::highlight`]. Those three guards
+/// are deliberately *not* enough for that step and it carries two more of its
+/// own: they are stated in bytes and in rows, while tokenising costs
+/// quadratically in the width of a single line -- which is why a minified
+/// bundle, one line of a million characters, passes every check here.
+///
 /// `path` is relative to the workspace and has already been through a
 /// [`crate::tools::Sandbox`] by the time this is called -- see the caller in
 /// `api.rs`, which is where the boundary is enforced, exactly as it is for
@@ -284,17 +290,11 @@ pub async fn source(workspace: &Workspace, path: &str) -> SourceText {
     let all: Vec<&str> = text.lines().collect();
 
     let dropped = all.len().saturating_sub(MOST_ROWS);
-    let lines = all
-        .into_iter()
-        .take(MOST_ROWS)
-        .enumerate()
-        .map(|(i, text)| SourceLine {
-            // 1-based, as an editor counts -- and as a note against it will
-            // name it back to the court.
-            number: (i + 1) as u32,
-            text: text.to_string(),
-        })
-        .collect();
+    let shown = &all[..all.len().min(MOST_ROWS)];
+    // Cut to the row cap *first*, so the highlighter never pays for lines the
+    // panel will not draw. Its own guards are about the shape of a line rather
+    // than how many there are -- see `highlight`.
+    let lines = crate::highlight::lines(path, shown);
 
     SourceText {
         path: path.to_string(),
@@ -1242,8 +1242,8 @@ mod tests {
             vec![1, 2, 3],
             "a trailing newline ends the last line rather than opening another"
         );
-        assert_eq!(read.lines[0].text, "one");
-        assert_eq!(read.lines[2].text, "three");
+        assert_eq!(read.lines[0].text(), "one");
+        assert_eq!(read.lines[2].text(), "three");
 
         // And with no trailing newline, the last line is still a line.
         std::fs::write(dir.path().join("lex.rs"), "one\ntwo").unwrap();
