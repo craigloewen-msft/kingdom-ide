@@ -1,0 +1,89 @@
+[package]
+name = "kingdom-citymap"
+version.workspace = true
+# The copied code is edition 2024 and stays that way. Editions are per-crate, so
+# this costs the rest of the workspace nothing and saves rewriting 13k lines
+# whose tests are the evidence the copy was faithful.
+edition = "2024"
+license = "MIT"
+description = "The kingdom map: scanning projects into a manifest, and drawing it with Bevy."
+
+[dependencies]
+# The manifest is plain serialisable data on both targets.
+serde.workspace = true
+
+# --- ssr: scanning and laying out ------------------------------------------
+# Gitignore-aware walking. Already a `kingdom-app` dependency at this version.
+ignore = { version = "0.4", optional = true }
+# Reading a kingdom's cities. Server-only here: nothing in `map` or `engine`
+# knows what a City is, which is what keeps the manifest a plain wire format.
+kingdom-core = { workspace = true, optional = true }
+
+# --- hydrate: drawing ------------------------------------------------------
+# The renderer. `default-features = false` because the defaults pull in audio,
+# gilrs, asset loaders and a good deal else this never uses; `webgl2` is the
+# fallback for machines without WebGPU.
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_ui_render",
+    "bevy_picking",
+    "mesh_picking",
+    "default_font",
+    "webgl2",
+], optional = true }
+leptos = { version = "0.8", optional = true }
+# Fetching the manifest, and deferring the engine's boot until the canvas is in
+# the document.
+gloo-net = { version = "0.6", optional = true }
+gloo-timers = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["Element", "HtmlCanvasElement"], optional = true }
+
+[dev-dependencies]
+# The copied tests run natively, and they compile the whole `engine` module, so
+# this needs the same Bevy features the browser build asks for -- plus `x11`,
+# which is what lets it *link* on Linux. No test opens a window; winit is a link
+# requirement of `bevy_winit`, not something the maths touches.
+#
+# It is a dev-dependency rather than a native target dependency on purpose: that
+# is what keeps `cargo build --features ssr` from ever compiling a renderer into
+# the server binary.
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_ui_render",
+    "bevy_picking",
+    "mesh_picking",
+    "default_font",
+    "x11",
+] }
+# The manifest's own doctest round-trips it as JSON.
+serde_json.workspace = true
+tempfile = "3"
+
+[features]
+default = []
+ssr = ["dep:ignore", "dep:kingdom-core", "dep:leptos", "leptos/ssr"]
+hydrate = [
+    "dep:bevy",
+    "dep:leptos",
+    "dep:gloo-net",
+    "dep:gloo-timers",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:kingdom-core",
+    "leptos/csr",
+]

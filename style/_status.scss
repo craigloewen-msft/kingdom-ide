@@ -1,16 +1,15 @@
-// Semantic state colours, shared between the left rail and the map.
+// Semantic state colours, shared by everything that shows a plan's state.
 //
 // This is the one place where a plan's state turns into pixels, so the badge in
-// the rail and the pip on the map cannot drift apart.
+// the rail and the dot in the chamber cannot drift apart.
 
 @use "sass:list";
 @use "abstracts/tokens" as t;
 
-// Each status names its colour once, as a custom property, and the three
+// Each status names its colour once, as a custom property, and the two
 // spellings that need it are collected as they go.
 $badges: ();
 $html-pips: ();
-$svg-pips: ();
 
 @each $name, $value in t.$statuses {
   .status-#{$name} { --status-colour: #{$value}; }
@@ -18,15 +17,14 @@ $svg-pips: ();
 
   $badges:    list.append($badges,    #{".plan-" + $name}, comma);
   $html-pips: list.append($html-pips, #{".status-" + $name}, comma);
-  $svg-pips:  list.append($svg-pips,  #{"circle.status-" + $name}, comma);
 }
 
 // A badge in the rail is text…
 #{$badges} { color: var(--status-colour); }
 
-// …an HTML pip paints with `background`…
+// …and an HTML pip paints with `background`.
+//
+// There was a third spelling here, `circle.status-*` with `fill`, for the pips
+// the old SVG map drew on each city. The map is a Bevy canvas now and has no
+// DOM to carry a class, so nothing could match it.
 #{$html-pips} { background: var(--status-colour); }
-
-// …while an SVG pip on the map needs `fill`; `background` means nothing there
-// and would otherwise leave the circle black.
-#{$svg-pips} { fill: var(--status-colour); background: none; }

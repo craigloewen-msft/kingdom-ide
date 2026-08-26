@@ -12,6 +12,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 kingdom-core.workspace = true
 kingdom-browser = { workspace = true, optional = true }
+# The map. Its own features mirror this crate's: `ssr` gets the scanner, and
+# `hydrate` gets Bevy. Forwarding rather than enabling both is what keeps a
+# renderer out of the server binary and a filesystem walker out of the bundle.
+kingdom-citymap.workspace = true
 serde.workspace = true
 # Needed on both targets: a `Deed`'s arguments are JSON, so the chamber renders
 # them and the watch socket parses plans off the wire.
@@ -112,12 +116,14 @@ tempfile = "3"
 default = ["ssr"]
 hydrate = [
     "leptos/hydrate",
+    "kingdom-citymap/hydrate",
     "dep:console_error_panic_hook",
     "dep:wasm-bindgen",
     "dep:js-sys",
 ]
 ssr = [
     "dep:kingdom-browser",
+    "kingdom-citymap/ssr",
     "dep:axum",
     "dep:tokio",
     "dep:leptos_axum",

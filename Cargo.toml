@@ -4,6 +4,7 @@ members = [
     "crates/kingdom-core",
     "crates/kingdom-app",
     "crates/kingdom-browser",
+    "crates/kingdom-citymap",
 ]
 
 [workspace.package]
@@ -14,6 +15,9 @@ license = "MIT"
 [workspace.dependencies]
 kingdom-core = { path = "crates/kingdom-core" }
 kingdom-browser = { path = "crates/kingdom-browser" }
+# The map. A path dependency on vendored code -- Repo City, copied into this
+# repository rather than fetched, so there is one project to maintain.
+kingdom-citymap = { path = "crates/kingdom-citymap" }
 serde = { version = "1", features = ["derive"] }
 # A tool call's arguments are the model's JSON, not a shape we declared, so the
 # domain stores them as JSON. Pure Rust and no I/O, so it still compiles to wasm.
@@ -70,3 +74,17 @@ bin-default-features = false
 lib-features = ["hydrate"]
 lib-default-features = false
 lib-profile-release = "wasm-release"
+
+# cargo-leptos otherwise runs `wasm-opt -Oz --enable-bulk-memory
+# --enable-nontrapping-float-to-int`, and the renderer needs two more features
+# than that: rustc emits sign-extension and bulk-memory-opt instructions that
+# wasm-opt validates against the bare MVP set unless told otherwise, and a
+# release build fails with "error validating input". Repo City's own Trunk
+# config carried the same list for the same reason.
+wasm-opt-features = [
+    "-Oz",
+    "--enable-bulk-memory",
+    "--enable-bulk-memory-opt",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+]

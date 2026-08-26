@@ -11,6 +11,11 @@
 @use "../abstracts/mixins" as m;
 
 .chamber {
+  // Positioned so it paints above the idle map, which is absolutely positioned
+  // in the same region and would otherwise sit on top of this in-flow content.
+  // `.map-region.hidden` already makes it invisible; this is the belt to that
+  // pair of braces, and costs nothing.
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;

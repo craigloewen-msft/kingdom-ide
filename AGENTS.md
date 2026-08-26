@@ -93,10 +93,16 @@ The translation, in full:
 the routes and the `.kingdom/` directory, and they are also ordinary English for
 a folder, a project and a unit of proposed work — so they need no translation.
 
-The one other exception is the map's own geometry: `layout.rs`, `terrain.rs` and
-`skyline.rs` keep `Realm`, `Road`, `CityPlacement`, `Lot` and `Plate`. That code
-draws a literal map of cities and roads, so there the metaphor *is* the subject
-matter rather than a euphemism for something else.
+The one other exception is the map, which is a whole crate of its own:
+`kingdom-citymap` keeps `Ward`, `Town`, `Road`, `Plaza` and `Holding`. That code
+draws a literal map of projects as settlements, so there the metaphor *is* the
+subject matter rather than a euphemism for something else.
+
+**Beware one collision.** In that crate a **`Ward` is a folder** — the ground a
+directory's files stand on. Everywhere else in Kingdom "a ward" is
+`Language`, and `ward_tree.rs` is the files rail. The two never meet — nothing
+outside `kingdom-citymap` names a `Ward` — but the word means different things
+on either side of that boundary, and its `lib.rs` says so at the top.
 
 When you add a concept, name the type for what it is and let the view call it
 what the King calls it. If you find yourself writing a glossary comment to
@@ -124,10 +130,6 @@ crates/
                     view; every decision needing a repository is made in
                     kingdom-app::review
     naming.rs       slugify — a plan's title turned into its branch name
-    layout.rs       Deterministic map placement (pure maths)
-    terrain.rs      The ground the kingdom stands on — the map's landmass,
-                    coastline and roads (pure maths)
-    skyline.rs      Deterministic per-city building placement (pure maths)
     sample.rs       Placeholder starter plans
     mockdata/       The Proving Grounds: synthetic fixtures, in Rust
                     mod.rs (FixtureSpec + expansion), fixtures.rs (THE FAKE
@@ -203,8 +205,26 @@ crates/
                     proposal/ (the plan put to the King: mod.rs is the card,
                     body.rs draws it as blocks he can write against, notes.rs
                     is the gathered margin, diff.rs reads a
-                    revision against the plan it revises),
-                    map/ (mod.rs + city.rs)
+                    revision against the plan it revises)
+
+  kingdom-citymap/  The map: every project drawn as a town on one island.
+                    **Vendored** — this is Repo City
+                    (github.com/craigloewen-msft/repo-city-visualizer, MIT),
+                    copied in at 449f090 rather than depended on, so there is
+                    one project to maintain rather than two. Edit it here.
+                    Split by feature the same way kingdom-app is, and for the
+                    same reason: `build` walks the disk and must never reach
+                    wasm; `engine` is Bevy and must never reach the server.
+    map/            The manifest: world-space geometry, plain serialisable
+                    data. The ONLY part on both targets — it is the seam the
+                    two halves meet at
+    build/          Scanning a kingdom and laying it out (ssr). Repo City's
+                    own `Survey` was deliberately NOT taken: it finds projects
+                    by looking for `.git` and so drops a folder without one,
+                    which disagrees with `kingdom-app::scan`. `manifest_for`
+                    walks `Kingdom::cities` instead
+    engine/         Drawing it with Bevy (hydrate, plus native for its tests)
+    view.rs         `CityMap` — the canvas, and the click that selects a city
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm

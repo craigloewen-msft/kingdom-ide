@@ -55,6 +55,13 @@ async fn main() {
             kingdom_app::artifact::ROUTE,
             axum::routing::get(kingdom_app::artifact::serve),
         )
+        // The map's manifest. Not a Leptos route either, and ahead of them for
+        // the same reason as the rest: the SSR fallback would answer it with
+        // the app shell instead of the geometry.
+        .route(
+            kingdom_citymap::ROUTE,
+            axum::routing::get(kingdom_app::citymap::serve),
+        )
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();
             move || shell(opts.clone())

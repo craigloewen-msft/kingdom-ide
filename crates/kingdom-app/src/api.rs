@@ -80,6 +80,16 @@ pub fn snapshot(id: &PlanId) -> Option<Plan> {
     lock().ok()?.plan(id).cloned()
 }
 
+/// The whole kingdom as the server currently has it.
+///
+/// The counterpart to [`snapshot`], and there for the same reason: the map's
+/// route is a plain Axum handler already inside the server, so it needs the
+/// state without going out through a `#[server]` function.
+#[cfg(feature = "ssr")]
+pub fn kingdom_snapshot() -> Option<Kingdom> {
+    lock().ok().map(|kingdom| kingdom.clone())
+}
+
 /// A plan on its way to a browser and nowhere else.
 ///
 /// Every `#[server]` function below hands back the plan it just changed, and

@@ -1,0 +1,63 @@
+// The map: one canvas, filling the region behind everything routed into it.
+//
+// This replaced `_map.scss` and `_skyline.scss`, which between them drew a
+// hand-written SVG isometric map -- the land, the roads, the throne, and every
+// building of every city. All of that is geometry now, generated in
+// `kingdom-citymap` and drawn by Bevy, so the styling that is left is the
+// element the renderer draws into and nothing else.
+
+@use "../abstracts/tokens" as t;
+
+// The map is mounted once, by `ThroneRoom`, and stands behind whichever route
+// is showing -- see the note on that component for why it may never unmount.
+// So it is taken out of flow and pinned to the region rather than being a flex
+// child of one route's column.
+.map-region {
+  position: absolute;
+  inset: 0;
+  // Deep ocean under the canvas: the renderer paints its own sea, and this is
+  // what shows for the moment before the first frame arrives.
+  background: t.$void;
+}
+
+// Left mounted but out of sight while the King is in a plan's chamber.
+// `visibility` rather than `display: none`: the canvas keeps its size, so the
+// engine is not handed a zero-sized viewport it would have to be told to
+// recover from.
+.map-region.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.city-map {
+  position: absolute;
+  inset: 0;
+}
+
+.city-map-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  // The renderer sizes its own drawing buffer to the element.
+  outline: none;
+}
+
+// A holding under the pointer is something you can select, and the cursor is
+// the only affordance saying so -- there is no hover chrome in the DOM to do it.
+.city-map.over-holding .city-map-canvas { cursor: pointer; }
+
+.city-map-error {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 30%;
+  margin: 0 auto;
+  width: fit-content;
+  max-width: 70%;
+  padding: 10px 16px;
+  border: 1px solid t.$edge;
+  border-radius: 6px;
+  background: t.$panel;
+  color: t.$ink-dim;
+  font-size: 12px;
+  text-align: center;
+}

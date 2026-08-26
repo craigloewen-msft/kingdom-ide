@@ -43,13 +43,3 @@
   border-radius: t.$radius;
   font-size: 11px;
 }
-
-// SVG text has no background, so legibility over the skyline comes from
-// painting a halo underneath the glyphs.
-@mixin map-label($width) {
-  pointer-events: none;
-  paint-order: stroke;
-  stroke: t.$label-halo;
-  stroke-width: $width;
-  stroke-linejoin: round;
-}
