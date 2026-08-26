@@ -6,9 +6,9 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    annotate_file, annotate_proposal, approve_plan, draft_plan, finish_plan, get_kingdom,
-    plan_briefing, plan_delete_file, plan_write_file, say, send_file_notes, send_notes,
-    set_aside_plan, stop_plan, unqueue, withdraw_file_note, withdraw_note,
+    annotate_file, annotate_proposal, approve_plan, delete_entry, draft_plan, finish_plan,
+    get_kingdom, plan_briefing, plan_delete_file, plan_write_file, say, send_file_notes,
+    send_notes, set_aside_plan, stop_plan, unqueue, withdraw_file_note, withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -1543,6 +1543,7 @@ fn ConversationBody(
 /// the transcript as it was when the user walked in.
 #[component]
 fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
     let plan_id = Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.id.clone())));
 
     // The chamber's one clock. It runs only while some deed is actually in
@@ -1558,6 +1559,29 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
         })
     });
     let now = ticking_clock(anything_running);
+
+    // Removing one line of the record. An index rather than an id, because a
+    // message carries none and giving it one only for this would be a field
+    // that exists solely to be deleted by -- see `api::delete_entry` on why a
+    // position in the transcript as last drawn is honest enough to act on.
+    //
+    // Refused server-side for the reasons `kingdom_core::Plan::delete_entry`
+    // gives; this callback only reports what came back; it does not repeat the
+    // guesswork of which entries are removable.
+    let delete_at = Callback::new(move |index: usize| {
+        let Some(plan_id) = plan_id.get_untracked() else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match delete_entry(plan_id.to_string(), index).await {
+                Ok(updated) => {
+                    state.error.set(None);
+                    state.kingdom.update(|k| k.insert(updated));
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        });
+    });
 
     view! {
         <For
@@ -1583,7 +1607,7 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
             let:entry
         >
             {
-                let (_, line) = entry;
+                let (index, line) = entry;
                 match line {
                     Entry::Message(u) => {
                         let is_user = u.speaker == Speaker::User;
@@ -1608,6 +1632,13 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                                     }
                                     .into_any()
                                 }}
+                                <button
+                                    class="entry-delete"
+                                    title="Remove this message from the record"
+                                    on:click=move |_| delete_at.run(index)
+                                >
+                                    "\u{00d7}"
+                                </button>
                             </div>
                         }
                         .into_any()
@@ -1638,6 +1669,12 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                     Entry::Tool(d) => {
                         let said = remark(&d);
                         let thought = thinking(&d);
+                        // A call still running has no result yet to judge, and
+                        // the server refuses it for exactly that reason -- see
+                        // `Plan::delete_entry`. Hidden here rather than shown
+                        // and left to fail, since a button that always errors
+                        // teaches the King to stop trusting it.
+                        let removable = !d.in_flight();
                         let deed = if is_open_question(&d) {
                             view! { <Question tool_call=d plan=plan_id/> }.into_any()
                         } else if d.tool == "spawn_agents" {
@@ -1649,7 +1686,23 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
                         } else {
                             view! { <ToolCallLine tool_call=d plan=plan_id now=now/> }.into_any()
                         };
-                        view! { <Thinking thought=thought/> <Remark said=said/> {deed} }.into_any()
+                        view! {
+                            <Thinking thought=thought/>
+                            <Remark said=said/>
+                            <div class="chat-deed-row">
+                                {deed}
+                                <Show when=move || removable>
+                                    <button
+                                        class="entry-delete"
+                                        title="Remove this call from the record"
+                                        on:click=move |_| delete_at.run(index)
+                                    >
+                                        "\u{00d7}"
+                                    </button>
+                                </Show>
+                            </div>
+                        }
+                        .into_any()
                     }
                 }
             }

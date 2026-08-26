@@ -2404,6 +2404,43 @@ pub async fn annotate_proposal(
     Ok(to_browser(updated))
 }
 
+/// The King removes one entry from a plan's transcript -- a message, or a
+/// settled tool call -- rather than living with something in the record he
+/// does not want read back to the model.
+///
+/// `index` is a position in [`Plan::transcript`] as the browser last drew it.
+/// That is honest rather than fragile: the transcript only ever grows or has
+/// entries removed from it by this very call, so a stale index either still
+/// names the entry the King meant, or [`kingdom_core::Plan::delete_entry`]
+/// refuses it outright -- there is no third case where it silently names
+/// something else. See that method for what else it refuses and why.
+#[server(DeleteEntry, "/api")]
+pub async fn delete_entry(plan: String, index: usize) -> Result<Plan, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let mut kingdom = lock()?;
+
+    // A settled plan is history and its workspace is gone; there is no reason
+    // to prune a conversation nothing will ever read again, and refusing here
+    // matches every other edit a settled plan already turns away.
+    if let Some(existing) = kingdom.plan(&plan_id) {
+        if existing.status.is_settled() {
+            return Err(ServerFnError::new(format!(
+                "That plan is {} and its record is closed.",
+                existing.status.label().to_lowercase()
+            )));
+        }
+    }
+
+    let mut outcome = Ok(());
+    let updated = update(&mut kingdom, &plan_id, |p| {
+        outcome = p.delete_entry(index);
+    })
+    .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
+
+    outcome.map_err(ServerFnError::new)?;
+    Ok(to_browser(updated))
+}
+
 /// The King takes a note back before the court has been told of it.
 ///
 /// The sibling of [`unqueue`], and it loses its race the same way: the notes may

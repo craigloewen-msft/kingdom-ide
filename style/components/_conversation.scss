@@ -278,6 +278,37 @@
   &:hover { color: t.$blocked; opacity: 1; }
 }
 
+// Removing an entry from the record entirely -- a message or a settled deed,
+// never a note (Kingdom's own record) or a call still running (nothing to
+// judge yet; `Plan::delete_entry` refuses both). Same quiet-until-reached-for
+// shape as `.queued-drop` above, for the same reason: it is the only control
+// in a row that is otherwise just something to read.
+.entry-delete {
+  flex-shrink: 0;
+  align-self: flex-start;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: t.$ink-faint;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.35;
+
+  &:hover { color: t.$blocked; opacity: 1; }
+}
+
+// The deed and its delete button share a row so the cross sits beside the
+// call rather than under it -- the deed itself may open a wide detail pane,
+// and the button must stay where the King's cursor already is.
+.chat-deed-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+
+  .chat-deed { flex: 1; min-width: 0; }
+}
+
 // When the line landed. Deliberately the quietest thing in the row: it exists
 // to confirm the order the King is already reading, not to be read itself.
 // Tabular figures so the column cannot jitter between rows.
