@@ -677,12 +677,26 @@ const RECENT_REPLIES: usize = 2;
 
 /// How many replies of signed thinking a gateway is assumed to still want.
 ///
-/// Wider than [`RECENT_REPLIES`] and shed only under real pressure, because
-/// this is the dangerous one: `Reasoning::without_opaque` records that a gateway
-/// *silently discards* thinking whose signature did not come back, so dropping
-/// one that is still live costs the model its reasoning with no error to show
-/// for it. Old blobs are a different matter -- nothing is still thinking with
-/// them, and 633 KB of them was half the text of the request that died.
+/// Wider than [`RECENT_REPLIES`] because this is the dangerous one:
+/// `Reasoning::without_opaque` records that a gateway *silently discards*
+/// thinking whose signature did not come back, so dropping one that is still
+/// live costs the model its reasoning with no error to show for it. Old blobs
+/// are a different matter -- nothing is still thinking with them, and 633 KB of
+/// them was half the text of the request that died.
+///
+/// **A bound, not a response to pressure.** This used to be consulted only when
+/// a body exceeded [`Budget::FULL`], which meant a conversation comfortably
+/// under budget carried every signature it had ever produced, forever. An audit
+/// of four real plans found that was the single largest thing in a request:
+/// 638 KB of 1.15 MB on one, 651 KB of 1.45 MB on another, and in both cases
+/// **100%** of it older than this window -- dead by this constant's own
+/// definition, and re-sent on every one of 192 and 283 rounds. Cumulatively it
+/// was 46-53% of everything those turns put on the wire.
+///
+/// So it is applied unconditionally now, exactly as [`RECENT_REPLIES`] is, and
+/// for the same stated reason: a conversation that merely happens to fit today
+/// would otherwise keep every blob until the day it does not, and the King
+/// would meet that mid-investigation rather than never.
 const LIVE_REPLIES: usize = 8;
 
 /// What to leave out so the request fits, decided before anything is emitted.
@@ -701,14 +715,19 @@ fn shedding(blocks: &[Block<'_>], can_see: bool, budget: Budget) -> Shedding {
     let tally = tally(blocks, can_see);
     let replies = tally.len();
 
-    // Fix A: pictures beyond the recent window never ride, whatever the budget
-    // says. A request that happens to fit today would otherwise keep every
-    // picture until the day it does not, which is precisely the failure this
-    // exists to prevent -- and the King would meet it mid-investigation rather
-    // than early.
+    // Neither pictures nor signatures beyond their window ever ride, whatever
+    // the budget says. A request that happens to fit today would otherwise keep
+    // every one of them until the day it does not, which is precisely the
+    // failure this exists to prevent -- and the King would meet it
+    // mid-investigation rather than early.
+    //
+    // The two bounds landed a task apart and for the same measured reason. The
+    // pictures came first, from a 413 that killed a plan three times; the
+    // signatures came from auditing the plans that did *not* die, where they
+    // were 39-56% of every request and essentially all of it stale.
     let mut shed = Shedding {
         images_from_reply: replies.saturating_sub(RECENT_REPLIES),
-        opaque_from_reply: 0,
+        opaque_from_reply: replies.saturating_sub(LIVE_REPLIES),
         result_cap: MOST_REPLAYED,
     };
 
@@ -734,14 +753,14 @@ fn shedding(blocks: &[Block<'_>], can_see: bool, budget: Budget) -> Shedding {
         return shed;
     }
 
-    // Signed thinking, oldest first, and never from a reply still live.
-    let live_from = replies.saturating_sub(LIVE_REPLIES);
-    for from in 0..=live_from {
-        shed.opaque_from_reply = from;
-        if fits(&shed) {
-            return shed;
-        }
-    }
+    // Signed thinking needs no step of its own any more. It used to be shed
+    // here, oldest first, up to `replies - LIVE_REPLIES` and never past it --
+    // which is exactly the bound the initial `Shedding` above now applies
+    // unconditionally, so by this point there is nothing left for such a loop
+    // to take. What it must never do is reach further: a signature inside
+    // `LIVE_REPLIES` is thinking the model is still using, and dropping it is
+    // silent (see `Reasoning::without_opaque`). Better to trim results, which
+    // say when they have been trimmed.
 
     // Results, halved until they fit or stop being worth reading. The floor is
     // not zero: a result trimmed to nothing tells the model its command
@@ -1112,25 +1131,27 @@ impl Model for CopilotModel {
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| ModelError::Transport(format!("unreadable response: {e}")))?;
 
-        answer_from(&parsed).inspect_err(|e| {
-            // The one place the raw reply is still in hand.
-            //
-            // This module logged nothing at all, and an empty reply cost a full
-            // investigation that ended in "unknowable": `answer_from` parses the
-            // body, returns an error naming a symptom, and the bytes that caused
-            // it are dropped on the way out. The next one should cost a log line.
-            //
-            // Bounded, and on stderr beside the server's other diagnostics --
-            // this crate has no `tracing`, and adding one for a single line is
-            // not the trade. It carries conversation content, so it is bounded
-            // hard and written only on the error path: a reply that parsed
-            // needs no forensics.
-            eprintln!(
-                "  A reply from {} could not be read ({e}). The body began: {}",
-                self.id,
-                truncate(&body, 600)
-            );
-        })
+        answer_from(&parsed)
+            .map(|answer| answer.weighing(sent))
+            .inspect_err(|e| {
+                // The one place the raw reply is still in hand.
+                //
+                // This module logged nothing at all, and an empty reply cost a full
+                // investigation that ended in "unknowable": `answer_from` parses the
+                // body, returns an error naming a symptom, and the bytes that caused
+                // it are dropped on the way out. The next one should cost a log line.
+                //
+                // Bounded, and on stderr beside the server's other diagnostics --
+                // this crate has no `tracing`, and adding one for a single line is
+                // not the trade. It carries conversation content, so it is bounded
+                // hard and written only on the error path: a reply that parsed
+                // needs no forensics.
+                eprintln!(
+                    "  A reply from {} could not be read ({e}). The body began: {}",
+                    self.id,
+                    truncate(&body, 600)
+                );
+            })
     }
 
     fn id(&self) -> &str {
@@ -1247,6 +1268,10 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
                 narration: (!text.is_empty()).then_some(text),
             }),
             tokens,
+            // `answer_from` reads the *response* and has never seen the request.
+            // `take_turn` measured that on its way out and fills this in with
+            // `Answer::weighing`.
+            bytes: 0,
         });
     }
 
@@ -1317,6 +1342,9 @@ fn answer_from(parsed: &Value) -> Result<Answer, ModelError> {
             body: text,
         }),
         tokens,
+        // See the note on the acting arm above: the request's weight is the
+        // caller's to add.
+        bytes: 0,
     })
 }
 
@@ -1904,6 +1932,61 @@ mod tests {
 
         // Every call still gets its result -- shedding the picture must not
         // shed the call, which the model matches against its own tool_call id.
+        assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 10);
+    }
+
+    /// The signature half of the same bound, and the larger half in practice.
+    ///
+    /// The sibling of [`only_recent_pictures_ride_the_wire`], added a task later
+    /// after auditing four real plans that never triggered the pressure path at
+    /// all. They did not need to: comfortably under [`Budget::FULL`], each was
+    /// carrying every signature it had ever produced -- 638 KB of a 1.15 MB
+    /// request on one, and in that case **100%** of it older than
+    /// [`LIVE_REPLIES`] and therefore dead by this module's own definition.
+    ///
+    /// This is the test that fails against the old code, where
+    /// `opaque_from_reply` started at `0` and only moved once a body exceeded
+    /// the budget. The budget here is deliberately the default: the whole point
+    /// is that no pressure is required.
+    #[test]
+    fn only_recent_signatures_ride_the_wire() {
+        let turns: Vec<Turn> = (0..10)
+            .map(|i| {
+                let mut tool_call = call(&format!("think-{i}"), Some(&format!("reply-{i}")), None);
+                tool_call.reasoning = Some(kingdom_core::Reasoning {
+                    text: Some(format!("thinking about {i}")),
+                    opaque: signature(2_000),
+                });
+                Turn::Tool(tool_call)
+            })
+            .collect();
+
+        let messages = messages(&brief_with(turns), false);
+
+        let signed = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant" && !m["signature"].is_null())
+            .count();
+        assert_eq!(
+            signed, LIVE_REPLIES,
+            "ten replies thought, and only the live ones may resend a signature \
+             under an ordinary budget: {signed}"
+        );
+
+        // The prose half is not a signature and is not bounded by this. It is
+        // what stops a model losing the thread of its own investigation -- see
+        // `a_models_own_reasoning_is_handed_back_to_it` -- and it is small.
+        let thinking = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant" && !m["reasoning_content"].is_null())
+            .count();
+        assert_eq!(
+            thinking, 10,
+            "shedding a stale signature must not shed the prose beside it: {thinking}"
+        );
+
+        // And every call still gets its result, for the reason the picture test
+        // gives: the model matches these against its own tool_call ids.
         assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 10);
     }
 

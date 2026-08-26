@@ -1382,7 +1382,12 @@ pub(crate) async fn converse(
         let tools = ToolSpec::for_model(model.as_ref(), permissions);
         let shop = Sandbox::new(workspace.clone())
             .for_plan(plan_id.clone())
-            .under(permissions);
+            .under(permissions)
+            // The fourth narrowing, and the one that could not live in
+            // `for_model`: `browser_take_screenshot` is offered to every model
+            // -- the King sees the picture either way -- but only a sighted one
+            // is handed the base64 with it. See `Sandbox::sighted`.
+            .seen_by_a_sighted_model(model.can_see());
 
         let brief = Brief {
             system_prompt: SystemPrompt::assemble(
@@ -1492,11 +1497,21 @@ pub(crate) async fn converse(
         //
         // Both numbers or neither: a count with no window is a percentage of
         // nothing. See `kingdom_core::ContextUsage`.
+        //
+        // The byte weight rides along rather than being written separately,
+        // for the same reason and one more: it is the *other* limit a gateway
+        // enforces, and the two are only comparable when they describe the same
+        // request. Written here, they always do.
         if let Some(tokens) = answer.tokens {
             let window = model.context_window();
+            let bytes = answer.bytes;
             let mut kingdom = lock()?;
             update(&mut kingdom, &plan_id, |p| {
-                p.context = Some(kingdom_core::ContextUsage { tokens, window });
+                p.context = Some(kingdom_core::ContextUsage {
+                    tokens,
+                    window,
+                    bytes,
+                });
             });
         }
 

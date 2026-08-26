@@ -486,10 +486,67 @@ fudged with a constant, because the ratio is entirely content-dependent (base64
 escapes to nothing, a build log nearly doubles), and a test now pins the estimate
 against a genuinely assembled body.
 
-What is **not** fixed is that the chamber header still reports tokens. The King
-watched 257k of 1M tick by while the gateway refused him on bytes, and the bar
-was telling the truth about the wrong quantity. Reporting wire bytes beside it is
-its own task.
+The chamber header now reports **both** limits. `ContextUsage` carries `bytes`
+beside `tokens` — the measurement `copilot.rs` already took so a 413 could name
+its own size, kept rather than discarded — and the header's tooltip says what the
+last request weighed on the wire. The King watched 257k of 1M tick by while the
+gateway refused him on bytes, and the bar was telling the truth about the wrong
+quantity. It is in the tooltip rather than beside the bar because it is the
+number to reach for when a turn fails for no visible reason, not one to watch;
+`bytes: 0` reads as *unmeasured* and draws nothing, which is what every plan
+recorded before the field existed loads as.
+
+**A request stopped carrying thinking nobody was using.** The other half of the
+same lesson as the pictures above, found by auditing four plans that did *not*
+die. `shedding` consulted `LIVE_REPLIES` only when a body exceeded
+`Budget::FULL`, so a conversation comfortably under budget re-sent every signed
+reasoning blob it had ever produced, forever. On real plans that was the single
+largest thing in a request — 638 KB of 1.15 MB on one, 651 KB of 1.45 MB on
+another — and in both cases **100%** of it older than `LIVE_REPLIES` and
+therefore dead by that constant's own definition. Cumulatively it was 46–53% of
+everything those turns put on the wire.
+
+So `opaque_from_reply` is now set in the *initial* `Shedding`, exactly as
+`images_from_reply` already was, and for the reason stated there: a conversation
+that merely happens to fit today would otherwise keep every blob until the day it
+does not. The pressure loop no longer needs a step for signatures — the bound it
+would have walked to is already applied — and it must never reach past it, since
+dropping a *live* signature is silent (`Reasoning::without_opaque`) where
+trimming a result says so.
+
+**And a round is now understood to be the unit of cost.** `copilot::armed` has
+set `parallel_tool_calls` all along, with a comment explaining that it saves
+(N−1) round trips whenever a model recognises a batch as independent — and
+nothing had ever asked a model to use it. Across those same four plans, 702
+rounds produced 840 tool calls: 1.20 per round, 84% of rounds carrying exactly
+one, and not a single round in any of them carrying three. `BATCHING` is the
+sentence that asks, kept for the `SHARED_MACHINE` reason rather than Phoenix's
+(Phoenix sends no such line; this is a fact about Kingdom's transport). Its
+second clause — *wait when a call needs an earlier result* — is as load-bearing
+as the ask, because batching a read with the write that depends on it trades a
+token bill for a correctness bug.
+
+The honest caveat is that a prompt line is a weak instrument: `workspace_block`'s
+own second clause fixed the redundant-`cd` habit outright and then lost to a
+stronger prior the moment a plan worked across two repositories, and the same
+audit found 71% of one plan's `bash` calls had the prefix back. Measured after
+the change, a four-file read arrived as one round of four calls.
+
+**A screenshot no longer costs two rounds.** `browser_take_screenshot` returned a
+path and left the model to spend a whole round on `read_image` for a file it had
+just asked to be created, reasoning that "the bytes must not be spent on a model
+that may not need them". The records disagreed: across a real kingdom, 131
+screenshots drew 128 `read_image` calls. 98% is not a model deciding, and the
+call now hands back the picture with the path.
+
+Nothing about the weight changes — `shown` puts an image on the wire only while
+it is within `RECENT_REPLIES`, so a picture delivered this way decays exactly as
+one delivered by `read_image` did, one round earlier and one round cheaper. The
+half of the old reasoning that was right is kept: a **blind** model still gets
+the path alone. That check could not live in `ToolSpec::for_model`, which
+narrows by withholding a tool — this tool is worth offering either way, since the
+King sees the picture regardless — so `Sandbox` carries `sighted` and `api.rs`
+sets it from the same `Model::can_see` the tool list is built from.
 
 **A question is asked one at a time, and the rail says one is standing.** Two
 halves of the same fault. `ask_user_question` may put up to four questions, and
@@ -776,11 +833,13 @@ edits, which is right while the King is only reading and wrong the moment he is
 typing against line 34 — the lines would shift under him and the note would land
 on something he never read.
 
-**The court can see, and can be seen.** `read_image` closes the loop
-`browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
-carries images beside its text. Two things about that are load-bearing and easy
-to undo by accident. Images are *not* persisted — `store.rs` strips them, because
-a plan's record is rewritten on every update and would otherwise grow by a
+**The court can see, and can be seen.** `read_image` was the tool that closed the
+loop `browser_take_screenshot` opened, and it cost a domain change: `ToolOutcome`
+carries images beside its text. That machinery is now used by the screenshot tool
+directly (see above) and `read_image` remains for every *other* picture — a
+diagram or a mockup already in the workspace. Two things about it are load-bearing
+and easy to undo by accident. Images are *not* persisted — `store.rs` strips them,
+because a plan's record is rewritten on every update and would otherwise grow by a
 megabyte per screenshot forever. And chat-completions has no image part on a
 tool result, so `copilot.rs` sends the picture as a following `user` message,
 built only on the wire and never as a `Turn` — the Responses API is the real fix
@@ -790,6 +849,9 @@ A model that cannot see is never offered `read_image` (`ToolSpec::for_model`,
 beside the existing `can_act` narrowing). The vision flag is read from three
 places in Copilot's `/models` payload because the catalogue is not ours; if it
 ever reads as blind for everything, that is where to look.
+`browser_take_screenshot` is the one tool that check does *not* withhold — it is
+worth having either way, since the King sees the picture regardless — so it asks
+`Sandbox::sighted` at run time instead.
 
 **The King reads what the court said, not only what it ran.** A model narrates
 the move it is about to make in the *same reply* as the tool calls, and that

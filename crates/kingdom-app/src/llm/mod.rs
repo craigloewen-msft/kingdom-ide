@@ -292,6 +292,17 @@ pub struct Answer {
     /// thing from zero and must stay tellable apart: zero would be drawn as an
     /// empty window, which is a claim rather than an absence.
     pub tokens: Option<usize>,
+    /// Bytes the request that earned this answer weighed on the wire.
+    ///
+    /// Zero means unmeasured, which is the honest reading for a provider that
+    /// never serialises a body -- the offline mock. Unlike [`Self::tokens`] this
+    /// is not a report from anyone: it is measured on the way out, which is why
+    /// it does not need an `Option` to distinguish silence from zero. Nobody can
+    /// send a zero-byte request.
+    ///
+    /// It is here because tokens and bytes are separately enforced limits and
+    /// Kingdom has been refused on each. See [`kingdom_core::ContextUsage`].
+    pub bytes: usize,
 }
 
 impl Answer {
@@ -300,7 +311,14 @@ impl Answer {
         Self {
             reply,
             tokens: None,
+            bytes: 0,
         }
+    }
+
+    /// The same answer, noting what the request that earned it weighed.
+    pub fn weighing(mut self, bytes: usize) -> Self {
+        self.bytes = bytes;
+        self
     }
 }
 

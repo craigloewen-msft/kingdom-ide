@@ -843,12 +843,39 @@ impl Proposal {
 ///
 /// The count is the *provider's*, never ours -- see [`ContextUsage::percent`]
 /// for why an estimate would be worse than nothing.
+///
+/// **Tokens are not the only bill, which is why [`ContextUsage::bytes`] rides
+/// beside them.** A gateway enforces two separate limits and Kingdom has been
+/// refused on each: a context window, counted in tokens, and a request size,
+/// counted in bytes. A plan died three times on `413 Request Entity Too Large`
+/// while this struct cheerfully reported 257k of 1M -- telling the truth about
+/// the wrong quantity, which is worse than saying nothing, because the King had
+/// a number in front of him and it said he was fine.
+///
+/// The two diverge because much of a request is not prose. Signed reasoning
+/// blobs and base64 images are heavy on the wire and cheap or free in tokens;
+/// an audit of four real plans found the signatures alone were 39-56% of every
+/// request while the reported token count tracked only the visible content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
     /// Tokens the last turn actually cost, as the provider reported them.
     pub tokens: usize,
     /// The window those tokens were measured against.
     pub window: usize,
+    /// Bytes the last request actually weighed on the wire.
+    ///
+    /// Ours rather than the provider's, and the one number here that is not a
+    /// report but a measurement: `copilot.rs` sizes the body before it sends it
+    /// so a 413 can name its own size, and this is that figure kept rather than
+    /// discarded.
+    ///
+    /// `#[serde(default)]` because every plan recorded before this field
+    /// existed must still load -- `store::load` *skips* a document that will not
+    /// parse, so a missing field would silently empty the King's rail. Zero
+    /// reads as "not measured", which is what a reader should show as nothing
+    /// rather than as an empty request.
+    #[serde(default)]
+    pub bytes: usize,
 }
 
 impl ContextUsage {
@@ -868,6 +895,27 @@ impl ContextUsage {
         // reply as well as the prompt can report slightly over its own limit,
         // and "104%" reads as a bug in Kingdom rather than as a full window.
         Some(((self.tokens * 100 / self.window).min(100)) as u8)
+    }
+
+    /// What the last request weighed, for a reader: `1.4 MB`, or `None`.
+    ///
+    /// `None` when nothing was measured, for the same reason [`Self::percent`]
+    /// returns it for an undeclared window: a reader that prints this
+    /// unconditionally should say nothing rather than claim a request of zero
+    /// bytes. Plans recorded before this was measured are exactly that case.
+    ///
+    /// Megabytes past a megabyte and kilobytes below it, because the number
+    /// exists to be compared against a limit that lives in megabytes -- and
+    /// "1447 KB" makes a reader do the division that the failure it warns about
+    /// gives him no time for.
+    pub fn weight(&self) -> Option<String> {
+        match self.bytes {
+            0 => None,
+            bytes if bytes >= 1024 * 1024 => {
+                Some(format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)))
+            }
+            bytes => Some(format!("{} KB", bytes / 1024)),
+        }
     }
 }
 
@@ -2927,7 +2975,8 @@ mod tests {
         assert_eq!(
             ContextUsage {
                 tokens: 4_000,
-                window: 0
+                window: 0,
+                bytes: 0,
             }
             .percent(),
             None
@@ -2936,7 +2985,8 @@ mod tests {
         assert_eq!(
             ContextUsage {
                 tokens: 50_000,
-                window: 200_000
+                window: 200_000,
+                bytes: 0,
             }
             .percent(),
             Some(25)
@@ -2945,11 +2995,63 @@ mod tests {
         assert_eq!(
             ContextUsage {
                 tokens: 208_000,
-                window: 200_000
+                window: 200_000,
+                bytes: 0,
             }
             .percent(),
             Some(100),
             "a full window reads as full, never as more than full"
+        );
+    }
+
+    /// The other limit, reported in the unit it is actually enforced in.
+    ///
+    /// A gateway refuses on a token window *and* on a request size, and Kingdom
+    /// has met both. The second killed a plan three times in ninety seconds
+    /// while `percent()` reported 26% of a million -- true, and about the wrong
+    /// quantity. This is the number that would have said why.
+    ///
+    /// The zero case is the one that matters for correctness rather than
+    /// presentation: every plan recorded before this field existed loads with
+    /// `bytes: 0` via `#[serde(default)]`, and a header that printed "0 KB" for
+    /// those would be claiming a measurement nobody took.
+    #[test]
+    fn an_unmeasured_request_weighs_nothing_rather_than_zero() {
+        let unmeasured = ContextUsage {
+            tokens: 4_000,
+            window: 1_000_000,
+            bytes: 0,
+        };
+        assert_eq!(
+            unmeasured.weight(),
+            None,
+            "a plan recorded before this was measured must say nothing, not '0 KB'"
+        );
+
+        // Below a megabyte, kilobytes. The unit a small request is legible in.
+        assert_eq!(
+            ContextUsage {
+                bytes: 442 * 1024,
+                ..unmeasured
+            }
+            .weight()
+            .as_deref(),
+            Some("442 KB")
+        );
+
+        // Past it, megabytes -- because the limit this exists to warn about is
+        // quoted in megabytes, and a reader meeting it has no time to divide.
+        // 1,520,435 is a real figure: the last request of a real plan, which is
+        // 1.45 MB and so reads as 1.4 rather than 1.5. Rounding down at the
+        // tenth is the right direction for a number compared against a ceiling.
+        assert_eq!(
+            ContextUsage {
+                bytes: 1_520_435,
+                ..unmeasured
+            }
+            .weight()
+            .as_deref(),
+            Some("1.4 MB")
         );
     }
 

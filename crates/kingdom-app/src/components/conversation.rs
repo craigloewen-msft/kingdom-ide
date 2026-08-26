@@ -495,6 +495,7 @@ fn ConversationBody(
             percent,
             kingdom_core::window_label(usage.window),
             usage.tokens,
+            usage.weight(),
         ))
     });
 
@@ -968,12 +969,25 @@ fn ConversationBody(
                                 // the end of it, so this sits with the other
                                 // provenance facts rather than announcing itself.
                                 <Show when=move || context.get().is_some()>
-                                    {move || context.get().map(|(percent, window, tokens)| view! {
+                                    {move || context.get().map(|(percent, window, tokens, weight)| view! {
                                         <span
                                             class="chamber-context"
                                             title=format!(
                                                 "{tokens} tokens of this model's {window} context \
-                                                 window, as the provider counted them on the last turn",
+                                                 window, as the provider counted them on the last turn.{}",
+                                                // The other limit, and the one that has
+                                                // actually refused a request here. A gateway
+                                                // enforces a token window *and* a body size,
+                                                // and a plan once died three times on the
+                                                // second while this header reported comfort
+                                                // about the first. Stated in the tooltip
+                                                // rather than beside the bar: it is the
+                                                // number to reach for when a turn fails for
+                                                // no visible reason, not one to watch.
+                                                weight.as_ref().map_or_else(
+                                                    String::new,
+                                                    |w| format!(" The last request weighed {w} on the wire."),
+                                                ),
                                             )
                                         >
                                             <span class="context-track">
