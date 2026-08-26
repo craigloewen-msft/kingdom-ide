@@ -392,6 +392,71 @@ gateway). `answer_from` also logs a bounded slice of the body on any parse
 failure: this module logged *nothing*, which is why diagnosing the original bug
 ended in "unknowable".
 
+**And a request too large to send is not the end of one either.** The same
+failure through a different door: a plan died on `413 Request Entity Too Large`
+and stayed dead, because 413 is a 4xx, `Refused` is fatal, and every "keep
+going" rebuilt a byte-identical body from the same transcript and was rejected
+identically. Three deaths in ninety seconds.
+
+The cause was that **a picture was replayed forever**. `read_image` puts base64
+on the live plan, `store::save` strips it on the way to *disk* but nothing takes
+it out of memory, and `copilot::messages` sent `shown()` for every tool call in
+the transcript on every round. Six screenshots became 4.02 MB of a 5.3 MB body,
+each already looked at and answered rounds earlier. So images now ride only while
+they are new (`RECENT_REPLIES`), which is the code catching up with what
+`ToolArtifact`'s own doc already claimed — `images` is "what the model was shown,
+true for one turn".
+
+Three things there are load-bearing. The window is **unconditional** rather than
+a response to pressure: a conversation that merely happens to fit today would
+otherwise keep every picture until the day it does not, and the King would meet
+this mid-investigation instead of never. A dropped picture is **admitted** in the
+tool result, for the reason `replayed` marks a truncation — a model that believes
+it can still see a screenshot describes it from memory and is confidently wrong
+about the UI it was asked to verify, while one told the attachment is gone simply
+takes another. And a **blind** model hears nothing either way, since it never had
+the image and the notice would only invite a screenshot it cannot read.
+
+Beyond that, `Budget` bounds the assembled body. `MOST_REPLAYED` already capped
+one result at 12 KB; nothing capped the sum, which is how 300 results comfortably
+under that cap still added up to a refusal. Over budget, `shedding` drops in
+order of what it costs to lose: stale pictures, then old `reasoning.opaque`, then
+the tails of old results. `opaque` is the delicate one — `Reasoning::without_opaque`
+records that a gateway *silently discards* thinking whose signature did not come
+back, so it is never taken from a reply recent enough to still be live
+(`LIVE_REPLIES`), and a test pins that under deliberate pressure.
+
+The number in `Budget::FULL` is a **guess**, and the design assumes so. The only
+hard fact is that 5.3 MB was refused; the real limit is unpublished and varies.
+So 413 gets `ModelError::TooLarge` — not transient, because resending the
+identical body is pointless, but `is_shrinkable`, which is a different question
+with a different remedy. `converse` halves the budget and asks again with no
+backoff (nothing is unwell; the next request is simply smaller), down to a floor
+past which the honest answer is to fail and say what was too big. Being wrong in
+either direction is survivable, which is what makes a guess acceptable here.
+
+Two smaller things. The body is measured before it goes so a 413 can report its
+own size, because "Request Entity Too Large" with no number attached is what made
+this feel unknowable. And `shedding` tallies each reply *once* and then asks that
+tally repeatedly — weighing candidates by re-walking the transcript re-serialised
+every tool call's arguments a dozen times over, which cost 110 ms on a real plan
+against 3 ms for the whole assembly.
+
+The tally counts **wire** bytes, not `str::len`, and that distinction bit once
+already during this very change. The body is JSON, where every quote and newline
+costs an extra byte, and tool output is mostly quotes and newlines: counting raw
+lengths under-reported the real transcript by 1.69x, so a request the budget
+called 3 MB went out at 5.1 MB — the size that was refused to begin with. A
+budget with no headroom is not a budget. `escaped_len` is counted rather than
+fudged with a constant, because the ratio is entirely content-dependent (base64
+escapes to nothing, a build log nearly doubles), and a test now pins the estimate
+against a genuinely assembled body.
+
+What is **not** fixed is that the chamber header still reports tokens. The King
+watched 257k of 1M tick by while the gateway refused him on bytes, and the bar
+was telling the truth about the wrong quantity. Reporting wire bytes beside it is
+its own task.
+
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
 deliberately *out* of the transcript and therefore out of `Plan::turns`) and

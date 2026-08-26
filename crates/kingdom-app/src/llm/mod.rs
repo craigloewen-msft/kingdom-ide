@@ -66,6 +66,18 @@ pub struct Brief {
     /// Empty means a prose-only turn, which is what a model that cannot call
     /// tools gets. A provider must not invent tools when this is empty.
     pub tools: Vec<ToolSpec>,
+    /// How many bytes of conversation this request may carry.
+    ///
+    /// On the `Brief` rather than on the provider because it is a property of
+    /// *this attempt*, not of the gateway: `api::converse` lowers it and asks
+    /// again when a request comes back too large, and a provider that held its
+    /// own budget would have no way to be told.
+    ///
+    /// What it bounds is the history -- see [`Budget`]. The system prompt, the
+    /// tool schemas and the King's own words are never shed, so this is not a
+    /// promise about the size of the finished body; it is the ceiling on the
+    /// part that grows without limit.
+    pub budget: Budget,
 }
 
 /// One tool, as a model is told about it.
@@ -325,6 +337,22 @@ pub enum ModelError {
     /// one. See [`ModelError::is_transient`].
     #[error("{0}")]
     Empty(String),
+    /// The gateway refused to *read* the request, because it was too big.
+    ///
+    /// Its own variant rather than a [`ModelError::Refused`] for the same reason
+    /// [`ModelError::Empty`] is: the two want opposite handling. A refusal is a
+    /// considered answer to the question asked, and nothing about asking it
+    /// again will change it. A 413 is the question never having been read, and
+    /// the remedy is a *smaller* question -- which is a thing Kingdom can
+    /// actually do, by shedding what a request need not carry.
+    ///
+    /// Folding this into `Refused` is what made a real plan unrecoverable: 413
+    /// is a 4xx, `Refused` is fatal, and every "keep going" rebuilt the same
+    /// oversized body from the same transcript and was rejected identically.
+    /// See [`Budget`] for what shrinking means, and `api::converse` for where it
+    /// happens.
+    #[error("{0}")]
+    TooLarge(String),
 }
 
 impl ModelError {
@@ -341,11 +369,86 @@ impl ModelError {
     /// time -- and his quota -- three times over. What is left is the reply that
     /// never arrived and the gateway that was briefly unwell, which are exactly
     /// the failures a second attempt fixes.
+    ///
+    /// [`ModelError::TooLarge`] is deliberately **not** transient, and that is
+    /// not the same as saying it is fatal. Resending the identical body would
+    /// be rejected identically, so it fails this question honestly; what it
+    /// earns instead is a retry that *changes* the request first, which
+    /// `api::converse` asks for separately through [`ModelError::is_shrinkable`].
+    /// Answering `true` here would have this loop resend the same oversized
+    /// request twice more and call the result a retry.
     pub fn is_transient(&self) -> bool {
         match self {
             ModelError::Empty(_) | ModelError::Transport(_) => true,
-            ModelError::Credential(_) | ModelError::Refused(_) => false,
+            ModelError::Credential(_) | ModelError::Refused(_) | ModelError::TooLarge(_) => false,
         }
+    }
+
+    /// Whether asking again with *less* in the request could answer differently.
+    ///
+    /// The counterpart to [`ModelError::is_transient`], asked separately because
+    /// the two remedies are different: one resends, this one rebuilds. Only a
+    /// request the gateway declined to read qualifies -- a model that considered
+    /// the question and refused it will refuse a shorter version of the same
+    /// question just as firmly.
+    pub fn is_shrinkable(&self) -> bool {
+        matches!(self, ModelError::TooLarge(_))
+    }
+}
+
+/// How many bytes of conversation one request may carry.
+///
+/// A gateway limits the *size of the body*, and that limit is nothing to do with
+/// the model's context window: a real plan was rejected with a 413 while its own
+/// header honestly read 257k of 1M tokens used. Tokens were never the scarce
+/// thing; bytes were, and nothing was counting them.
+///
+/// The number is a guess with headroom, and deliberately so. The only hard fact
+/// available is that ~5.3 MB was refused; the limit itself is not published and
+/// differs per gateway. So this is set well clear of the one figure known to
+/// fail, while leaving room for the two recent screenshots a provider is
+/// expected to carry (`copilot::RECENT_REPLIES`) -- a budget too mean to hold
+/// those would shed them on every request and quietly undo the fix it exists to
+/// support.
+///
+/// Being wrong in either direction is survivable, which is what makes a guess
+/// acceptable here: too generous costs one refused request before
+/// [`Budget::tighter`] shrinks and retries, and too mean costs some old signed
+/// thinking that nothing in the UI has ever drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub bytes: usize,
+}
+
+impl Budget {
+    /// What a request starts with.
+    pub const FULL: Budget = Budget {
+        bytes: 3 * 1024 * 1024,
+    };
+
+    /// Below this, shedding has stopped buying anything worth the loss.
+    ///
+    /// A floor rather than an endless halving because a request eventually
+    /// consists of the system prompt, the tool schemas and the King's own words,
+    /// none of which this may drop. Past that point the honest answer is to fail
+    /// and say what was too big, not to send a request with the conversation
+    /// filed off.
+    const FLOOR: usize = 256 * 1024;
+
+    /// Half as much, or `None` at the floor.
+    ///
+    /// Halving rather than stepping down politely: the limit is unknown, so the
+    /// aim is to cross under it in two or three attempts rather than to discover
+    /// it precisely at the cost of the user's afternoon.
+    pub fn tighter(self) -> Option<Budget> {
+        let bytes = self.bytes / 2;
+        (bytes >= Self::FLOOR).then_some(Budget { bytes })
+    }
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self::FULL
     }
 }
 
