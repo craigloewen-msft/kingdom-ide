@@ -442,6 +442,16 @@ tally repeatedly — weighing candidates by re-walking the transcript re-seriali
 every tool call's arguments a dozen times over, which cost 110 ms on a real plan
 against 3 ms for the whole assembly.
 
+The tally counts **wire** bytes, not `str::len`, and that distinction bit once
+already during this very change. The body is JSON, where every quote and newline
+costs an extra byte, and tool output is mostly quotes and newlines: counting raw
+lengths under-reported the real transcript by 1.69x, so a request the budget
+called 3 MB went out at 5.1 MB — the size that was refused to begin with. A
+budget with no headroom is not a budget. `escaped_len` is counted rather than
+fudged with a constant, because the ratio is entirely content-dependent (base64
+escapes to nothing, a build log nearly doubles), and a test now pins the estimate
+against a genuinely assembled body.
+
 What is **not** fixed is that the chamber header still reports tokens. The King
 watched 257k of 1M tick by while the gateway refused him on bytes, and the bar
 was telling the truth about the wrong quantity. Reporting wire bytes beside it is

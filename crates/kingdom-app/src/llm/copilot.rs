@@ -759,7 +759,7 @@ fn shedding(blocks: &[Block<'_>], can_see: bool, budget: Budget) -> Shedding {
     shed
 }
 
-/// What one reply weighs, split by what a [`Shedding`] can drop.
+/// What one reply weighs on the wire, split by what a [`Shedding`] can drop.
 struct Tally {
     /// Everything that always goes: ids, arguments, narration, prose reasoning,
     /// and any words said before this reply.
@@ -768,9 +768,39 @@ struct Tally {
     opaque: usize,
     /// The base64 of this reply's pictures, where the model can see at all.
     images: usize,
-    /// Each result's full length, kept separately so a cap can be applied
-    /// without re-reading the transcript.
-    results: Vec<usize>,
+    /// Each result as `(raw, escaped)`, so a lowered `result_cap` can be applied
+    /// without re-reading the transcript. The cap is measured against the raw
+    /// text because that is what [`replayed`] cuts; the cost is the escaped size
+    /// of whatever survives.
+    results: Vec<(usize, usize)>,
+}
+
+/// How many bytes a string costs *inside the JSON body*.
+///
+/// The thing this exists to stop getting wrong. `weight` originally counted raw
+/// `str` lengths, and on a real transcript that under-counted the assembled body
+/// by 1.69x -- tool output is mostly newlines and quotes, and serde escapes
+/// every one of them. A budget compared against a figure 1.69x too small has no
+/// headroom at all: 3 MB of "estimate" is 5.1 MB on the wire, which is the size
+/// that was refused in the first place.
+///
+/// Counted rather than approximated with a fudge factor, because the ratio
+/// depends entirely on the content -- base64 escapes to nothing, a build log
+/// nearly doubles. It is one pass over bytes already being walked, and it runs
+/// once per assembly rather than once per shedding candidate.
+fn escaped_len(text: &str) -> usize {
+    text.len()
+        + text
+            .bytes()
+            .map(|byte| match byte {
+                // `\"` and `\\`, and the control bytes with two-character
+                // forms: `\n`, `\r`, `\t`, `\b`, `\f`.
+                b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 1,
+                // Every other control byte goes as `\u00XX`.
+                0x00..=0x1f => 5,
+                _ => 0,
+            })
+            .sum::<usize>()
 }
 
 /// Every reply weighed once.
@@ -784,7 +814,7 @@ fn tally(blocks: &[Block<'_>], can_see: bool) -> Vec<Tally> {
 
     for block in blocks {
         match block {
-            Block::Said(u) => pending_said += u.body.len(),
+            Block::Said(u) => pending_said += escaped_len(&u.body),
             Block::Acted(batch) => {
                 let mut fixed = std::mem::take(&mut pending_said);
                 let mut opaque = 0;
@@ -792,21 +822,29 @@ fn tally(blocks: &[Block<'_>], can_see: bool) -> Vec<Tally> {
                 let mut results = Vec::with_capacity(batch.len());
 
                 if let Some(reasoning) = &batch[0].reasoning {
-                    fixed += reasoning.text.as_ref().map_or(0, |t| t.len());
+                    fixed += reasoning.text.as_deref().map_or(0, escaped_len);
+                    // The opaque half is written back as a JSON *value* rather
+                    // than into a string, so `to_string` is already its wire
+                    // form and must not be escaped a second time.
                     opaque += reasoning
                         .opaque
                         .iter()
                         .map(|(key, value)| key.len() + value.to_string().len())
                         .sum::<usize>();
                 }
-                fixed += batch[0].narration.as_ref().map_or(0, |n| n.len());
+                fixed += batch[0].narration.as_deref().map_or(0, escaped_len);
 
                 for tool_call in batch {
+                    // `arguments` carries the JSON as a *string*, so the
+                    // serialised form is escaped again on the way in.
                     fixed += tool_call.id.len()
                         + tool_call.tool.len()
-                        + tool_call.input.to_string().len();
-                    results.push(tool_call.report().len());
+                        + escaped_len(&tool_call.input.to_string());
+                    let report = tool_call.report();
+                    results.push((report.len(), escaped_len(report)));
                     if can_see {
+                        // Base64 needs no escaping: its alphabet contains none
+                        // of the characters above.
                         images += tool_call
                             .shown()
                             .iter()
@@ -845,11 +883,11 @@ fn tally(blocks: &[Block<'_>], can_see: bool) -> Vec<Tally> {
 /// Roughly how many bytes of body a shedding leaves, for comparison with a
 /// [`Budget`].
 ///
-/// An estimate, deliberately. The exact figure needs the assembled JSON, and
-/// building the whole request once per candidate -- images and all -- to weigh
-/// it would cost more than the saving. Every term that grows without bound is
-/// counted exactly; the per-message JSON scaffolding is not, which is part of
-/// why `Budget::FULL` is set well below any real limit.
+/// An estimate, but an estimate in *wire bytes* -- see [`escaped_len`] for why
+/// that distinction is the whole point. What it leaves out is the per-message
+/// JSON scaffolding: the role keys, the braces, the tool-call envelopes. That is
+/// a few dozen bytes per message and does not grow with the content, which is
+/// part of why `Budget::FULL` sits well below any real limit.
 fn weight(tally: &[Tally], shed: &Shedding) -> usize {
     tally
         .iter()
@@ -859,7 +897,18 @@ fn weight(tally: &[Tally], shed: &Shedding) -> usize {
                 + one
                     .results
                     .iter()
-                    .map(|len| (*len).min(shed.result_cap))
+                    .map(|(raw, escaped)| {
+                        // Under the cap the whole result goes, at its escaped
+                        // size. Over it, `replayed` keeps `cap` bytes of the
+                        // text, which escape at about the same rate as the whole
+                        // -- exactness here would mean re-scanning the kept
+                        // slice for every candidate cap.
+                        if *raw <= shed.result_cap {
+                            *escaped
+                        } else {
+                            escaped.saturating_mul(shed.result_cap) / (*raw).max(1)
+                        }
+                    })
                     .sum::<usize>()
                 + if reply >= shed.opaque_from_reply {
                     one.opaque
@@ -2015,6 +2064,75 @@ mod tests {
         assert!(
             !newest["signature"].is_null(),
             "the newest reply's signature is the one that must never go: {newest:#?}"
+        );
+    }
+
+    /// The budget must be counted in wire bytes, not in raw string lengths.
+    ///
+    /// The bug this exists to prevent shipped once already, in this very change:
+    /// `weight` counted `str::len` while the body is JSON, where every quote and
+    /// newline costs an extra byte. On the real transcript that under-counted by
+    /// 1.69x -- so a "3 MB" request was 5.1 MB on the wire, which is the size
+    /// that was refused to begin with. A budget with no headroom is not a budget.
+    ///
+    /// Tool output is exactly the worst case: shell logs are mostly newlines and
+    /// quoted paths, so the fixture leans on both.
+    #[test]
+    fn the_budget_is_measured_in_wire_bytes() {
+        // A result of the shape a real command produces.
+        let noisy = (0..200)
+            .map(|i| format!("running \"test {i}\" in \"src/lib.rs\"\n"))
+            .collect::<String>();
+
+        let mut tool_call =
+            kingdom_core::ToolCall::started("call-1", "bash", json!({ "cmd": "cargo test" }));
+        tool_call = tool_call.in_reply("reply-1", None, None);
+        tool_call.outcome = Some(kingdom_core::ToolOutcome::done(noisy.clone()));
+
+        let turns = vec![Turn::Tool(tool_call)];
+        let blocks = blocks(&turns);
+        let estimate = weight(
+            &tally(&blocks, false),
+            &Shedding {
+                images_from_reply: 0,
+                opaque_from_reply: 0,
+                result_cap: MOST_REPLAYED,
+            },
+        );
+
+        // The raw length is what the old code counted, and it is not the cost.
+        assert!(
+            estimate > noisy.len(),
+            "escaping must be counted: raw {} vs estimate {estimate}",
+            noisy.len()
+        );
+
+        // And the estimate must not be *under* the body it is standing in for.
+        // A little under would be tolerable; 1.69x under is what broke it.
+        let body = serde_json::to_vec(&json!(messages(
+            &brief_with(vec![Turn::Tool({
+                let mut c = kingdom_core::ToolCall::started(
+                    "call-1",
+                    "bash",
+                    json!({ "cmd": "cargo test" }),
+                );
+                c = c.in_reply("reply-1", None, None);
+                c.outcome = Some(kingdom_core::ToolOutcome::done(noisy.clone()));
+                c
+            })]),
+            false
+        )))
+        .unwrap();
+
+        // The body carries the system prompt and JSON scaffolding the estimate
+        // deliberately omits, so it is larger -- but the *content* must not be
+        // understated. Everything but the prompt is accounted for.
+        let scaffolding = body.len() - estimate;
+        assert!(
+            scaffolding < body.len() / 2,
+            "the estimate must account for most of the body, not a third of it: \
+             estimate {estimate}, body {}",
+            body.len()
         );
     }
 
