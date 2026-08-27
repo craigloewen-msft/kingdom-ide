@@ -39,6 +39,11 @@ pulldown-cmark = { version = "0.13.4", default-features = false, features = ["ht
 # the line -- the review drawer's diff panel is built on it.
 similar = { version = "2", features = ["inline"] }
 
+# A city's shared-service manifest, at `<city>/.kingdom/services.toml`. TOML
+# because a person hand-writes this file and comments in it; pure Rust with no
+# I/O, so it crosses to wasm with `kingdom-core`.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+
 # Release profile for the wasm bundle: optimise for size, since this ships to a browser.
 [profile.wasm-release]
 inherits = "release"
