@@ -86,6 +86,14 @@ pub fn FileTree(
     // view state and neither belongs on the kingdom: nothing outside this rail
     // cares which folders are open.
     let expanded = RwSignal::new(HashSet::<String>::new());
+    // And which ones he has closed *by hand*, which is a different fact from
+    // "not open".
+    //
+    // A folder is absent from `expanded` for two quite different reasons: he has
+    // never opened it, or he has just deliberately shut it. Only the second
+    // carries an instruction, and it is the one the reveal below has to obey --
+    // see the note on that effect for the lock-in this exists to prevent.
+    let hand_closed = RwSignal::new(HashSet::<String>::new());
     let listings = RwSignal::new(HashMap::<String, Vec<DirEntry>>::new());
     // Paths with a request in flight, so a double-click cannot send two.
     let fetching = RwSignal::new(HashSet::<String>::new());
@@ -148,6 +156,12 @@ pub fn FileTree(
         // the set yields, which is fine: each row is placed by `walk` from the
         // cache once its parent has arrived, so a child landing before its
         // parent is simply not drawn yet.
+        //
+        // `hand_closed` is deliberately left alone here, and the next reader
+        // will ask why. What went stale is the *listing*; which folders he
+        // wanted shut did not. Clearing it would hand the King's collapse back
+        // to the next reveal, and re-open the folder he closed, the moment he
+        // deleted a file somewhere else entirely.
         for path in open {
             fetch(plan.get_value(), path, listings, fetching);
         }
@@ -196,6 +210,16 @@ pub fn FileTree(
                 e.insert(path.clone());
             }
         });
+        // What he just did to this folder, remembered so an automatic reveal
+        // cannot undo it. Closing records the instruction; opening withdraws it,
+        // because the King opening a folder himself is him changing his mind.
+        hand_closed.update(|closed| {
+            if opening {
+                closed.remove(&path);
+            } else {
+                closed.insert(path.clone());
+            }
+        });
         if opening {
             fetch(plan.get_value(), path, listings, fetching);
         }
@@ -222,6 +246,24 @@ pub fn FileTree(
     // time an unrelated folder grows it. So the path last revealed is
     // remembered, and a run that finds nothing new to reveal writes nothing and
     // scrolls nothing.
+    //
+    // # And an event does not outrank an instruction
+    //
+    // That was half the rule, and the half above only covers a reveal *repeating*
+    // for the file already open. A reveal for a genuinely different file is news
+    // by any reading -- and it was still enough to undo the King's collapse,
+    // because the file it reveals may be a neighbour of the one he was reading,
+    // in the very folder he has just shut.
+    //
+    // That is not hypothetical, and it is why he could never close the folder:
+    // the map at the foot of the rail sets `picked_file` on a click, the chamber
+    // turns that into the open file, and the camera has meanwhile zoomed onto
+    // the open file's own building -- so the pane is filled with houses of that
+    // same folder. Every click there re-opened it.
+    //
+    // So `hand_closed` above records what he shut, and `ancestors_to_open`
+    // refuses to re-open it. The courtesy is still paid everywhere he has not
+    // given an instruction.
     //
     // Two halves: open the folders on the way down, then scroll to what they
     // uncovered. The second may have to wait for a listing, which is the one
@@ -256,13 +298,10 @@ pub fn FileTree(
         // only to look for a row that had not been listed yet, and the folders
         // are the King's to close in the meantime.
         if fresh {
-            // Only the ones that are not already open, so a file opened inside
-            // a folder he has expanded himself writes nothing at all.
-            let shut: Vec<String> = expanded.with_untracked(|open| {
-                ancestors_of(&path)
-                    .into_iter()
-                    .filter(|path| !open.contains(path))
-                    .collect()
+            // Which folders this reveal is allowed to open: the ones on the way
+            // down that are neither already open nor shut by the King himself.
+            let shut = expanded.with_untracked(|open| {
+                hand_closed.with_untracked(|closed| ancestors_to_open(&path, open, closed))
             });
             if !shut.is_empty() {
                 expanded.update(|open| {
@@ -279,6 +318,15 @@ pub fn FileTree(
                     fetch(plan.get_value(), path, listings, fetching);
                 }
             }
+        }
+
+        // A file inside a folder the King has shut has no row to find and never
+        // will, so the wait is retired here rather than left armed. Without
+        // this the effect stays subscribed to `rows` and re-runs on every later
+        // change of shape, hunting a row that cannot appear.
+        if hand_closed.with_untracked(|closed| is_hidden_by_hand(&path, closed)) {
+            awaiting_row.set_value(false);
+            return;
         }
 
         // And then bring the row into view -- but only once it exists. Tracking
@@ -433,6 +481,58 @@ fn ancestors_of(path: &str) -> Vec<String> {
     ancestors
 }
 
+/// Which folders a reveal may open on its way to `path`.
+///
+/// The ancestors, less the ones already open -- and stopping dead at the first
+/// one the King has closed himself. That last rule is the whole of the fix for a
+/// folder that could never be closed, and it is the reason this is a function
+/// rather than three lines inlined in the effect: it is the pure half of the
+/// decision, and the half a regression would get quietly wrong.
+///
+/// # Why a hand-closed folder outranks a reveal
+///
+/// Revealing the open file is a courtesy: it saves the King hunting for a file
+/// something else put in front of him. Closing a folder is an instruction. When
+/// the two disagree the instruction has to win, because the courtesy repeats --
+/// anything that changes the open file runs another reveal, and the map at the
+/// foot of the rail changes it on a click, so a reveal that re-opened his folder
+/// would re-open it again and again and the folder could never be shut at all.
+///
+/// Nothing is lost by obeying him: the file still opens in the panel, and its
+/// row reappears the moment he opens the folder himself -- which withdraws the
+/// instruction, because it is him changing his mind.
+///
+/// # Why it stops rather than filters
+///
+/// Skipping only the shut folder and going on to open its children would draw
+/// nothing today -- `walk` never descends into a closed folder -- and would be a
+/// trap tomorrow: those children would sit in `expanded` unseen, and the next
+/// time he opened the folder himself it would unfold several levels at once,
+/// with no way to tell why. A reveal that is refused entry stops at the door.
+fn ancestors_to_open(
+    path: &str,
+    open: &HashSet<String>,
+    hand_closed: &HashSet<String>,
+) -> Vec<String> {
+    ancestors_of(path)
+        .into_iter()
+        .take_while(|folder| !hand_closed.contains(folder))
+        .filter(|folder| !open.contains(folder))
+        .collect()
+}
+
+/// Whether `path` sits inside a folder the King has closed by hand.
+///
+/// Asked after a reveal has opened what it may: if any folder on the way down is
+/// still shut on his orders, the file has no row in the tree and will not grow
+/// one, so the effect must stop waiting for it rather than watch every later
+/// change of shape hoping.
+fn is_hidden_by_hand(path: &str, hand_closed: &HashSet<String>) -> bool {
+    ancestors_of(path)
+        .iter()
+        .any(|folder| hand_closed.contains(folder))
+}
+
 /// Whether the panel showing `open` is news, given the path last revealed.
 ///
 /// The whole of "a reveal is an event, not a property of the tree" in one
@@ -537,6 +637,91 @@ mod tests {
             Some("src/engine/camera.rs")
         ));
         assert!(!is_new_reveal(None, None));
+    }
+
+    /// Turns a list of paths into the set the helpers take.
+    fn set(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// The King's own collapse must survive a *different* file being opened.
+    ///
+    /// This is the half the first fix missed, and the one the King reported.
+    /// `is_new_reveal` stops a reveal repeating for the file already showing,
+    /// but anything that opens a *neighbour* is genuinely new -- and the map at
+    /// the foot of the rail opens one on a click. Without this filter that
+    /// reveal re-opens the folder he has just shut, and since the map can do it
+    /// again the folder can never be closed at all.
+    #[test]
+    fn a_reveal_does_not_re_open_a_folder_the_king_closed() {
+        let closed = set(&["src"]);
+
+        // The folder is shut on his orders, so the way down stops there --
+        // even though the file being revealed is genuinely a new one.
+        assert!(ancestors_to_open("src/core_0.ts", &HashSet::new(), &closed).is_empty());
+
+        // And deeper: one shut folder anywhere on the path is enough, and the
+        // ones below it are not opened either -- a reveal refused entry stops
+        // at the door rather than quietly expanding what is behind it.
+        assert!(ancestors_to_open("src/engine/camera.rs", &HashSet::new(), &closed).is_empty());
+
+        // The stop is at the shut folder, not before it: everything above is
+        // still opened, so a file deep in a tree whose middle he has closed
+        // still uncovers as much of the way as he allows.
+        assert_eq!(
+            ancestors_to_open(
+                "crates/app/src/main.rs",
+                &HashSet::new(),
+                &set(&["crates/app/src"])
+            ),
+            vec!["crates".to_string(), "crates/app".to_string()]
+        );
+    }
+
+    /// ...while a folder he has never touched is still opened for him.
+    ///
+    /// The courtesy has to survive the fix. Only a folder he *closed* carries an
+    /// instruction; one he simply never opened carries none, so revealing a file
+    /// several folders deep works exactly as it did.
+    #[test]
+    fn a_reveal_still_opens_folders_the_king_has_not_shut() {
+        assert_eq!(
+            ancestors_to_open("src/engine/camera.rs", &HashSet::new(), &HashSet::new()),
+            vec!["src".to_string(), "src/engine".to_string()]
+        );
+
+        // A folder already open is not opened twice, which is what keeps a
+        // reveal into an expanded tree from writing to `expanded` at all.
+        assert!(ancestors_to_open("src/lib.rs", &set(&["src"]), &HashSet::new()).is_empty());
+
+        // Shutting one folder does not make an unrelated one unreachable.
+        assert_eq!(
+            ancestors_to_open("docs/guide.md", &HashSet::new(), &set(&["src"])),
+            vec!["docs".to_string()]
+        );
+    }
+
+    /// A file hidden behind his collapse is one the effect must stop hunting.
+    ///
+    /// The reveal's second half waits for the file's row and scrolls to it. If a
+    /// folder on the way is shut by hand that row will never exist, so the wait
+    /// has to be retired -- otherwise the effect stays subscribed to the rows
+    /// and re-runs on every later change of shape, forever.
+    #[test]
+    fn a_file_behind_a_closed_folder_is_known_to_have_no_row() {
+        assert!(is_hidden_by_hand("src/core_0.ts", &set(&["src"])));
+        assert!(is_hidden_by_hand("src/engine/camera.rs", &set(&["src"])));
+        // The folder that holds it, not merely one that shares a prefix.
+        assert!(is_hidden_by_hand(
+            "src/engine/camera.rs",
+            &set(&["src/engine"])
+        ));
+
+        // Nothing shut on the way: the row is expected to appear.
+        assert!(!is_hidden_by_hand("src/core_0.ts", &HashSet::new()));
+        assert!(!is_hidden_by_hand("src/core_0.ts", &set(&["docs"])));
+        // A file at the root sits in no folder, so it can never be hidden.
+        assert!(!is_hidden_by_hand("README.md", &set(&["src"])));
     }
 
     /// Which folders a reveal opens, and which it must not.
