@@ -25,6 +25,15 @@
 //! by colour and shares one handle across hundreds of meshes, so animating a
 //! cached material would pulse whatever else happened to land in its bucket.
 //!
+//! # Why a town is traced twice
+//!
+//! A ring is a fixed width in world units and the map is drawn at wildly
+//! different zooms, so one width cannot serve both ends of it: the weight that
+//! is a bold band over a single street is a two-pixel hairline once the whole
+//! realm is in frame. Since that far end is precisely where nothing else about
+//! a town is legible, each town gets both weights and the detail tier chooses
+//! between them. See [`RingTier`] and [`shows`].
+//!
 //! # Why the ring is unlit
 //!
 //! Everything else on this map is a *surface*: it takes the manifest's sun, it
@@ -37,7 +46,8 @@
 
 use bevy::prelude::*;
 
-use super::bridge::TownActivity;
+use super::bridge::{LodLevel, TownActivity};
+use super::lod::ActiveLod;
 
 /// The colour a working town is traced in.
 ///
@@ -98,6 +108,40 @@ impl Activity {
     }
 }
 
+/// Which of a town's two rings this is.
+///
+/// A ring is a fixed width in *world* units, and the map is drawn at wildly
+/// different zooms, so one width cannot serve both ends of it. At the
+/// [`LodLevel::FileDetail`] end nine units is a bold band; pulled back to the
+/// zoom-out limit the same nine units come out around two and a half pixels --
+/// a hairline barely heavier than a ward kerb, at exactly the tier where the
+/// ring is the *only* thing left that can say an agent is here.
+///
+/// So each town is traced twice, and the tier picks which trace is shown. See
+/// [`shows`], and `spawn::BOLD_TOWN_RING_WIDTH` for the widths and the
+/// arithmetic behind them.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RingTier {
+    /// The hairline, for the tiers where a town's own detail is legible.
+    Fine,
+    /// The heavy band, for the tier where nothing else about a town reads.
+    Bold,
+}
+
+/// Whether a ring of this weight is the one to show at this zoom.
+///
+/// Pure, so the whole matrix can be pinned without a camera or a render device
+/// -- the same reason `lod::reaches` is a free function. The two arms are
+/// exhaustive and disjoint on purpose: every tier shows exactly one of a town's
+/// rings, so a working town is never drawn with two bands stacked and never
+/// drawn with none.
+pub fn shows(tier: RingTier, lod: LodLevel) -> bool {
+    match tier {
+        RingTier::Bold => lod == LodLevel::Districts,
+        RingTier::Fine => lod != LodLevel::Districts,
+    }
+}
+
 /// A ring traced around one town, shown only while that town is working.
 ///
 /// Carries its own material handle rather than reading it back off the entity,
@@ -107,26 +151,39 @@ impl Activity {
 pub struct TownRing {
     /// The town this ring belongs to, by name.
     pub town: String,
-    /// This ring's own material, animated by [`pulse_rings`].
+    /// Which weight this one is drawn at, and therefore which zoom it is for.
+    pub tier: RingTier,
+    /// This ring's material, animated by [`pulse_rings`].
+    ///
+    /// **Shared with the town's other ring**, deliberately: they are one town
+    /// and one breath, and two handles would be two clocks free to drift apart
+    /// across a tier change. Only one of the pair is ever visible, so only one
+    /// is ever written -- see [`shows`].
     pub material: Handle<StandardMaterial>,
 }
 
-/// Shows or hides each ring as the reported activity changes.
+/// Shows or hides each ring as the reported activity, or the zoom, changes.
 ///
-/// Only runs on a change. A ring going dark is faded to its resting colour as
-/// well as hidden, so that a town coming back to life starts its breath from
-/// rest rather than resuming mid-glow.
+/// A ring is shown when its town is working **and** its weight is the one this
+/// zoom calls for, so this watches [`ActiveLod`] as well as [`Activity`]. Still
+/// only on a change of one or the other: an idle map held at a steady zoom
+/// costs two resource reads a frame.
+///
+/// A ring going dark is faded to its resting colour as well as hidden, so that
+/// a town coming back to life starts its breath from rest rather than resuming
+/// mid-glow.
 pub fn apply_activity(
     activity: Res<Activity>,
+    active: Res<ActiveLod>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut rings: Query<(&TownRing, &mut Visibility)>,
 ) {
-    if !activity.is_changed() {
+    if !activity.is_changed() && !active.is_changed() {
         return;
     }
     for (ring, mut visibility) in rings.iter_mut() {
         let working = activity.working_in(&ring.town) > 0;
-        let wanted = if working {
+        let wanted = if working && shows(ring.tier, active.0) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -134,6 +191,15 @@ pub fn apply_activity(
         if *visibility != wanted {
             *visibility = wanted;
         }
+        // Faded on the town's activity rather than on this ring's visibility:
+        // a ring hidden merely because the camera moved belongs to a town that
+        // is still working, and dimming it would put the pair's shared material
+        // back to rest underneath the sibling that is currently breathing.
+        //
+        // For a town that has genuinely stopped, both of its rings write
+        // `PULSE_FLOOR` to the one handle they share. The second write is
+        // identical to the first, so the duplicate costs a store and means
+        // nothing.
         if !working {
             if let Some(mut material) = materials.get_mut(&ring.material) {
                 material.base_color = ring_color(PULSE_FLOOR);
@@ -250,6 +316,38 @@ mod tests {
                 "drifted at {at}: {} vs {later}",
                 glow(at)
             );
+        }
+    }
+
+    /// The whole point of the pair: pulled right back, the band the King sees
+    /// is the heavy one.
+    #[test]
+    fn the_bold_ring_is_the_one_shown_when_the_map_is_furthest_out() {
+        assert!(shows(RingTier::Bold, LodLevel::Districts));
+        assert!(!shows(RingTier::Bold, LodLevel::Architecture));
+        assert!(!shows(RingTier::Bold, LodLevel::FileDetail));
+
+        assert!(!shows(RingTier::Fine, LodLevel::Districts));
+        assert!(shows(RingTier::Fine, LodLevel::Architecture));
+        assert!(shows(RingTier::Fine, LodLevel::FileDetail));
+    }
+
+    /// The property the pair actually has to hold, stated as a property rather
+    /// than as six assertions: two bands stacked would read as a thick smear
+    /// with a seam down it, and none at all would lose the fact entirely at
+    /// whichever zoom the gap fell in.
+    #[test]
+    fn exactly_one_ring_shows_at_every_tier() {
+        for lod in [
+            LodLevel::Districts,
+            LodLevel::Architecture,
+            LodLevel::FileDetail,
+        ] {
+            let shown = [RingTier::Fine, RingTier::Bold]
+                .into_iter()
+                .filter(|tier| shows(*tier, lod))
+                .count();
+            assert_eq!(shown, 1, "{lod:?} shows {shown} rings, not one");
         }
     }
 
