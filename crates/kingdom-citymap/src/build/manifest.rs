@@ -5,9 +5,7 @@
 
 use std::collections::HashMap;
 
-pub use crate::map::{
-    MapCrumb, MapDistrict, MapFeature, MapLocation, MapManifest, MapWorld,
-};
+pub use crate::map::{MapCrumb, MapDistrict, MapFeature, MapLocation, MapManifest, MapWorld};
 
 use crate::build::layout::{Building, CityLayout, District, Rect, WorldLayout};
 use crate::build::model::{Category, Repository};
@@ -359,6 +357,7 @@ mod tests {
             },
             bytes: 2048,
             lines: 90,
+            code_lines: 80,
             complexity: 7,
             references: 3,
             scale: 1.0,
