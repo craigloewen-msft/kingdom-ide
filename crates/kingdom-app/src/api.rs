@@ -62,13 +62,17 @@ pub(crate) fn update(
     change: impl FnOnce(&mut Plan),
 ) -> Option<Plan> {
     let root = std::path::PathBuf::from(&kingdom.root);
+    // Resolved before the plan is borrowed mutably, and passed down rather than
+    // looked up again: publishing attaches the city's shared services, and the
+    // kingdom lock this caller is holding cannot be taken a second time.
+    let city_root = city_root_in(kingdom, id);
     let plan = kingdom.plans.iter_mut().find(|p| &p.id == id)?;
     change(plan);
     remember(&root, plan);
     // After `remember`, not before: a failed write appends a note to the plan,
     // and the conversation should be told the thing that was actually stored
     // rather than an optimistic version of it.
-    crate::events::publish(plan);
+    crate::events::publish_within(plan, city_root.as_deref());
     Some(plan.clone())
 }
 
@@ -107,6 +111,19 @@ pub fn kingdom_snapshot() -> Option<Kingdom> {
 #[cfg(feature = "ssr")]
 pub fn city_root_of(id: &PlanId) -> Option<std::path::PathBuf> {
     let kingdom = lock().ok()?;
+    city_root_in(&kingdom, id)
+}
+
+/// [`city_root_of`] for a caller that is already holding the kingdom.
+///
+/// The kingdom's mutex is a plain [`std::sync::Mutex`], which is **not**
+/// reentrant: a thread that asks for it twice deadlocks itself and leaves the
+/// lock held forever, so every later request hangs too. [`update`] runs with the
+/// guard in hand and publishes from inside it, so anything on that path -- which
+/// now includes resolving a plan's city for its shared services -- must take the
+/// kingdom as an argument rather than reaching for the lock again.
+#[cfg(feature = "ssr")]
+pub fn city_root_in(kingdom: &Kingdom, id: &PlanId) -> Option<std::path::PathBuf> {
     let plan = kingdom.plan(id)?;
     let city = kingdom.city(&plan.city)?;
     Some(std::path::Path::new(&kingdom.root).join(&city.path))

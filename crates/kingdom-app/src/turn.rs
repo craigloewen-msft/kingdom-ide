@@ -690,6 +690,11 @@ pub(crate) async fn spawn_subagents(
         // A subagent is briefed on the *workspace*, exactly as its parent is:
         // it is sent to look at the work in progress, not at a pristine copy.
         let city_brief = crate::llm::CityBrief::from_city(&city, &parent.workspace);
+        // The city as a path, for publishing. Taken from the city already in
+        // hand rather than looked up: the kingdom lock is held here and is not
+        // reentrant, so `city_root_of` from inside this block would deadlock the
+        // whole server. See `events::publish_within`.
+        let city_root = std::path::Path::new(&kingdom.root).join(&city.path);
 
         let mut subagents = Vec::new();
         for errand in tasks {
@@ -700,7 +705,7 @@ pub(crate) async fn spawn_subagents(
             // Pushed as well as recorded, so the parent's conversation can draw
             // the subagent the instant it exists rather than when it first
             // speaks.
-            crate::events::publish(&subagent);
+            crate::events::publish_within(&subagent, Some(&city_root));
             kingdom.plans.push(subagent);
             subagents.push((id, errand));
         }

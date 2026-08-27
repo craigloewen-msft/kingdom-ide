@@ -154,6 +154,29 @@ fn last_pulse() -> &'static Mutex<HashMap<PlanId, PlanPulse>> {
 /// halves are independent on purpose, so a poisoned per-plan registry silences
 /// one chamber rather than every badge in the app.
 pub fn publish(plan: &Plan) {
+    // Resolved here, where no lock is held, rather than deep inside
+    // `on_the_wire`: see [`publish_within`] for why that distinction is
+    // load-bearing.
+    let city_root = crate::api::city_root_of(&plan.id);
+    publish_within(plan, city_root.as_deref());
+}
+
+/// [`publish`] for a caller that is already holding the kingdom.
+///
+/// # Why the city is passed in
+///
+/// Attaching a plan's shared services means knowing which city it belongs to,
+/// and that answer lives in the kingdom -- behind a plain, **non-reentrant**
+/// [`std::sync::Mutex`]. [`crate::api::update`] publishes with that guard in
+/// hand, so a lookup from in here would be the same thread asking for the same
+/// lock twice: it deadlocks, and because it deadlocks *holding* the lock, every
+/// later request in the process hangs behind it. The server answers once and
+/// then spins forever.
+///
+/// So the city is resolved by whoever already has the kingdom open and handed
+/// down. `None` is a plan whose city could not be resolved -- it simply carries
+/// no services, the same as a project that declares none.
+pub fn publish_within(plan: &Plan, city_root: Option<&std::path::Path>) {
     if let Ok(channels) = registry().lock() {
         // Everything on this channel is bound for a browser, so the opaque half
         // of the model's thinking is dropped once here rather than at each
@@ -165,14 +188,22 @@ pub fn publish(plan: &Plan) {
         let mut for_wire: Option<Plan> = None;
 
         if let Some(tx) = channels.get(&plan.id) {
-            let _ = tx.send(for_wire.get_or_insert_with(|| on_the_wire(plan)).clone());
+            let _ = tx.send(
+                for_wire
+                    .get_or_insert_with(|| on_the_wire(plan, city_root))
+                    .clone(),
+            );
         }
 
         // The second channel is the *sender's*, not a broadcast: only the plan
         // that sent this subagent hears about it.
         if let Some(subagent) = &plan.spawned_by {
             if let Some(tx) = channels.get(&subagent.parent) {
-                let _ = tx.send(for_wire.get_or_insert_with(|| on_the_wire(plan)).clone());
+                let _ = tx.send(
+                    for_wire
+                        .get_or_insert_with(|| on_the_wire(plan, city_root))
+                        .clone(),
+                );
             }
         }
     }
@@ -190,7 +221,9 @@ pub fn publish(plan: &Plan) {
 /// so both are answered here, at the moment of sending, rather than stored -- a
 /// forward or an address written to disk would name something that stopped
 /// answering when the server did.
-fn on_the_wire(plan: &Plan) -> Plan {
+///
+/// The city is given rather than looked up: see [`publish_within`].
+fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> Plan {
     let mut wire = plan.for_wire();
     if plan.network.is_isolated() {
         wire.ports = crate::netns::forwards_of(&plan.id)
@@ -203,12 +236,12 @@ fn on_the_wire(plan: &Plan) -> Plan {
     // whether or not this one has a network of its own, and the King wants the
     // address either way. Empty for the overwhelming majority of projects,
     // which declare no services at all.
-    if let Some(city_root) = crate::api::city_root_of(&plan.id) {
-        wire.shared_services = crate::services::running_in(&city_root)
+    if let Some(city_root) = city_root {
+        wire.shared_services = crate::services::running_in(city_root)
             .into_iter()
             .map(|service| kingdom_core::SharedService {
                 address: service.address(),
-                users: crate::services::users_of(&city_root, &service.name),
+                users: crate::services::users_of(city_root, &service.name),
                 name: service.name,
                 image: service.image,
             })
@@ -324,8 +357,46 @@ mod tests {
         )
     }
 
-    /// A shared service is never persisted, only attached on the way out.
+    /// Publishing must never reach for the kingdom lock.
     ///
+    /// [`crate::api::update`] publishes with the kingdom's guard in hand, and
+    /// that mutex is a plain [`std::sync::Mutex`] -- not reentrant. A lookup
+    /// from inside the publish path is therefore the same thread asking for the
+    /// same lock twice, which deadlocks *while holding it*: the server answers
+    /// one request and then every later one hangs behind a lock nobody will ever
+    /// release. That is exactly what attaching shared services on the wire once
+    /// did, by resolving the plan's city through `api::city_root_of`.
+    ///
+    /// A subscriber is registered first because it is load-bearing: `on_the_wire`
+    /// is built lazily and only runs when somebody is actually listening, which
+    /// is why the fault appeared only once a chamber was open.
+    ///
+    /// Run on its own thread with a deadline, so a reintroduced deadlock is a
+    /// failing test rather than a suite that never finishes.
+    #[test]
+    fn publishing_while_the_kingdom_is_held_does_not_deadlock() {
+        let plan = a_plan("held");
+        let listening = subscribe(&plan.id);
+
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _kingdom = crate::api::lock().expect("the kingdom locks");
+            publish_within(&plan, None);
+            let _ = done.send(());
+        });
+
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "publishing under the kingdom lock must return -- a second lock from \
+             inside the publish path deadlocks the whole server"
+        );
+
+        drop(listening);
+    }
+
+    /// A shared service is never persisted, only attached on the way out.    ///
     /// The same rule `Plan::ports` follows, and it matters for the same reason:
     /// an address belongs to a running Docker daemon, so one restored from a
     /// record would name a container that stopped when the server did. This
