@@ -528,11 +528,16 @@ pub fn child_environment(shop: &Sandbox) -> Vec<(String, String)> {
 /// The city is resolved through `api::city_root_of` rather than from the
 /// sandbox's own path, because the sandbox points at the plan's *worktree* and
 /// the well belongs to the project. Five worktrees, one city, one address.
+///
+/// The *plan* is passed on as well as the city, because the two plans sharing
+/// one database are not necessarily told the same address: an isolated plan has
+/// it on its own loopback and one on the machine's network does not. See
+/// `services::environment`.
 fn service_environment(shop: &Sandbox) -> Vec<(String, String)> {
     let Some(city_root) = crate::api::city_root_of(shop.plan()) else {
         return Vec::new();
     };
-    crate::services::environment(&city_root)
+    crate::services::environment(shop.plan(), &city_root)
 }
 
 /// Whether this workspace is a checkout of Kingdom itself.

@@ -44,6 +44,24 @@
 //! network namespace. So finding out what a plan is listening on costs one file
 //! read and no subprocess. See [`listeners`] for the trap in that.
 //!
+//! # The namespace's loopback is a place to *put* things, not only to avoid
+//!
+//! `--disable-host-loopback` makes `127.0.0.1` inside a plan a dead end, and
+//! [`crate::services`] is built around that: a shared database is reached at
+//! its container address because a published port provably cannot be reached
+//! from in here.
+//!
+//! But that same dead end is *empty and the plan's own*, which makes it the
+//! best possible place to put the database. [`open_wells`] stands a relay on
+//! `127.0.0.1:<the service's own port>` inside the namespace and splices it to
+//! the container -- so `mongodb://localhost:27017` is true in this plan, false
+//! on the King's machine, and true again with a different database in the plan
+//! next door. Measured before it was written: a MongoDB handshake completed
+//! through exactly this hop from inside a real plan.
+//!
+//! It is the same [`spawn_relay`] the forwarding path uses, pointed the other
+//! way -- inwards from the namespace rather than outwards to `tap0`.
+//!
 //! **A forward needs a relay, because it can only ever land on `tap0`.**
 //! `add_hostfwd` NATs to the namespace's `tap0` address, but almost everything
 //! a plan runs binds `127.0.0.1` instead -- a different socket even inside the
@@ -117,6 +135,15 @@ pub struct Namespace {
     /// launched for this plan. Excluded from [`forwards_of`] -- see its own
     /// docs for why the King's badge must never show it.
     cdp_port: Option<u16>,
+    /// Service port -> the relay putting a shared service on this namespace's
+    /// own loopback. See [`open_wells`].
+    ///
+    /// Kept apart from `forwards` because it is the opposite direction of
+    /// travel and has to be treated as such everywhere: a forward carries the
+    /// plan's own server *out* to the King, where a well carries a container
+    /// *in* to the plan. [`Namespace::listeners`] is where that distinction
+    /// earns its keep.
+    wells: HashMap<u16, u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +281,15 @@ impl Namespace {
     ///
     /// Read from the host, with no subprocess: `/proc/<pid>/net` is per network
     /// namespace, so this file *is* the namespace's table.
+    ///
+    /// **A well's port is not one of these, and the distinction is the whole
+    /// reason `wells` is a separate field.** A well relay listens inside the
+    /// namespace like anything else, so `/proc` reports it -- but it is the
+    /// King's own database seen sideways, not a server this plan wrote.
+    /// Forwarded, it would put a host port on the ports badge that opens a
+    /// MongoDB wire protocol socket in a browser tab. Dropped here rather than
+    /// hidden in [`forwards_of`], because unlike Chrome's CDP port there is no
+    /// reason to carry it out of the namespace at all.
     fn listeners(&self) -> Vec<u16> {
         let mut ports = Vec::new();
         for family in ["tcp", "tcp6"] {
@@ -264,9 +300,20 @@ impl Namespace {
         }
         ports.sort_unstable();
         ports.dedup();
-        ports.retain(|p| !NEVER_FORWARD.contains(p));
-        ports
+        forwardable(ports, &self.wells)
     }
+}
+
+/// Drops the ports that are listening but are not the plan's own server.
+///
+/// Pure, and separate from the `/proc` read for the reason [`parse_listeners`]
+/// is: the suite runs on a bare machine, and this is the half worth pinning.
+/// A well port that slipped through here would be forwarded to the King's
+/// loopback and offered on his ports badge as something to open in a browser --
+/// where it would answer his click in the MongoDB wire protocol.
+fn forwardable(mut ports: Vec<u16>, wells: &HashMap<u16, u32>) -> Vec<u16> {
+    ports.retain(|p| !NEVER_FORWARD.contains(p) && !wells.contains_key(p));
+    ports
 }
 
 /// Pulls the listening ports out of a `/proc/net/tcp` table.
@@ -521,24 +568,48 @@ async fn add_forward(api_socket: &std::path::Path, holder: u32, guest: u16) -> O
 /// this keeps that list from growing by one for a job the binary can do
 /// itself. See `main.rs`'s `--relay` mode.
 async fn spawn_relay(holder: u32, guest: u16) -> Option<u32> {
-    let exe = std::env::current_exe().ok()?;
-    let bind = format!("{GUEST_ADDR}:{guest}");
-    let target = format!("127.0.0.1:{guest}");
+    spawn_relay_between(
+        holder,
+        &format!("{GUEST_ADDR}:{guest}"),
+        &format!("127.0.0.1:{guest}"),
+    )
+    .await
+}
 
-    let mut prefix = vec![
+/// The argv that starts one relay inside a plan's namespace.
+///
+/// Split out from the spawning so the *direction of travel* can be tested
+/// without a kernel, which is worth a test of its own: a relay with its bind
+/// and target the wrong way round starts happily, listens on an address
+/// nothing uses, and does nothing at all. Both callers pass addresses that
+/// look alike, so the mistake would be invisible in review.
+fn relay_argv(holder: u32, exe: &str, bind: &str, target: &str) -> Vec<String> {
+    vec![
         "nsenter".to_string(),
         "--preserve-credentials".to_string(),
         format!("--user=/proc/{holder}/ns/user"),
         format!("--net=/proc/{holder}/ns/net"),
         "--".to_string(),
-    ];
-    prefix.push(exe.to_string_lossy().to_string());
-    prefix.push("--relay".to_string());
-    prefix.push(bind);
-    prefix.push(target);
+        exe.to_string(),
+        "--relay".to_string(),
+        bind.to_string(),
+        target.to_string(),
+    ]
+}
 
-    let mut child = tokio::process::Command::new(&prefix[0])
-        .args(&prefix[1..])
+/// Spawns one relay inside a plan's namespace, from any address to any other.
+///
+/// The general form of [`spawn_relay`], which travels outwards to `tap0`, and
+/// of [`open_wells`], which travels inwards from the loopback. Returns the pid
+/// only when the process is still alive after its bind: an immediate exit means
+/// the bind was refused, and what that *means* differs between the two callers,
+/// so each interprets `None` for itself.
+async fn spawn_relay_between(holder: u32, bind: &str, target: &str) -> Option<u32> {
+    let exe = std::env::current_exe().ok()?;
+    let argv = relay_argv(holder, &exe.to_string_lossy(), bind, target);
+
+    let mut child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -554,9 +625,10 @@ async fn spawn_relay(holder: u32, guest: u16) -> Option<u32> {
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     match child.try_wait() {
-        // Exited already -- almost certainly the bind conflict described
-        // above, meaning the server itself already answers on `tap0`. No
-        // relay wanted; the forward reaches the server directly.
+        // Exited already -- the bind was refused, because something is already
+        // listening there. For a forward that is the server itself on `tap0`
+        // and no relay is wanted; for a well it means the address is taken and
+        // the caller must not claim it works.
         Ok(Some(_)) => None,
         // Still running: the bind succeeded and it is now relaying.
         Ok(None) => Some(pid),
@@ -695,6 +767,7 @@ impl Namespace {
             api_socket,
             forwards: HashMap::new(),
             cdp_port: None,
+            wells: HashMap::new(),
         })
     }
 
@@ -706,6 +779,12 @@ impl Namespace {
             if let Some(pid) = forward.relay {
                 kill(pid);
             }
+        }
+        // The well relays are relays too, and leak in exactly the same way if
+        // they are missed -- one process per shared service per plan, holding
+        // an open socket to a database, for the life of the server.
+        for pid in self.wells.values() {
+            kill(*pid);
         }
         // slirp next: it holds a descriptor on the namespace, and killing the
         // holder while it watches produces a noisy log for no benefit.
@@ -981,6 +1060,132 @@ pub async fn run_relay(bind: &str, target: &str) {
     }
 }
 
+/// Puts a city's shared services on this plan's own loopback, so an agent can
+/// reach its database at the address it would reach it at anywhere else.
+///
+/// # Why this is the right place for a database
+///
+/// [`crate::services`] hands a plan its well as a container address --
+/// `172.31.4.10:27017` -- because a container published to the King's loopback
+/// is provably unreachable through `--disable-host-loopback`. That is true and
+/// stays true. But it means every project with a well must teach every agent a
+/// rule that contradicts what every agent already knows, and the failure when
+/// it is forgotten reads as a broken database rather than a wrong address.
+///
+/// A plan's loopback is nobody else's. A relay standing on it makes
+/// `mongodb://localhost:27017` *true here* -- while the same address on the
+/// King's machine is still his own, and in the plan next door is that plan's.
+/// Isolation is what makes the ordinary address safe to hand out, rather than
+/// the reason it cannot be.
+///
+/// # Isolated plans only, and not by accident
+///
+/// A plan with no namespace gets nothing from this: there is no loopback of its
+/// own to bind, so the relay would take the King's real `127.0.0.1:27017` --
+/// the precise port collision this product exists to prevent, committed by the
+/// product. Such a plan keeps the container address, which works and always
+/// has.
+///
+/// # Idempotent, because it runs at the top of every turn
+///
+/// A port already relayed is left alone. Re-spawning would be a bind conflict
+/// against our own relay, and the second process would exit having achieved
+/// nothing while looking like a failure.
+///
+/// Returns the ports that are now answering on the loopback, which is what
+/// [`crate::services::environment`] needs in order to promise `localhost` only
+/// where it is true.
+pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<u16> {
+    let (holder, already) = {
+        let registry = lock();
+        let Some(namespace) = registry.get(plan) else {
+            // No namespace: a shared-network plan, deliberately left with the
+            // container address. See the note above.
+            return Vec::new();
+        };
+        (
+            namespace.holder,
+            namespace.wells.keys().copied().collect::<Vec<_>>(),
+        )
+    };
+
+    let mut open = already.clone();
+    for (host, port) in services {
+        if already.contains(port) {
+            continue;
+        }
+        let bind = format!("127.0.0.1:{port}");
+        let target = format!("{host}:{port}");
+        let Some(pid) = spawn_relay_between(holder, &bind, &target).await else {
+            // The bind was refused, so this port is *not* answering on the
+            // loopback and must not be recorded as if it were. The caller
+            // falls back to the container address, which is what every plan
+            // had before this existed -- a worse address, but a working one.
+            continue;
+        };
+        let mut registry = lock();
+        let Some(namespace) = registry.get_mut(plan) else {
+            // The plan was closed while we were spawning. Nothing will ever
+            // tear this down, so do it here rather than leak it.
+            kill(pid);
+            continue;
+        };
+        namespace.wells.insert(*port, pid);
+        open.push(*port);
+    }
+
+    open.sort_unstable();
+    open.dedup();
+    open
+}
+
+/// Which service ports are answering on this plan's own loopback.
+///
+/// Asked by [`crate::services::environment`] on every command a plan runs, so
+/// it is a map lookup rather than anything that touches the network: the
+/// question is "did the relay come up", and the registry is where that was
+/// recorded.
+pub fn wells_of(plan: &PlanId) -> Vec<u16> {
+    let registry = lock();
+    let Some(namespace) = registry.get(plan) else {
+        return Vec::new();
+    };
+    let mut ports: Vec<u16> = namespace.wells.keys().copied().collect();
+    ports.sort_unstable();
+    ports
+}
+
+/// Records a plan as having wells on its loopback, without a kernel.
+///
+/// Test-only, and deliberately in this module rather than reached for through a
+/// public field: what [`crate::services::environment`] and the system prompt
+/// need to be told is exactly what [`open_wells`] records, and a test that
+/// built its own idea of that state would pass while the real pair drifted.
+/// The pids are fictional and nothing ever signals them -- `tear_down` is not
+/// reached, because no namespace is really created here.
+#[cfg(test)]
+pub(crate) fn pretend_wells_are_open(plan: &PlanId, ports: &[u16]) {
+    let mut registry = lock();
+    let namespace = registry.entry(plan.clone()).or_insert_with(|| Namespace {
+        holder: 0,
+        slirp: 0,
+        api_socket: PathBuf::from("/run/nowhere.sock"),
+        forwards: HashMap::new(),
+        cdp_port: None,
+        wells: HashMap::new(),
+    });
+    for (index, port) in ports.iter().enumerate() {
+        namespace.wells.insert(*port, 900_000 + index as u32);
+    }
+}
+
+/// Undoes [`pretend_wells_are_open`], so one test cannot leak into another
+/// through this process-global registry.
+#[cfg(test)]
+pub(crate) fn forget_namespace(plan: &PlanId) {
+    lock().remove(plan);
+}
+
 /// Reserves a fixed port for Chrome's CDP inside a plan's namespace, and
 /// records it so the King's ports badge can exclude it.
 ///
@@ -1123,6 +1328,7 @@ mod tests {
             api_socket: PathBuf::from("/run/nowhere.sock"),
             forwards: HashMap::new(),
             cdp_port: None,
+            wells: HashMap::new(),
         };
         let prefix = namespace.enter_prefix();
 
@@ -1201,10 +1407,102 @@ mod tests {
                 api_socket: PathBuf::from("/run/nowhere.sock"),
                 forwards,
                 cdp_port: Some(9222),
+                wells: HashMap::new(),
             },
         );
         *namespaces().lock().unwrap() = registry;
 
         assert_eq!(forwards_of(&plan), vec![(3000, 40001)]);
+    }
+
+    /// A well relay listens inside the namespace, and must not be mistaken for
+    /// the plan's own server.
+    ///
+    /// This is the trap in putting a database on the plan's loopback:
+    /// `/proc/<holder>/net/tcp` cannot tell a relay from a dev server, so
+    /// without this filter `reconcile` forwards 27017 to a host port and the
+    /// ports badge invites the King to open his own database in a browser tab.
+    #[test]
+    fn a_wells_port_is_never_forwarded_as_a_server_of_the_plans_own() {
+        let mut wells = HashMap::new();
+        wells.insert(27017, 5555);
+
+        // What `/proc` would report inside a plan running a server with a well
+        // open: its own :3000, and the relay carrying the database.
+        assert_eq!(forwardable(vec![3000, 27017], &wells), vec![3000]);
+
+        // And with no wells open, nothing is dropped -- the filter must not
+        // cost a shared-network plan anything.
+        assert_eq!(
+            forwardable(vec![3000, 27017], &HashMap::new()),
+            vec![3000, 27017]
+        );
+    }
+
+    /// A well relay binds the plan's loopback and reaches out to the container,
+    /// never the reverse.
+    ///
+    /// Worth pinning because both addresses are `host:port` strings of the same
+    /// shape, so swapping them is a one-line mistake that compiles, starts a
+    /// process, and silently relays nothing: the relay would listen on the
+    /// container's address -- which it cannot bind -- or, worse, bind the
+    /// container's port and forward the loopback to itself.
+    #[test]
+    fn a_well_relay_listens_on_the_loopback_and_reaches_the_container() {
+        let argv = relay_argv(
+            4242,
+            "/usr/bin/kingdom",
+            "127.0.0.1:27017",
+            "172.31.4.10:27017",
+        );
+
+        // Entered into the plan's namespace, or it would bind the King's own
+        // loopback -- the collision this whole product exists to prevent.
+        assert_eq!(argv.first().map(String::as_str), Some("nsenter"));
+        assert!(argv.iter().any(|p| p == "--net=/proc/4242/ns/net"));
+        assert!(argv.iter().any(|p| p == "--preserve-credentials"));
+
+        // The order is the direction of travel: bind first, target second.
+        let relay = argv.iter().position(|p| p == "--relay").expect("--relay");
+        assert_eq!(argv[relay + 1], "127.0.0.1:27017", "binds the loopback");
+        assert_eq!(argv[relay + 2], "172.31.4.10:27017", "reaches the well");
+    }
+
+    /// The forwarding relay travels the other way, and still does.
+    ///
+    /// The generalisation that let a well relay exist could have changed this
+    /// one's addresses without any caller noticing, because a forward with a
+    /// backwards relay fails the same way it failed before relays existed: the
+    /// host port accepts and then answers nothing.
+    #[test]
+    fn a_forwarding_relay_still_travels_out_to_tap0() {
+        let argv = relay_argv(
+            7,
+            "/usr/bin/kingdom",
+            &format!("{GUEST_ADDR}:3000"),
+            "127.0.0.1:3000",
+        );
+        let relay = argv.iter().position(|p| p == "--relay").expect("--relay");
+        assert_eq!(argv[relay + 1], format!("{GUEST_ADDR}:3000"));
+        assert_eq!(argv[relay + 2], "127.0.0.1:3000");
+    }
+
+    /// A plan with no namespace gets no well relay at all.
+    ///
+    /// The refusal is the feature. Such a plan's `127.0.0.1` *is* the King's,
+    /// so a relay there would take his real port 27017 -- Kingdom committing
+    /// the exact collision it exists to surface.
+    #[tokio::test]
+    async fn a_shared_network_plan_is_given_no_loopback_well() {
+        let plan = PlanId::new("plan-on-the-machines-network");
+        namespaces().lock().unwrap().remove(&plan);
+
+        let opened = open_wells(&plan, &[("172.31.4.10".to_string(), 27017)]).await;
+
+        assert!(
+            opened.is_empty(),
+            "binding the King's own loopback is the one outcome worth refusing"
+        );
+        assert!(wells_of(&plan).is_empty());
     }
 }

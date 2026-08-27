@@ -111,6 +111,14 @@ const LABEL_CITY: &str = "kingdom.city";
 /// The label carrying the service's name within that city.
 const LABEL_SERVICE: &str = "kingdom.service";
 
+/// The address a plan reaches its own wells at, once they are relayed onto its
+/// loopback.
+///
+/// Spelled as an address rather than as `localhost` because it is substituted
+/// into a connection string, and a name would put the plan at the mercy of
+/// whatever its `/etc/hosts` and resolver do with it.
+const LOOPBACK: &str = "127.0.0.1";
+
 /// One service that is up, and where to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningService {
@@ -309,6 +317,22 @@ fn scopes_for(city_root: &Path) -> [Scope; 2] {
 /// plan already registered as a drawer stays exactly one user. Plans two
 /// through five therefore find the service standing and pay only for a
 /// `docker inspect`.
+///
+/// # And puts them on the plan's own loopback
+///
+/// The last thing this does, for an isolated plan, is
+/// [`crate::netns::open_wells`] -- so the agent reaches its database at
+/// `localhost:27017` rather than at an address it has to be taught. Done here
+/// rather than at each call site on the reasoning `tools::child_environment`
+/// and `netns::enter_prefix` are built on: `turn` and `terminal` both already
+/// route through this one function, and a call site that had to *remember* is
+/// one that will forget -- leaving an agent with a `localhost` that works in
+/// the chamber and not in the King's shell, or the reverse.
+///
+/// It follows the containers rather than leading them because the relay needs
+/// an address to reach, and the address does not exist until the container
+/// does. It is also why the caller must have raised the namespace first; both
+/// callers do.
 pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningService>, ServiceError> {
     let mut manifests = Vec::new();
     for scope in scopes_for(city_root) {
@@ -342,6 +366,16 @@ pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningServic
             up.push(service);
         }
     }
+
+    // On the plan's own loopback, so `localhost` is the right answer here. A
+    // no-op for a shared-network plan, which has no loopback of its own to put
+    // anything on -- see `netns::open_wells`.
+    let addresses: Vec<(String, u16)> = up
+        .iter()
+        .map(|service| (service.host.clone(), service.port))
+        .collect();
+    crate::netns::open_wells(plan, &addresses).await;
+
     Ok(up)
 }
 
@@ -355,7 +389,22 @@ pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningServic
 /// its own database wins over a machine-wide one of the same name. Collected
 /// through a map rather than a `Vec` for that reason -- the last writer has to
 /// be the only one left.
-pub fn environment(city_root: &Path) -> Vec<(String, String)> {
+///
+/// # Which address the plan is told
+///
+/// `127.0.0.1` when [`crate::netns::open_wells`] has a relay standing for that
+/// service, and the container's address otherwise. The plan asked for is the
+/// one that decides, not the city: five plans on one project can have four
+/// isolated and one on the machine's network, and each must be told the address
+/// that is true where it is standing.
+///
+/// **Only when the relay is actually up.** A relay that failed to bind means
+/// `localhost` reaches nothing, and handing out an address that fails to
+/// connect for no visible reason is worse than handing out an awkward one that
+/// works. The fallback is exactly what every plan had before wells reached the
+/// loopback.
+pub fn environment(plan: &PlanId, city_root: &Path) -> Vec<(String, String)> {
+    let on_the_loopback = crate::netns::wells_of(plan);
     let registry = registry();
     let mut merged: BTreeMap<String, String> = BTreeMap::new();
 
@@ -369,7 +418,12 @@ pub fn environment(city_root: &Path) -> Vec<(String, String)> {
         let key = scope.key();
         for spec in &manifest.services {
             if let Some(running) = registry.running.get(&(key.clone(), spec.name.clone())) {
-                merged.extend(spec.environment(&running.host, running.port));
+                let host = if on_the_loopback.contains(&running.port) {
+                    LOOPBACK
+                } else {
+                    running.host.as_str()
+                };
+                merged.extend(spec.environment(host, running.port));
             }
         }
     }
@@ -1054,6 +1108,42 @@ async fn wait_until_ready(service: &RunningService) -> Result<(), ServiceError> 
     })
 }
 
+/// Records one running service, and writes the manifest that declares it.
+///
+/// Test-only, and `pub(crate)` because two modules need to set up the same
+/// state: this module tests which address a plan is *handed*, and
+/// `llm::system_prompt` tests which address a plan is *told*. Those two must
+/// agree, and they cannot agree if each builds its own idea of a standing well.
+///
+/// Nothing here touches Docker: the container named does not exist, which is
+/// exactly right for testing the half that decides what an address says.
+#[cfg(test)]
+pub(crate) fn pretend_a_well_is_running(city_root: &Path, port: u16) {
+    std::fs::create_dir_all(city_root.join(".kingdom")).expect("the city's folder");
+    std::fs::write(
+        city_root.join(kingdom_core::services::MANIFEST_PATH),
+        format!(
+            "[[service]]\nname = \"db\"\nimage = \"mongo:7\"\nport = {port}\n\
+             env = {{ MONGODB_URI = \"mongodb://{{host}}:{{port}}/app\" }}\n"
+        ),
+    )
+    .expect("the manifest");
+
+    let key = city_key(city_root);
+    registry().running.insert(
+        (key.clone(), "db".to_string()),
+        RunningService {
+            name: "db".to_string(),
+            image: "mongo:7".to_string(),
+            host: "172.31.4.10".to_string(),
+            port,
+            container: format!("kingdom-{key}-db"),
+            scope: ServiceScope::City,
+            key,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,7 +1293,92 @@ mod tests {
         let _ = std::fs::create_dir_all(&empty);
         let manifest = manifest_of(&empty).expect("a missing manifest is not a failure");
         assert!(manifest.is_empty());
-        assert!(environment(&empty).is_empty());
+        assert!(environment(&PlanId::new("any-plan"), &empty).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Which address a plan is told. The container is one address and the
+    // plan's own loopback is another, and which one a given plan gets is the
+    // difference between `npm start` working and an agent hunting for a
+    // database that is running perfectly well.
+    // -----------------------------------------------------------------------
+
+    /// Puts one running service in the registry, as `ensure` would have.
+    ///
+    /// Returns the city root it is filed under. Named for the city so two
+    /// tests cannot collide in the process-global registry.
+    fn a_running_well(city: &str, port: u16) -> PathBuf {
+        let root = std::env::temp_dir().join(city);
+        pretend_a_well_is_running(&root, port);
+        root
+    }
+
+    /// A plan with the well on its own loopback is told to use it.
+    ///
+    /// This is the whole feature seen from the one place that decides it: the
+    /// agent never reads this code, it reads `$MONGODB_URI`, and what that
+    /// variable says is what it will type.
+    #[test]
+    fn a_plan_with_the_well_on_its_loopback_is_given_localhost() {
+        let root = a_running_well("kingdom-loopback-well-test", 27017);
+        let plan = PlanId::new("plan-with-its-own-network");
+        crate::netns::pretend_wells_are_open(&plan, &[27017]);
+
+        assert_eq!(
+            environment(&plan, &root),
+            vec![(
+                "MONGODB_URI".to_string(),
+                "mongodb://127.0.0.1:27017/app".to_string()
+            )]
+        );
+
+        crate::netns::forget_namespace(&plan);
+    }
+
+    /// A plan on the machine's network is told the container's address, exactly
+    /// as before.
+    ///
+    /// Not a leftover: such a plan's `127.0.0.1` **is** the King's, so a relay
+    /// there would take his real port. The awkward address is the correct
+    /// answer for this plan, and the fallback if an isolated plan's relay fails.
+    #[test]
+    fn a_plan_on_the_machines_network_keeps_the_containers_address() {
+        let root = a_running_well("kingdom-shared-network-well-test", 27017);
+        let plan = PlanId::new("plan-on-the-shared-network");
+        crate::netns::forget_namespace(&plan);
+
+        assert_eq!(
+            environment(&plan, &root),
+            vec![(
+                "MONGODB_URI".to_string(),
+                "mongodb://172.31.4.10:27017/app".to_string()
+            )]
+        );
+    }
+
+    /// A relay that did not come up must not be described as if it had.
+    ///
+    /// The failure this prevents is the worst one available here: a `localhost`
+    /// address that refuses the connection reads as a broken database, and the
+    /// agent goes looking for a fault in the project's own code. A working
+    /// address that needed reading is a far smaller cost.
+    #[test]
+    fn a_well_whose_relay_never_bound_is_still_given_its_real_address() {
+        let root = a_running_well("kingdom-half-open-well-test", 27017);
+        let plan = PlanId::new("plan-whose-relay-failed");
+        // A namespace, and some *other* port relayed -- but not the well's.
+        crate::netns::pretend_wells_are_open(&plan, &[6379]);
+
+        assert_eq!(
+            environment(&plan, &root),
+            vec![(
+                "MONGODB_URI".to_string(),
+                "mongodb://172.31.4.10:27017/app".to_string()
+            )],
+            "promising localhost where nothing is listening is worse than the IP"
+        );
+
+        crate::netns::forget_namespace(&plan);
     }
 
     /// A container is never published to the host.
@@ -1630,9 +1805,11 @@ mod host_scope {
         assert_eq!(users_of_key("host", "scopecache"), 2);
 
         // And both are handed it as an environment variable, with the real
-        // address substituted -- the only way an agent finds it.
-        for root in [one.path(), two.path()] {
-            let env = environment(root);
+        // address substituted -- the only way an agent finds it. Neither plan
+        // has a namespace here, so both get the container's own address; an
+        // isolated plan would be told its loopback instead.
+        for (plan, root) in [(&alice, one.path()), (&bob, two.path())] {
+            let env = environment(plan, root);
             let url = env
                 .iter()
                 .find(|(k, _)| k == "REDIS_URL")
@@ -1715,8 +1892,11 @@ mod real_docker {
             .await
             .expect("the service must answer at the address we hand to plans");
 
-        // And that address is what a plan's tools would be given.
-        let environment = environment(&root);
+        // And that address is what a plan's tools would be given. `one` has no
+        // namespace here, so it is told the container's address -- the
+        // shared-network answer, and the fallback an isolated plan gets if its
+        // loopback relay could not be raised.
+        let environment = environment(&one, &root);
         assert_eq!(
             environment,
             vec![(
