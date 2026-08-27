@@ -77,8 +77,12 @@ fn square_site(center: (f32, f32), size: f32, obstacles: &[Rect], lane: f32) -> 
     let reach = obstacles
         .iter()
         .map(|rect| {
-            let far_x = (rect.x - center.0).abs().max(rect.x + rect.width - center.0);
-            let far_y = (rect.y - center.1).abs().max(rect.y + rect.height - center.1);
+            let far_x = (rect.x - center.0)
+                .abs()
+                .max(rect.x + rect.width - center.0);
+            let far_y = (rect.y - center.1)
+                .abs()
+                .max(rect.y + rect.height - center.1);
             far_x.hypot(far_y)
         })
         .fold(0.0f32, f32::max)
@@ -413,7 +417,10 @@ pub fn settlement_roads(
         height: 0.0,
     }));
     let ground = Ground::new(settlement_extent(&reach, square.center()), &obstacles, lane);
-    let houses: Vec<Rect> = buildings.iter().map(|building| building.footprint()).collect();
+    let houses: Vec<Rect> = buildings
+        .iter()
+        .map(|building| building.footprint())
+        .collect();
     let mut roads = Vec::with_capacity(edges.len() + corridors.len());
 
     for (index, &(parent, child)) in edges.iter().enumerate() {
@@ -547,7 +554,10 @@ fn driveway(building: &Building, roads: &[MapRoad]) -> Option<MapRoad> {
             continue;
         }
         for segment in road.points.windows(2) {
-            let (start, end) = ((segment[0][0], segment[0][1]), (segment[1][0], segment[1][1]));
+            let (start, end) = (
+                (segment[0][0], segment[0][1]),
+                (segment[1][0], segment[1][1]),
+            );
             let meeting = if (start.1 - end.1).abs() <= f32::EPSILON {
                 let (low, high) = (start.0.min(end.0), start.0.max(end.0));
                 (door.0 >= low && door.0 <= high).then_some((door.0, start.1))
@@ -922,11 +932,12 @@ impl Ground {
             // Blocked on the true rect: with the cell now smaller than the
             // lane, nothing has to be given away to keep a route open, so a
             // road is held off built ground to within one cell.
-            let first_column = (((rect.x - origin.0) / cell).floor().max(0.0) as usize).min(columns);
+            let first_column =
+                (((rect.x - origin.0) / cell).floor().max(0.0) as usize).min(columns);
             let first_row = (((rect.y - origin.1) / cell).floor().max(0.0) as usize).min(rows);
-            let last_column = ((((rect.x + rect.width) - origin.0) / cell).ceil().max(0.0) as usize
-                + 1)
-            .min(columns);
+            let last_column =
+                ((((rect.x + rect.width) - origin.0) / cell).ceil().max(0.0) as usize + 1)
+                    .min(columns);
             let last_row = ((((rect.y + rect.height) - origin.1) / cell).ceil().max(0.0) as usize
                 + 1)
             .min(rows);
@@ -1019,7 +1030,11 @@ impl Ground {
                 if self.blocked[next] && next != goal && next != start {
                     continue;
                 }
-                let turn = if next_heading == heading { 0 } else { TURN_COST };
+                let turn = if next_heading == heading {
+                    0
+                } else {
+                    TURN_COST
+                };
                 let next_cost = cost + 1 + turn;
                 let next_state = next * 4 + next_heading;
                 if next_cost < best[next_state] {
@@ -1234,7 +1249,12 @@ mod tests {
 
         let mut docs = Node::directory("docs".to_owned(), PathBuf::from("docs"));
         docs.children = (0..5)
-            .map(|index| file(&format!("guide_{index}.md"), &format!("docs/guide_{index}.md")))
+            .map(|index| {
+                file(
+                    &format!("guide_{index}.md"),
+                    &format!("docs/guide_{index}.md"),
+                )
+            })
             .collect();
         docs.metrics = Metrics {
             bytes: 10_000,
@@ -1596,7 +1616,10 @@ mod tests {
         }
         assert!((widths[0] - DRIVE_WIDTH).abs() < 1e-5, "{widths:?}");
         assert!(widths[2] > widths[0] * 1.5, "{widths:?}");
-        assert!(*widths.last().expect("a width") <= DRIVE_MAX_WIDTH, "{widths:?}");
+        assert!(
+            *widths.last().expect("a width") <= DRIVE_MAX_WIDTH,
+            "{widths:?}"
+        );
         // A narrow house never gets a drive broader than the wall it leaves.
         assert!(drive_width(4_096, 6.0) <= 6.0 * 0.8 + 1e-5);
     }
@@ -1778,10 +1801,10 @@ mod tests {
                             width: (segment[0][0] - segment[1][0]).abs() + road.width,
                             height: (segment[0][1] - segment[1][1]).abs() + road.width,
                         };
-                        let across = (run.x + run.width).min(house.x + house.width)
-                            - run.x.max(house.x);
-                        let along = (run.y + run.height).min(house.y + house.height)
-                            - run.y.max(house.y);
+                        let across =
+                            (run.x + run.width).min(house.x + house.width) - run.x.max(house.x);
+                        let along =
+                            (run.y + run.height).min(house.y + house.height) - run.y.max(house.y);
                         assert!(
                             across <= 0.0 || along <= 0.0,
                             "a {:?} road {:.2} wide lay {:.2} units into {}",
@@ -1909,7 +1932,10 @@ mod tests {
             let count = 6 + (next() % 34) as usize;
             let mut lines = 0;
             for index in 0..count {
-                let mut child = file(&format!("file_{index}.rs"), &format!("{path}/file_{index}.rs"));
+                let mut child = file(
+                    &format!("file_{index}.rs"),
+                    &format!("{path}/file_{index}.rs"),
+                );
                 let size = 40 + (next() % 900) as usize;
                 child.metrics = Metrics {
                     bytes: (size * 24) as u64,
@@ -1934,8 +1960,10 @@ mod tests {
         root.metrics = source.metrics;
         root.children.push(source);
         for index in 0..6 {
-            root.children
-                .push(file(&format!("note_{index}.md"), &format!("note_{index}.md")));
+            root.children.push(file(
+                &format!("note_{index}.md"),
+                &format!("note_{index}.md"),
+            ));
             root.metrics.file_count += 1;
         }
         root
@@ -2134,4 +2162,3 @@ mod tests {
         distance_squared(point, (start[0] + dx * t, start[1] + dy * t)).sqrt()
     }
 }
-

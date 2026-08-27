@@ -294,7 +294,9 @@ mod tests {
 
         let mut last = 0.0;
         for reading in readings {
-            let now = reading.fraction().expect("every reading here is measurable");
+            let now = reading
+                .fraction()
+                .expect("every reading here is measurable");
             assert!(
                 now >= last,
                 "the bar went backwards, from {last} to {now}: {reading:?}"

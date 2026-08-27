@@ -299,7 +299,10 @@ mod tests {
     fn a_frame_that_comes_late_enough_is_not_delayed() {
         let started = Instant::now();
 
-        assert_eq!(wait_before_ack(Some(started), started + FRAME_INTERVAL), None);
+        assert_eq!(
+            wait_before_ack(Some(started), started + FRAME_INTERVAL),
+            None
+        );
         assert_eq!(
             wait_before_ack(Some(started), started + FRAME_INTERVAL * 3),
             None

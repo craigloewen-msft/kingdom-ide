@@ -132,7 +132,12 @@ const SHRINKS: usize = 3;
 /// Returns `None` only when the folder is genuinely full at every size tried.
 /// The caller decides what to do about it; there is no good silent answer, and
 /// stacking two houses on one lot is not one.
-pub fn place_fresh(ward: &MapWard, taken: &[MapRect], seed: u32, want: [f32; 2]) -> Option<MapRect> {
+pub fn place_fresh(
+    ward: &MapWard,
+    taken: &[MapRect],
+    seed: u32,
+    want: [f32; 2],
+) -> Option<MapRect> {
     // The ward's own edge is kept clear so a ghost never straddles the kerb its
     // folder is drawn with.
     let margin = (ward.rect.width.min(ward.rect.depth) * 0.06).clamp(0.5, 6.0);
@@ -211,7 +216,7 @@ fn overlaps(a: &MapRect, b: &MapRect) -> bool {
 /// plan open and nothing to resolve.
 #[cfg(any(feature = "hydrate", test))]
 mod resolve {
-    use super::{place_fresh, Work, WorkSite};
+    use super::{Work, WorkSite, place_fresh};
     use crate::map::{MapManifest, MapRect, MapWard};
     use kingdom_core::{ChangeKind, ChangeSummary};
     use std::collections::HashMap;
@@ -256,11 +261,7 @@ mod resolve {
             .iter()
             .filter(|file| !file.binary && file.kind != ChangeKind::Deleted && file.churn() > 0)
             .collect();
-        let busiest = drawable
-            .iter()
-            .map(|file| file.churn())
-            .max()
-            .unwrap_or(0);
+        let busiest = drawable.iter().map(|file| file.churn()).max().unwrap_or(0);
         if busiest == 0 {
             // Nothing with an honest line count is being drawn -- a rename-only,
             // deletion-only or binary-only summary. Inventing a denominator
@@ -374,12 +375,7 @@ mod tests {
             path: "src".to_owned(),
             parent: None,
             files: 3,
-            rect: MapRect {
-                x,
-                y,
-                width,
-                depth,
-            },
+            rect: MapRect { x, y, width, depth },
             polygon: Vec::new(),
             depth: 0,
             ground: [0, 0, 0, 255],
@@ -388,12 +384,7 @@ mod tests {
     }
 
     pub(super) fn rect(x: f32, y: f32, width: f32, depth: f32) -> MapRect {
-        MapRect {
-            x,
-            y,
-            width,
-            depth,
-        }
+        MapRect { x, y, width, depth }
     }
 
     /// The guarantee the whole placer exists for. A ghost house dropped on top
@@ -404,7 +395,9 @@ mod tests {
         let ward = ward(0.0, 0.0, 100.0, 100.0);
         // A dense-ish folder: a grid of lots with gaps between them.
         let taken: Vec<MapRect> = (0..5)
-            .flat_map(|row| (0..5).map(move |col| rect(col as f32 * 20.0, row as f32 * 20.0, 14.0, 14.0)))
+            .flat_map(|row| {
+                (0..5).map(move |col| rect(col as f32 * 20.0, row as f32 * 20.0, 14.0, 14.0))
+            })
             .collect();
 
         let placed = place_fresh(&ward, &taken, 7, [4.0, 4.0]).expect("a gap this wide exists");
@@ -500,7 +493,10 @@ mod tests {
     /// return a rectangle with negative extent.
     #[test]
     fn a_ward_with_no_usable_ground_is_refused() {
-        assert_eq!(place_fresh(&ward(0.0, 0.0, 0.0, 0.0), &[], 1, [1.0, 1.0]), None);
+        assert_eq!(
+            place_fresh(&ward(0.0, 0.0, 0.0, 0.0), &[], 1, [1.0, 1.0]),
+            None
+        );
     }
 
     /// A site reports its ground and its base whichever kind it is, which is
@@ -677,7 +673,10 @@ mod resolve_tests {
             }
         );
         assert_eq!(raised[0].scale, 1.0, "the only file is the busiest");
-        assert!((raised[0].growth - 0.75).abs() < 1e-6, "30 of 40 was growth");
+        assert!(
+            (raised[0].growth - 0.75).abs() < 1e-6,
+            "30 of 40 was growth"
+        );
     }
 
     /// The feature the King asked for: a file the court created has no house,
@@ -694,9 +693,15 @@ mod resolve_tests {
 
         assert_eq!(raised.len(), 1);
         let WorkSite::Fresh { footprint } = raised[0].site else {
-            panic!("a file with no house should be given ground, got {:?}", raised[0].site);
+            panic!(
+                "a file with no house should be given ground, got {:?}",
+                raised[0].site
+            );
         };
-        assert!(!overlaps(&taken, &footprint), "it landed on an existing lot");
+        assert!(
+            !overlaps(&taken, &footprint),
+            "it landed on an existing lot"
+        );
         let ward = &map.world.wards[0];
         assert!(
             footprint.x >= ward.rect.x && footprint.max_x() <= ward.rect.max_x(),
@@ -720,7 +725,10 @@ mod resolve_tests {
         assert_eq!(raised.len(), 2);
         let first = raised[0].site.footprint();
         let second = raised[1].site.footprint();
-        assert!(!overlaps(&first, &second), "{first:?} and {second:?} collide");
+        assert!(
+            !overlaps(&first, &second),
+            "{first:?} and {second:?} collide"
+        );
     }
 
     /// A binary file's counts are not line counts, and a deleted file's house

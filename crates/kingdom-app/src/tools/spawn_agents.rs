@@ -169,7 +169,7 @@ impl Tool for SpawnAgents {
             .into();
         };
 
-        match crate::api::spawn_subagents(shop.plan(), tool_call, tasks, PATIENCE).await {
+        match crate::turn::spawn_subagents(shop.plan(), tool_call, tasks, PATIENCE).await {
             Ok(reports) => ToolOutcome::done(reports),
             Err(why) => Refusal::Refused(why).into(),
         }

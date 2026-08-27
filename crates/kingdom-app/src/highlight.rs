@@ -302,7 +302,10 @@ mod tests {
     fn spans_always_rejoin_to_the_line_they_came_from() {
         let cases = [
             ("a.rs", "fn main() {\n\tlet x = \"héllo\"; // wörld\n\n}\n"),
-            ("b.ts", "export const f = (x: number) => `v${x}`;\n\n// end \n"),
+            (
+                "b.ts",
+                "export const f = (x: number) => `v${x}`;\n\n// end \n",
+            ),
             ("c.scss", ".a { color: $ink; }\n\n// note\n"),
             ("d.toml", "[package]\nname = \"kingdom\"\n\n"),
             ("e.py", "def f(x):\n    return {'a': 1}  # ok\n"),

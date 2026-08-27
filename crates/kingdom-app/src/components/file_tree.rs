@@ -462,8 +462,8 @@ fn is_new_reveal(revealed: Option<&str>, open: Option<&str>) -> bool {
 /// could open files -- must not jerk the list about under the King's pointer.
 #[cfg(feature = "hydrate")]
 fn reveal_selected_row(body: NodeRef<leptos::html::Div>) {
-    use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
 
     let Some(window) = web_sys::window() else {
         return;

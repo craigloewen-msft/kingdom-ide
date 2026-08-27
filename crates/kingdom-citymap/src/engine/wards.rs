@@ -11,8 +11,8 @@
 //! The other half is in the generator, which decides where a name fits and
 //! what colour a ward is.
 
-use bevy::prelude::*;
 use crate::map::MapWard;
+use bevy::prelude::*;
 
 use super::bridge::Bridge;
 use super::camera::CameraRig;

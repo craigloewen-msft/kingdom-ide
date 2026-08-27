@@ -525,7 +525,7 @@ mod tests {
     /// flag it filters on.
     #[test]
     fn a_binary_file_is_marked_so_it_can_be_left_out() {
-        let files = vec![
+        let files = [
             changed("logo.png", 999_999, 0, true),
             changed("main.rs", 25, 5, false),
         ];

@@ -1159,9 +1159,7 @@ impl Plan {
                 )
             }
             Some(Entry::Tool(tool_call)) if tool_call.outcome.is_none() => {
-                return Err(
-                    "That call is still running and cannot be removed yet.".to_string(),
-                )
+                return Err("That call is still running and cannot be removed yet.".to_string())
             }
             Some(Entry::Message(_) | Entry::Tool(_)) => {}
         }
@@ -1175,14 +1173,15 @@ impl Plan {
             .to_string(),
             Entry::Tool(tool_call) => {
                 if let Some(batch) = tool_call.batch.clone() {
-                    if let Some(sibling) = self.transcript[index..]
-                        .iter_mut()
-                        .find_map(|entry| match entry {
-                            Entry::Tool(t) if t.batch.as_deref() == Some(batch.as_str()) => {
-                                Some(t)
-                            }
-                            _ => None,
-                        })
+                    if let Some(sibling) =
+                        self.transcript[index..]
+                            .iter_mut()
+                            .find_map(|entry| match entry {
+                                Entry::Tool(t) if t.batch.as_deref() == Some(batch.as_str()) => {
+                                    Some(t)
+                                }
+                                _ => None,
+                            })
                     {
                         if sibling.narration.is_none() {
                             sibling.narration = tool_call.narration.clone();
@@ -1196,7 +1195,10 @@ impl Plan {
             }
             Entry::Note(_) => unreachable!("refused above"),
         };
-        self.note(NoteKind::Deleted, format!("You removed {description} from the record."));
+        self.note(
+            NoteKind::Deleted,
+            format!("You removed {description} from the record."),
+        );
         Ok(())
     }
 

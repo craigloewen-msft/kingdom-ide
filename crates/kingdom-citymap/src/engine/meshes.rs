@@ -10,10 +10,10 @@
 //! its lot. Bevy's coordinate space is right-handed with `y` up, so the world's
 //! ground `y` becomes `z` here.
 
+use crate::map::{BuildingKind, MapUnderside};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use crate::map::{BuildingKind, MapUnderside};
 
 /// A mesh under construction.
 ///

@@ -119,15 +119,15 @@ pub fn track_pointer(
 
     for event in moved.read() {
         pointer.anchor = event.position - center;
-        if pointer.dragging {
-            if let Some(delta) = event.delta {
-                rig.pan(delta);
-                // Inside the branch that actually moved the camera, and not a
-                // line higher: a press that selects a building is not a
-                // takeover, and a pointer merely crossing the map is not one
-                // either.
-                steering.touched(time.elapsed());
-            }
+        if pointer.dragging
+            && let Some(delta) = event.delta
+        {
+            rig.pan(delta);
+            // Inside the branch that actually moved the camera, and not a
+            // line higher: a press that selects a building is not a
+            // takeover, and a pointer merely crossing the map is not one
+            // either.
+            steering.touched(time.elapsed());
         }
     }
 }

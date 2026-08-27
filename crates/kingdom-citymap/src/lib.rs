@@ -6,8 +6,8 @@
 //! skyline}` and `kingdom_app::components::map`, all deleted). It is **Repo
 //! City** — <https://github.com/craigloewen-msft/repo-city-visualizer> by Craig
 //! Loewen, MIT — copied in wholesale at commit `449f090` rather than depended
-//! on, so that there is one project to maintain rather than two. See `LICENSE`
-//! beside this file.
+//! on, so that there is one project to maintain rather than two. See the
+//! `LICENSE` at this crate's root.
 //!
 //! # The shape of it
 //!
@@ -39,7 +39,7 @@
 //! In this crate a **`Ward` is a folder** — the ground a directory's files
 //! stand on, and its parent-child nesting is the folder tree. Kingdom's own
 //! glossary in `AGENTS.md` uses "a ward" for [`kingdom_core::Language`], and
-//! `kingdom_app::components::ward_tree` is the file tree. That collision is
+//! `kingdom_app::components::file_tree` is the file tree. That collision is
 //! real and deliberate: renaming ~200 references through code whose tests are
 //! the evidence it still works would trade a genuine guarantee for a cosmetic
 //! one. The two vocabularies do not meet — nothing outside this crate names a

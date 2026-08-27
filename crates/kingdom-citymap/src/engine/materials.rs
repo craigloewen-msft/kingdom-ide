@@ -5,9 +5,9 @@
 //! base colour of a surface — and since a whole town is painted from a handful
 //! of palettes, those materials are shared rather than duplicated per building.
 
+use crate::map::MapColor;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use crate::map::MapColor;
 
 /// Colours are bucketed before lookup so two shades a single step apart share
 /// one material instead of allocating two.

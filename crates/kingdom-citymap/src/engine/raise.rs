@@ -651,7 +651,10 @@ mod tests {
 
         let mut seen: Vec<(Step, usize)> = Vec::new();
         while let Some((step, slice)) = plan.take() {
-            assert!(!slice.is_empty(), "an empty slice costs a frame for nothing");
+            assert!(
+                !slice.is_empty(),
+                "an empty slice costs a frame for nothing"
+            );
             for index in slice {
                 seen.push((step, index));
             }
