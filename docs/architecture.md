@@ -354,7 +354,7 @@ and the King's terminal all prepend `netns::enter_prefix`, which is **empty for
 a shared-network plan** -- that emptiness is what makes the default path
 behave exactly as it did before this existed.
 
-Four things worth knowing, each learned by running it:
+Five things worth knowing, each learned by running it:
 
 - **`nsenter` needs `--preserve-credentials`.** Re-entering a namespace you made
   yourself otherwise fails with `setgroups failed: Operation not permitted`. A
@@ -373,6 +373,24 @@ Four things worth knowing, each learned by running it:
   `ensure` in `terminal.rs` was a real bug: the King got a shell on his *own*
   network while the header said otherwise, and it took `EADDRINUSE` from his own
   server. Nothing here may fall back to the host network silently.
+- **The browser's two wrappers nest; they do not compete.** CPU confinement
+  (`cpu_shim`, `taskset`) and namespace entry (`write_namespace_wrapper`,
+  `nsenter`) both want to be the "executable" chromiumoxide launches, and
+  setting `chrome_executable` twice silently keeps only the last. They are
+  composed instead, `nsenter -> taskset -> chrome`, so an isolated plan's
+  browser is confined *and* in its own network. This matters more since WebGL
+  became the default: the CPU ceiling is half of what makes that affordable, and
+  dropping it for isolated plans would have handed exactly those plans an
+  uncapped software rasteriser. Verified with a real Chrome — every child,
+  including the GPU process, in the plan's namespace and masked to `0-3`.
+
+**An isolated plan cannot reach the host's loopback**, by design:
+slirp4netns runs with `--disable-host-loopback`, so the King's own
+`127.0.0.1:3000` answers nothing from inside. That is the collision being
+prevented, but it has one surprising consequence worth knowing before it costs
+somebody an hour — a plan with its own network cannot browse *this* Kingdom's
+map at `?map=on`. See
+[`docs/citymap.md`](citymap.md#a-plan-with-a-network-of-its-own-cannot-reach-your-kingdom).
 
 **It is not a security boundary.** A process in the namespace still has the
 whole filesystem and the King's uid. It cannot take another plan's port; it can

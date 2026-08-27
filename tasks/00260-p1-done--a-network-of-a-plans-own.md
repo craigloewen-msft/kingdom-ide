@@ -80,6 +80,41 @@ Against a real kernel and a real slirp4netns, in the browser:
 - a shared plan created no namespace at all and behaved exactly as before;
 - restarting the server reclaimed the previous one's holder and slirp.
 
+## Merged with main, and one hazard git could not see
+
+Main landed two browser changes while this was in flight: **CPU confinement**
+(`cpu_shim`, launching Chrome behind `taskset`, four CPUs by default) and
+**WebGL back on by default** — the software rasteriser is the only renderer a
+headless box has, and disabling it was why `?map=on` drew nothing.
+
+They conflicted with this work *semantically* while merging cleanly. Both
+`cpu_shim` and `write_namespace_wrapper` set `chrome_executable`, which keeps
+only the last one set — and this branch's ran second. An isolated plan would
+have silently lost its CPU ceiling, which is precisely the half of main's
+argument that makes default WebGL affordable: an uncapped SwiftShader was
+measured at 5.46 cores.
+
+They now nest, `nsenter -> taskset -> chrome`, and
+`the_namespace_wrapper_execs_whatever_it_was_given` pins it — verified to fail
+when the composition is undone.
+
+Checked with a real Chrome inside a namespace:
+
+- WebGL works: `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...))`.
+  SwiftShader is CPU rendering and wants no network, so the namespace is
+  irrelevant to it.
+- Every child — zygote, utility, renderer, **and the GPU process** — reported
+  the plan's namespace *and* the `0-3` mask. Both halves hold together.
+
+**One consequence worth knowing:** slirp4netns runs with
+`--disable-host-loopback`, so an isolated plan cannot reach the host's
+`127.0.0.1` — measured `000` inside against `200` outside. It therefore cannot
+browse *this* Kingdom's map at `?map=on`, which is main's own recipe. That is
+isolation working rather than a fault, but it would cost somebody an hour to
+rediscover, so it is written down in `docs/citymap.md` beside the recipe itself.
+A plan with its own network should serve and browse its own `:3000`, which is
+the ordinary case and works normally.
+
 ## Known limits
 
 - **Not a security boundary.** A process in the namespace still has the whole

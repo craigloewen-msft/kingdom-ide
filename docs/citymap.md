@@ -163,6 +163,25 @@ and carries the whole of `ViewerStatus`. Prefer it to a screenshot: it is stable
 against every change to how the map is *drawn*, and it names what was hit rather
 than leaving a reader to recognise it in an image.
 
+### A plan with a network of its own cannot reach *your* Kingdom
+
+The URL above is the one served by the Kingdom you are reading this in — on the
+host's `127.0.0.1:3000`. A plan opened with a **network of its own** has a
+different `127.0.0.1` and slirp4netns runs with `--disable-host-loopback`, so
+that address answers nothing there. Measured: `000` from inside the namespace
+against `200` from the host.
+
+That is isolation working, not a bug — reaching back into the host's loopback is
+the collision the namespace exists to prevent. But it means the recipe above is
+for a **shared-network** plan, which is the default. A plan with its own network
+should start its own server and browse to *that* `:3000`, which is the ordinary
+case and works normally.
+
+WebGL itself is unaffected by the namespace: SwiftShader is pure CPU rendering
+and needs no network. Verified with a real Chrome inside one — `ANGLE (Google,
+Vulkan 1.3.0 (SwiftShader Device ...))`, with every child process including the
+GPU process confined to the same four CPUs.
+
 One caveat before you aim: at the default zoom the whole kingdom is in frame, so
 a single holding is a few pixels. Move the pointer and read `hovered` back
 rather than trusting a coordinate to have landed.

@@ -1687,6 +1687,55 @@ async fn dispatch_key(page: &Page, key: &str, modifiers: &[String]) -> Result<()
 mod tests {
     use super::*;
 
+    /// The namespace wrapper wraps whatever it is given, not Chrome directly.
+    ///
+    /// This is the merge hazard between CPU confinement and network isolation,
+    /// pinned. Both features want to be the executable chromiumoxide launches,
+    /// and `chrome_executable` keeps only the last one set — so composing them
+    /// is the difference between a confined browser and one silently free to
+    /// take every core. It broke exactly this way once, and nothing about it
+    /// fails to compile.
+    ///
+    /// The wrapper's *content* is what is checked, because that is what
+    /// survives: whatever path it is handed is what it `exec`s.
+    #[test]
+    fn the_namespace_wrapper_execs_whatever_it_was_given() {
+        // A stand-in for `cpu_shim`'s output. The test does not need a
+        // namespace to exist -- with no hook installed the prefix is empty,
+        // which is the shared-network case, so the script is asserted on
+        // directly rather than through a launch.
+        let confined = Path::new("/tmp/kingdom-chrome-abc/chrome-confined.sh");
+
+        let wrapper = write_namespace_wrapper("plan-nesting", confined)
+            .expect("the wrapper should be writable");
+        let script = std::fs::read_to_string(&wrapper).expect("the wrapper should be readable");
+
+        assert!(
+            script.contains("chrome-confined.sh"),
+            "the wrapper dropped the CPU shim it was handed:\n{script}"
+        );
+        // `exec`, so the pid chromiumoxide waits on is the browser's own and
+        // killing the session still kills Chrome.
+        assert!(script.starts_with("#!/bin/sh\nexec "), "{script}");
+        // Chrome's own flags are forwarded, quoted, because they carry paths.
+        assert!(script.trim_end().ends_with(r#""$@""#), "{script}");
+
+        let _ = std::fs::remove_file(&wrapper);
+    }
+
+    /// A path with an apostrophe in it does not break out of its quoting.
+    ///
+    /// Belt and braces rather than a live threat — these come from `PATH`
+    /// lookups — but a home directory with an apostrophe is a real thing and
+    /// the resulting launch failure would be baffling.
+    #[test]
+    fn a_quoted_path_survives_an_apostrophe() {
+        assert_eq!(
+            shell_quote("/home/o'brien/chrome"),
+            r"'/home/o'\''brien/chrome'"
+        );
+    }
+
     /// The default viewport must clear Kingdom's own responsive thresholds.
     ///
     /// This is the whole reason the number changed: at 1024 wide the cities
