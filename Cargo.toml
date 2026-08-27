@@ -130,6 +130,35 @@ opt-level = 3
 [profile.dev.package.miniz_oxide]
 opt-level = 3
 
+# The map builder, optimised even in a debug build.
+#
+# The same argument as the highlighter above, and a far larger number. Building
+# a map manifest walks every project, plans a road network on a grid of a few
+# million cells and scatters woodland with a Poisson sampler -- inner loops of
+# exactly the kind an unoptimised build ruins. Measured on this workspace,
+# building the manifest for a real dev folder (7 cities, 3,080 holdings):
+#
+#           opt-level 0    released
+#   scan       2,575ms        301ms
+#   scene     13,114ms      1,136ms
+#   total       15.9s         1.5s
+#
+# 15.9s is what `curl http://127.0.0.1:3000/kingdom/map.json` actually took
+# against a `cargo leptos serve` server, and the King pays it in full the first
+# time he opens the map after every restart -- which under `watch` is every
+# save. `citymap.rs` memoises the result, so this is a cost paid once per server
+# and then never; that is exactly what makes it easy to miss and worth removing.
+#
+# This crate is not one anybody edits while debugging the chamber, and measured
+# by touching its `lib.rs` and rebuilding, the entry costs nothing either way:
+# 2s at opt-level 0 and 2s at 3. Release builds are unaffected.
+#
+# `ignore`, `globset` and `memchr` were tried alongside it and made no
+# difference -- this crate's own code was the whole cost, and `regex-automata`
+# is already above.
+[profile.dev.package.kingdom-citymap]
+opt-level = 3
+
 # cargo-leptos configuration ------------------------------------------------
 # Drives the two-target build: a native SSR server binary + a wasm client bundle.
 [[workspace.metadata.leptos]]
