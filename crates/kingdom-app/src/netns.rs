@@ -44,6 +44,24 @@
 //! network namespace. So finding out what a plan is listening on costs one file
 //! read and no subprocess. See [`listeners`] for the trap in that.
 //!
+//! **A forward needs a relay, because it can only ever land on `tap0`.**
+//! `add_hostfwd` NATs to the namespace's `tap0` address, but almost everything
+//! a plan runs binds `127.0.0.1` instead -- a different socket even inside the
+//! same namespace. Measured directly: slirp accepts a forward to a
+//! loopback-bound server and it then answers nothing, a silent wrong answer
+//! rather than a refusal. [`spawn_relay`] puts this same binary back into the
+//! namespace, in a hidden `--relay` mode (see [`run_relay`]), hopping `tap0:P`
+//! to `127.0.0.1:P` -- on the same port number both sides, which is also what
+//! lets Chrome's own CDP port cross the boundary with no rewriting anywhere.
+//! Skipped when the relay cannot itself bind `tap0:P`: that failure means the
+//! server already answers there directly, and one relay too many would be
+//! wrong rather than merely redundant.
+//!
+//! **The namespace lives in a process, not a name.** A daemon found again by a
+//! stable name -- tmux's socket, most notably -- says nothing about which
+//! *generation* of namespace it was last talking to. See
+//! `tools::tmux::ensure_server` for the mismatch this causes and the fix.
+//!
 //! # What this is not
 //!
 //! **Not a security boundary.** A process in here still has the whole
@@ -69,14 +87,13 @@ const HOST_PORT_HIGH: u16 = 49999;
 /// How many times a port draw is retried before giving up.
 const PORT_ATTEMPTS: usize = 40;
 
-/// Ports inside the namespace that are never forwarded.
+/// Ports inside the namespace that are never forwarded to the King's badge.
 ///
-/// Empty today, and named rather than inlined because the *question* recurs:
-/// every port a plan opens becomes reachable from the King's loopback, so
-/// anything that should stay private belongs here. Chrome's debugging port was
-/// the obvious candidate and is deliberately absent -- chromiumoxide lets the
-/// kernel choose it, so there is no fixed number to list, and the spyglass
-/// reaches Chrome from inside the namespace regardless.
+/// Not a fixed list: the one port that must stay off the badge is Chrome's own
+/// CDP port, and that number is chosen per plan at launch time rather than
+/// known up front. It is tracked on [`Namespace::cdp_port`] instead and
+/// excluded there. This constant now names the *idea*, not any content -- kept
+/// so a future private port has somewhere obvious to be added.
 const NEVER_FORWARD: &[u16] = &[];
 
 /// The address slirp4netns gives the namespace on `tap0`.
@@ -93,8 +110,13 @@ pub struct Namespace {
     slirp: u32,
     /// Its JSON control socket, which is how ports get forwarded.
     api_socket: PathBuf,
-    /// Guest port -> (host port, slirp's id for the forward).
+    /// Guest port -> (host port, slirp's id for the forward, and the relay
+    /// standing between them, if one was needed).
     forwards: HashMap<u16, Forward>,
+    /// Chrome's own CDP port inside this namespace, if a browser has been
+    /// launched for this plan. Excluded from [`forwards_of`] -- see its own
+    /// docs for why the King's badge must never show it.
+    cdp_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +124,11 @@ struct Forward {
     host_port: u16,
     /// slirp's own handle for this rule, needed to remove it again.
     id: i64,
+    /// The relay's pid, inside the namespace, hopping `tap0:guest_port` to
+    /// `127.0.0.1:guest_port` -- present only when one was needed. See
+    /// [`relay_needed`] for when it is not: a server that already bound
+    /// `0.0.0.0` or `tap0` itself needs no help reaching the forward.
+    relay: Option<u32>,
 }
 
 /// Every namespace this server is holding.
@@ -195,6 +222,19 @@ pub fn enter_prefix(plan: &PlanId) -> Vec<String> {
         .get(plan)
         .map(|ns| ns.enter_prefix())
         .unwrap_or_default()
+}
+
+/// This plan's own network namespace, for comparing against something that
+/// claims to be in it -- the check `tools::tmux::daemon_belongs_here` needs to
+/// tell a live daemon from a stale one.
+///
+/// `None` for a shared-network plan, the same as `enter_prefix`'s empty
+/// vector, and for the same reason: there is nothing of the plan's own to
+/// compare against.
+pub fn holder_ns(plan: &PlanId) -> Option<std::path::PathBuf> {
+    let registry = lock();
+    let namespace = registry.get(plan)?;
+    std::fs::read_link(format!("/proc/{}/ns/net", namespace.holder)).ok()
 }
 
 impl Namespace {
@@ -302,6 +342,11 @@ pub fn shutdown(plan: &PlanId) {
 }
 
 /// What a plan currently has forwarded, for the ports badge.
+///
+/// Chrome's CDP port is excluded, deliberately: it is forwarded like any other
+/// listener so the relay can reach it, but it is not a port the King ever
+/// wants to click -- it speaks CDP, not HTTP, and showing it would be a badge
+/// entry that always fails to open in a browser.
 pub fn forwards_of(plan: &PlanId) -> Vec<(u16, u16)> {
     let registry = lock();
     let Some(namespace) = registry.get(plan) else {
@@ -310,6 +355,7 @@ pub fn forwards_of(plan: &PlanId) -> Vec<(u16, u16)> {
     let mut out: Vec<(u16, u16)> = namespace
         .forwards
         .iter()
+        .filter(|(guest, _)| Some(**guest) != namespace.cdp_port)
         .map(|(guest, forward)| (*guest, forward.host_port))
         .collect();
     out.sort_unstable();
@@ -322,7 +368,7 @@ pub fn forwards_of(plan: &PlanId) -> Vec<(u16, u16)> {
 /// Returns true when anything changed, so the caller can avoid publishing an
 /// event for a poll that found nothing.
 pub async fn reconcile(plan: &PlanId) -> bool {
-    let (listening, known, api_socket) = {
+    let (listening, known, api_socket, holder) = {
         let registry = lock();
         let Some(namespace) = registry.get(plan) else {
             return false;
@@ -331,6 +377,7 @@ pub async fn reconcile(plan: &PlanId) -> bool {
             namespace.listeners(),
             namespace.forwards.clone(),
             namespace.api_socket.clone(),
+            namespace.holder,
         )
     };
 
@@ -339,6 +386,9 @@ pub async fn reconcile(plan: &PlanId) -> bool {
     // Gone: the agent stopped its server, so the host port must stop answering.
     for (guest, forward) in &known {
         if !listening.contains(guest) && remove_hostfwd(&api_socket, forward.id).await.is_ok() {
+            if let Some(pid) = forward.relay {
+                kill(pid);
+            }
             if let Some(ns) = lock().get_mut(plan) {
                 ns.forwards.remove(guest);
             }
@@ -351,7 +401,7 @@ pub async fn reconcile(plan: &PlanId) -> bool {
         if known.contains_key(&guest) {
             continue;
         }
-        if let Some(forward) = add_forward(&api_socket, guest).await {
+        if let Some(forward) = add_forward(&api_socket, holder, guest).await {
             if let Some(ns) = lock().get_mut(plan) {
                 ns.forwards.insert(guest, forward);
                 changed = true;
@@ -419,13 +469,14 @@ fn watchers() -> &'static Mutex<std::collections::HashSet<PlanId>> {
     WATCHERS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Picks a free host port and asks slirp to forward it.
+/// Picks a free host port, asks slirp to forward it, and puts the relay in
+/// place that lets the forward actually answer.
 ///
 /// The retry is the point. A host port is chosen at random rather than
 /// allocated, so two plans can pick the same number; rather than coordinate,
 /// this asks and moves on when refused, which is both simpler and correct under
 /// a race with a process that is not ours at all.
-async fn add_forward(api_socket: &std::path::Path, guest: u16) -> Option<Forward> {
+async fn add_forward(api_socket: &std::path::Path, holder: u32, guest: u16) -> Option<Forward> {
     for _ in 0..PORT_ATTEMPTS {
         let host_port = random_port();
         // Bind it ourselves first. slirp would tell us too, but this also
@@ -436,10 +487,88 @@ async fn add_forward(api_socket: &std::path::Path, guest: u16) -> Option<Forward
             continue;
         }
         if let Ok(id) = add_hostfwd(api_socket, host_port, guest).await {
-            return Some(Forward { host_port, id });
+            let relay = spawn_relay(holder, guest).await;
+            return Some(Forward {
+                host_port,
+                id,
+                relay,
+            });
         }
     }
     None
+}
+
+/// Puts a relay in the namespace that hops `tap0:guest` to `127.0.0.1:guest`,
+/// unless the server is already reachable on `tap0` without one.
+///
+/// **Why this exists at all.** `add_hostfwd` can only ever land traffic on
+/// `tap0` -- that is the interface slirp4netns gave the namespace, and the
+/// only address it knows how to NAT to. Almost everything a plan runs binds
+/// `127.0.0.1` instead, because that is the ordinary default for a dev server,
+/// and `tap0` and `127.0.0.1` are different sockets even inside the same
+/// namespace. Measured directly: a forward to a loopback-bound server accepts
+/// the rule from slirp and then answers nothing. The relay is the missing hop.
+///
+/// **Why the bind conflict is the detector, not a special case.** If the
+/// relay's own attempt to bind `tap0:guest` fails, something is *already*
+/// listening there -- the plan's own server bound `0.0.0.0` or `tap0` itself --
+/// and forwarding straight to it is both correct and simpler than asking first.
+/// One test ("can I bind this address") distinguishes the two cases without
+/// guessing from a project's own configuration.
+///
+/// Spawned as this same binary, re-entered into the namespace by `nsenter`,
+/// rather than `socat`: `socat` is not a listed prerequisite in AGENTS.md, and
+/// this keeps that list from growing by one for a job the binary can do
+/// itself. See `main.rs`'s `--relay` mode.
+async fn spawn_relay(holder: u32, guest: u16) -> Option<u32> {
+    let exe = std::env::current_exe().ok()?;
+    let bind = format!("{GUEST_ADDR}:{guest}");
+    let target = format!("127.0.0.1:{guest}");
+
+    let mut prefix = vec![
+        "nsenter".to_string(),
+        "--preserve-credentials".to_string(),
+        format!("--user=/proc/{holder}/ns/user"),
+        format!("--net=/proc/{holder}/ns/net"),
+        "--".to_string(),
+    ];
+    prefix.push(exe.to_string_lossy().to_string());
+    prefix.push("--relay".to_string());
+    prefix.push(bind);
+    prefix.push(target);
+
+    let mut child = tokio::process::Command::new(&prefix[0])
+        .args(&prefix[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(false)
+        .spawn()
+        .ok()?;
+    let pid = child.id()?;
+
+    // Give the relay a moment to either settle into `accept()` or fail its
+    // bind. Short: this only has to outlast the bind syscall, not the
+    // process's whole life, and every forward already waits on this before it
+    // is usable.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    match child.try_wait() {
+        // Exited already -- almost certainly the bind conflict described
+        // above, meaning the server itself already answers on `tap0`. No
+        // relay wanted; the forward reaches the server directly.
+        Ok(Some(_)) => None,
+        // Still running: the bind succeeded and it is now relaying.
+        Ok(None) => Some(pid),
+        // Could not even ask -- treat as "no relay", the safer default: a
+        // forward with no relay either works already or answers nothing, and
+        // the latter is diagnosable, where a relay pid we cannot account for
+        // is a leak.
+        Err(_) => {
+            kill(pid);
+            None
+        }
+    }
 }
 
 /// A port in the forwarding range.
@@ -565,11 +694,20 @@ impl Namespace {
             slirp: slirp_pid,
             api_socket,
             forwards: HashMap::new(),
+            cdp_port: None,
         })
     }
 
     fn tear_down(&self) {
-        // slirp first: it holds a descriptor on the namespace, and killing the
+        // Relays first: each is a child of nothing but its own bind, and
+        // killing it before the holder avoids a moment where the relay is
+        // still accepting into a namespace whose holder is already gone.
+        for forward in self.forwards.values() {
+            if let Some(pid) = forward.relay {
+                kill(pid);
+            }
+        }
+        // slirp next: it holds a descriptor on the namespace, and killing the
         // holder while it watches produces a noisy log for no benefit.
         kill(self.slirp);
         kill(self.holder);
@@ -587,7 +725,8 @@ fn remember_pids(api_socket: &std::path::Path, holder: u32, slirp: u32) {
     let _ = std::fs::write(pid_path(api_socket), format!("{holder}\n{slirp}\n"));
 }
 
-/// Kills the holder and slirp a previous server left for this plan.
+/// Kills the holder, slirp and any relays a previous server left for this
+/// plan.
 ///
 /// Best effort throughout, and **paranoid about pid reuse**: a pid is a
 /// recycled number, so a stale file naming 4242 must not kill whatever happens
@@ -599,6 +738,10 @@ fn remember_pids(api_socket: &std::path::Path, holder: u32, slirp: u32) {
 ///   matched on its command line: `unshare --fork` runs it through a shell that
 ///   `exec`s `sleep`, which replaces the argv, so the word "unshare" is on the
 ///   *parent* and never on the process actually holding the namespace.
+/// - a relay, found by scanning for our own binary's `--relay` argv whose net
+///   namespace matches the holder's. Like the holder, a relay left running
+///   keeps its namespace alive on its own -- the same trap this whole design
+///   exists to close for tmux, reproduced here if it were left unhandled.
 fn reclaim_previous(plan: &PlanId) {
     let api_socket = api_socket_path(plan);
     let Ok(recorded) = std::fs::read_to_string(pid_path(&api_socket)) else {
@@ -618,6 +761,40 @@ fn reclaim_previous(plan: &PlanId) {
         if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
             if String::from_utf8_lossy(&cmdline).contains(ours.as_ref()) {
                 kill(pid);
+            }
+        }
+    }
+
+    // Relays, before the holder: found by their own `--relay` argv and a net
+    // namespace matching the holder's -- the same identification the holder
+    // itself gets below, applied to every pid rather than one recorded one,
+    // because a relay's pid was never written to the pidfile.
+    if let Some(holder_pid) = holder {
+        if let Ok(theirs) = std::fs::read_link(format!("/proc/{holder_pid}/ns/net")) {
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let Some(pid) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|n| n.parse::<u32>().ok())
+                    else {
+                        continue;
+                    };
+                    if pid == holder_pid {
+                        continue;
+                    }
+                    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                        continue;
+                    };
+                    if !String::from_utf8_lossy(&cmdline).contains("--relay") {
+                        continue;
+                    }
+                    if std::fs::read_link(format!("/proc/{pid}/ns/net")).ok()
+                        == Some(theirs.clone())
+                    {
+                        kill(pid);
+                    }
+                }
             }
         }
     }
@@ -766,6 +943,95 @@ async fn ask(
     Ok(reply)
 }
 
+/// Runs this process as a relay: one TCP splice from `bind` to `target`, and
+/// nothing else.
+///
+/// This is the whole reason `main.rs` has a `--relay` mode instead of shipping
+/// a second binary or reaching for `socat`: entered via `nsenter` into a plan's
+/// namespace, this binds `tap0` at the forwarded port and pipes every
+/// connection straight through to the loopback address the plan's own server
+/// actually bound. See [`spawn_relay`] for why the hop exists at all -- in
+/// short, `add_hostfwd` can only ever land on `tap0`, and almost nothing binds
+/// that address.
+///
+/// Never returns under ordinary operation: it serves connections until killed,
+/// which is what [`Namespace::tear_down`], `reconcile`'s removal arm and
+/// [`reclaim_previous`] all do to end its life.
+pub async fn run_relay(bind: &str, target: &str) {
+    let listener = match tokio::net::TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("relay could not bind {bind}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let target = target.to_string();
+    loop {
+        let Ok((mut inbound, _)) = listener.accept().await else {
+            continue;
+        };
+        let target = target.clone();
+        tokio::spawn(async move {
+            let Ok(mut outbound) = tokio::net::TcpStream::connect(&target).await else {
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+    }
+}
+
+/// Reserves a fixed port for Chrome's CDP inside a plan's namespace, and
+/// records it so the King's ports badge can exclude it.
+///
+/// Called instead of leaving the port at 0 (kernel-chosen) only when the plan
+/// has a namespace: chromiumoxide reads the DevTools URL Chrome prints to its
+/// own stderr and connects to whatever address it says, which is
+/// `127.0.0.1:<port>` -- true inside the namespace and false for the host
+/// client that actually issues CDP calls. A *known* port lets the relay (see
+/// [`spawn_relay`]) put the same number on `tap0`, so the URL Chrome printed is
+/// already correct from the host and chromiumoxide's ordinary `connect()` path
+/// needs no rewriting.
+///
+/// Idempotent for a given plan: a session relaunching keeps its previous port
+/// rather than drawing a new one and leaving the old forward stranded.
+pub async fn reserve_cdp_port(plan: &PlanId) -> Option<u16> {
+    let holder = {
+        let registry = lock();
+        let namespace = registry.get(plan)?;
+        if let Some(port) = namespace.cdp_port {
+            return Some(port);
+        }
+        namespace.holder
+    };
+
+    let api_socket = api_socket_path(plan);
+    for _ in 0..PORT_ATTEMPTS {
+        let port = random_port();
+        // Bound directly rather than through the relay's own retry: the port
+        // has to be free on *both* the namespace's tap0 test the relay will
+        // make and the loopback address Chrome will actually bind, and
+        // drawing it here keeps that single choice in one place.
+        if add_hostfwd(&api_socket, port, port).await.is_ok() {
+            let relay = spawn_relay(holder, port).await;
+            let mut registry = lock();
+            if let Some(namespace) = registry.get_mut(plan) {
+                namespace.cdp_port = Some(port);
+                namespace.forwards.insert(
+                    port,
+                    Forward {
+                        host_port: port,
+                        id: 0,
+                        relay,
+                    },
+                );
+            }
+            return Some(port);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +1122,7 @@ mod tests {
             slirp: 4243,
             api_socket: PathBuf::from("/run/nowhere.sock"),
             forwards: HashMap::new(),
+            cdp_port: None,
         };
         let prefix = namespace.enter_prefix();
 
@@ -899,5 +1166,45 @@ mod tests {
             pid_path(&socket),
             PathBuf::from("/run/user/1000/kingdom-netns/plan-7.pid")
         );
+    }
+
+    /// Chrome's CDP port is forwarded like any other listener -- the relay
+    /// needs the forward to reach it -- but never shown on the King's badge.
+    /// A badge entry that speaks CDP, not HTTP, would be one the King clicks
+    /// and gets nothing useful from.
+    #[test]
+    fn the_cdp_port_never_reaches_the_badge() {
+        let mut registry = HashMap::new();
+        let plan = PlanId::new("plan-with-a-browser");
+        let mut forwards = HashMap::new();
+        forwards.insert(
+            3000,
+            Forward {
+                host_port: 40001,
+                id: 1,
+                relay: None,
+            },
+        );
+        forwards.insert(
+            9222,
+            Forward {
+                host_port: 40002,
+                id: 2,
+                relay: Some(9999),
+            },
+        );
+        registry.insert(
+            plan.clone(),
+            Namespace {
+                holder: 1,
+                slirp: 2,
+                api_socket: PathBuf::from("/run/nowhere.sock"),
+                forwards,
+                cdp_port: Some(9222),
+            },
+        );
+        *namespaces().lock().unwrap() = registry;
+
+        assert_eq!(forwards_of(&plan), vec![(3000, 40001)]);
     }
 }

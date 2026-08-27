@@ -319,11 +319,28 @@ async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
         .into();
     };
 
+    let enter = crate::netns::enter_prefix(shop.plan());
+    // Adopted from `terminal.rs`'s own guard: an isolated plan whose prefix
+    // comes back empty must refuse rather than run on the host network with a
+    // straight face about being isolated. A silent fallback there is what once
+    // took `Address already in use` from the King's own server; the same
+    // outcome here is a command believed private that was not.
+    let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.network.is_isolated());
+    if isolated && enter.is_empty() {
+        return Refusal::Refused(
+            "This plan's network could not be entered, so nothing was started. \
+             A command on the machine's own network would be the wrong answer \
+             rather than a lesser one."
+                .to_string(),
+        )
+        .into();
+    }
+
     let job = match Job::spawn(
         cmd,
         shop.root().to_path_buf(),
         super::child_environment(shop),
-        crate::netns::enter_prefix(shop.plan()),
+        enter,
     ) {
         Ok(job) => job,
         // A shell that would not start is not a command that failed -- there is
