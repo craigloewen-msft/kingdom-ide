@@ -220,6 +220,34 @@
   padding: 0;
 }
 
+// The isolation panel's tab strip. One tab today; the strip exists so the
+// second one is a row in a list rather than a new layout.
+//
+// Borrowed wholesale from the rail's `.filter-toggle` / `.filter-btn`, so a
+// segmented control looks the same wherever the King meets one.
+.isolation-tabs {
+  display: flex;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 10px;
+  border: 1px solid t.$edge;
+  border-radius: 6px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.isolation-tab {
+  padding: 3px 9px;
+  background: transparent;
+  border: none;
+  color: t.$ink-faint;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover { color: t.$ink; }
+  &.active { background: t.$deep; color: t.$gold; }
+}
+
 // Two lines per option, because the difference between them is a *bargain*
 // (isolation vs. immediacy) and a bare label cannot carry that.
 .workspace-row {
