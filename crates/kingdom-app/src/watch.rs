@@ -57,12 +57,16 @@ async fn watch(mut socket: WebSocket, id: PlanId) {
     // has been offline is handed current truth as its first message, with
     // nothing to replay and no sequence to reconcile.
     //
-    // `for_wire` for the same reason every proclamation is: this is the largest
-    // message the socket ever sends -- a whole plan, at whatever length its
-    // transcript has reached -- and the opaque half of the model's thinking is
-    // no part of what the chamber draws.
-    if let Some(plan) = crate::api::snapshot(&id) {
-        if send(&mut socket, &plan.for_wire()).await.is_err() {
+    // `events::for_browser`, not a bare `for_wire`: this is also what makes a
+    // *reload* during review show the plan's ports and shared services. The
+    // push path (`events::publish`) attaches them already; this door did not,
+    // and it is the only chance a reconnecting or freshly opened conversation
+    // gets before the next proclamation -- which, for an idle plan awaiting
+    // review, never comes. No kingdom guard is held here: `api::snapshot`
+    // takes and releases it before returning, so the lookup inside
+    // `for_browser` is safe.
+    if let Some(wire) = crate::events::for_browser(&id) {
+        if send(&mut socket, &wire).await.is_err() {
             crate::events::forget_if_unwatched(&id);
             return;
         }
