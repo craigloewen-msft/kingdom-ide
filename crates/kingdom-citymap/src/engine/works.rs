@@ -2,10 +2,30 @@
 //!
 //! This is the map's answer to the third of the three questions in `AGENTS.md`
 //! -- *what are they proposing that I need to decide on?* -- put where the first
-//! two are already answered. A house the court has been working in wears a
-//! scaffold whose height is how much moved; a house it has been cutting from
-//! wears a skirt around its lot; a file that does not exist in the city's
+//! two are already answered. A house the court has been adding to wears a
+//! scaffold above its roof, whose height is how much was added; a house it has
+//! been cutting from is covered by a shroud rising from the ground over as much
+//! of the house as the file is losing; a file that does not exist in the city's
 //! checkout at all stands as a ghost on free ground inside its own folder.
+//!
+//! # The grammar, which has exactly one rule
+//!
+//! **What is being built rises above the roof. What is being taken away covers
+//! the house.** Nothing crosses that line in either direction, so the two can
+//! never be confused at a glance however far out the camera is.
+//!
+//! It was not always so, and the exception was the fault this module was last
+//! rewritten for: removals used to be stacked into the *same upward column* as
+//! additions, one band above the other, so a file losing three hundred lines
+//! grew a tall tower -- saying the opposite of what had happened. A deletion,
+//! meanwhile, was a third thing again: a band at the foot of the house sized
+//! from its churn. Both are now the same mark, and a deletion is simply a
+//! shroud that covers all of it -- one rule rather than three.
+//!
+//! The share is [`crate::map::works::WorkBand::cover`], computed at the seam
+//! rather than here: it is a fraction of the file's own length, and a file's
+//! length is a fact about a codebase that this module is deliberately ignorant
+//! of. All the drawing does is multiply it by a height it already has.
 //!
 //! # Why this does not come through the manifest
 //!
@@ -151,12 +171,22 @@ const GIRTH_RANGE: (f32, f32) = (0.30, 0.85);
 /// How far a skirt of cleared ground spreads past the lot it surrounds, as a
 /// share of the footprint's shorter side.
 ///
+/// # Why this survives the shroud
+///
+/// The skirt and the shroud say the same thing at two zooms, and neither can do
+/// the other's job. The map's most common home is a pane at the foot of the
+/// rail where a house is a couple of pixels across -- at that size a shroud
+/// over the house is a *fraction* of those pixels and cannot be resolved at
+/// all, while a stain spreading across the lot around it can. Close in, the
+/// shroud is the precise reading and the skirt is the halo that draws the eye
+/// to it.
+///
 /// **Was an absolute 1.9 world units, and that is why removals did not show.**
 /// The world's own `REFERENCE_WORLD` is 1,000 units and a typical holding
 /// stands ~32 units tall, so 1.9 units at maximum -- and a file that was 80%
-/// additions got `1.9 * 0.2 = 0.38` of a unit. In the rail's pane, where a
-/// house is a couple of pixels across, that is sub-pixel: the skirt was being
-/// drawn correctly and was simply too small for any display to resolve.
+/// additions got `1.9 * 0.2 = 0.38` of a unit. In the rail's pane that is
+/// sub-pixel: the skirt was being drawn correctly and was simply too small for
+/// any display to resolve.
 ///
 /// A share of the footprint scales with whatever house it surrounds, in a world
 /// whose buildings differ in size by an order of magnitude.
@@ -175,29 +205,49 @@ const SKIRT_FLOOR: f32 = 1.2;
 /// house, which is precisely the thing the stack exists to say.
 const BAND_GAP: f32 = 1.1;
 
-/// How far a razing band rises up the house it is taking down, as a share of
-/// the height its churn would otherwise earn.
+/// How far a shroud spreads past the footprint it covers, as a share of it.
 ///
-/// Well under one: a razing is *capped at the roofline* by the caller, and this
-/// keeps a typical one visibly below it. The grammar is that what is being
-/// built rises above a roof and what is being taken away stays at the foot of
-/// the building, so the two can never be confused at a glance -- which is the
-/// distinction that failed hardest when a deletion was drawn as a thin ground
-/// stain and read as nothing at all.
-const RAZING_RISE: f32 = 0.55;
+/// **Wider than any roof on the map, and that is the whole requirement.** The
+/// predecessor of this constant was 1.06, which is narrower than most
+/// archetypes' eaves, so the block read as a box wedged *inside* the building
+/// rather than as one placed over it. Measured from `meshes.rs`, in the unit
+/// footprint every archetype is modelled in (walls span 1.0):
+///
+/// | Archetype | Widest roof point | Girth it needs |
+/// |---|---|---|
+/// | `keep` | `HALF + 0.04` | 1.08 |
+/// | `scriptorium` | `HALF + 0.05` | 1.10 |
+/// | `pitched` (cottage, guildhall, granary) | `HALF + 0.06` | 1.12 |
+/// | `market` | `HALF + 0.12` (the front slab) | 1.24 |
+///
+/// 1.28 clears every one of them with a little air. It stays well inside the
+/// lot: `build::layout::Building::footprint` insets a house to 0.46--0.58 of
+/// its lot, so the lot is at least ~1.7x the footprint and no neighbour is
+/// touched. The `granary`'s ground-level bins (`HALF + 0.2`) do still show,
+/// which is deliberate -- a sliver of house at the foot of the block reads as
+/// the house being covered rather than replaced.
+const SHROUD_GIRTH: f32 = 1.28;
 
-/// How wide a razing band is, as a share of the footprint.
+/// The least of a house a shroud covers, as a share of its height.
 ///
-/// Wider than any column: it wraps the house rather than standing on it, so it
-/// reads as the building being consumed from the outside.
-const RAZING_GIRTH: f32 = 1.06;
+/// A one-line cut in a four-thousand-line file is a share of 0.00025, which is
+/// nothing at any zoom. This is the floor that keeps such a change visible at
+/// all, and it is the same judgement [`BAND_FLOOR`] makes for the column: a
+/// small change is still a change the King should be able to see.
+///
+/// A share rather than an absolute, unlike `BAND_FLOOR`, because it is measured
+/// against the house's own height -- houses on this map differ in height by an
+/// order of magnitude, and an absolute floor would swallow a small one whole.
+const SHROUD_FLOOR: f32 = 0.08;
 
-/// How solid a razing is.
+/// How solid a shroud is.
 ///
-/// More opaque than the works above it. A deletion is the most consequential
-/// thing in a review and the easiest to miss -- it was invisible before this
-/// work -- so it is drawn as the most present thing on the lot.
-const RAZING_ALPHA: u8 = 0xe0;
+/// The most present thing on a lot. A deletion is the most consequential thing
+/// in a review and the easiest to miss -- it was invisible before the work that
+/// introduced this -- so it is drawn as the heaviest mark. Still short of
+/// opaque: the roofline reads through the top edge, which is what keeps a
+/// covered house legible as a *house* rather than as an anonymous block.
+const SHROUD_ALPHA: u8 = 0xe0;
 
 // Checked when this compiles rather than when the suite runs. `main` made this
 // argument for the old scaffold floor and it is the right one: these are facts
@@ -220,20 +270,28 @@ const _: () = assert!(
     "girth has to ramp, or magnitude has only one channel again"
 );
 const _: () = assert!(
-    RAZING_GIRTH > GIRTH_RANGE.1,
-    "a razing wraps its house rather than standing on it, so it is the wider mark"
+    SHROUD_GIRTH > GIRTH_RANGE.1,
+    "a shroud covers its house rather than standing on it, so it is the wider mark"
+);
+// The measurement in `SHROUD_GIRTH`'s own docs, held as a build failure. A
+// shroud narrower than the widest roof on the map is a box wedged inside the
+// building instead of one placed over it, which is exactly the fault this
+// replaced -- and it is one edited literal away at all times. 1.24 is the
+// `market`'s front slab, the widest roof point of any archetype in `meshes.rs`.
+const _: () = assert!(
+    SHROUD_GIRTH > 1.24,
+    "a shroud this narrow leaves the market's eaves sticking out of it"
 );
 const _: () = assert!(
-    RAZING_RISE < 1.0,
-    "nothing about a deletion may rise above the roofline it is taking down"
+    SHROUD_FLOOR > 0.0 && SHROUD_FLOOR < 1.0,
+    "the least of a house a removal covers is a share of it, and not all of it"
 );
 
 /// How high the skirt stands off the ground.
 ///
-/// Barely anything: this is a stain on the ground rather than a wall, and a
-/// skirt tall enough to hide its own house would say the opposite of what it
-/// means. Above `spawn::layer::GROUND_LABEL` so it is not swallowed by a folder
-/// name painted across the same ward.
+/// Barely anything: this is a stain on the ground rather than a wall, and the
+/// shroud is what stands *on* the lot. Above `spawn::layer::GROUND_LABEL` so it
+/// is not swallowed by a folder name painted across the same ward.
 const SKIRT_LIFT: f32 = 0.24;
 
 /// How transparent the works are.
@@ -254,10 +312,10 @@ const WORKS_ALPHA: u8 = 0xc8;
 const GHOST_ALPHA: u8 = 0x78;
 
 // The three weights the works are drawn at, in the order they must stay in: a
-// deletion is the most present thing on a lot, a proposal is translucent, and a
+// removal is the most present thing on a lot, a proposal is translucent, and a
 // house that does not exist yet is fainter still.
 const _: () = assert!(
-    RAZING_ALPHA > WORKS_ALPHA && WORKS_ALPHA > GHOST_ALPHA,
+    SHROUD_ALPHA > WORKS_ALPHA && WORKS_ALPHA > GHOST_ALPHA,
     "the works' three weights have crossed over"
 );
 
@@ -455,58 +513,56 @@ fn raise_one(
         ));
     }
 
-    // The column: one segment per agent per direction, stacked from the roof
-    // up. This is what makes several agents in one file legible -- how many
-    // segments is how many agents, and which hues they are is which agents.
+    // The column: one segment per agent, stacked from the roof up. This is what
+    // makes several agents in one file legible -- how many segments is how many
+    // agents, and which hues they are is which agents.
     //
-    // Each agent's own two segments are drawn adjacent, added below removed, so
-    // one agent's contribution reads as one block of one hue in two values
-    // rather than as two unrelated marks.
+    // **Additions only.** Removals used to be stacked in here too, directly on
+    // top of an agent's growth band, and that was the fault this replaced: it
+    // put a *taller tower* on a house that was losing three hundred lines, which
+    // says the opposite of what happened and contradicted the grammar this
+    // module's own docs claimed. What is being built rises above the roof; what
+    // is being taken away covers the house, below. There is now no exception to
+    // that in either direction.
     let mut standing = base;
     for band in &work.bands {
-        // A razing is not a thing that stands on a house; it is the house
-        // coming down. Drawn below, at ground level.
-        if band.razing {
+        let churn = band.added;
+        if churn <= 0.0 {
             continue;
         }
-        for (churn, colour) in [(band.added, band.growth), (band.removed, band.cutting)] {
-            if churn <= 0.0 {
-                continue;
-            }
-            let height = band_height(churn);
-            let girth = band_girth(churn);
-            let strength = 0.55 + magnitude(churn) * 0.45;
-            let base_color = to_color(colour);
-            let material = materials.add(unlit(
-                band_color(base_color, strength, WORKS_ALPHA),
-                WORKS_ALPHA,
-            ));
+        let height = band_height(churn);
+        let girth = band_girth(churn);
+        let strength = 0.55 + magnitude(churn) * 0.45;
+        let base_color = to_color(band.growth);
+        let material = materials.add(unlit(
+            band_color(base_color, strength, WORKS_ALPHA),
+            WORKS_ALPHA,
+        ));
 
-            commands.spawn((
-                ChildOf(root),
-                Mesh3d(meshes.add(Cuboid::new(
-                    footprint.width * girth,
-                    height,
-                    footprint.depth * girth,
-                ))),
-                MeshMaterial3d(material.clone()),
-                // Cuboids are built about their own centre, so the box is
-                // lifted by half its height to stand *on* what is below it
-                // rather than through it.
-                Transform::from_xyz(center[0], standing + height * 0.5, center[1]),
-                Scaffold {
-                    material,
-                    base: base_color,
-                    strength,
-                },
-                Pickable::IGNORE,
-            ));
+        commands.spawn((
+            ChildOf(root),
+            Mesh3d(meshes.add(Cuboid::new(
+                footprint.width * girth,
+                height,
+                footprint.depth * girth,
+            ))),
+            MeshMaterial3d(material.clone()),
+            // Cuboids are built about their own centre, so the box is lifted by
+            // half its height to stand *on* what is below it rather than
+            // through it.
+            Transform::from_xyz(center[0], standing + height * 0.5, center[1]),
+            Scaffold {
+                material,
+                base: base_color,
+                strength,
+            },
+            Pickable::IGNORE,
+        ));
 
-            // The next segment starts above this one, with a hairline of clear
-            // air between them: two saturated colours meeting exactly would
-            // read as one column with a gradient rather than as two agents.
-            standing += height + BAND_GAP;
-        }
+        // The next segment starts above this one, with a hairline of clear air
+        // between them: two saturated colours meeting exactly would read as one
+        // column with a gradient rather than as two agents.
+        standing += height + BAND_GAP;
     }
 
     // The ground: what is being cleared here, and by whom.
@@ -556,27 +612,58 @@ fn raise_one(
         ));
     }
 
-    // A razed house wears a collapse band at its *base* rather than a column on
-    // its roof. Nothing about a deletion may rise above the roofline: that is
-    // the whole grammar -- what is being built goes up, what is being taken
-    // away sits at the foot of the building and eats into it.
-    if let Some(band) = razing {
-        let height = (band_height(band.churn().max(1.0)) * RAZING_RISE).min(base.max(1.0));
+    // The shroud: what is being taken away, covering the house it is taken from.
+    //
+    // **This is what the King asked for, and the grammar the module's docs
+    // always claimed.** A block rising from the ground over as much of the house
+    // as the file is losing -- half the file cut, half the house covered -- so a
+    // removal can never be mistaken for the column of growth above the roof.
+    //
+    // Stacked, like the column, and for the same reason: with two agents cutting
+    // one file, whose deletion is whose is a question the map has to answer, and
+    // two hues covering half a house between them answer it. Each agent's share
+    // is its own, so the stack adds up to what the file is actually losing.
+    //
+    // A deletion is not a special case any more -- it is `cover` at 1.0, and the
+    // whole house disappears under the block. That is the honest reading, and it
+    // is one rule instead of two.
+    let mut covered = 0.0;
+    for band in &work.bands {
+        if band.cover <= 0.0 || !band.cover.is_finite() {
+            continue;
+        }
+        // Each agent's share is clamped by `resolve`, but the *stack* is not:
+        // three agents each cutting half a file sum to one and a half houses,
+        // and a shroud rising past the roof is the one thing this grammar does
+        // not allow. What is left of the house is the ceiling.
+        let room = base - covered;
+        if room <= 0.0 {
+            break;
+        }
+        let height = shroud_height(band.cover, base).min(room);
+        if height <= 0.0 {
+            continue;
+        }
         let base_color = to_color(band.cutting);
         let material = materials.add(unlit(
-            band_color(base_color, 1.0, RAZING_ALPHA),
-            RAZING_ALPHA,
+            band_color(base_color, 1.0, SHROUD_ALPHA),
+            SHROUD_ALPHA,
         ));
 
         commands.spawn((
             ChildOf(root),
             Mesh3d(meshes.add(Cuboid::new(
-                footprint.width * RAZING_GIRTH,
+                footprint.width * SHROUD_GIRTH,
                 height,
-                footprint.depth * RAZING_GIRTH,
+                footprint.depth * SHROUD_GIRTH,
             ))),
             MeshMaterial3d(material.clone()),
-            Transform::from_xyz(center[0], height * 0.5, center[1]),
+            // From the ground up, each agent's share stacked on the last. No
+            // gap between them, unlike the column: these are one house being
+            // covered rather than separate things standing on each other, and
+            // a stripe of bare wall between two blocks would read as the
+            // house showing through.
+            Transform::from_xyz(center[0], covered + height * 0.5, center[1]),
             Scaffold {
                 material,
                 base: base_color,
@@ -584,7 +671,26 @@ fn raise_one(
             },
             Pickable::IGNORE,
         ));
+
+        covered += height;
     }
+}
+
+/// How much of a house a removal covers, in world units.
+///
+/// `cover` is the share of the file going away and `house` is how tall it
+/// stands, so the product is the King's own rule: half the file removed covers
+/// half the house. [`SHROUD_FLOOR`] is what keeps a one-line cut in a huge file
+/// from being nothing at all.
+///
+/// Pure, so the shape is pinned by the tests below without a renderer -- and
+/// guarded against the same NaN that [`magnitude`] records, since `cover` is a
+/// ratio that crossed a wire.
+pub fn shroud_height(cover: f32, house: f32) -> f32 {
+    if !cover.is_finite() || cover <= 0.0 || !house.is_finite() || house <= 0.0 {
+        return 0.0;
+    }
+    house * cover.clamp(SHROUD_FLOOR, 1.0)
 }
 
 /// A translucent unlit material in one colour. See the module docs for why
@@ -641,6 +747,9 @@ mod tests {
             cutting: [0x15, 0x7f, 0x4a, 255],
             added,
             removed,
+            // What `resolve` would compute for a file of a hundred lines, which
+            // is a plausible house for these to stand on.
+            cover: (removed / 100.0).clamp(0.0, 1.0),
             razing: false,
         }
     }
@@ -812,20 +921,119 @@ mod tests {
         assert!(GHOST_ALPHA < WORKS_ALPHA);
     }
 
-    /// A razing must never rise above a roofline, because that is the whole
-    /// grammar: what is being built goes up, what is being taken away sits at
-    /// the foot of the house. Confusing the two is the fault this replaced.
+    /// **The reported fault.** Half the file removed covers half the house.
     ///
-    /// That `RAZING_RISE < 1.0` and that a razing is the wider mark are pinned
-    /// at the constants themselves, as `const` assertions -- they are
-    /// arithmetic on literals. What is left here is the part that is genuinely
-    /// behaviour: the *computed* rise on a real roof.
+    /// This is the King's own rule, stated as arithmetic. It replaces
+    /// `a_razing_stays_below_the_roof_it_is_taking_down`, which pinned the
+    /// previous grammar -- a deletion drawn as a band at the foot of the house
+    /// at 55% of whatever height its churn earned, with ordinary removals
+    /// stacked in the *column above the roof*, where they read as growth.
     #[test]
-    fn a_razing_stays_below_the_roof_it_is_taking_down() {
-        // Against a typical holding's own roof, at a large deleted file.
-        let roof = 32.0_f32;
-        let rise = (band_height(900.0) * RAZING_RISE).min(roof);
-        assert!(rise <= roof, "a razing rose {rise} over a {roof} roof");
+    fn a_removal_covers_a_share_of_the_house_it_is_cutting() {
+        let house = 32.0_f32;
+        assert_eq!(shroud_height(0.5, house), house * 0.5);
+        assert_eq!(shroud_height(0.25, house), house * 0.25);
+        // A deletion is a shroud at full height: the whole house goes under it.
+        assert_eq!(shroud_height(1.0, house), house);
+    }
+
+    /// Nothing about a removal may rise above the house it is covering. The
+    /// whole grammar is that growth goes up and cutting covers, so a shroud
+    /// taller than its house would be indistinguishable from a column.
+    ///
+    /// A share over 1.0 is reachable: the manifest is memoised on the shape of
+    /// the kingdom and may be stale about a file's length, so `removed` can
+    /// exceed it. `resolve` clamps, and this is the second guard.
+    #[test]
+    fn a_removal_never_rises_above_the_house() {
+        let house = 32.0_f32;
+        for cover in [0.0, 0.01, 0.5, 1.0, 4.0, f32::MAX] {
+            let height = shroud_height(cover, house);
+            assert!(
+                height <= house,
+                "a cover of {cover} rose {height} over a {house} house"
+            );
+        }
+    }
+
+    /// A *stack* of removals may not rise above the house either.
+    ///
+    /// Each agent's share is clamped on its own by `resolve`, but three agents
+    /// each cutting half a file sum to one and a half houses. This is the
+    /// arithmetic the drawing does to hold the stack to the roofline -- the one
+    /// rule the grammar has.
+    #[test]
+    fn a_stack_of_removals_never_rises_above_the_house() {
+        let house = 32.0_f32;
+        let mut covered = 0.0_f32;
+        for cover in [0.5, 0.5, 0.5, 1.0] {
+            let room = house - covered;
+            if room <= 0.0 {
+                break;
+            }
+            covered += shroud_height(cover, house).min(room);
+        }
+        assert!(
+            covered <= house,
+            "four agents covered {covered} of a {house} house"
+        );
+        assert_eq!(covered, house, "and between them they cover all of it");
+    }
+
+    /// A small cut in a large file is still a cut the King should be able to
+    /// see. One line of four thousand is a share of 0.00025, which is nothing
+    /// at any zoom -- the same fault `BAND_FLOOR` exists to prevent for the
+    /// column.
+    #[test]
+    fn even_the_smallest_removal_covers_enough_to_see() {
+        let house = 32.0_f32;
+        let sliver = shroud_height(1.0 / 4_000.0, house);
+        assert_eq!(sliver, house * SHROUD_FLOOR);
+        assert!(
+            sliver > 1.0,
+            "a one-line cut covered {sliver} of a {house} house, which is nothing"
+        );
+    }
+
+    /// **The regression guard for the girth.** A shroud has to be wider than
+    /// every roof on the map or it is a box wedged inside the building rather
+    /// than one placed over it -- which is how the razing it replaced read.
+    ///
+    /// The numbers are the widest point of each archetype in `meshes.rs`, in
+    /// the unit footprint they are modelled in. That `SHROUD_GIRTH` clears the
+    /// widest of them is also a `const` assertion; this is the table it was
+    /// taken from, so that adding a wider roof breaks a test that names it.
+    #[test]
+    fn a_shroud_is_wider_than_every_roof_it_covers() {
+        const HALF: f32 = 0.5;
+        for (archetype, widest) in [
+            ("keep", HALF + 0.04),
+            ("scriptorium", HALF + 0.05),
+            ("pitched: cottage, guildhall, granary", HALF + 0.06),
+            ("market's front slab", HALF + 0.12),
+        ] {
+            let needed = widest * 2.0;
+            assert!(
+                SHROUD_GIRTH > needed,
+                "{archetype} needs {needed} and the shroud is only {SHROUD_GIRTH} wide"
+            );
+        }
+    }
+
+    /// A house with no height cannot be covered, and a share that is not a
+    /// number must not become one.
+    ///
+    /// Reachable for the same reason `magnitude` guards: `cover` crosses a wire
+    /// as an `f32` and `f32::clamp` propagates NaN rather than trapping it, so
+    /// an unguarded version reaches Bevy as a degenerate mesh.
+    #[test]
+    fn a_cover_out_of_range_is_still_a_sane_height() {
+        assert_eq!(shroud_height(f32::NAN, 32.0), 0.0);
+        assert_eq!(shroud_height(0.5, f32::NAN), 0.0);
+        assert_eq!(shroud_height(-1.0, 32.0), 0.0);
+        assert_eq!(shroud_height(0.5, 0.0), 0.0);
+        assert!(shroud_height(f32::INFINITY, 32.0).is_finite());
+        assert!(shroud_height(0.5, f32::MAX).is_finite());
     }
 
     /// A site with no ground cannot be built on, and must not reach the
