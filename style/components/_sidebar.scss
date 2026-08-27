@@ -333,6 +333,17 @@
   border-left: 1px solid t.$edge;
   border-radius: 0 4px 4px 0;
 
+  // The agent's banner. This row is where the King *learns* the colour -- the
+  // map and the drawer only ever use it -- so it sits before the title, at the
+  // start of the reading order, rather than being tucked in beside the badge.
+  //
+  // Nudged down off the baseline the flex row aligns on: a 7px square aligned
+  // by its bottom edge sits visibly high against lowercase text.
+  .agent-pip {
+    position: relative;
+    top: 1px;
+  }
+
   .plan-row:hover & {
     background: t.$panel-2;
     .plan-title { color: t.$ink; }

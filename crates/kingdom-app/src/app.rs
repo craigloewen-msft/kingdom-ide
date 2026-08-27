@@ -174,20 +174,28 @@ pub struct KingdomState {
     /// file and then **clears this**: it is a message rather than a state, and
     /// leaving it set would mean the same building could not be pressed twice.
     pub picked_file: RwSignal<Option<String>>,
-    /// What the plan the King is reading has changed, published where the map
-    /// can draw it.
+    /// What every live agent in the selected city is changing, published where
+    /// the map can draw it.
     ///
     /// Here for exactly [`Self::focus_file`]'s reason, and it sits beside it for
     /// that reason: the chamber renders inside the router's outlet, the map is
     /// mounted outside it (see [`ThroneRoom`]), and a shared signal is the only
     /// seam between them.
     ///
-    /// Written by the chamber from the summary the review drawer already
-    /// fetches -- so this costs no request of its own -- and cleared on the way
-    /// out, so the works never outlive the chamber they describe.
+    /// **Several plans rather than one, which is what makes the map answer
+    /// "who".** It used to be the open plan's summary alone, so a city with
+    /// three agents in it drew one agent's work and silently omitted the rest --
+    /// and with one green for every addition there was nothing to tell them
+    /// apart even in principle. Each entry carries its plan, and
+    /// `kingdom_core::palette` turns that into the colours the works are drawn
+    /// in.
     ///
-    /// `None` when no plan is open, which is what tears the works down.
-    pub works: RwSignal<Option<kingdom_core::ChangeSummary>>,
+    /// Ordered by plan id, which is load-bearing: a banner collision is
+    /// resolved by position, so an unstable order would let two agents swap
+    /// colours between refetches. `api::city_changes` sorts.
+    ///
+    /// Empty when nothing is live, which is what tears the works down.
+    pub works: RwSignal<Vec<(kingdom_core::PlanId, kingdom_core::ChangeSummary)>>,
     /// What each plan wants of the King, as the server last said.
     ///
     /// A cache beside the kingdom rather than a field on `Plan`, and the reason
@@ -231,7 +239,7 @@ impl KingdomState {
             workspace: RwSignal::new(WorkspaceMode::default()),
             focus_file: RwSignal::new(None),
             picked_file: RwSignal::new(None),
-            works: RwSignal::new(None),
+            works: RwSignal::new(Vec::new()),
             attention: RwSignal::new(std::collections::HashMap::new()),
         }
     }
@@ -542,6 +550,88 @@ fn kingdom_activity(state: KingdomState) -> Memo<Vec<CityActivity>> {
     Memo::new(move |_| state.kingdom.with(Kingdom::activity))
 }
 
+/// Keeps [`KingdomState::works`] current for whichever city is selected.
+///
+/// # Why this is push-driven rather than polled
+///
+/// The rail's socket already carries a `PlanPulse` for every plan whenever it
+/// moves, and `absorb` writes that onto the kingdom this browser holds. So
+/// "has any agent in this city done anything?" is a question already answered
+/// locally, for free, at exactly the moment it changes -- a timer would be both
+/// slower and more expensive. This is the same argument `kingdom_activity`
+/// above records for the working rings, applied to the works.
+///
+/// # What it is keyed on
+///
+/// A digest -- the city, and each live plan's id and `working_on` -- rather than
+/// the kingdom itself. The kingdom signal is re-set wholesale on every push,
+/// including pushes about plans in other cities and about transcript entries
+/// that touched no file, and refetching a city's git state for those would be a
+/// request per round of every turn in the kingdom. A `Memo` over a small
+/// `PartialEq` value means the fetch runs when an agent here actually did
+/// something.
+///
+/// The guard is `fetching`, the same shape `review_drawer::fetch_changes` uses
+/// and for its reason: an answer that arrives while one is in flight is dropped
+/// rather than queued, because the next pulse will ask again in a moment and
+/// two overlapping answers could land out of order.
+fn watch_city_works(state: KingdomState) {
+    // What would make the answer different. `working_on` is in here because it
+    // moves on every deed, which is the cheapest honest proxy for "this agent
+    // may have just touched a file"; the id list covers a plan opening,
+    // settling or being deleted.
+    let stirring = Memo::new(move |_| {
+        let Some(city) = state.selected.get() else {
+            return None;
+        };
+        let plans = state.kingdom.with(|k| {
+            k.plans_in(&city)
+                .filter(|plan| plan.is_live())
+                .map(|plan| (plan.id.clone(), plan.working_on.clone()))
+                .collect::<Vec<_>>()
+        });
+        Some((city, plans))
+    });
+
+    let fetching = RwSignal::new(false);
+
+    Effect::new(move |_| {
+        let Some((city, _)) = stirring.get() else {
+            // No city selected: nothing to draw, and an empty list is how the
+            // works are torn down.
+            state.works.set(Vec::new());
+            return;
+        };
+        if fetching.get_untracked() {
+            return;
+        }
+        fetching.set(true);
+
+        leptos::task::spawn_local(async move {
+            if let Ok(found) = crate::api::city_changes(city.to_string()).await {
+                // A failed fetch deliberately leaves the last good answer
+                // standing, exactly as the review drawer's does: blanking the
+                // map because one request was dropped is a worse answer than a
+                // slightly stale one.
+                state.works.set(found);
+            }
+            fetching.set(false);
+        });
+    });
+}
+
+/// One agent's line in the rail map's header: who, how much, and its banner.
+///
+/// A named alias because it is the key of a `<For>` as well as its item, and
+/// spelling a five-tuple twice in a view is how the two come to disagree.
+type AgentTally = (
+    kingdom_core::PlanId,
+    u32,
+    u32,
+    usize,
+    &'static kingdom_core::AgentPalette,
+);
+
 /// Root component: the throne room.
 #[component]
 pub fn App() -> impl IntoView {
@@ -564,6 +654,12 @@ pub fn App() -> impl IntoView {
     // lets a plan that has stopped to ask something say so while the King is
     // looking at the map or at another chamber entirely.
     watch_kingdom(state);
+
+    // What every agent in the selected city is changing, kept current off that
+    // same socket. Mounted here rather than in the chamber because the map
+    // outlives any one conversation -- and because the works are now about a
+    // city rather than about whichever plan happens to be open.
+    watch_city_works(state);
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the user back to the folder picker.
@@ -745,45 +841,80 @@ fn ThroneRoom() -> impl IntoView {
                                     .unwrap_or_default()
                             }}
                         </span>
-                        // What the scaffolding on the map adds up to. The map
-                        // says where the work is and how it is distributed; a
-                        // scaffold is a proportion, so the totals are the one
-                        // thing the geometry cannot state.
+                        // What the works on the map add up to, per agent.
+                        //
+                        // The map says *where* each agent is working and how
+                        // much; this says *who* they are and totals it, which
+                        // is the one thing geometry is bad at -- a column is a
+                        // proportion, not a number. One chip per agent, in that
+                        // agent's own two colours, so the hues standing on the
+                        // map have a key sitting beside them.
                         <Show when=move || {
-                            state.works.with(|w| {
-                                w.as_ref().is_some_and(|w| !w.files.is_empty())
-                            })
+                            state.works.with(|w| w.iter().any(|(_, s)| !s.files.is_empty()))
                         }>
-                            <span
-                                class="map-rail-works"
-                                title=move || {
-                                    state.works.with(|w| {
-                                        let count = w
-                                            .as_ref()
-                                            .map(|w| w.files.len())
-                                            .unwrap_or(0);
-                                        format!(
-                                            "{count} files changed in this plan",
-                                        )
-                                    })
-                                }
-                            >
-                                <span class="count-added">
-                                    "+"
-                                    {move || {
+                            <span class="map-rail-works">
+                                <For
+                                    each=move || {
                                         state.works.with(|w| {
-                                            w.as_ref().map(|w| w.added()).unwrap_or(0)
+                                            let plans: Vec<_> =
+                                                w.iter().map(|(id, _)| id.clone()).collect();
+                                            let banners =
+                                                kingdom_core::palette::assign_banners(&plans);
+                                            w.iter()
+                                                .zip(banners)
+                                                .filter(|((_, s), _)| !s.files.is_empty())
+                                                .map(|((id, s), (_, banner))| {
+                                                    (
+                                                        id.clone(),
+                                                        s.added(),
+                                                        s.removed(),
+                                                        s.files.len(),
+                                                        banner,
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>()
                                         })
-                                    }}
-                                </span>
-                                <span class="count-removed">
-                                    "\u{2212}"
-                                    {move || {
-                                        state.works.with(|w| {
-                                            w.as_ref().map(|w| w.removed()).unwrap_or(0)
-                                        })
-                                    }}
-                                </span>
+                                    }
+                                    key=|entry: &AgentTally| {
+                                        (entry.0.clone(), entry.1, entry.2, entry.3)
+                                    }
+                                    let:entry
+                                >
+                                    {
+                                        let (id, added, removed, files, banner) = entry;
+                                        let title = state.kingdom.with(|k| {
+                                            let name = k
+                                                .plan(&id)
+                                                .map(|p| p.title.clone())
+                                                .unwrap_or_else(|| id.to_string());
+                                            format!(
+                                                "{name} \u{2014} {files} files, +{added} \
+                                                 \u{2212}{removed} ({})",
+                                                banner.name,
+                                            )
+                                        });
+                                        view! {
+                                            <span class="map-rail-agent" title=title>
+                                                <span
+                                                    class="agent-pip"
+                                                    style:background=banner.growth
+                                                ></span>
+                                                <span
+                                                    class="count-added"
+                                                    style:color=banner.growth
+                                                >
+                                                    "+"{added}
+                                                </span>
+                                                <span
+                                                    class="count-removed"
+                                                    style:color=banner.cutting
+                                                >
+                                                    "\u{2212}"{removed}
+                                                </span>
+                                            </span>
+                                        }
+                                    }
+                                </For>
                             </span>
                         </Show>
                         <a class="map-rail-open" href="/" title="Open the whole kingdom">

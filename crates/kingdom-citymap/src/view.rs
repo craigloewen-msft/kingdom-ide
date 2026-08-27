@@ -25,7 +25,7 @@
 
 use gloo_net::http::Request;
 use gloo_timers::callback::{Interval, Timeout};
-use kingdom_core::{ChangeSummary, CityActivity, CityId};
+use kingdom_core::{ChangeSummary, CityActivity, CityId, PlanId};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -170,14 +170,19 @@ pub fn CityMap(
     /// same building openable twice.
     #[prop(into)]
     picked_file: RwSignal<Option<String>>,
-    /// What the open plan is proposing, if the King is in a chamber.
+    /// What every live agent in the focused city is changing.
     ///
     /// Resolved against the manifest here and handed to the engine as plain
     /// geometry -- see the effect below, which is the boundary the engine's
-    /// ignorance of Kingdom's domain is kept at. `None` outside a chamber, which
-    /// tears the works down.
+    /// ignorance of Kingdom's domain is kept at. Empty when nobody is working,
+    /// which tears the works down.
+    ///
+    /// Several plans rather than one because the question the map now answers
+    /// is *who* is touching a file, and one plan's summary structurally cannot
+    /// answer it. Ordered by plan id by the caller, so a banner does not swap
+    /// between two agents from one refetch to the next.
     #[prop(into)]
-    works: Signal<Option<ChangeSummary>>,
+    works: Signal<Vec<(PlanId, ChangeSummary)>>,
 ) -> impl IntoView {
     // First, and before anything is created: an engine that is not to run must
     // not be half-started and then told to stop. See the module doc.
@@ -336,14 +341,14 @@ pub fn CityMap(
     // Measured, not guessed -- the works were silently absent on first open.
     let builder = bridge.clone();
     Effect::new(move |_| {
-        let summary = works.get();
+        let working = works.get();
         let city = focus_city.get();
         let standing = built.get();
-        let raised = manifest.with(|map| match (map, &summary, &city) {
-            (Some(map), Some(summary), Some(city)) if standing => {
-                crate::map::works::resolve(map, city.as_str(), summary)
+        let raised = manifest.with(|map| match (map, &city) {
+            (Some(map), Some(city)) if standing && !working.is_empty() => {
+                crate::map::works::resolve(map, city.as_str(), &working)
             }
-            // No plan open, or nothing to draw against yet. An empty list is
+            // Nobody working, or nothing to draw against yet. An empty list is
             // how the works are torn down, so this is sent rather than skipped.
             _ => Vec::new(),
         });

@@ -133,6 +133,17 @@ crates/
                     cheap "is this still what I opened?" a save is checked
                     against
     naming.rs       slugify — a plan's title turned into its branch name
+    palette.rs      WHICH AGENT did this: one hue per plan, in two values
+                    (light = lines added, dark = lines removed). The third
+                    colour axis, and it needs its own because the other two
+                    are spoken for — PlanStatus::color says what an agent is
+                    DOING and Language::tint says what the code IS, and
+                    neither can say who is touching a file. Hues were picked
+                    by search against the status palette, and tests pin the
+                    separation. `assign_banners` is hash-with-de-collision:
+                    stable across restarts, but two live plans are NEVER the
+                    same colour, because two agents on one house that cannot
+                    be told apart is the failure the feature exists to fix
     sample.rs       Placeholder starter plans
     mockdata/       The Proving Grounds: synthetic fixtures, in Rust
                     mod.rs (FixtureSpec + expansion), fixtures.rs (THE FAKE
@@ -262,10 +273,13 @@ crates/
                     wasm; `engine` is Bevy and must never reach the server.
     map/            The manifest: world-space geometry, plain serialisable
                     data. The one *seam* on both targets — where the two halves
-                    meet. `works.rs` is the exception that proves it: what a
-                    plan proposes, resolved from a `ChangeSummary` into ground
-                    to build on, and the placer that finds free land inside a
-                    folder for a file that has no house yet. It lives here
+                    meet. `works.rs` is the exception that proves it: what
+                    EVERY live agent in a city is changing, resolved from their
+                    `ChangeSummary`s into ground to build on, and the placer
+                    that finds free land inside a folder for a file that has no
+                    house yet. Grouped by PATH rather than by plan, so a file
+                    three agents share is one house wearing three bands rather
+                    than three houses claiming to be the same file. It lives here
                     rather than in `engine` so `cargo test` can pin it without
                     a browser — a ghost house landing on a real one is then a
                     test failure rather than something noticed by eye
@@ -284,9 +298,13 @@ crates/
                     which towns have agents working in them, traced as a pulsing
                     ring, polled rather than pushed and never cached with the
                     geometry. `works.rs` is the second, for the same reason and
-                    on the same channel: the open plan's changes, raised over the
-                    city as scaffolding, skirts of cleared ground, and ghost
-                    houses for files that do not exist yet. `stars.rs` is the
+                    on the same channel: every agent's changes, raised over the
+                    city as stacked colour-per-agent columns, skirts of cleared
+                    ground, razed lots for deleted files, and ghost houses for
+                    files that do not exist yet. Height AND girth both ramp with
+                    ABSOLUTE churn (`FULL_CHURN`) — never a share of a plan's
+                    own busiest file, which made two agents incomparable and
+                    flattened a 400-line change against a 4-line one. `stars.rs` is the
                     one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
                     would have no parallax and would *zoom* with the kingdom —

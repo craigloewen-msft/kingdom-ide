@@ -703,6 +703,85 @@ pub async fn plan_changes(plan: String) -> Result<kingdom_core::ChangeSummary, S
     Ok(crate::review::changes(&workspace).await)
 }
 
+/// What **every live agent in one city** has changed, as one answer.
+///
+/// The plural of [`plan_changes`], and it exists because the map's question
+/// changed. "What did my agent do?" is answered by one plan's summary; "who is
+/// touching this file?" cannot be, however many times it is asked -- the
+/// browser would have to know which other plans are live and fetch each in
+/// turn, and would still be assembling the picture a request at a time while
+/// the answer moved under it.
+///
+/// # Which plans
+///
+/// Live, non-subagent plans in that city. [`Kingdom::plans_in`] already excludes
+/// subagents, and its doc gives the reason this endpoint would need anyway: a
+/// subagent works inside the worktree of the plan that sent it, so counting it
+/// would draw one piece of work several times over. Settled plans are excluded
+/// because their worktrees are gone -- there is nothing on disk to diff.
+///
+/// # Why the reads are concurrent
+///
+/// Each summary is a few `git` invocations against a different worktree, and
+/// they share nothing. Run in sequence, a city with six agents would cost six
+/// times one plan's latency on every refetch; spawned together, it costs the
+/// slowest one. The kingdom lock is released before any of them start, which
+/// matters more than the concurrency: `review::changes` shells out, and holding
+/// the mutex across that would park every other request behind the slowest git
+/// in the city.
+///
+/// # Why one bad plan does not fail the request
+///
+/// [`crate::review::changes`] never errors for an ordinary absence -- a
+/// disposed worktree, a project without git -- it answers with an empty summary
+/// carrying a note. A plan whose read panics its task is dropped from the
+/// answer rather than blanking the map for every other agent, which is the same
+/// judgement `plan_changes` makes when it refuses to blank a list the King is
+/// reading.
+///
+/// Sorted by plan id, and that is load-bearing rather than tidiness:
+/// `kingdom_core::palette::assign_banners` resolves a colour collision by
+/// position, so an unstable order here would let two agents swap colours
+/// between refetches.
+#[server(CityChanges, "/api")]
+pub async fn city_changes(
+    city: String,
+) -> Result<Vec<(kingdom_core::PlanId, kingdom_core::ChangeSummary)>, ServerFnError> {
+    let city_id = kingdom_core::CityId::new(city);
+
+    // The lock is taken only to decide *what* to read, never across the reads
+    // themselves.
+    let workspaces: Vec<(kingdom_core::PlanId, kingdom_core::Workspace)> = {
+        let kingdom = lock()?;
+        let root = &kingdom.root;
+        let mut found: Vec<(kingdom_core::PlanId, kingdom_core::Workspace)> = kingdom
+            .plans_in(&city_id)
+            .filter(|plan| plan.is_live())
+            .map(|plan| (plan.id.clone(), grounded(root, &plan.workspace)))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    };
+
+    let reads: Vec<_> = workspaces
+        .into_iter()
+        .map(|(id, workspace)| {
+            tokio::spawn(async move { (id, crate::review::changes(&workspace).await) })
+        })
+        .collect();
+
+    let mut answered = Vec::with_capacity(reads.len());
+    for read in reads {
+        // A task that failed is dropped rather than failing the whole answer:
+        // one unreadable worktree must not blank the map for every other agent.
+        if let Ok(one) = read.await {
+            answered.push(one);
+        }
+    }
+
+    Ok(answered)
+}
+
 /// One changed file, as a side-by-side diff against the same base.
 ///
 /// # The boundary

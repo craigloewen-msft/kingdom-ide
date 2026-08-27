@@ -871,21 +871,16 @@ fn ConversationBody(
     let summary = RwSignal::new(None::<kingdom_core::ChangeSummary>);
     let looking = RwSignal::new(false);
 
-    // And the same answer, published where the map can raise it as building
-    // works over the city.
+    // The works are deliberately **not** published from here any more.
     //
-    // Beside the `focus_file` effect above and for its reason: the map is
-    // mounted outside the router's outlet and may never unmount, so a shared
-    // signal on `KingdomState` is the only seam between this chamber and it.
-    //
-    // This costs no request of its own -- the rail is already fetching the
-    // summary for the drawer and the badge, and this is the same value read a
-    // third time. Cleared on the way out, so a plan the King has left does not
-    // leave scaffolding standing over its city.
-    Effect::new(move |_| state.works.set(summary.get()));
-    on_cleanup(move || {
-        state.works.try_set(None);
-    });
+    // They used to be: this chamber set `state.works` from the summary the rail
+    // had already fetched, which cost no request and was exactly right while
+    // the map drew one plan. It is wrong now that the map draws every agent in
+    // the city -- a chamber publishing its own plan's changes would blank the
+    // other agents' works every time the King opened one, and re-blank them on
+    // every transcript entry. `app::watch_city_works` owns that signal, keyed
+    // on the city rather than on whichever conversation happens to be open, and
+    // it is fed by the same pulse socket at no extra cost.
 
     // The open file's counts, as a stamp. When the court edits the file the
     // King is reading, these move and the panel fetches again -- at no cost,

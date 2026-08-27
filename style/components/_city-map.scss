@@ -102,19 +102,37 @@
   color: t.$ink-dim;
 }
 
-// What the works standing on the map add up to.
+// What the works standing on the map add up to, per agent.
 //
-// The map says *where* the work is; this says *how much*, which is the one
-// thing geometry is bad at -- a scaffold is a proportion, not a number. The two
-// counts reuse `.count-added` / `.count-removed` from `_review.scss`, so the
-// same change is the same two colours in the drawer and on the map.
+// The map says *where* each agent is working; this says *who* and *how much*,
+// which is the one thing geometry is bad at -- a column is a proportion, not a
+// number. One entry per agent, so the header is also the legend for the hues
+// standing on the map beneath it.
 .map-rail-works {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  min-width: 0;
   font-size: 10px;
   letter-spacing: 0.04em;
   white-space: nowrap;
+  // Several busy agents can outrun a 290px pane. The city name beside this
+  // gives way first (it truncates), and past that the far agents scroll rather
+  // than pushing the "open the map" link off the end.
+  overflow: hidden;
+}
+
+// One agent's tally: its pip, then what it added and what it cut.
+//
+// The two counts keep `.count-added` / `.count-removed` so the shape is the one
+// the King already reads, but their *colour* is set inline from the agent's own
+// banner -- see `_status.scss` on why a runtime-chosen colour may not be
+// restated in a stylesheet.
+.map-rail-agent {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .map-rail-open {

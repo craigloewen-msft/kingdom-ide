@@ -43,7 +43,58 @@ pub fn ReviewDrawer(
     /// Called with a path when the King picks a file to read.
     on_open: Callback<String>,
 ) -> impl IntoView {
-    let _ = plan;
+    let state = expect_context::<crate::app::KingdomState>();
+
+    // This plan's own banner, which is what the counts below are painted in.
+    //
+    // Taken from the city-wide assignment rather than from `palette::preferred`
+    // so the drawer and the map agree about which colour this agent is even
+    // when a collision moved it -- two spellings of one fact is how a rail and
+    // a map come to disagree.
+    let banner = {
+        let plan = plan.clone();
+        Memo::new(move |_| {
+            state.works.with(|working| {
+                let plans: Vec<PlanId> = working.iter().map(|(id, _)| id.clone()).collect();
+                kingdom_core::palette::assign_banners(&plans)
+                    .into_iter()
+                    .find(|(id, _)| id == &plan)
+                    .map(|(_, banner)| banner)
+                    .unwrap_or_else(|| kingdom_core::palette::preferred(&plan))
+            })
+        })
+    };
+
+    // Who else has hands on each file, and in which colours.
+    //
+    // The contention question from `AGENTS.md` -- the one the product calls the
+    // goal -- answered where the answer already is. This costs no request: the
+    // works are fetched for the map on every pulse, and this is that same value
+    // read once more.
+    let others = {
+        let plan = plan.clone();
+        Memo::new(move |_| {
+            state.works.with(|working| {
+                let plans: Vec<PlanId> = working.iter().map(|(id, _)| id.clone()).collect();
+                let banners = kingdom_core::palette::assign_banners(&plans);
+                let mut found: Vec<(String, &'static kingdom_core::AgentPalette, String)> =
+                    Vec::new();
+                for ((id, changes), (_, banner)) in working.iter().zip(banners.iter()) {
+                    if id == &plan {
+                        continue;
+                    }
+                    let title = state
+                        .kingdom
+                        .with(|k| k.plan(id).map(|p| p.title.clone()))
+                        .unwrap_or_else(|| id.to_string());
+                    for file in &changes.files {
+                        found.push((file.path.clone(), banner, title.clone()));
+                    }
+                }
+                found
+            })
+        })
+    };
 
     let files = Memo::new(move |_| summary.get().map(|s| s.files).unwrap_or_default());
     let note = Memo::new(move |_| summary.get().and_then(|s| s.note));
@@ -106,6 +157,20 @@ pub fn ReviewDrawer(
                             let path = path.clone();
                             Memo::new(move |_| open_file.get().as_deref() == Some(path.as_str()))
                         };
+                        // Every other agent with hands on this same file. A
+                        // stack of pips rather than a number, because "who"
+                        // is the question and a count cannot answer it.
+                        let sharing = {
+                            let path = path.clone();
+                            Memo::new(move |_| {
+                                others
+                                    .get()
+                                    .into_iter()
+                                    .filter(|(other, _, _)| other == &path)
+                                    .map(|(_, banner, title)| (banner, title))
+                                    .collect::<Vec<_>>()
+                            })
+                        };
                         let open = {
                             let path = path.clone();
                             move |_| on_open.run(path.clone())
@@ -120,6 +185,11 @@ pub fn ReviewDrawer(
                                 <button
                                     class="review-row"
                                     class:selected=move || selected.get()
+                                    // A file more than one agent is in is the
+                                    // contention this product exists to
+                                    // surface, so the row says so itself
+                                    // rather than leaving it to be inferred.
+                                    class:contended=move || !sharing.get().is_empty()
                                     title=title
                                     on:click=open
                                 >
@@ -132,6 +202,34 @@ pub fn ReviewDrawer(
                                         {kind.mark()}
                                     </span>
                                     <span class="review-dot" style:background=tint></span>
+                                    // The other agents in this file, in their
+                                    // own colours -- the same hues their bands
+                                    // wear on the map.
+                                    <Show when=move || !sharing.get().is_empty()>
+                                        <span class="review-sharers">
+                                            <For
+                                                each=move || sharing.get()
+                                                key=|(banner, _): &(
+                                                    &'static kingdom_core::AgentPalette,
+                                                    String,
+                                                )| banner.name
+                                                let:who
+                                            >
+                                                {
+                                                    let (banner, title) = who;
+                                                    view! {
+                                                        <span
+                                                            class="agent-pip"
+                                                            style:background=banner.growth
+                                                            title=format!(
+                                                                "{title} is also in this file",
+                                                            )
+                                                        ></span>
+                                                    }
+                                                }
+                                            </For>
+                                        </span>
+                                    </Show>
                                     <span class="review-name">
                                         // Dimmed folder, bright name: in a
                                         // narrow column the name is what is
@@ -154,10 +252,20 @@ pub fn ReviewDrawer(
                                         fallback=move || view! {
                                             <span class="review-count">
                                                 <Show when=move || { added > 0 }>
-                                                    <span class="count-added">"+"{added}</span>
+                                                    <span
+                                                        class="count-added"
+                                                        style:color=move || banner.get().growth
+                                                    >
+                                                        "+"{added}
+                                                    </span>
                                                 </Show>
                                                 <Show when=move || { removed > 0 }>
-                                                    <span class="count-removed">"\u{2212}"{removed}</span>
+                                                    <span
+                                                        class="count-removed"
+                                                        style:color=move || banner.get().cutting
+                                                    >
+                                                        "\u{2212}"{removed}
+                                                    </span>
                                                 </Show>
                                             </span>
                                         }

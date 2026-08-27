@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod works;
 
-pub use works::{Work, WorkSite};
+pub use works::{Work, WorkBand, WorkSite};
 
 /// An sRGB colour with alpha.
 pub type MapColor = [u8; 4];
