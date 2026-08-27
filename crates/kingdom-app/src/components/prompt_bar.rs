@@ -6,10 +6,11 @@
 //! a sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
-use crate::api::{begin_plan, list_branches, list_models};
+use crate::api::{begin_plan, list_branches, list_models, network_available};
 use crate::app::KingdomState;
 use kingdom_core::{
-    City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, WorkspaceMode,
+    City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, NetworkMode,
+    WorkspaceMode,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -22,6 +23,7 @@ pub fn PromptBar() -> impl IntoView {
     let (draft, set_draft) = signal(String::new());
     let (showing_models, set_showing_models) = signal(false);
     let (showing_workspace, set_showing_workspace) = signal(false);
+    let (showing_network, set_showing_network) = signal(false);
 
     let catalogue = Resource::new(|| (), |_| list_models());
 
@@ -58,10 +60,11 @@ pub fn PromptBar() -> impl IntoView {
         // exactly when a remembered model has left the catalogue.
         let chosen = choice.get_untracked();
         let workspace = state.workspace.get_untracked();
+        let network = state.network.get_untracked();
         let navigate = navigate.clone();
 
         async move {
-            match begin_plan(prompt, city, chosen, Some(workspace)).await {
+            match begin_plan(prompt, city, chosen, Some(workspace), Some(network)).await {
                 // Opening makes no model call, so the user
                 // lands in the conversation while the model is still thinking.
                 // The conversation itself kicks off the drafting.
@@ -153,6 +156,7 @@ pub fn PromptBar() -> impl IntoView {
                     title="Choose the model and how hard it thinks"
                     on:click=move |_| {
                         set_showing_workspace.set(false);
+                        set_showing_network.set(false);
                         set_showing_models.update(|s| *s = !*s);
                     }
                 >
@@ -172,10 +176,29 @@ pub fn PromptBar() -> impl IntoView {
                     title="Choose where this work happens"
                     on:click=move |_| {
                         set_showing_models.set(false);
+                        set_showing_network.set(false);
                         set_showing_workspace.update(|s| *s = !*s);
                     }
                 >
                     {move || state.workspace.get().label()}
+                    <span class="chip-chevron">"\u{2304}"</span>
+                </button>
+
+                // Whether the next plan gets a network of its own. Beside the
+                // other two because it is the same kind of decision -- settled
+                // before a prompt is spent, recorded on the plan, and not
+                // changeable afterwards.
+                <button
+                    class="network-chip"
+                    class:isolated={move || state.network.get().is_isolated()}
+                    title="Choose whether this plan gets a network of its own"
+                    on:click=move |_| {
+                        set_showing_models.set(false);
+                        set_showing_workspace.set(false);
+                        set_showing_network.update(|s| *s = !*s);
+                    }
+                >
+                    {move || state.network.get().label()}
                     <span class="chip-chevron">"\u{2304}"</span>
                 </button>
             </div>
@@ -190,6 +213,10 @@ pub fn PromptBar() -> impl IntoView {
 
             <Show when={move || showing_workspace.get()}>
                 <WorkspacePicker on_close=move || set_showing_workspace.set(false)/>
+            </Show>
+
+            <Show when={move || showing_network.get()}>
+                <NetworkPicker on_close=move || set_showing_network.set(false)/>
             </Show>
 
             <Show when={move || state.error.get().is_some()}>
@@ -560,6 +587,97 @@ fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
                             "The project directory itself. No isolation."
                         </span>
                     </button>
+                </li>
+            </ul>
+        </div>
+    }
+}
+
+/// Whether the next plan gets a network of its own.
+///
+/// Shaped like [`WorkspacePicker`] deliberately: they are the same kind of
+/// decision and should not present two different chromes for it.
+///
+/// # Why the unavailable case is a disabled row and not a hidden one
+///
+/// Without `slirp4netns` an isolated plan cannot reach DNS, crates.io or git,
+/// so Kingdom refuses to open one at all. The option is therefore shown
+/// *disabled, with the reason and the command to fix it*, rather than quietly
+/// omitted -- a King who never learns the feature exists cannot decide he wants
+/// it, and one whose prompt is refused after he has typed it learns the same
+/// thing at a worse moment.
+#[component]
+fn NetworkPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+
+    // Asked once per opening rather than cached: slirp4netns can be installed
+    // while Kingdom runs, and the King who just installed it on our own advice
+    // should not have to restart the server to be believed.
+    let available = Resource::new(|| (), |_| network_available());
+
+    let current = Memo::new(move |_| state.network.get());
+    let choose = move |mode: NetworkMode| {
+        state.choose_network(mode);
+        on_close();
+    };
+
+    // `None` -> still asking; `Some(None)` -> available; `Some(Some(why))` -> not.
+    let refusal = Memo::new(move |_| match available.get() {
+        Some(Ok(reason)) => reason,
+        // A server that could not answer is treated as "cannot", with its own
+        // words: the alternative is offering an option that then fails.
+        Some(Err(e)) => Some(e.to_string()),
+        None => None,
+    });
+    let settled = Memo::new(move |_| available.get().is_some());
+
+    view! {
+        <div class="workspace-picker network-picker">
+            <div class="picker-head">
+                <span class="picker-title">"Network"</span>
+                <button class="picker-close" on:click=move |_| on_close()>"\u{2715}"</button>
+            </div>
+
+            <ul class="workspace-list">
+                <li>
+                    <button
+                        class="workspace-row"
+                        class:chosen={move || !current.get().is_isolated()}
+                        on:click=move |_| choose(NetworkMode::Shared)
+                    >
+                        <span class="workspace-name">"The machine's network"</span>
+                        <span class="workspace-detail">
+                            "Ports are shared with everything else. Two plans that \
+                             both want :3000 will collide."
+                        </span>
+                    </button>
+                </li>
+
+                <li>
+                    <button
+                        class="workspace-row"
+                        class:chosen={move || current.get().is_isolated()}
+                        // Disabled while the answer is still coming, so a fast
+                        // click cannot choose an option that turns out to be
+                        // unavailable.
+                        disabled={move || !settled.get() || refusal.get().is_some()}
+                        on:click=move |_| choose(NetworkMode::Isolated)
+                    >
+                        <span class="workspace-name">"A network of its own"</span>
+                        <span class="workspace-detail">
+                            "Its own loopback: it can take :3000 without touching \
+                             yours. Ports it opens are forwarded back to you."
+                        </span>
+                    </button>
+
+                    // The reason, and the command that fixes it. Kingdom does
+                    // not install anything on the King's machine; it says what
+                    // to install.
+                    <Show when=move || refusal.get().is_some()>
+                        <p class="network-unavailable">
+                            {move || refusal.get().unwrap_or_default()}
+                        </p>
+                    </Show>
                 </li>
             </ul>
         </div>

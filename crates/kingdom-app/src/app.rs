@@ -4,7 +4,9 @@ use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, PromptBar, Sidebar};
 use kingdom_citymap::map::MapPresence;
 use kingdom_citymap::CityMap;
-use kingdom_core::{Attention, CityActivity, CityId, Kingdom, ModelChoice, Plan, WorkspaceMode};
+use kingdom_core::{
+    Attention, CityActivity, CityId, Kingdom, ModelChoice, NetworkMode, Plan, WorkspaceMode,
+};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
@@ -90,6 +92,12 @@ const EFFORT_KEY: &str = "kingdom.effort";
 const WORKSPACE_KEY: &str = "kingdom.workspace";
 #[cfg(feature = "hydrate")]
 const BRANCH_KEY: &str = "kingdom.branch";
+/// Where the last-used network mode is remembered.
+///
+/// Its own key rather than a field of the workspace's, because it is its own
+/// axis -- see [`kingdom_core::NetworkMode`].
+#[cfg(feature = "hydrate")]
+const NETWORK_KEY: &str = "kingdom.network";
 
 /// Shared UI state, provided via context so the three regions stay in sync
 /// without threading props through every layer.
@@ -151,6 +159,9 @@ pub struct KingdomState {
     pub choice: RwSignal<Option<ModelChoice>>,
     /// How the next new plan will be isolated on disk.
     pub workspace: RwSignal<WorkspaceMode>,
+    /// Whether the next plan gets a network of its own. A separate axis from
+    /// `workspace`; see [`kingdom_core::NetworkMode`].
+    pub network: RwSignal<NetworkMode>,
     /// The file the chamber's panel is showing, relative to the plan's city.
     ///
     /// Written by the chamber and read by the map, which is why it is here: the
@@ -237,6 +248,7 @@ impl KingdomState {
             error: RwSignal::new(None),
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
+            network: RwSignal::new(NetworkMode::default()),
             focus_file: RwSignal::new(None),
             picked_file: RwSignal::new(None),
             works: RwSignal::new(Vec::new()),
@@ -279,6 +291,12 @@ impl KingdomState {
     pub fn choose_workspace(&self, mode: WorkspaceMode) {
         store_workspace(&mode);
         self.workspace.set(mode);
+    }
+
+    /// Records whether the next plan gets a network of its own.
+    pub fn choose_network(&self, mode: NetworkMode) {
+        store_network(&mode);
+        self.network.set(mode);
     }
 
     /// Folds the cities rail away, or brings it back, remembering which.
@@ -387,6 +405,48 @@ fn restore_workspace(mode: RwSignal<WorkspaceMode>) {
         };
         mode.set(restored);
     });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = mode;
+}
+
+/// Restores the remembered network mode, in the same place and for the same
+/// reason as [`restore_workspace`].
+fn restore_network(mode: RwSignal<NetworkMode>) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(storage) = local_storage() else {
+            return;
+        };
+        let Some(stored) = storage.get_item(NETWORK_KEY).ok().flatten() else {
+            return;
+        };
+        // Anything unrecognised means shared. The default is deliberately the
+        // *un*isolated one here, the opposite of the workspace's: a network
+        // namespace needs slirp4netns, and a machine that has since lost it
+        // should open on the mode that always works rather than on one the
+        // server would refuse.
+        mode.set(match stored.as_str() {
+            "isolated" => NetworkMode::Isolated,
+            _ => NetworkMode::Shared,
+        });
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = mode;
+}
+
+fn store_network(mode: &NetworkMode) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(
+            NETWORK_KEY,
+            match mode {
+                NetworkMode::Shared => "shared",
+                NetworkMode::Isolated => "isolated",
+            },
+        );
+    }
 
     #[cfg(not(feature = "hydrate"))]
     let _ = mode;
@@ -641,6 +701,7 @@ pub fn App() -> impl IntoView {
     provide_context(state);
     restore_choice(state.choice);
     restore_workspace(state.workspace);
+    restore_network(state.network);
     restore_rail_collapsed(state.rail_collapsed, state.rail_preference);
     // After the restore, so "enough room again" gives back the King's own
     // preference rather than the default standing in for it.

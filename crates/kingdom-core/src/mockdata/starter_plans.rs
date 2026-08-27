@@ -13,7 +13,7 @@
 //! here when plans can genuinely collide.
 
 use crate::ids::PlanId;
-use crate::model::{City, ModelChoice, Plan, PlanStatus, Speaker, Workspace};
+use crate::model::{City, ModelChoice, NetworkMode, Plan, PlanStatus, Speaker, Workspace};
 
 /// The standard opening model: whatever [`crate::sample::starter_plans`] makes.
 ///
@@ -38,6 +38,7 @@ pub fn quiet_plans(cities: &[City]) -> Vec<Plan> {
         "Tidy the documentation",
         &ModelChoice::new("mock", None),
         Workspace::in_place(&city.path),
+        NetworkMode::Shared,
     );
     plan.title = format!("The Quiet Works of {}", city.name);
     plan.summary = "Nothing in flight. All is well.".into();

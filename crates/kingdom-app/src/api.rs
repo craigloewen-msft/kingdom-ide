@@ -451,6 +451,7 @@ pub async fn begin_plan(
     city: Option<String>,
     choice: Option<ModelChoice>,
     workspace: Option<WorkspaceMode>,
+    network: Option<kingdom_core::NetworkMode>,
 ) -> Result<Plan, ServerFnError> {
     use kingdom_core::{CityId, NoteKind};
 
@@ -490,7 +491,24 @@ pub async fn begin_plan(
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let mut plan = Plan::opened(plan_id, city_id, &prompt, &choice, workspace.clone());
+    let network = network.unwrap_or_default();
+
+    // Refused *before* a plan exists, not when its first command runs. A plan
+    // that took the setting and then quietly ran on the shared network would be
+    // exactly the invisible isolation this feature exists to end -- and the
+    // King would only find out when two agents collided on 3000 anyway.
+    if network.is_isolated() {
+        crate::netns::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
+    }
+
+    let mut plan = Plan::opened(
+        plan_id,
+        city_id,
+        &prompt,
+        &choice,
+        workspace.clone(),
+        network,
+    );
     // Where an agent is fenced in is not something it said, it is something that
     // happened -- and isolation the user cannot see is isolation he cannot
     // trust, so it is recorded in the log rather than only in the header.
@@ -501,6 +519,17 @@ pub async fn begin_plan(
             None => format!("Working directly in {}, with no isolation.", workspace.path),
         },
     );
+    // The same argument, for the other axis. A plan with its own network can
+    // bind whatever port it likes, and the King needs to know that the `:3000`
+    // this plan talks about is not the `:3000` in his own browser.
+    if network.is_isolated() {
+        plan.note(
+            NoteKind::Workspace,
+            "On a network of its own: ports it opens belong to this plan alone, \
+             and are forwarded to the host on ports shown in the chamber."
+                .to_string(),
+        );
+    }
 
     let mut kingdom = lock()?;
     let root = std::path::PathBuf::from(&kingdom.root);
@@ -512,6 +541,17 @@ pub async fn begin_plan(
     crate::events::pulse(&plan);
 
     Ok(plan)
+}
+
+/// Whether this machine can give a plan a network of its own.
+///
+/// `None` when it can; the string is what to tell the King when it cannot, and
+/// it names the package to install. Asked by the prompt bar so the option can
+/// be offered as *disabled with a reason* rather than offered and then refused
+/// after he has typed his prompt.
+#[server(NetworkAvailable, "/api")]
+pub async fn network_available() -> Result<Option<String>, ServerFnError> {
+    Ok(crate::netns::availability().err().map(|e| e.to_string()))
 }
 
 /// Local branches in a city's repository, for the workspace picker.
@@ -2034,6 +2074,16 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // document.
     let draft = crate::tools::propose_plan::draft_body(&workspace);
 
+    // The plan's network goes before its worktree does. Ordered deliberately:
+    // the namespace holds whatever the agent left running -- a dev server, a
+    // watcher -- and those processes have the worktree as their working
+    // directory. Killing them first means `git worktree remove` is not fighting
+    // a process still writing into the directory it is trying to delete.
+    //
+    // Unconditional, like the draft read above: a plan on the shared network
+    // has no namespace and this does nothing at all.
+    crate::netns::shutdown(&plan_id);
+
     let finish = match how {
         Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
         Disposition::Archive => {
@@ -2206,6 +2256,7 @@ fn expand_home(path: &str) -> String {
 #[cfg(all(test, feature = "ssr"))]
 pub(crate) mod tests {
     use super::*;
+    use kingdom_core::NetworkMode;
     use std::path::PathBuf;
 
     /// Containment must survive traversal, not merely prefix-matching.
@@ -2401,6 +2452,7 @@ pub(crate) mod tests {
             "Read the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place(city_path.to_string_lossy()),
+            NetworkMode::Shared,
         );
         plan.permissions = kingdom_core::Permissions::Propose;
 
@@ -2544,6 +2596,7 @@ pub(crate) mod tests {
                 "A fabricated decree",
                 &ModelChoice::new("mock", None),
                 Workspace::in_place("/dev/testburg"),
+                NetworkMode::Shared,
             )]
         }
 
@@ -2560,6 +2613,7 @@ pub(crate) mod tests {
             "The King's own decree",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )];
         assert_eq!(
             seed_starter_plans(recorded.clone(), &[], starter_plans),
@@ -2590,6 +2644,7 @@ pub(crate) mod tests {
             "A decree whose turn died",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
 
         // Exactly what a turn killed mid-flight leaves behind.
@@ -2961,6 +3016,7 @@ pub(crate) mod tests {
                 id: Some("abc".into()),
                 base: Some("main".into()),
             },
+            NetworkMode::Shared,
         );
         let subagent = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
 
@@ -2987,6 +3043,7 @@ pub(crate) mod tests {
             "Fix the parser",
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )
     }
 

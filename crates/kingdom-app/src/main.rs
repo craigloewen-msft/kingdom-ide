@@ -54,6 +54,12 @@ async fn main() {
             kingdom_app::screencast::ROUTE,
             axum::routing::get(kingdom_app::screencast::upgrade),
         )
+        // The King's own shell, in the plan's workspace and its network. Ahead
+        // of the Leptos routes for the same reason as the sockets above.
+        .route(
+            kingdom_app::terminal::ROUTE,
+            axum::routing::get(kingdom_app::terminal::upgrade),
+        )
         // Files a plan's work left behind -- a screenshot the chamber renders
         // inline. Ahead of the Leptos routes because its path lives under
         // `/plan/`, which the SSR fallback would otherwise claim and answer

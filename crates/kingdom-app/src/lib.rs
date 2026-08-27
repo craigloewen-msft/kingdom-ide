@@ -33,6 +33,10 @@ pub mod highlight;
 pub mod llm;
 #[cfg(feature = "ssr")]
 pub mod mock;
+// A network of a plan's own. Server-only and Linux-only: it spawns `unshare`
+// and `slirp4netns`, neither of which has any meaning in a browser.
+#[cfg(feature = "ssr")]
+pub mod netns;
 #[cfg(feature = "ssr")]
 pub mod profile;
 #[cfg(feature = "ssr")]
@@ -49,6 +53,17 @@ pub mod store;
 pub mod tools;
 #[cfg(feature = "ssr")]
 pub mod turns;
+// Both targets: the browser builds the socket's address from `terminal::ROUTE`,
+// the server answers it -- the same split as `watch`, for the same reason.
+pub mod terminal_route {
+    /// The path the terminal socket lives at. One shell per socket.
+    ///
+    /// Here rather than in `terminal` because that module is server-only (it
+    /// forks a shell) while the browser still has to know where to connect.
+    pub const ROUTE: &str = "/watch/plan/{id}/terminal";
+}
+#[cfg(feature = "ssr")]
+pub mod terminal;
 // Both targets: the browser builds the socket's address from `watch::ROUTE`,
 // the server answers it. See the module's own note on why the constants cross
 // and the handlers do not.

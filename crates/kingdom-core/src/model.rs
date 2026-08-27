@@ -492,6 +492,54 @@ impl Default for WorkspaceMode {
     }
 }
 
+/// Whether a plan gets a network of its own.
+///
+/// A **separate axis** from [`WorkspaceMode`], deliberately, rather than a
+/// fourth variant of it. The two answer different questions -- "can this agent
+/// trample the folder I am in?" and "can this agent trample the port I am
+/// serving on?" -- and the honest answers are independent: a plan can want a
+/// fresh worktree while still talking to the machine's real network, and a
+/// plan working in place can still want its own `:3000`.
+///
+/// Folding them together would have made four of the six combinations
+/// unsayable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NetworkMode {
+    /// The machine's network, as every plan has always had it. Ports are
+    /// shared, so two plans that both bind 3000 collide.
+    #[default]
+    Shared,
+    /// A network namespace of the plan's own: its own loopback, its own set of
+    /// ports, and its listeners forwarded to the host on ports Kingdom picks.
+    Isolated,
+}
+
+impl NetworkMode {
+    /// Short label for the prompt bar's chip.
+    pub fn label(&self) -> &'static str {
+        match self {
+            NetworkMode::Shared => "shared network",
+            NetworkMode::Isolated => "own network",
+        }
+    }
+
+    pub fn is_isolated(&self) -> bool {
+        matches!(self, NetworkMode::Isolated)
+    }
+}
+
+/// A port an isolated plan is listening on, and the host port it answers on.
+///
+/// Runtime truth rather than record: it is filled in on the way to a browser
+/// and is empty everywhere else. See [`Plan::ports`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForward {
+    /// What the agent bound, inside its own namespace -- typically 3000.
+    pub guest: u16,
+    /// Where the King reaches it, on his own loopback.
+    pub host: u16,
+}
+
 /// A prepared place on disk for one plan to work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -577,6 +625,28 @@ pub struct Plan {
     /// Where on disk this plan works. Settled when the plan opens and never
     /// changed afterwards.
     pub workspace: Workspace,
+    /// Whether this plan has a network of its own. Settled when the plan opens
+    /// and never changed afterwards, for the same reason as `workspace`: the
+    /// processes it started are already in that namespace, and moving them is
+    /// not a thing a namespace lets you do.
+    ///
+    /// `#[serde(default)]` -- `Shared` -- because every plan record already on
+    /// disk predates the field, and shared is what those plans in fact had.
+    #[serde(default)]
+    pub network: NetworkMode,
+    /// Which of this plan's ports are reachable from the host right now.
+    ///
+    /// **Never persisted meaningfully and never read back from disk as truth.**
+    /// A forward exists only as long as the slirp4netns process holding it, so
+    /// a record of one restored from a file would name a host port that answers
+    /// nothing. It is filled in only on the copy bound for a browser -- see
+    /// `events::publish` -- and is empty on the plan Kingdom keeps and stores.
+    ///
+    /// It lives on `Plan` regardless, because that is what lets the ports badge
+    /// arrive through the socket that already carries whole plans, rather than
+    /// needing a second channel and a second thing to keep in step.
+    #[serde(default)]
+    pub ports: Vec<PortForward>,
     /// What this plan is busy with right now, in plain language, or `None`
     /// when nothing is in flight.
     ///
@@ -971,6 +1041,7 @@ impl Plan {
         prompt: impl Into<String>,
         choice: &ModelChoice,
         workspace: Workspace,
+        network: NetworkMode,
     ) -> Self {
         let prompt = prompt.into();
         let title = title_from_prompt(&prompt);
@@ -990,6 +1061,8 @@ impl Plan {
             status: PlanStatus::Drafting,
             outcome: None,
             workspace,
+            network,
+            ports: Vec::new(),
             working_on: None,
             queued: Vec::new(),
             spawned_by: None,
@@ -1044,6 +1117,12 @@ impl Plan {
             status: PlanStatus::Drafting,
             outcome: None,
             workspace: parent.workspace.clone(),
+            // The parent's network as well as the parent's workspace, and for
+            // the same reason: a subagent is another agent working in the same
+            // place. One that could not see the server its parent just started
+            // would be unable to answer most of what it is sent to answer.
+            network: parent.network,
+            ports: Vec::new(),
             working_on: None,
             // A subagent answers to the model that sent it and renders no
             // composer, so nobody can queue anything against it.
@@ -3173,6 +3252,7 @@ mod proposal_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
         plan.propose("Fix the off-by-one", "Change `lex.rs` line 42.");
         plan.status = PlanStatus::AwaitingReview;
@@ -3351,6 +3431,7 @@ mod proposal_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
         assert!(
             nothing.annotate(1, "anything", "a note").is_none(),
@@ -3457,6 +3538,7 @@ mod transcript_tests {
             "First question",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
         plan.note(
             NoteKind::Workspace,
@@ -3495,6 +3577,7 @@ mod transcript_tests {
             "Run the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
         plan.begin_tool_call(ToolCall::started(
             "call-1",
@@ -3660,6 +3743,7 @@ mod transcript_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
         plan.begin_tool_call(
             ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
@@ -3710,6 +3794,7 @@ mod transcript_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
         plan.begin_tool_call(
             ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
@@ -3857,6 +3942,7 @@ mod transcript_tests {
             "Work out what is slow",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
 
         let mut first = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the parser");
@@ -3922,6 +4008,7 @@ mod transcript_tests {
             "Make the build fast",
             &choice,
             Workspace::in_place("/dev/forge"),
+            NetworkMode::Shared,
         );
         working.working_on = Some("Reading the build script".into());
 
@@ -3938,6 +4025,7 @@ mod transcript_tests {
             "Rename the crate",
             &choice,
             Workspace::in_place("/dev/forge"),
+            NetworkMode::Shared,
         );
         waiting.status = PlanStatus::AwaitingReview;
 
@@ -3948,6 +4036,7 @@ mod transcript_tests {
             "Tidy the docs",
             &choice,
             Workspace::in_place("/dev/archive"),
+            NetworkMode::Shared,
         );
         settled.status = PlanStatus::Merged;
 
@@ -3997,6 +4086,7 @@ mod transcript_tests {
             "Run the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
 
         plan.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
@@ -4137,6 +4227,7 @@ mod transcript_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )
     }
 
@@ -4419,6 +4510,7 @@ mod review_note_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )
     }
 
@@ -4608,6 +4700,7 @@ mod attention_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )
     }
 

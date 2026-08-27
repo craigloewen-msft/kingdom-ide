@@ -68,6 +68,16 @@ crates/
     watch.rs        The chamber's push socket, and the rail's (the route
                     constants cross to wasm; the handlers are ssr only)
     screencast.rs   The King's live view of a plan's browser (ssr only)
+    netns.rs        A network of a plan's own: an unprivileged user+net
+                    namespace per isolated plan, held open by an `unshare`
+                    process, given a way out by `slirp4netns`, and entered by
+                    everything the plan runs. Also watches
+                    /proc/<holder>/net/tcp for ports the agent opened and asks
+                    slirp to forward each to a host port. ssr only, and Linux
+                    only at runtime -- availability() refuses elsewhere
+    terminal.rs     The King's own shell, over a socket, in a plan's workspace
+                    and its network — the door into an isolated plan (route +
+                    URL on both targets via `terminal_route`; the pty ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
@@ -317,6 +327,81 @@ flowchart TB
   Core -.->|"compiled into both"| Browser
   Core -.-> Server
 ```
+
+## A network of a plan's own
+
+The first real answer to the product's second question -- *what shared resources
+are these agents holding?* -- for one resource: **ports**. Two agents that both
+run `cargo leptos serve` used to collide on 3000 and the second one died.
+
+It is **off by default** and chosen per plan, beside the model and workspace
+chips. `NetworkMode` is its own axis rather than a fourth `WorkspaceMode`,
+because "can this agent trample my folder?" and "can it trample my port?" are
+independent questions with independent answers.
+
+```mermaid
+flowchart LR
+  K["King's browser"] -->|"127.0.0.1:47983"| S["slirp4netns (host)"]
+  S -->|"tap0 to 10.0.2.100:3000"| A["the agent's dev server"]
+  H["Kingdom server"] -->|"add_hostfwd / remove_hostfwd"| S
+  H -.->|"polls /proc/holder/net/tcp"| A
+```
+
+Three unprivileged processes per isolated plan: an `unshare` **holder** that
+owns the namespace and keeps it alive between tool calls, **slirp4netns** giving
+it a way out, and `nsenter` putting everything else in. `bash`, `tmux`, Chrome
+and the King's terminal all prepend `netns::enter_prefix`, which is **empty for
+a shared-network plan** -- that emptiness is what makes the default path
+behave exactly as it did before this existed.
+
+Five things worth knowing, each learned by running it:
+
+- **`nsenter` needs `--preserve-credentials`.** Re-entering a namespace you made
+  yourself otherwise fails with `setgroups failed: Operation not permitted`. A
+  test pins the flag, because its absence is not a compile error -- it is a tool
+  that mysteriously will not run.
+- **Port discovery costs one file read.** `/proc/<holder>/net/tcp` read from the
+  host *is* the namespace's table, so nothing has to enter the namespace to find
+  out what it is serving. Only state `0A` counts; the rest are live connections.
+- **slirp4netns forwards for us.** Its JSON API socket takes `add_hostfwd` and
+  `remove_hostfwd`, so Kingdom ships no bridge process and needs no `socat`.
+- **The namespace lives in a process, not on disk.** A restarted server has an
+  empty registry while plan records still say `Isolated`. Every entry point
+  therefore calls `netns::ensure` before reading the prefix, and
+  `reclaim_previous` kills what the last server left -- identified by namespace
+  and command line, never by pid alone, because pids are reused. Skipping that
+  `ensure` in `terminal.rs` was a real bug: the King got a shell on his *own*
+  network while the header said otherwise, and it took `EADDRINUSE` from his own
+  server. Nothing here may fall back to the host network silently.
+- **The browser's two wrappers nest; they do not compete.** CPU confinement
+  (`cpu_shim`, `taskset`) and namespace entry (`write_namespace_wrapper`,
+  `nsenter`) both want to be the "executable" chromiumoxide launches, and
+  setting `chrome_executable` twice silently keeps only the last. They are
+  composed instead, `nsenter -> taskset -> chrome`, so an isolated plan's
+  browser is confined *and* in its own network. This matters more since WebGL
+  became the default: the CPU ceiling is half of what makes that affordable, and
+  dropping it for isolated plans would have handed exactly those plans an
+  uncapped software rasteriser. Verified with a real Chrome — every child,
+  including the GPU process, in the plan's namespace and masked to `0-3`.
+
+**An isolated plan cannot reach the host's loopback**, by design:
+slirp4netns runs with `--disable-host-loopback`, so the King's own
+`127.0.0.1:3000` answers nothing from inside. That is the collision being
+prevented, but it has one surprising consequence worth knowing before it costs
+somebody an hour — a plan with its own network cannot browse *this* Kingdom's
+map at `?map=on`. See
+[`docs/citymap.md`](citymap.md#a-plan-with-a-network-of-its-own-cannot-reach-your-kingdom).
+
+**It is not a security boundary.** A process in the namespace still has the
+whole filesystem and the King's uid. It cannot take another plan's port; it can
+still delete his home directory. The same admission `Sandbox::root` makes about
+paths, for the same reason: a limit people can see beats a guarantee that does
+not hold.
+
+`slirp4netns` is **required**, not optional. Without it a namespace has only
+`lo` -- no DNS, no crates.io, no git -- so Kingdom refuses to open an isolated
+plan and the picker says which package to install, rather than degrading to
+something that breaks every build.
 
 ## Where state lives
 

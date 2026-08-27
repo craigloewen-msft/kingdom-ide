@@ -437,6 +437,7 @@ mod tests {
             "Do the thing",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            kingdom_core::NetworkMode::Shared,
         )
     }
 
