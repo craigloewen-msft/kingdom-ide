@@ -77,6 +77,29 @@ const MAX_READINESS_SECONDS: u64 = 300;
 /// shows the model everything it has started.
 const SESSION: &str = "main";
 
+/// The argv prefix that puts a plan's tmux server in its own namespace --
+/// refusing rather than silently falling through to the host network.
+///
+/// Adopts the same guard `terminal.rs` uses for the King's own shell: an
+/// isolated plan whose prefix comes back empty must not get a tmux server on
+/// the host network with a straight face about being isolated. That silent
+/// fallback is the one outcome worse than a refusal -- a dev server started in
+/// such a pane would bind the King's own `:3000` and answer for a project it
+/// was never given.
+fn isolated_enter_prefix(shop: &Sandbox) -> Result<Vec<String>, Refusal> {
+    let enter = crate::netns::enter_prefix(shop.plan());
+    let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.network.is_isolated());
+    if isolated && enter.is_empty() {
+        return Err(Refusal::Refused(
+            "This plan's network could not be entered, so no tmux server was \
+             started here. A server on the machine's own network would be \
+             the wrong answer rather than a lesser one."
+                .to_string(),
+        ));
+    }
+    Ok(enter)
+}
+
 pub struct TmuxRun;
 pub struct Tmux;
 
@@ -173,13 +196,11 @@ impl Tool for TmuxRun {
             .unwrap_or(true);
 
         let socket = socket_for(shop);
-        if let Err(reason) = ensure_server(
-            &socket,
-            shop.root(),
-            &crate::netns::enter_prefix(shop.plan()),
-        )
-        .await
-        {
+        let enter = match isolated_enter_prefix(shop) {
+            Ok(enter) => enter,
+            Err(refusal) => return refusal.into(),
+        };
+        if let Err(reason) = ensure_server(&socket, shop.root(), shop.plan(), &enter).await {
             return Refusal::Refused(reason).into();
         }
 
@@ -515,16 +536,43 @@ fn fingerprint(s: &str) -> u64 {
     hash
 }
 
-/// Makes sure the plan's server and its session exist.
+/// Makes sure the plan's server and its session exist, and that they belong
+/// to the namespace this plan is in *right now*.
 ///
 /// Done before every start rather than once, because the server is a process
 /// like any other: the user may have killed it, or the machine may have
 /// rebooted, and a cached "it exists" would turn that into a confusing failure
 /// on the next window instead of a silent recovery.
-async fn ensure_server(socket: &Path, root: &Path, enter: &[String]) -> Result<(), String> {
+///
+/// **The mismatch this exists to catch.** A namespace lives in a process, not
+/// on disk (see `netns::reclaim_previous`), so a server restart gives the plan
+/// a *fresh* namespace while this daemon -- named from the plan id alone, and
+/// found again on disk regardless of restarts -- is still the one from before.
+/// `has-session` succeeding said nothing about which namespace answered.
+/// Measured directly: kill the holder a restart would kill, and the daemon
+/// answers `has-session` for a full minute afterwards, its every future window
+/// landing in the orphaned namespace -- no slirp, no DNS, unreachable from
+/// anything in the new one. So once the daemon is confirmed alive, its own
+/// network namespace is compared against the one this plan should be in, and a
+/// mismatch means starting over.
+async fn ensure_server(
+    socket: &Path,
+    root: &Path,
+    plan: &kingdom_core::PlanId,
+    enter: &[String],
+) -> Result<(), String> {
     let alive = cli(socket, &["has-session", "-t", SESSION]).await?;
     if alive.status.success() {
-        return Ok(());
+        if daemon_belongs_here(socket, plan).await {
+            return Ok(());
+        }
+        // Wrong generation: this daemon's panes cannot reach anywhere the
+        // *current* namespace can, and nothing later in this plan will notice
+        // until a dev server it starts answers nothing. Starting over is the
+        // only correct move -- there is no way to move a live pane to a
+        // different namespace.
+        let _ = cli(socket, &["kill-server"]).await;
+        let _ = std::fs::remove_file(socket);
     }
 
     // The *server* is what has to be inside the namespace, not each window: a
@@ -560,6 +608,32 @@ async fn ensure_server(socket: &Path, root: &Path, enter: &[String]) -> Result<(
     // whose failure the model cannot read.
     let _ = cli(socket, &["set-option", "-g", "history-limit", "20000"]).await;
     Ok(())
+}
+
+/// Whether a live tmux daemon is in the same network namespace this plan is
+/// meant to be in.
+///
+/// A **shared-network plan is never mismatched**: it has no namespace of its
+/// own to compare against, so any live daemon belongs to it by definition, and
+/// this returns `true` without asking tmux anything more. Only an isolated
+/// plan can have a daemon that has fallen behind a server restart.
+async fn daemon_belongs_here(socket: &Path, plan: &kingdom_core::PlanId) -> bool {
+    let Some(current) = crate::netns::holder_ns(plan) else {
+        // Not isolated, or isolation not yet (re-)established for this call --
+        // either way there is no namespace of the plan's own to disagree with.
+        return true;
+    };
+
+    let Ok(out) = cli(socket, &["display-message", "-p", "#{pid}"]).await else {
+        return true;
+    };
+    let Some(pid) = text(&out.stdout).trim().parse::<u32>().ok() else {
+        return true;
+    };
+    let Ok(theirs) = std::fs::read_link(format!("/proc/{pid}/ns/net")) else {
+        return true;
+    };
+    theirs == current
 }
 
 /// One tmux invocation, always against this plan's socket.

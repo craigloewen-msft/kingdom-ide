@@ -29,6 +29,6 @@ mod session;
 pub use profile::{PerfReading, ProfilingState};
 pub use screencast::{ScreencastBroker, ScreencastEvent};
 pub use session::{
-    on_enter_namespace, sweep_orphans, BrowserError, BrowserSessionManager, ConsoleEntry,
-    KeyMethod, Screenshot,
+    on_enter_namespace, on_reserve_cdp_port, sweep_orphans, BrowserError, BrowserSessionManager,
+    ConsoleEntry, KeyMethod, Screenshot,
 };

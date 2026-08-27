@@ -74,6 +74,15 @@ pub fn start_housekeeping() -> usize {
         crate::netns::enter_prefix(&kingdom_core::PlanId::new(plan))
     });
 
+    // And how to reserve a fixed CDP port and its relay -- the companion hook,
+    // for the same reason: a namespaced plan's browser needs a knowable port
+    // *before* Chrome launches, and only `kingdom-app` knows what a namespace
+    // is. See `kingdom_browser::on_reserve_cdp_port`.
+    kingdom_browser::on_reserve_cdp_port(|plan| {
+        let plan = kingdom_core::PlanId::new(plan);
+        async move { crate::netns::reserve_cdp_port(&plan).await }
+    });
+
     let reclaimed = kingdom_browser::sweep_orphans();
     // The handle is dropped deliberately: the reaper lives as long as the
     // server does, and there is no shutdown path that would want to stop it

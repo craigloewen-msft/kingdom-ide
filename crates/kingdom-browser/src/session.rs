@@ -460,6 +460,41 @@ pub fn on_enter_namespace(hook: impl Fn(&str) -> Vec<String> + Send + Sync + 'st
     let _ = ENTER_NAMESPACE.set(Box::new(hook));
 }
 
+/// How a plan reserves a fixed CDP port inside its own namespace, and puts a
+/// relay in place that lets the host reach it.
+///
+/// A companion to [`ENTER_NAMESPACE`] rather than folded into it, because the
+/// two questions are asked at different times: the namespace prefix is needed
+/// to launch Chrome at all, where the port has to be **known before launch**,
+/// since it is handed to Chrome as `--remote-debugging-port` and cannot be
+/// read back afterwards the way a kernel-chosen one can. `None` from the hook,
+/// or no hook installed, means an ordinary kernel-chosen port -- the ordinary
+/// path is unaffected.
+type ReserveCdpPort = Box<
+    dyn Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<u16>> + Send>>
+        + Send
+        + Sync,
+>;
+
+static RESERVE_CDP_PORT: OnceLock<ReserveCdpPort> = OnceLock::new();
+
+/// Teaches this crate how to reserve a plan's CDP port. Called once, beside
+/// [`on_enter_namespace`], by `kingdom-app`.
+pub fn on_reserve_cdp_port<F, Fut>(hook: F)
+where
+    F: Fn(&str) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Option<u16>> + Send + 'static,
+{
+    let _ = RESERVE_CDP_PORT.set(Box::new(move |plan| Box::pin(hook(plan))));
+}
+
+async fn reserved_cdp_port(plan: &str) -> Option<u16> {
+    match RESERVE_CDP_PORT.get() {
+        Some(hook) => hook(plan).await,
+        None => None,
+    }
+}
+
 /// The argv prefix that puts this plan's Chrome in its own namespace, if any.
 fn enter_prefix(plan: &str) -> Vec<String> {
     ENTER_NAMESPACE
@@ -477,6 +512,16 @@ impl BrowserSession {
         let profile = profile_dir(plan);
         let _ = std::fs::remove_dir_all(&profile);
         let (width, height) = configured_viewport();
+
+        // A fixed CDP port, only for a plan with a namespace of its own. See
+        // `on_reserve_cdp_port` for why this has to be known *before* launch:
+        // handed to Chrome as `--remote-debugging-port` via `BrowserConfig`'s
+        // own `port()`, which leaves chromiumoxide's ordinary `launch()` --
+        // and its 127.0.0.1 rewrite on the `connect()` path only -- entirely
+        // unchanged. `None` here, the ordinary case, keeps `port: 0` and
+        // today's ephemeral-port behaviour exactly.
+        let cdp_port = reserved_cdp_port(plan).await;
+
         let mut builder = BrowserConfig::builder()
             .new_headless_mode()
             .no_sandbox()
@@ -511,6 +556,10 @@ impl BrowserSession {
                 has_touch: false,
             })
             .user_data_dir(profile.clone());
+
+        if let Some(port) = cdp_port {
+            builder = builder.port(port);
+        }
 
         // Withheld only when the King has asked for it to be, which is the
         // reverse of how this once read.

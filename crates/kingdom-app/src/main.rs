@@ -14,6 +14,26 @@ async fn main() {
     use leptos::prelude::*;
     use leptos_axum::{generate_route_list, LeptosRoutes};
 
+    // A hidden, early mode: relay traffic between a bind address and a target
+    // address, then exit. Never reached by the King -- it is how this same
+    // binary is re-spawned, via `nsenter`, *inside* a plan's namespace, to hop
+    // a forwarded port from `tap0` to the loopback address the real server
+    // actually bound. See `kingdom_app::netns` for why this hop exists at all.
+    // Short-circuited ahead of everything else in `main` because none of
+    // Axum, Leptos or the model catalogue has any business running in a
+    // process whose entire job is one TCP splice.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("--relay") {
+            let (Some(bind), Some(target)) = (args.get(2), args.get(3)) else {
+                eprintln!("--relay needs <bind> <target>");
+                std::process::exit(2);
+            };
+            kingdom_app::netns::run_relay(bind, target).await;
+            return;
+        }
+    }
+
     // Model configuration lives in an optional, gitignored `.kingdom.env` so a
     // credential or provider choice survives restarts without being committed.
     // Real environment variables win, which keeps one-off overrides easy.

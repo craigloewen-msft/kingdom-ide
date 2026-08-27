@@ -384,16 +384,38 @@ Five things worth knowing, each learned by running it:
 - **Port discovery costs one file read.** `/proc/<holder>/net/tcp` read from the
   host *is* the namespace's table, so nothing has to enter the namespace to find
   out what it is serving. Only state `0A` counts; the rest are live connections.
-- **slirp4netns forwards for us.** Its JSON API socket takes `add_hostfwd` and
-  `remove_hostfwd`, so Kingdom ships no bridge process and needs no `socat`.
+- **A forward can only ever land on `tap0`, and almost nothing binds there.**
+  `add_hostfwd` NATs to `tap0`'s own address, but the ordinary default for a dev
+  server is `127.0.0.1` -- a different socket even inside the same namespace.
+  Measured directly: slirp accepts a forward to a loopback-bound server and it
+  then answers nothing, a silent wrong answer rather than a refusal. The fix is
+  a **relay**, this same binary re-spawned with `nsenter` and a hidden `--relay`
+  mode, hopping `tap0:P` to `127.0.0.1:P` on the same port number both sides --
+  which is also what makes Chrome's own CDP URL, printed as `127.0.0.1:P`,
+  already correct from the host. It is skipped, not added twice, when the relay
+  itself cannot bind `tap0:P`: that failure means the server already answers
+  there directly. Ships as our own binary rather than `socat`, which is not a
+  listed prerequisite in AGENTS.md and would otherwise become one.
 - **The namespace lives in a process, not on disk.** A restarted server has an
   empty registry while plan records still say `Isolated`. Every entry point
   therefore calls `netns::ensure` before reading the prefix, and
   `reclaim_previous` kills what the last server left -- identified by namespace
-  and command line, never by pid alone, because pids are reused. Skipping that
-  `ensure` in `terminal.rs` was a real bug: the King got a shell on his *own*
-  network while the header said otherwise, and it took `EADDRINUSE` from his own
-  server. Nothing here may fall back to the host network silently.
+  and command line, never by pid alone, because pids are reused; a relay is
+  found and reclaimed the same way. Skipping that `ensure` in `terminal.rs` was
+  a real bug: the King got a shell on his *own* network while the header said
+  otherwise, and it took `EADDRINUSE` from his own server. Nothing here may fall
+  back to the host network silently -- `bash` and `tmux` carry the same refusal
+  now.
+  
+  A second version of the same trap hit **tmux** specifically: its socket is
+  named from the plan id alone and is found again after a restart regardless,
+  so `has-session` answering "yes" said nothing about *which* namespace's
+  daemon answered. Measured by killing a holder out from under its tmux: the
+  daemon kept answering `has-session` for a full minute, and every window it
+  opened afterwards landed in the now-orphaned namespace. `ensure_server`
+  therefore compares the daemon's own `/proc/<pid>/ns/net` against the
+  namespace the plan should currently be in, and restarts the server on a
+  mismatch rather than trusting that a live daemon is the right one.
 - **The browser's two wrappers nest; they do not compete.** CPU confinement
   (`cpu_shim`, `taskset`) and namespace entry (`write_namespace_wrapper`,
   `nsenter`) both want to be the "executable" chromiumoxide launches, and
