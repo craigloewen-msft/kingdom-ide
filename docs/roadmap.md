@@ -60,6 +60,13 @@ detail and the reasoning for each gap.
   building the same crate still block each other on the same lock, and nothing
   says so. Isolation is also still off by default and per plan, so the King has
   to know to ask for it.
+
+  The *sharing* half now has a screen — [`shared-resources.md`](shared-resources.md)
+  — which answers "what is shared, with whom, and who is in it right now" for
+  containers. It is still only containers, and still only reporting: nothing
+  detects two agents writing the same collection, and there is no way to say
+  "hold this until that plan is done". Naming what is shared is a prerequisite
+  for arbitrating it, not the thing itself.
 - Naming a plan with a model. A plan's branch is cut from its title today —
   `kingdom/<slug>`, via `kingdom_core::naming::slugify`, with `-2`, `-3` walked
   past on collision — but that title is still just the first clause of the

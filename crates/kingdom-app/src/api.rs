@@ -2287,6 +2287,94 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     Ok(to_browser(plan))
 }
 
+/// Every shared resource this kingdom knows about, and what each is doing.
+///
+/// The whole ledger in one call, host scope and every city at once. See
+/// [`crate::services::inventory`] for why it is not per city and why it costs
+/// one Docker question rather than one per row.
+///
+/// The kingdom's lock is taken and **released** before the await: `inventory`
+/// shells out to `docker`, and holding a `std::sync::Mutex` across an await
+/// point is the deadlock `city_root_in` already warns about, with a subprocess
+/// on top of it.
+#[server(SharedResources, "/api")]
+pub async fn shared_resources() -> Result<kingdom_core::ResourceInventory, ServerFnError> {
+    let kingdom = { lock()?.clone() };
+    Ok(crate::services::inventory(&kingdom).await)
+}
+
+/// Declares a new shared resource, writing it to the manifest its scope keeps.
+///
+/// Returns the path written to, which is the thing the King needs next: the
+/// file is the source of truth and editing it by hand is the supported way to
+/// change or remove what is there.
+///
+/// # Why the city is a `CityId` and not a path
+///
+/// The browser cannot be trusted with a filesystem path -- that is the whole
+/// reason the opening screen asks the King to type one rather than accepting
+/// one from a page. A city id is resolved against the open kingdom here, so the
+/// only paths this can write to are a city of the kingdom he opened, or his own
+/// profile.
+///
+/// # Why `env` is a string
+///
+/// It arrives as the `KEY=value` text the King typed, and is parsed by
+/// [`kingdom_core::services::parse_env`] here. Not cosmetic: a `Vec` of pairs
+/// that happens to be **empty** does not survive a server function's argument
+/// encoding at all, and a service with no environment is the ordinary case.
+/// Measured against a running server, where the form failed with "missing
+/// field `env`" for exactly that input.
+#[server(DeclareSharedResource, "/api")]
+pub async fn declare_shared_resource(
+    scope: String,
+    city: Option<String>,
+    name: String,
+    image: String,
+    port: u16,
+    env: String,
+    volume: String,
+) -> Result<String, ServerFnError> {
+    use kingdom_core::services::ServiceScope;
+
+    let Some(kind) = ServiceScope::from_wire(&scope) else {
+        return Err(ServerFnError::new(format!(
+            "`{scope}` is not a level a shared resource can run at."
+        )));
+    };
+
+    let scope = match kind {
+        ServiceScope::Host => crate::services::Scope::Host,
+        ServiceScope::City => {
+            let kingdom = lock()?;
+            let Some(city) = city
+                .map(kingdom_core::CityId::new)
+                .and_then(|id| kingdom.city(&id).cloned())
+            else {
+                return Err(ServerFnError::new(
+                    "A resource that belongs to one project needs a project. \
+                     Pick one, or share it with the whole machine instead.",
+                ));
+            };
+            crate::services::Scope::City(std::path::Path::new(&kingdom.root).join(&city.path))
+        }
+    };
+
+    let spec = kingdom_core::ServiceSpec {
+        name: name.trim().to_string(),
+        image: image.trim().to_string(),
+        port,
+        env: kingdom_core::services::parse_env(&env),
+        // An empty box is "no volume", which is a different declaration from a
+        // volume named "" -- and the one the parser would refuse.
+        volume: Some(volume.trim().to_string()).filter(|v| !v.is_empty()),
+    };
+
+    let path =
+        crate::services::declare(&scope, &spec).map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Every model the user can choose between, and what each will accept.
 ///
 /// Read live from each provider rather than hard-coded, so the picker cannot

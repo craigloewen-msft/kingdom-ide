@@ -350,9 +350,17 @@ fn services_block(city_root: &Path) -> String {
          agent working on it, not one per agent. Reach them at these addresses:\n",
     );
     for service in &running {
+        // The scope is named because it changes what "shared" means. A city's
+        // well is shared with the other agents on this project; the King's is
+        // shared with every agent on every project he has open, and an agent
+        // about to drop a collection should know which of those it is holding.
+        let shared_with = match service.scope {
+            kingdom_core::ServiceScope::Host => "shared across every project on this machine",
+            kingdom_core::ServiceScope::City => "shared by this project",
+        };
         let _ = writeln!(
             out,
-            "\n- **{}** ({}) at `{}`",
+            "\n- **{}** ({}) at `{}` -- {shared_with}",
             service.name,
             service.image,
             service.address()

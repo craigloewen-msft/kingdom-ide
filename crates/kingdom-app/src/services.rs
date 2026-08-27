@@ -47,6 +47,15 @@
 //! finds still carrying its labels rather than killing them, and a plan that
 //! comes back finds its data where it left it.
 //!
+//! # Two levels, one mechanism
+//!
+//! A well is declared either by a **project**, in its own committed manifest,
+//! or by the **King**, in his profile -- and the second is offered to every
+//! project he opens. See [`Scope`]. Nothing below distinguishes them beyond the
+//! key: same network-per-key, same derived address, same reference count, same
+//! adopt-on-restart. That is deliberate. A host well that behaved differently
+//! from a city well would be a second feature wearing the first one's clothes.
+//!
 //! # What this is not
 //!
 //! **Not a sandbox.** A container Kingdom starts is an ordinary container,
@@ -55,10 +64,13 @@
 //! coordination, not containment, and saying so plainly is worth more than a
 //! guarantee that does not hold.
 
-use kingdom_core::services::{ServiceManifest, ServiceSpec};
-use kingdom_core::PlanId;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use kingdom_core::services::{
+    ManifestTrouble, ResourceInventory, ServiceManifest, ServiceScope, ServiceSpec, ServiceState,
+    SharedResource,
+};
+use kingdom_core::{Kingdom, PlanId};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// The private range Kingdom draws city subnets from.
@@ -93,7 +105,8 @@ const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 /// How often the port is tried while waiting.
 const READY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// The label carrying the city a container belongs to.
+/// The label carrying the scope a container belongs to: a city's key, or
+/// `host`.
 const LABEL_CITY: &str = "kingdom.city";
 /// The label carrying the service's name within that city.
 const LABEL_SERVICE: &str = "kingdom.service";
@@ -112,6 +125,16 @@ pub struct RunningService {
     pub port: u16,
     /// The container's name, which is also how it is found again.
     pub container: String,
+    /// Which level it was declared at.
+    ///
+    /// Carried on the running service rather than looked up again, because the
+    /// two places that show a well to the King -- the badge and the ledger --
+    /// both have to say whether it is this project's or the machine's, and
+    /// re-deriving it from the container name would be reading a string back
+    /// out of a string.
+    pub scope: ServiceScope,
+    /// The registry key it is filed under: `host`, or the city's key.
+    pub key: String,
 }
 
 impl RunningService {
@@ -128,15 +151,72 @@ impl RunningService {
 /// plan finds it already up.
 static SERVICES: OnceLock<Mutex<Registry>> = OnceLock::new();
 
+/// The registry key every host service is filed under.
+///
+/// A reserved word in the same namespace city keys live in, and safe there
+/// because a city key always carries a `-<8 hex digits>` suffix -- so no
+/// project, however it is named, can produce the string `host`.
+const HOST_KEY: &str = "host";
+
+/// Which level a well is declared and shared at, with the paths that follow
+/// from it.
+///
+/// The one seam between the two kinds. Everything downstream -- the network,
+/// the container name, the subnet, the reference count -- is a function of
+/// [`Scope::key`], so adding the host level meant naming this rather than
+/// branching in six places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// The King's machine, declared in his profile.
+    Host,
+    /// One project, declared in its own repository. Carries the city's root.
+    City(PathBuf),
+}
+
+impl Scope {
+    /// The key this scope's services are filed under.
+    pub fn key(&self) -> String {
+        match self {
+            Scope::Host => HOST_KEY.to_string(),
+            Scope::City(root) => city_key(root),
+        }
+    }
+
+    /// The manifest this scope reads and the form writes.
+    ///
+    /// The host's is `$KINGDOM_HOME/services.toml`, which is what makes a
+    /// rehearsal honest: `tools::child_environment` points a plan working on
+    /// Kingdom at a `KINGDOM_HOME` inside its own workspace, so it declares and
+    /// sees its own host wells rather than the King's.
+    pub fn manifest_path(&self) -> PathBuf {
+        match self {
+            Scope::Host => crate::profile::home().join(kingdom_core::services::HOST_MANIFEST_FILE),
+            Scope::City(root) => root.join(kingdom_core::services::MANIFEST_PATH),
+        }
+    }
+
+    /// Which of the two kinds this is, for the wire.
+    pub fn kind(&self) -> ServiceScope {
+        match self {
+            Scope::Host => ServiceScope::Host,
+            Scope::City(_) => ServiceScope::City,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Registry {
-    /// `(city key, service name)` -> the running service.
+    /// `(scope key, service name)` -> the running service.
     running: HashMap<(String, String), RunningService>,
-    /// `(city key, service name)` -> the plans using it.
+    /// `(scope key, service name)` -> the plans using it.
     ///
     /// This is the reference count, kept as the set of plan ids rather than an
     /// integer so that a plan closed twice cannot decrement it twice -- which
     /// would stop a database five other plans were still using.
+    ///
+    /// A host service's set spans **every** city, which is the whole difference
+    /// the scope makes: it is stopped when the last plan anywhere lets go, not
+    /// when the last plan in one project does.
     users: HashMap<(String, String), HashSet<PlanId>>,
 }
 
@@ -184,28 +264,60 @@ pub enum ServiceError {
     },
 }
 
-/// Reads a city's manifest, if it has one.
+/// Reads a scope's manifest, if it has one.
 ///
 /// A missing file is `Ok(empty)` rather than an error: almost every project has
-/// no manifest, and that is not a fault to report.
-pub fn manifest_of(city_root: &Path) -> Result<ServiceManifest, ServiceError> {
-    let path = city_root.join(kingdom_core::services::MANIFEST_PATH);
+/// no manifest and most machines have no host one, and neither is a fault to
+/// report.
+pub fn manifest_in(scope: &Scope) -> Result<ServiceManifest, ServiceError> {
+    let path = scope.manifest_path();
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(ServiceManifest::default());
     };
-    kingdom_core::services::parse(&text).map_err(|e| ServiceError::Manifest(e.to_string()))
+    // The path is attached **here** rather than inside `ManifestError`, because
+    // this is the only layer that knows which of the two manifests was being
+    // read. `kingdom-core` does no I/O and cannot say, and a message that
+    // guessed named a project's file for a fault in the King's profile.
+    kingdom_core::services::parse(&text)
+        .map_err(|e| ServiceError::Manifest(format!("{} is {e}", path.display())))
 }
 
-/// Makes sure every service this city declares is up, and records that this
+/// Reads a city's manifest, if it has one.
+///
+/// Kept as its own name because it reads at every call site as the question
+/// being asked -- "what does this project declare?" -- and because the city is
+/// the common case by a wide margin.
+pub fn manifest_of(city_root: &Path) -> Result<ServiceManifest, ServiceError> {
+    manifest_in(&Scope::City(city_root.to_path_buf()))
+}
+
+/// The two scopes a plan working in this city draws from, host first.
+///
+/// Host first is load-bearing in exactly one place: [`environment`] lets a
+/// later scope overwrite an earlier one's variable, so this order is what makes
+/// a project's own declaration win over the machine's. The more specific
+/// statement is the one the project meant.
+fn scopes_for(city_root: &Path) -> [Scope; 2] {
+    [Scope::Host, Scope::City(city_root.to_path_buf())]
+}
+
+/// Makes sure every service this plan can reach is up, and records that this
 /// plan is drawing from it.
 ///
-/// Idempotent in both halves: a service already running is adopted rather than
-/// restarted, and a plan already registered as a drawer stays exactly one
-/// user. Plans two through five therefore find the service standing and pay only
-/// for a `docker inspect`.
+/// Both scopes: the King's own wells and the project's. Idempotent in both
+/// halves: a service already running is adopted rather than restarted, and a
+/// plan already registered as a drawer stays exactly one user. Plans two
+/// through five therefore find the service standing and pay only for a
+/// `docker inspect`.
 pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningService>, ServiceError> {
-    let manifest = manifest_of(city_root)?;
-    if manifest.is_empty() {
+    let mut manifests = Vec::new();
+    for scope in scopes_for(city_root) {
+        let manifest = manifest_in(&scope)?;
+        if !manifest.is_empty() {
+            manifests.push((scope, manifest));
+        }
+    }
+    if manifests.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -213,59 +325,73 @@ pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningServic
         return Err(ServiceError::DockerMissing);
     }
 
-    let key = city_key(city_root);
-    let network = network_name(&key);
-    let subnet = ensure_network(&network).await?;
-
     let mut up = Vec::new();
-    for (index, spec) in manifest.services.iter().enumerate() {
-        let service = ensure_one(&key, &network, subnet, index, spec).await?;
-        {
-            let mut registry = registry();
-            let id = (key.clone(), spec.name.clone());
-            registry.running.insert(id.clone(), service.clone());
-            registry.users.entry(id).or_default().insert(plan.clone());
+    for (scope, manifest) in manifests {
+        let key = scope.key();
+        let network = network_name(&key);
+        let subnet = ensure_network(&network).await?;
+
+        for (index, spec) in manifest.services.iter().enumerate() {
+            let service = ensure_one(&scope, &key, &network, subnet, index, spec).await?;
+            {
+                let mut registry = registry();
+                let id = (key.clone(), spec.name.clone());
+                registry.running.insert(id.clone(), service.clone());
+                registry.users.entry(id).or_default().insert(plan.clone());
+            }
+            up.push(service);
         }
-        up.push(service);
     }
     Ok(up)
 }
 
-/// The environment a plan's tools get for this city's services.
+/// The environment a plan's tools get for the services it can reach.
 ///
 /// Read from the registry rather than started here, so this is cheap enough to
 /// call on every command. A city with nothing running yields nothing, which is
 /// what makes it safe to apply unconditionally in `tools::child_environment`.
+///
+/// Host first and the city second, so a project that sets `DATABASE_URL` for
+/// its own database wins over a machine-wide one of the same name. Collected
+/// through a map rather than a `Vec` for that reason -- the last writer has to
+/// be the only one left.
 pub fn environment(city_root: &Path) -> Vec<(String, String)> {
-    let Ok(manifest) = manifest_of(city_root) else {
-        return Vec::new();
-    };
-    if manifest.is_empty() {
-        return Vec::new();
-    }
-
-    let key = city_key(city_root);
     let registry = registry();
-    let mut out = Vec::new();
-    for spec in &manifest.services {
-        if let Some(running) = registry.running.get(&(key.clone(), spec.name.clone())) {
-            out.extend(spec.environment(&running.host, running.port));
+    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+
+    for scope in scopes_for(city_root) {
+        let Ok(manifest) = manifest_in(&scope) else {
+            continue;
+        };
+        if manifest.is_empty() {
+            continue;
+        }
+        let key = scope.key();
+        for spec in &manifest.services {
+            if let Some(running) = registry.running.get(&(key.clone(), spec.name.clone())) {
+                merged.extend(spec.environment(&running.host, running.port));
+            }
         }
     }
-    out
+
+    merged.into_iter().collect()
 }
 
-/// What this city has standing, for the badge and the system prompt.
+/// What a plan in this city has standing, for the badge and the system prompt.
+///
+/// Both scopes, because both are addresses the plan can actually use, and an
+/// address nobody is shown is an address nobody can use. Ordered host first
+/// then by name, so the list does not reshuffle between pushes.
 pub fn running_in(city_root: &Path) -> Vec<RunningService> {
-    let key = city_key(city_root);
+    let keys: Vec<String> = scopes_for(city_root).iter().map(Scope::key).collect();
     let registry = registry();
     let mut out: Vec<RunningService> = registry
         .running
         .iter()
-        .filter(|((city, _), _)| city == &key)
+        .filter(|((key, _), _)| keys.contains(key))
         .map(|(_, service)| service.clone())
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.name.cmp(&b.name)));
     out
 }
 
@@ -275,22 +401,37 @@ pub fn users_of(city_root: &Path, service: &str) -> usize {
     registry().users.get(&key).map_or(0, HashSet::len)
 }
 
-/// The address of one named service, or `None` if it is not up.
+/// [`users_of`] for a service already resolved to its registry key.
+///
+/// The form the two callers that hold a [`RunningService`] want: a host well is
+/// not filed under any city, so asking for it by city root would count zero and
+/// report a shared database as used by nobody.
+pub fn users_of_key(key: &str, service: &str) -> usize {
+    let id = (key.to_string(), service.to_string());
+    registry().users.get(&id).map_or(0, HashSet::len)
+}
+
+/// The address of one named service in this city's scope, or `None` if it is
+/// not up.
 pub fn address_of(city_root: &Path, service: &str) -> Option<String> {
     let key = (city_key(city_root), service.to_string());
     registry().running.get(&key).map(RunningService::address)
 }
 
-/// Notes that a plan is finished with this city's services, stopping any that
-/// nobody is left drawing from.
+/// Notes that a plan is finished with the services it was drawing from,
+/// stopping any that nobody is left drawing from.
 ///
-/// Called when a plan is merged or archived, beside `netns::shutdown`. The
-/// container is **stopped, not removed**, and its named volume is left alone:
-/// the King's data is the whole reason the service existed, and losing it
-/// because five agents finished their work would be the worst possible
+/// Called when a plan is merged or archived, beside `netns::shutdown`. Both
+/// scopes, and the host one is why the reference count is a set of plan ids
+/// rather than a number per city: a machine-wide well is released only when the
+/// last plan *anywhere* lets go of it.
+///
+/// The container is **stopped, not removed**, and its named volume is left
+/// alone: the King's data is the whole reason the service existed, and losing
+/// it because five agents finished their work would be the worst possible
 /// interpretation of "tear down".
 pub async fn release(plan: &PlanId, city_root: &Path) {
-    let key = city_key(city_root);
+    let keys: Vec<String> = scopes_for(city_root).iter().map(Scope::key).collect();
 
     let orphaned: Vec<RunningService> = {
         let mut registry = registry();
@@ -298,7 +439,7 @@ pub async fn release(plan: &PlanId, city_root: &Path) {
         let ids: Vec<(String, String)> = registry
             .users
             .keys()
-            .filter(|(city, _)| city == &key)
+            .filter(|(key, _)| keys.contains(key))
             .cloned()
             .collect();
 
@@ -320,6 +461,240 @@ pub async fn release(plan: &PlanId, city_root: &Path) {
     for service in orphaned {
         let _ = docker(&["stop", &service.container]).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The ledger: what is declared anywhere, and how a new one is declared
+// ---------------------------------------------------------------------------
+
+/// Every shared resource the King has declared, with what it is doing.
+///
+/// The whole screen in one call. Deliberately **not** per city: the question
+/// the ledger answers is "what does this machine share, and with whom", and
+/// answering it one project at a time would put the joining back on the
+/// browser.
+///
+/// Cheap. It reads at most one small file per city plus one for the host, and
+/// asks Docker exactly one question for the whole screen -- see
+/// [`docker_trouble`]. No `docker inspect` per row: the registry already knows
+/// what this server started, and a container some *other* server started is not
+/// this ledger's business.
+pub async fn inventory(kingdom: &Kingdom) -> ResourceInventory {
+    let mut out = ResourceInventory {
+        docker_trouble: docker_trouble().await,
+        ..ResourceInventory::default()
+    };
+
+    // Host first, so the machine's own wells head the list -- they are the ones
+    // shared furthest, and so the ones a change to is most consequential.
+    let mut scopes: Vec<(Scope, Option<&kingdom_core::City>)> = vec![(Scope::Host, None)];
+    let root = Path::new(&kingdom.root);
+    for city in &kingdom.cities {
+        scopes.push((Scope::City(root.join(&city.path)), Some(city)));
+    }
+
+    for (scope, city) in scopes {
+        let path = scope.manifest_path();
+        let shown_path = path.to_string_lossy().to_string();
+        let manifest = match manifest_in(&scope) {
+            Ok(manifest) => manifest,
+            // A manifest that does not parse is the failure this ledger exists
+            // to surface. Today it is silent until an agent's first turn is
+            // refused, minutes in, with a message about the model.
+            Err(e) => {
+                out.troubles.push(ManifestTrouble {
+                    scope: scope.kind(),
+                    city_name: city.map(|c| c.name.clone()),
+                    manifest_path: shown_path,
+                    detail: e.to_string(),
+                });
+                continue;
+            }
+        };
+        if manifest.is_empty() {
+            continue;
+        }
+
+        let key = scope.key();
+        for spec in &manifest.services {
+            out.resources.push(describe(
+                kingdom,
+                &scope,
+                &key,
+                city,
+                &shown_path,
+                spec,
+                out.docker_trouble.is_some(),
+            ));
+        }
+    }
+
+    out
+}
+
+/// One declared service, joined against what is actually running.
+#[allow(clippy::too_many_arguments)]
+fn describe(
+    kingdom: &Kingdom,
+    scope: &Scope,
+    key: &str,
+    city: Option<&kingdom_core::City>,
+    manifest_path: &str,
+    spec: &ServiceSpec,
+    docker_is_out: bool,
+) -> SharedResource {
+    let id = (key.to_string(), spec.name.clone());
+    let (running, drawing) = {
+        let registry = registry();
+        (
+            registry.running.get(&id).cloned(),
+            registry.users.get(&id).cloned().unwrap_or_default(),
+        )
+    };
+
+    // Titles rather than ids: "who else is in here?" is a question about
+    // people's work, and a UUID does not answer it. Sorted, so the same three
+    // plans do not reorder themselves between two loads of the screen.
+    let mut users: Vec<String> = drawing
+        .iter()
+        .map(|plan| {
+            kingdom
+                .plan(plan)
+                .map(|p| p.title.clone())
+                .unwrap_or_else(|| plan.to_string())
+        })
+        .collect();
+    users.sort();
+
+    let state = match (&running, docker_is_out) {
+        (Some(_), _) => ServiceState::Running,
+        // Not "idle": with no daemon answering, Kingdom genuinely does not know
+        // whether this is up, and saying "not started" would be a guess dressed
+        // as a fact.
+        (None, true) => ServiceState::Unknown,
+        (None, false) => ServiceState::Idle,
+    };
+
+    // Filled in when the address is known, and left as written when it is not.
+    // A `{host}` the King can see is the honest answer for a service that has
+    // never run -- the address does not exist yet.
+    let environment = match &running {
+        Some(running) => spec.environment(&running.host, running.port),
+        None => spec
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
+
+    SharedResource {
+        spec: spec.clone(),
+        scope: scope.kind(),
+        city: city.map(|c| c.id.clone()),
+        city_name: city.map(|c| c.name.clone()),
+        manifest_path: manifest_path.to_string(),
+        state,
+        address: running.as_ref().map(RunningService::address),
+        // Derived rather than allocated, so it is known even for a service that
+        // has never run -- which is what makes `docker logs <name>` printable
+        // on a row that is not up.
+        container: container_name(key, &spec.name),
+        users,
+        environment,
+    }
+}
+
+/// Why nothing could be running, or `None` if Docker answered.
+///
+/// Asked once for the whole ledger rather than once per row: the answer is the
+/// same for every one of them, and it is the difference between a screen of
+/// confusing "not started"s and one banner saying the daemon is down.
+async fn docker_trouble() -> Option<String> {
+    if which("docker").is_none() {
+        return Some(ServiceError::DockerMissing.to_string());
+    }
+    match docker(&["version", "--format", "{{.Server.Version}}"]).await {
+        Ok(_) => None,
+        Err(e) => Some(ServiceError::DockerUnreachable(e).to_string()),
+    }
+}
+
+/// Why a resource could not be declared.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeclareError {
+    #[error("{0}")]
+    Invalid(String),
+
+    #[error(
+        "`{name}` is already declared in {path}. Pick another name, or edit \
+         that file to change the one that is there."
+    )]
+    Duplicate { name: String, path: String },
+
+    #[error("{path} could not be written: {detail}")]
+    Unwritable { path: String, detail: String },
+}
+
+/// Declares a new shared resource, by appending it to its scope's manifest.
+///
+/// # Why this appends text
+///
+/// The manifest is a file a person writes and comments. Parsing it into a
+/// `ServiceManifest`, pushing an entry and re-serialising would silently eat
+/// every comment in it as the price of adding one service -- including the
+/// paragraph the `shopfront` fixture puts at the top explaining what Kingdom
+/// does with the file. So the spec is rendered as one block and appended, and
+/// everything already in the file is left exactly as the King typed it.
+///
+/// # What is checked before anything is written
+///
+/// The whole file **after** the addition is parsed. That is stronger than
+/// validating the spec alone and it is the check that matters: it proves the
+/// King is left with a manifest that still works, rather than one that parses
+/// in isolation and collides with what was already there.
+///
+/// Returns the path written to, which is what the UI shows him next.
+pub fn declare(scope: &Scope, spec: &ServiceSpec) -> Result<PathBuf, DeclareError> {
+    let path = scope.manifest_path();
+    let shown = path.to_string_lossy().to_string();
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Named first, because "that name is taken" is a better message than
+    // whatever the parser says about a duplicate three lines later.
+    if let Ok(current) = kingdom_core::services::parse(&existing) {
+        if current.services.iter().any(|s| s.name == spec.name) {
+            return Err(DeclareError::Duplicate {
+                name: spec.name.clone(),
+                path: shown,
+            });
+        }
+    }
+
+    let mut next = existing.clone();
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    next.push_str(&spec.render());
+
+    // The whole file, not just the new block. See the doc comment.
+    kingdom_core::services::parse(&next).map_err(|e| DeclareError::Invalid(e.to_string()))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| DeclareError::Unwritable {
+            path: shown.clone(),
+            detail: e.to_string(),
+        })?;
+    }
+    std::fs::write(&path, next).map_err(|e| DeclareError::Unwritable {
+        path: shown,
+        detail: e.to_string(),
+    })?;
+
+    Ok(path)
 }
 
 /// Finds an executable on `PATH`.
@@ -503,13 +878,14 @@ fn third_octet(subnet: &str) -> Option<u8> {
 
 /// Brings one service up, or adopts it if it is already up.
 async fn ensure_one(
-    city_key: &str,
+    scope: &Scope,
+    key: &str,
     network: &str,
     subnet: u8,
     index: usize,
     spec: &ServiceSpec,
 ) -> Result<RunningService, ServiceError> {
-    let container = container_name(city_key, &spec.name);
+    let container = container_name(key, &spec.name);
     let host = service_address(subnet, index);
 
     let service = RunningService {
@@ -518,6 +894,8 @@ async fn ensure_one(
         host: host.clone(),
         port: spec.port,
         container: container.clone(),
+        scope: scope.kind(),
+        key: key.to_string(),
     };
 
     match container_state(&container).await {
@@ -553,7 +931,7 @@ async fn ensure_one(
         "--ip".into(),
         host.clone(),
         "--label".into(),
-        format!("{LABEL_CITY}={city_key}"),
+        format!("{LABEL_CITY}={key}"),
         "--label".into(),
         format!("{LABEL_SERVICE}={}", spec.name),
         // Deliberately no `-p`. Nothing is published on the King's loopback, so
@@ -764,6 +1142,8 @@ mod tests {
                     host: "172.31.9.10".to_string(),
                     port: 27017,
                     container: "kingdom-double-release-test-db".to_string(),
+                    scope: ServiceScope::City,
+                    key: city.clone(),
                 },
             );
             registry
@@ -816,6 +1196,369 @@ mod tests {
             !source.contains("\"--publish\""),
             "a published port cannot be reached from a plan's namespace"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The two levels, and the ledger over them. No daemon is needed for any of
+    // these: they are about which file is read and written, which is the half
+    // that actually decides how far a resource is shared.
+    // -----------------------------------------------------------------------
+
+    /// A host resource and a city one land in two different files.
+    ///
+    /// The single most consequential fact about the scope, and the one mistake
+    /// worth making impossible: a project's database written into the King's
+    /// profile would be offered to every other project he opens.
+    #[test]
+    fn the_two_scopes_write_to_two_different_files() {
+        let dir = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(dir.path());
+
+        let city = Path::new("/home/king/dev/shopfront");
+        let host_path = Scope::Host.manifest_path();
+        let city_path = Scope::City(city.to_path_buf()).manifest_path();
+
+        assert_eq!(host_path, dir.path().join("services.toml"));
+        assert_eq!(
+            city_path,
+            city.join(kingdom_core::services::MANIFEST_PATH),
+            "a project's manifest belongs in the project"
+        );
+        assert_ne!(host_path, city_path);
+    }
+
+    /// A host well is filed under its own key, so it is not confusable with a
+    /// project's -- and gets a network and containers of its own.
+    #[test]
+    fn a_host_well_has_a_key_no_project_can_take() {
+        assert_eq!(Scope::Host.key(), "host");
+        assert_eq!(
+            container_name(&Scope::Host.key(), "cache"),
+            "kingdom-host-cache"
+        );
+
+        // A city key always carries a `-<8 hex>` suffix, so no project -- even
+        // one whose folder is literally called `host` -- can collide with it.
+        let awkward = city_key(Path::new("/home/king/dev/host"));
+        assert_ne!(awkward, "host");
+        assert!(awkward.starts_with("host-"), "{awkward}");
+    }
+
+    /// The form writes a file the parser can read back, and creates the
+    /// directory it needs on the way.
+    #[tokio::test]
+    async fn declaring_a_resource_writes_a_manifest_that_parses() {
+        let dir = tempfile::tempdir().expect("a temporary city");
+        let scope = Scope::City(dir.path().to_path_buf());
+        let spec = ServiceSpec {
+            name: "db".to_string(),
+            image: "postgres:16".to_string(),
+            port: 5432,
+            env: [(
+                "DATABASE_URL".to_string(),
+                "postgres://postgres@{host}:{port}/app".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            volume: Some("app-db".to_string()),
+        };
+
+        let path = declare(&scope, &spec).expect("a first declaration must land");
+        assert_eq!(path, dir.path().join(kingdom_core::services::MANIFEST_PATH));
+
+        let manifest = manifest_in(&scope).expect("and must read back");
+        assert_eq!(manifest.services, vec![spec]);
+    }
+
+    /// A second declaration is appended, and the comments already in the file
+    /// survive it.
+    ///
+    /// This is the whole reason `declare` writes text rather than
+    /// re-serialising a parsed document: the `shopfront` fixture's manifest
+    /// opens with a paragraph explaining what Kingdom does with the file, and a
+    /// round trip would eat it as the price of adding one service.
+    #[tokio::test]
+    async fn a_second_declaration_keeps_the_first_and_its_comments() {
+        let dir = tempfile::tempdir().expect("a temporary city");
+        let scope = Scope::City(dir.path().to_path_buf());
+        let manifest_path = dir.path().join(kingdom_core::services::MANIFEST_PATH);
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest_path,
+            "# What this project needs standing in order to run.\n\
+             [[service]]\n\
+             name = \"db\"\n\
+             image = \"mongo:7\"\n\
+             port = 27017\n",
+        )
+        .unwrap();
+
+        declare(
+            &scope,
+            &ServiceSpec {
+                name: "cache".to_string(),
+                image: "redis:7".to_string(),
+                port: 6379,
+                env: std::collections::BTreeMap::new(),
+                volume: None,
+            },
+        )
+        .expect("the second must land beside the first");
+
+        let text = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            text.contains("# What this project needs standing in order to run."),
+            "the King's own comment must survive: {text:?}"
+        );
+
+        let names: Vec<String> = manifest_in(&scope)
+            .expect("both must parse")
+            .services
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["db".to_string(), "cache".to_string()]);
+    }
+
+    /// A name already in the file is refused, and nothing is written.
+    ///
+    /// The parser would refuse a duplicate too, but only after the file was on
+    /// disk -- leaving the King with a manifest that no longer loads and a
+    /// message about the whole file rather than about the name he just typed.
+    #[tokio::test]
+    async fn a_duplicate_name_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().expect("a temporary city");
+        let scope = Scope::City(dir.path().to_path_buf());
+        let spec = ServiceSpec {
+            name: "db".to_string(),
+            image: "mongo:7".to_string(),
+            port: 27017,
+            env: std::collections::BTreeMap::new(),
+            volume: None,
+        };
+
+        declare(&scope, &spec).expect("the first lands");
+        let before = std::fs::read_to_string(scope.manifest_path()).unwrap();
+
+        let error = declare(&scope, &spec).expect_err("the second must be refused");
+        assert!(matches!(error, DeclareError::Duplicate { .. }), "{error:?}");
+        // And the King is told which name and which file.
+        assert!(error.to_string().contains("db"), "{error}");
+
+        assert_eq!(
+            std::fs::read_to_string(scope.manifest_path()).unwrap(),
+            before,
+            "a refused declaration must not have touched the file"
+        );
+    }
+
+    /// The ledger reports both scopes, and reports a manifest that does not
+    /// parse instead of dropping it.
+    ///
+    /// That last part is most of why the screen exists: today a broken manifest
+    /// is silent until an agent's first turn is refused, minutes in, with a
+    /// message about the model rather than about the file.
+    #[tokio::test]
+    async fn the_ledger_reports_both_scopes_and_a_broken_manifest() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+        let root = tempfile::tempdir().expect("a temporary kingdom");
+
+        // The King's own well.
+        std::fs::write(
+            home.path().join("services.toml"),
+            "[[service]]\nname = \"cache\"\nimage = \"redis:7\"\nport = 6379\n",
+        )
+        .unwrap();
+
+        // One good project manifest, and one that does not parse.
+        for (name, body) in [
+            (
+                "shopfront",
+                "[[service]]\nname = \"db\"\nimage = \"mongo:7\"\nport = 27017\n",
+            ),
+            ("ledger", "[[service]\nname = \"db\"\n"),
+        ] {
+            let dir = root.path().join(name).join(".kingdom");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("services.toml"), body).unwrap();
+        }
+
+        let mut kingdom = Kingdom::unopened();
+        kingdom.root = root.path().to_string_lossy().to_string();
+        kingdom.cities = vec![
+            a_city("shopfront"),
+            a_city("ledger"),
+            // A project with no manifest at all: the overwhelmingly common
+            // case, and it must contribute nothing rather than an empty group.
+            a_city("quiet"),
+        ];
+
+        let inventory = inventory(&kingdom).await;
+
+        let named: Vec<(&str, &str)> = inventory
+            .resources
+            .iter()
+            .map(|r| (r.scope.wire_name(), r.spec.name.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![("host", "cache"), ("city", "db")],
+            "the machine's own wells come first, then each project's"
+        );
+
+        let cache = &inventory.resources[0];
+        assert_eq!(cache.city_name, None);
+        assert_eq!(cache.owner(), "The whole machine");
+        assert_eq!(
+            cache.manifest_path,
+            home.path().join("services.toml").to_string_lossy()
+        );
+        // Known even though nothing is running, because the name is derived
+        // rather than allocated -- which is what makes `docker logs` printable.
+        assert_eq!(cache.container, "kingdom-host-cache");
+
+        let db = &inventory.resources[1];
+        assert_eq!(db.city_name.as_deref(), Some("shopfront"));
+        assert_eq!(db.owner(), "shopfront");
+        assert!(
+            db.manifest_path.contains("shopfront"),
+            "the King has to be able to find the file: {}",
+            db.manifest_path
+        );
+
+        assert_eq!(inventory.troubles.len(), 1, "{:?}", inventory.troubles);
+        let trouble = &inventory.troubles[0];
+        assert_eq!(trouble.city_name.as_deref(), Some("ledger"));
+        assert!(trouble.manifest_path.contains("ledger"));
+        assert!(!trouble.detail.is_empty());
+        // The message names the file that is actually at fault. It used to name
+        // a hardcoded `.kingdom/services.toml` from `kingdom-core`, which was
+        // wrong for the King's own profile -- the message sent him to a file in
+        // a project that had nothing wrong with it.
+        assert!(
+            trouble.detail.contains(&trouble.manifest_path),
+            "the King must be told which file to open: {}",
+            trouble.detail
+        );
+    }
+
+    /// A city that declares nothing costs nothing and appears nowhere.
+    #[tokio::test]
+    async fn a_kingdom_that_shares_nothing_has_an_empty_ledger() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+        let root = tempfile::tempdir().expect("a temporary kingdom");
+
+        let mut kingdom = Kingdom::unopened();
+        kingdom.root = root.path().to_string_lossy().to_string();
+        kingdom.cities = vec![a_city("quiet")];
+
+        assert!(inventory(&kingdom).await.is_empty());
+    }
+
+    fn a_city(name: &str) -> kingdom_core::City {
+        kingdom_core::City {
+            id: kingdom_core::CityId::from(name),
+            name: name.to_string(),
+            path: name.to_string(),
+            kind: kingdom_core::CityKind::Unknown,
+            file_count: 0,
+            has_git: true,
+            dirty_files: 0,
+            structure: None,
+        }
+    }
+}
+
+/// Against a real Docker daemon. `cargo test -p kingdom-app --features ssr \
+/// --no-default-features -- --ignored a_host_well_serves_two_projects`
+///
+/// The claim the host scope makes, and the one that cannot be checked without
+/// a daemon: **one** container, reached by plans working in two different
+/// projects, released only when the last of them is done. Every other test of
+/// the scope is about which file is read; this is about what actually runs.
+#[cfg(test)]
+mod host_scope {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "needs a running Docker daemon"]
+    async fn a_host_well_serves_two_projects() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+
+        // Declared through the same path the form uses, so this proves the
+        // write and the read together rather than one against a hand-made file.
+        declare(
+            &Scope::Host,
+            &ServiceSpec {
+                name: "scopecache".to_string(),
+                image: "redis:7-alpine".to_string(),
+                port: 6379,
+                env: [("REDIS_URL".to_string(), "redis://{host}:{port}".to_string())]
+                    .into_iter()
+                    .collect(),
+                volume: None,
+            },
+        )
+        .expect("the King's own manifest must be writable");
+
+        // Two projects that declare nothing of their own. Whatever they reach
+        // is the machine's, which is the point.
+        let one = tempfile::tempdir().expect("project one");
+        let two = tempfile::tempdir().expect("project two");
+        let alice = PlanId::new("host-scope-alice");
+        let bob = PlanId::new("host-scope-bob");
+
+        let raised = ensure(&alice, one.path())
+            .await
+            .expect("the first plan raises it");
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].scope, ServiceScope::Host);
+        let container = raised[0].container.clone();
+        assert_eq!(container, "kingdom-host-scopecache");
+
+        // A plan in a *different* project finds the same container standing.
+        let adopted = ensure(&bob, two.path())
+            .await
+            .expect("the second plan adopts it");
+        assert_eq!(
+            adopted[0].address(),
+            raised[0].address(),
+            "two projects must reach one address, or the scope means nothing"
+        );
+        assert_eq!(users_of_key("host", "scopecache"), 2);
+
+        // And both are handed it as an environment variable, with the real
+        // address substituted -- the only way an agent finds it.
+        for root in [one.path(), two.path()] {
+            let env = environment(root);
+            let url = env
+                .iter()
+                .find(|(k, _)| k == "REDIS_URL")
+                .map(|(_, v)| v.clone())
+                .expect("every project gets the machine's wells");
+            assert_eq!(url, format!("redis://{}", raised[0].address()));
+        }
+
+        // One project finishing does not take it from the other. This is the
+        // reference count spanning cities, which is the whole difference
+        // between a host well and a city one.
+        release(&alice, one.path()).await;
+        assert_eq!(users_of_key("host", "scopecache"), 1);
+        assert_eq!(
+            container_state(&container).await,
+            ContainerState::Running,
+            "another project is still using it"
+        );
+
+        release(&bob, two.path()).await;
+        assert_eq!(users_of_key("host", "scopecache"), 0);
+        assert_eq!(container_state(&container).await, ContainerState::Stopped);
+
+        let _ = docker(&["rm", "-f", &container]).await;
+        let _ = docker(&["network", "rm", &network_name("host")]).await;
     }
 }
 

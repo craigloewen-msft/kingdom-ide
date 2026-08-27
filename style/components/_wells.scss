@@ -1,0 +1,578 @@
+// The wells: containers a project or the whole machine shares.
+//
+// Two surfaces, one file, because they draw the same thing at two sizes: the
+// popover behind the ports badge in a chamber (`.wells-list`, a glance), and
+// the ledger at `/resources` (`.wells-view`, a reading and writing screen).
+// Splitting them would let the same resource look like two different kinds of
+// object depending on where the King happened to see it.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+// --- In the ports badge ------------------------------------------------------
+
+.wells-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+// Two lines rather than one row: an address is long, an image name is long,
+// and squeezing both onto the same line as the ports would make the one thing
+// the King came here to copy the hardest thing to select.
+.wells-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  padding: 6px 0;
+  font-size: 12px;
+
+  & + & { border-top: 1px solid t.$edge; }
+}
+
+.wells-name {
+  grid-column: 1;
+  color: t.$ink;
+  font-family: t.$font-mono;
+  font-weight: 600;
+}
+
+// The one thing worth copying, so it is the one thing in the King's colour.
+.wells-address {
+  grid-column: 2;
+  justify-self: start;
+  color: t.$gold;
+  font-family: t.$font-mono;
+  user-select: all;
+}
+
+.wells-image,
+.wells-drawers {
+  color: t.$ink-faint;
+  font-size: 10px;
+}
+
+.wells-image { grid-column: 1 / -1; }
+
+// Who else is drawing. Marked when it is more than this plan -- that is the
+// fact that changes what the King does next in a shared database.
+.wells-drawers {
+  grid-column: 1 / -1;
+  color: t.$working;
+}
+
+// How far it is shared. A pill rather than more grey text, because it changes
+// the meaning of the count beside it: three plans on one project and three
+// plans across three projects are very different situations.
+.wells-scope {
+  grid-column: 2;
+  justify-self: start;
+  padding: 0 6px;
+  border: 1px solid t.$edge-bright;
+  border-radius: 9px;
+  color: t.$ink-faint;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+
+  &.machine {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+  }
+}
+
+.ports-manage {
+  display: block;
+  margin-top: 8px;
+  color: t.$ink-dim;
+  font-size: 11px;
+  text-decoration: none;
+
+  &:hover { color: t.$gold; }
+}
+
+// --- In the rail -------------------------------------------------------------
+
+.rail-resources {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-bottom: 1px solid t.$edge;
+  color: t.$ink-dim;
+  font-size: 12px;
+  text-decoration: none;
+
+  &:hover { background: t.$panel-2; color: t.$ink; }
+
+  // Where you are, not somewhere to go.
+  &.current {
+    background: t.$panel-2;
+    color: t.$gold;
+    box-shadow: inset 2px 0 0 t.$gold;
+  }
+}
+
+.rail-resources-mark { font-size: 13px; }
+
+// --- The ledger --------------------------------------------------------------
+
+.wells-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+
+.wells-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+
+  h1 {
+    margin: 0;
+    color: t.$ink;
+    font-size: 18px;
+    font-weight: 600;
+  }
+}
+
+.wells-sub {
+  max-width: 62ch;
+  margin: 4px 0 0;
+  color: t.$ink-faint;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.wells-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.wells-back {
+  color: t.$ink-faint;
+  font-size: 12px;
+  text-decoration: none;
+
+  &:hover { color: t.$gold; }
+}
+
+.wells-new {
+  padding: 6px 12px;
+  background: t.$panel-2;
+  border: 1px solid t.$gold-dim;
+  border-radius: t.$radius;
+  color: t.$gold;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover { border-color: t.$gold; }
+  &.open { border-color: t.$edge-bright; color: t.$ink-dim; }
+}
+
+.wells-loading,
+.wells-empty,
+.wells-nothing {
+  max-width: 60ch;
+  color: t.$ink-faint;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+// Docker is down, or absent. One banner for the whole screen rather than the
+// same confusing word on every row.
+.wells-banner {
+  margin: 0;
+  padding: 9px 12px;
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid t.$failed;
+  border-radius: t.$radius;
+  color: t.$failed;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+// A manifest that does not parse. Loud, because the alternative it replaces is
+// silence until an agent's first turn is refused with a message about
+// something else entirely.
+.wells-trouble {
+  display: flex;
+  gap: 10px;
+  padding: 9px 12px;
+  background: rgba(234, 179, 8, 0.06);
+  border: 1px solid t.$review;
+  border-radius: t.$radius;
+}
+
+.wells-trouble-mark { color: t.$review; }
+
+.wells-trouble-detail {
+  margin: 0;
+  color: t.$ink;
+  font-size: 12px;
+  line-height: 1.5;
+  // The path is inside this sentence, and a long one must wrap rather than
+  // widening the pane it sits in.
+  word-break: break-word;
+}
+
+// The path, everywhere it appears. Selectable in one press, because the King's
+// next move is to paste it into an editor.
+.wells-path {
+  display: inline-block;
+  color: t.$gold;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  word-break: break-all;
+  user-select: all;
+}
+
+// The two panes: the ledger, and whatever is selected in it. Fixed left and
+// `1fr` right, for `.throne-room`'s reason -- the list supports the detail and
+// must not grow into an equal column.
+.wells-panes {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 18px;
+  align-items: start;
+  min-height: 0;
+}
+
+.wells-groups,
+.wells-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wells-group + .wells-group { margin-top: 14px; }
+
+// Who owns the resources beneath it -- the answer to "where is this shared?",
+// which is why it is a heading rather than a column.
+.wells-owner {
+  margin: 0 0 6px;
+  color: t.$ink-faint;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+
+  &.machine { color: t.$gold; }
+}
+
+.wells-entry {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: t.$radius;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { background: t.$panel-2; }
+
+  &.chosen {
+    background: t.$panel-2;
+    border-color: t.$gold-dim;
+  }
+}
+
+.wells-entry-name {
+  color: t.$ink;
+  font-family: t.$font-mono;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.wells-entry-image {
+  grid-column: 1;
+  color: t.$ink-faint;
+  font-size: 10px;
+}
+
+// Running or not. The one state on the row, and green only when it is actually
+// up -- "not started" is the ordinary condition of a project with no plan open
+// and must not read as a fault.
+.wells-state {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: center;
+  color: t.$ink-faint;
+  font-size: 10px;
+
+  &.running { color: t.$working; }
+}
+
+// --- One resource, in full ---------------------------------------------------
+
+.well-card {
+  padding: 16px 18px;
+  background: t.$panel;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+}
+
+.well-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.well-name {
+  color: t.$ink;
+  font-family: t.$font-mono;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.well-facts {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px 14px;
+  margin: 0;
+  font-size: 12px;
+
+  dt {
+    color: t.$ink-faint;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  dd {
+    margin: 0;
+    color: t.$ink-dim;
+    line-height: 1.5;
+  }
+
+  code {
+    color: t.$gold;
+    font-family: t.$font-mono;
+    user-select: all;
+  }
+
+  // A hint inside a fact sits under it, not beside it. `docker logs <name>`
+  // run inline reads as part of the container's name -- which is the one
+  // string on this row a person copies.
+  .well-hint {
+    display: block;
+    margin-top: 2px;
+  }
+}
+
+.well-absent { color: t.$ink-faint; }
+
+.well-users {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    color: t.$working;
+    &::before { content: "\2022  "; color: t.$ink-faint; }
+  }
+}
+
+.well-section {
+  margin: 16px 0 6px;
+  color: t.$ink-faint;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.well-env {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  code {
+    color: t.$ink;
+    font-family: t.$font-mono;
+    font-size: 11px;
+    user-select: all;
+  }
+}
+
+.well-note,
+.well-hint {
+  max-width: 66ch;
+  margin: 6px 0 0;
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+// --- The form ----------------------------------------------------------------
+
+.well-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  background: t.$panel;
+  border: 1px solid t.$gold-dim;
+  border-radius: t.$radius;
+}
+
+.well-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+
+  label {
+    color: t.$ink-faint;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  input,
+  select,
+  textarea {
+    padding: 7px 10px;
+    background: t.$deep;
+    border: 1px solid t.$edge;
+    border-radius: t.$radius;
+    color: t.$ink;
+    font-family: t.$font-mono;
+    font-size: 12px;
+
+    &:focus {
+      border-color: t.$gold-dim;
+      outline: none;
+    }
+  }
+
+  textarea { resize: vertical; }
+}
+
+.well-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 110px;
+  gap: 12px;
+}
+
+.well-narrow { min-width: 0; }
+
+// The one decision the King cannot take back by editing a value: it decides
+// which file this is written to, and how far it is shared. So it is two
+// explained cards rather than a dropdown of two words.
+.scope-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.scope-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: t.$deep;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { border-color: t.$edge-bright; }
+
+  &.active {
+    border-color: t.$gold-dim;
+    background: t.$panel-2;
+  }
+}
+
+.scope-name {
+  color: t.$ink;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.scope-detail {
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+// Exactly what is about to be appended to the file. The King owns that file,
+// so he sees the text before it goes in rather than after.
+.well-preview {
+  margin: 0;
+  padding: 10px 12px;
+  background: t.$void;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  font-family: t.$font-mono;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.well-submit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.well-declare {
+  padding: 7px 16px;
+  background: t.$gold;
+  border: none;
+  border-radius: t.$radius;
+  color: t.$void;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:disabled {
+    background: t.$edge;
+    color: t.$ink-faint;
+    cursor: not-allowed;
+  }
+}
+
+// What is still missing, said while he types rather than after the write.
+.well-complaint {
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
+.well-error {
+  margin: 0;
+  color: t.$blocked;
+  font-size: 12px;
+}
+
+.well-written {
+  margin: 0;
+  color: t.$working;
+  font-size: 12px;
+
+  code {
+    color: t.$gold;
+    font-family: t.$font-mono;
+    user-select: all;
+  }
+}
+
+// A laptop cannot afford two columns and a form of paired inputs at once.
+@media (max-width: 1100px) {
+  .wells-panes { grid-template-columns: 1fr; }
+  .well-row { grid-template-columns: 1fr; }
+  .scope-toggle { grid-template-columns: 1fr; }
+}

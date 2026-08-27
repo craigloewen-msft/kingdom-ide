@@ -226,58 +226,6 @@
   .ports-note + & { margin-top: 12px; }
 }
 
-// --- The wells: containers the whole city shares -----------------------------
-
-.wells-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-// Two lines rather than one row: an address is long, an image name is long,
-// and squeezing both onto the same line as the ports would make the one thing
-// the King came here to copy the hardest thing to select.
-.wells-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 2px 8px;
-  padding: 6px 0;
-  font-size: 12px;
-
-  & + & { border-top: 1px solid t.$edge; }
-}
-
-.wells-name {
-  grid-column: 1;
-  color: t.$ink;
-  font-family: t.$font-mono;
-  font-weight: 600;
-}
-
-// The one thing worth copying, so it is the one thing in the King's colour.
-.wells-address {
-  grid-column: 2;
-  justify-self: start;
-  color: t.$gold;
-  font-family: t.$font-mono;
-  user-select: all;
-}
-
-.wells-image,
-.wells-drawers {
-  color: t.$ink-faint;
-  font-size: 10px;
-}
-
-.wells-image { grid-column: 1 / -1; }
-
-// Who else is drawing. Marked when it is more than this plan -- that is the
-// fact that changes what the King does next in a shared database.
-.wells-drawers {
-  grid-column: 1 / -1;
-  color: t.$working;
-}
-
 // --- The network chip, in the prompt bar -------------------------------------
 
 // Shaped like `.workspace-chip`, which it sits beside: the two are the same

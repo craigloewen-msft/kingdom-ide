@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, PromptBar, Sidebar};
+use crate::components::{Conversation, PromptBar, SharedResourcesView, Sidebar};
 use kingdom_citymap::map::MapPresence;
 use kingdom_citymap::CityMap;
 use kingdom_core::{
@@ -815,6 +815,11 @@ pub fn App() -> impl IntoView {
                     <ParentRoute path=path!("") view=ThroneRoom>
                         <Route path=path!("") view=Realm/>
                         <Route path=path!("plan/:id") view=Conversation/>
+                        // A sibling of both, and deliberately not inside a
+                        // chamber: what this machine shares spans every project
+                        // plus the King's own profile, which is not a question
+                        // one conversation can be asked.
+                        <Route path=path!("resources") view=SharedResourcesView/>
                     </ParentRoute>
                 </Routes>
             </Router>

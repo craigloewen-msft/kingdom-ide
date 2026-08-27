@@ -6,6 +6,7 @@
 //! ```text
 //! ~/.kingdom/
 //!   settings.json               durable IDE settings, e.g. the last kingdom opened
+//!   services.toml               shared resources the King keeps for every project
 //!   kingdoms/<key>/
 //!     kingdom.json              which root this folder is for
 //!     plans/<id>.json           (see `store.rs`)
@@ -14,6 +15,11 @@
 //!     approved/<id>.md          retired; still migrated, no longer written
 //!   realms/<name>/              proving grounds (see `mock.rs`)
 //! ```
+//!
+//! `services.toml` is at the top rather than in a kingdom's folder because a
+//! host-level shared resource is offered to every kingdom the King opens --
+//! that is exactly what distinguishes it from one a project declares. See
+//! `crate::services::Scope`.
 //!
 //! **Why out of the kingdom root.** Two reasons, and they pull the same way.
 //! Which folder the King last opened is the one fact that cannot be read from
