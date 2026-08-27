@@ -62,13 +62,36 @@
 //! court's edits. That is right while the King is only reading and wrong the
 //! moment he is typing against a line: the rows would shift under him. So an
 //! open composer suspends the refetch, exactly as it does in the source view.
+//!
+//! # Seeing further than the diff shows
+//!
+//! Three lines of context either side of a change say *what* moved and often
+//! not *where*: the function a hunk sits inside starts above the first row
+//! drawn. So every break between hunks -- and the run before the first and after
+//! the last, which the panel never used to mark at all -- is a [`Gap`], and the
+//! King opens it twenty lines at a time from either end, or all at once.
+//!
+//! **The lines are fetched, not shipped with the diff.** Sending the whole file
+//! and folding it here would be simpler and would undo the row cap the panel is
+//! built around: a 40,000-line file with one changed line is cheap today
+//! precisely because the unchanged 39,990 never leave the server. See
+//! `crate::api::plan_diff_context`, and `review::context` for why nothing is
+//! re-diffed to answer.
 
-use crate::api::plan_diff;
+use crate::api::{plan_diff, plan_diff_context};
 use crate::components::note_composer::NoteComposer;
 use crate::components::resizer::{restore_flag, store_flag};
 use kingdom_core::{DiffLine, DiffRow, FileDiff, NoteSide, PlanId, ReviewNote};
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
 use std::collections::HashSet;
+
+/// Lines one press of a gap's control reveals.
+///
+/// Twenty, as GitHub's is. Small enough that the answer lands instantly and the
+/// King keeps his place on screen, large enough that finding an enclosing `fn`
+/// is usually one press rather than four.
+const STEP: u32 = 20;
 
 /// Whether long lines wrap inside their column, remembered between visits.
 ///
@@ -183,6 +206,12 @@ pub fn DiffView(
         (Some(diff.path.as_str()) == path.get().as_deref()).then_some(diff)
     });
 
+    // The plan, kept where both the per-hunk gaps and the trailing one can take
+    // a copy: the first is used inside a `<For>` closure, which moves what it
+    // captures, and a second `.clone()` afterwards would be a borrow of a value
+    // already gone.
+    let plan_id = StoredValue::new(plan.clone());
+
     let base = Memo::new(move |_| shown.get().map(|d| d.base).unwrap_or_default());
     let hunks = Memo::new(move |_| shown.get().map(|d| d.hunks).unwrap_or_default());
     // A verdict is what the panel says *instead of*, or beneath, the rows: a
@@ -296,14 +325,22 @@ pub fn DiffView(
                         {
                             let (index, hunk) = entry;
                             view! {
-                                // The break between two hunks, so a jump in the
-                                // line numbers is announced rather than
-                                // discovered.
-                                <Show when=move || { index > 0 }>
-                                    <div class="diff-gap">
-                                        <span class="diff-gap-mark">"\u{22ef}"</span>
-                                    </div>
-                                </Show>
+                                // What is hidden before this hunk, and the way
+                                // to open it. Hunk 0 included: a change on line
+                                // 400 otherwise simply starts the panel, with
+                                // no sign that 399 lines come first.
+                                <Gap
+                                    plan=plan_id.get_value()
+                                    path=path
+                                    gap=Memo::new(move |_| {
+                                        shown.get().filter(|d| d.may_expand())?.gap_before(index)
+                                    })
+                                    parted={index > 0}
+                                    marked=marked
+                                    writing=writing
+                                    set_writing=set_writing
+                                    on_note=on_note
+                                />
                                 <For
                                     each={
                                         let rows = hunk.rows.clone();
@@ -314,95 +351,363 @@ pub fn DiffView(
                                 >
                                     {
                                         let (_, row) = row;
-                                        let context = row.is_context();
-                                        // Which cell of this row, if either, has
-                                        // the composer open. Held here rather
-                                        // than in `Side` so the box can be a
-                                        // sibling of both cells and span the
-                                        // grid -- see the module note.
-                                        let old_line = row.old.clone();
-                                        let new_line = row.new.clone();
-                                        let writing_here = Memo::new(move |_| {
-                                            let open = writing.get()?;
-                                            let (side, line) = open;
-                                            let here = match side {
-                                                NoteSide::Base => old_line.as_ref(),
-                                                NoteSide::Working => new_line.as_ref(),
-                                            }?;
-                                            (here.number == line)
-                                                .then(|| (side, line, here.text()))
-                                        });
-
                                         view! {
-                                            <div class="diff-row" class:context=context>
-                                                <Side
-                                                    line=row.old
-                                                    side=OLD
-                                                    note_side=NoteSide::Base
-                                                    marked=marked
-                                                    writing=writing
-                                                    set_writing=set_writing
-                                                />
-                                                <Side
-                                                    line=row.new
-                                                    side=NEW
-                                                    note_side=NoteSide::Working
-                                                    marked=marked
-                                                    writing=writing
-                                                    set_writing=set_writing
-                                                />
-                                            </div>
-
-                                            // The box, spanning both columns
-                                            // beneath the row it is about. A
-                                            // sibling of `.diff-row` rather than
-                                            // a child, because `.diff-row` is
-                                            // `display: contents` and has no box
-                                            // of its own to put anything in.
-                                            <Show when=move || writing_here.get().is_some()>
-                                                {move || {
-                                                    let (side, line, quote) = writing_here.get()?;
-                                                    let quote = StoredValue::new(quote);
-                                                    Some(view! {
-                                                        <div class="diff-composer">
-                                                            <NoteComposer
-                                                                quote=quote.get_value()
-                                                                about=match side {
-                                                                    NoteSide::Base => format!(
-                                                                        "line {line}, as it was"
-                                                                    ),
-                                                                    NoteSide::Working => {
-                                                                        format!("line {line}")
-                                                                    }
-                                                                }
-                                                                on_write=Callback::new(
-                                                                    move |note: String| {
-                                                                        set_writing.set(None);
-                                                                        on_note.run((
-                                                                            line,
-                                                                            side,
-                                                                            quote.get_value(),
-                                                                            note,
-                                                                        ));
-                                                                    }
-                                                                )
-                                                                on_cancel=Callback::new(
-                                                                    move |_| set_writing.set(None)
-                                                                )
-                                                            />
-                                                        </div>
-                                                    })
-                                                }}
-                                            </Show>
+                                            <Row
+                                                row=row
+                                                marked=marked
+                                                writing=writing
+                                                set_writing=set_writing
+                                                on_note=on_note
+                                            />
                                         }
                                     }
                                 </For>
                             }
                         }
                     </For>
+
+                    // And the tail of the file, for the same reason the leading
+                    // gap exists: a change forty lines from the end should say
+                    // so rather than look like the end of the file.
+                    <Gap
+                        plan=plan_id.get_value()
+                        path=path
+                        gap=Memo::new(move |_| {
+                            shown.get().filter(|d| d.may_expand())?.gap_after_last()
+                        })
+                        parted=false
+                        marked=marked
+                        writing=writing
+                        set_writing=set_writing
+                        on_note=on_note
+                    />
                 </div>
             </div>
         </div>
+    }
+}
+
+/// A server function's failure, in the words the server actually wrote.
+///
+/// `ServerFnError`'s own `Display` prefixes "error running server function: ",
+/// which is a fact about the transport and reads as noise in a strip a few
+/// words wide -- what the King is being told is *this file has changed since it
+/// was compared*, and the plumbing around that sentence is not for him.
+fn plainly(error: ServerFnError) -> String {
+    match error {
+        ServerFnError::ServerError(said) => said,
+        // Anything else genuinely is about the request rather than about the
+        // file, and its own wording is the best available.
+        other => other.to_string(),
+    }
+}
+
+/// One row of the comparison: two cells that must stay level, and the composer
+/// that opens beneath them.
+///
+/// A component rather than the inline block it used to be, because revealed
+/// context lines need exactly this and a second renderer for them would be a
+/// second place for "which side is this note about?" to be answered. A line the
+/// King opened up takes a note the same way a line the diff chose to show does.
+#[component]
+fn Row(
+    row: DiffRow,
+    marked: Memo<HashSet<Cell>>,
+    writing: ReadSignal<Option<Cell>>,
+    set_writing: WriteSignal<Option<Cell>>,
+    on_note: Callback<(u32, NoteSide, String, String)>,
+) -> impl IntoView {
+    let context = row.is_context();
+
+    // Which cell of this row, if either, has the composer open. Held here
+    // rather than in `Side` so the box can be a sibling of both cells and span
+    // the grid -- see the module note.
+    let old_line = row.old.clone();
+    let new_line = row.new.clone();
+    let writing_here = Memo::new(move |_| {
+        let (side, line) = writing.get()?;
+        let here = match side {
+            NoteSide::Base => old_line.as_ref(),
+            NoteSide::Working => new_line.as_ref(),
+        }?;
+        (here.number == line).then(|| (side, line, here.text()))
+    });
+
+    view! {
+        <div class="diff-row" class:context=context>
+            <Side
+                line=row.old
+                side=OLD
+                note_side=NoteSide::Base
+                marked=marked
+                writing=writing
+                set_writing=set_writing
+            />
+            <Side
+                line=row.new
+                side=NEW
+                note_side=NoteSide::Working
+                marked=marked
+                writing=writing
+                set_writing=set_writing
+            />
+        </div>
+
+        // The box, spanning both columns beneath the row it is about. A sibling
+        // of `.diff-row` rather than a child, because `.diff-row` is
+        // `display: contents` and has no box of its own to put anything in.
+        <Show when=move || writing_here.get().is_some()>
+            {move || {
+                let (side, line, quote) = writing_here.get()?;
+                let quote = StoredValue::new(quote);
+                Some(view! {
+                    <div class="diff-composer">
+                        <NoteComposer
+                            quote=quote.get_value()
+                            about=match side {
+                                NoteSide::Base => format!("line {line}, as it was"),
+                                NoteSide::Working => format!("line {line}"),
+                            }
+                            on_write=Callback::new(move |note: String| {
+                                set_writing.set(None);
+                                on_note.run((line, side, quote.get_value(), note));
+                            })
+                            on_cancel=Callback::new(move |_| set_writing.set(None))
+                        />
+                    </div>
+                })
+            }}
+        </Show>
+    }
+}
+
+/// Lines the diff is not showing, and the ways to open them.
+///
+/// # What it draws, and in what order
+///
+/// Rows revealed from the top, the strip, then rows revealed from the bottom --
+/// as a **fragment**, never wrapped in an element. `.diff-grid` is the grid
+/// itself and `.diff-row` is `display: contents`; a box around any of this would
+/// take its cells out of the grid and put the two columns out of step.
+///
+/// # Why the reveal is local, and forgotten on a refetch
+///
+/// The counts live here rather than in the panel, so this is emptied whenever
+/// the gap it was given moves -- which is exactly when the court has edited the
+/// file. Revealed lines left standing across that would be text the King is
+/// still reading and the workspace no longer holds.
+#[component]
+fn Gap(
+    plan: PlanId,
+    path: Memo<Option<String>>,
+    /// What is hidden here, or `None` when nothing is -- two hunks that touch,
+    /// or a comparison too partial to measure (`FileDiff::may_expand`).
+    gap: Memo<Option<kingdom_core::Gap>>,
+    /// Whether this gap sits *between* two hunks rather than at an end of the
+    /// file. Only the break between hunks is drawn once there is nothing left
+    /// to reveal: at the ends, an empty strip would be a line announcing that
+    /// the file begins where it begins.
+    parted: bool,
+    marked: Memo<HashSet<Cell>>,
+    writing: ReadSignal<Option<Cell>>,
+    set_writing: WriteSignal<Option<Cell>>,
+    on_note: Callback<(u32, NoteSide, String, String)>,
+) -> impl IntoView {
+    // What has been revealed from each end. Two runs rather than one, because
+    // "read on from the change above" and "see what encloses the change below"
+    // are different questions, and the answer to one must not shift the other.
+    let (above, set_above) = signal(Vec::<DiffRow>::new());
+    let (below, set_below) = signal(Vec::<DiffRow>::new());
+    let (failed, set_failed) = signal(None::<String>);
+    let fetching = RwSignal::new(false);
+
+    // A gap that has moved is a gap whose revealed rows are about a different
+    // part of the file. Clearing on change is what keeps a refetch from leaving
+    // the King reading lines that were true a moment ago.
+    Effect::new(move |_| {
+        gap.track();
+        set_above.set(Vec::new());
+        set_below.set(Vec::new());
+        set_failed.set(None);
+    });
+
+    // What is still hidden, once both ends have been opened as far as they have.
+    let left = Memo::new(move |_| {
+        gap.get()?
+            .narrowed(above.get().len() as u32, below.get().len() as u32)
+    });
+
+    // Asks for a run and files it under the end it was taken from. One closure
+    // for both directions: which end this was is the only thing that differs,
+    // and two would be two places to get the append order wrong.
+    let reveal = {
+        let plan = plan.clone();
+        move |run: kingdom_core::Gap, from_top: bool| {
+            if fetching.get_untracked() {
+                return;
+            }
+            let Some(path) = path.get_untracked() else {
+                return;
+            };
+            fetching.set(true);
+            set_failed.set(None);
+
+            let plan = plan.to_string();
+            leptos::task::spawn_local(async move {
+                let asked =
+                    plan_diff_context(plan, path, run.old_from, run.new_from, run.count).await;
+                match asked {
+                    Ok(rows) => {
+                        if from_top {
+                            // Appended after what was already revealed from the
+                            // top: this run starts where that one ended.
+                            set_above.update(|had| had.extend(rows));
+                        } else {
+                            // Prepended, for the mirror reason -- this run sits
+                            // above whatever was revealed upwards before it.
+                            set_below.update(|had| {
+                                let mut rows = rows;
+                                rows.append(had);
+                                *had = rows;
+                            });
+                        }
+                    }
+                    Err(e) => set_failed.set(Some(plainly(e))),
+                }
+                fetching.set(false);
+            });
+        }
+    };
+    let reveal = StoredValue::new(reveal);
+
+    let revealed = move |rows: ReadSignal<Vec<DiffRow>>| {
+        view! {
+            <For
+                each={move || rows.get().into_iter().enumerate().collect::<Vec<_>>()}
+                key=|(_, row): &(usize, DiffRow)| {
+                    // Keyed on the line itself rather than its position: the run
+                    // grows at one end as more is revealed, and an index key
+                    // would renumber every row already on screen.
+                    (
+                        row.old.as_ref().map(|l| l.number),
+                        row.new.as_ref().map(|l| l.number),
+                    )
+                }
+                let:entry
+            >
+                {
+                    let (_, row) = entry;
+                    view! {
+                        <Row
+                            row=row
+                            marked=marked
+                            writing=writing
+                            set_writing=set_writing
+                            on_note=on_note
+                        />
+                    }
+                }
+            </For>
+        }
+    };
+
+    view! {
+        {revealed(above)}
+
+        <Show when=move || left.get().is_some() || (parted && gap.get().is_some())>
+            <div class="diff-gap">
+                // Sticky, and sized against the stage rather than the grid, for
+                // the reason `.diff-composer` is: unwrapped, the grid is as wide
+                // as the longest line in the file, and a strip that scrolled
+                // with it would put its own buttons off the panel's edge.
+                <div class="diff-gap-strip">
+                    <span class="diff-gap-mark">"\u{22ef}"</span>
+                    <span class="diff-gap-count">
+                        {move || match left.get() {
+                            Some(gap) if gap.count == 1 => "1 line not shown".to_string(),
+                            Some(gap) => format!("{} lines not shown", gap.count),
+                            // Nothing left, and the strip is only still drawn
+                            // because the break between two hunks is worth
+                            // marking however much of it has been opened.
+                            None => String::new(),
+                        }}
+                    </span>
+
+                    <Show when=move || left.get().is_some()>
+                        <span class="diff-gap-acts">
+                            // Upwards first, reading left to right: it is the
+                            // one the King reaches for, since the `fn` a change
+                            // sits inside starts above it.
+                            <button
+                                class="diff-gap-act"
+                                title="Show the lines just above the change below"
+                                disabled=move || fetching.get()
+                                on:click=move |_| {
+                                    if let Some(gap) = left.get_untracked() {
+                                        reveal.with_value(|f| f(gap.tail(STEP), false));
+                                    }
+                                }
+                            >
+                                {format!("\u{2191} {STEP}")}
+                            </button>
+
+                            // Only while the whole of what remains fits one
+                            // answer. Offered against a larger gap it would
+                            // reveal the cap and leave the rest -- a button that
+                            // does less than it says.
+                            <Show when=move || {
+                                left.get().is_some_and(|g| g.count <= kingdom_core::MOST_CONTEXT)
+                            }>
+                                <button
+                                    class="diff-gap-act"
+                                    title="Show every line hidden here"
+                                    disabled=move || fetching.get()
+                                    on:click=move |_| {
+                                        if let Some(gap) = left.get_untracked() {
+                                            reveal.with_value(|f| f(gap, true));
+                                        }
+                                    }
+                                >
+                                    {move || {
+                                        let n = left.get().map(|g| g.count).unwrap_or_default();
+                                        format!("Show all {n}")
+                                    }}
+                                </button>
+                            </Show>
+
+                            <button
+                                class="diff-gap-act"
+                                title="Show the lines just below the change above"
+                                disabled=move || fetching.get()
+                                on:click=move |_| {
+                                    if let Some(gap) = left.get_untracked() {
+                                        reveal.with_value(|f| f(gap.head(STEP), true));
+                                    }
+                                }
+                            >
+                                {format!("\u{2193} {STEP}")}
+                            </button>
+                        </span>
+                    </Show>
+                </div>
+            </div>
+        </Show>
+
+        // Reported in the strip's own place rather than over the panel: the
+        // ordinary cause is the court having rewritten this stretch of the file,
+        // which is a fact about these lines and not about the comparison.
+        <Show when=move || failed.get().is_some()>
+            <div class="diff-gap">
+                <div class="diff-gap-strip">
+                    <span class="diff-gap-failed">
+                        "These lines could not be shown: "
+                        {move || failed.get().unwrap_or_default()}
+                    </span>
+                </div>
+            </div>
+        </Show>
+
+        {revealed(below)}
     }
 }
 

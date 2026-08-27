@@ -344,13 +344,168 @@ pub struct FileDiff {
     /// caption itself without the drawer being open.
     pub base: String,
     pub hunks: Vec<Hunk>,
+    /// How many lines each version has in full, which is what makes the
+    /// unshown parts *measurable*: the hunks say where the changes are, and
+    /// these say how much file lies before the first and after the last.
+    pub old_lines: u32,
+    pub new_lines: u32,
     pub verdict: DiffVerdict,
 }
 
 /// One contiguous run of changed lines and the context around it.
+///
+/// The four numbers are what a unified diff spells `@@ -a,b +c,d @@`, and they
+/// are here for one reason: without them a hunk knows what it *shows* and
+/// nothing about what it is hiding, so the panel cannot offer to reveal it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hunk {
     pub rows: Vec<DiffRow>,
+    /// The 1-based first line of this hunk in the old file, and how many of
+    /// that file's lines it covers.
+    ///
+    /// A pure insertion covers none of them, so `old_len` is 0 and `old_start`
+    /// is the line the insertion would come *before* -- which is exactly what
+    /// the gap arithmetic wants, since everything up to `old_start - 1` is
+    /// still hidden above it.
+    pub old_start: u32,
+    pub old_len: u32,
+    pub new_start: u32,
+    pub new_len: u32,
+}
+
+impl Hunk {
+    /// One past the last old line this hunk covers, 1-based.
+    fn old_end(&self) -> u32 {
+        self.old_start + self.old_len
+    }
+
+    /// One past the last new line this hunk covers, 1-based.
+    fn new_end(&self) -> u32 {
+        self.new_start + self.new_len
+    }
+}
+
+/// Lines one expansion may reveal.
+///
+/// A diff of a huge file is cheap because the lines it does not show never
+/// leave the server, and "show me everything between these two hunks" is
+/// exactly the request that would undo that: the gap in a 40,000-line file with
+/// one changed line is 39,990 lines long. So one press reveals at most this
+/// many, and the strip stays, offering the rest.
+///
+/// **Here rather than beside the reader**, because the browser decides whether
+/// to offer "show all" and the server decides what it will serve, and those two
+/// have to be the same number or the button silently gives less than it says.
+pub const MOST_CONTEXT: u32 = 400;
+
+/// A run of lines the diff is not showing, and where to find them.
+///
+/// Both files are named because the panel has two columns to number and they
+/// have drifted apart by the time any hunk has landed -- old line 40 and new
+/// line 46 are the same text. The count is one number rather than two because
+/// **a gap is equal on both sides by construction**: a diff only ever breaks
+/// between hunks inside a run of unchanged lines, so what is hidden there is
+/// the same text in both versions. Anything else would not be a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gap {
+    /// The first hidden line in the old file, 1-based.
+    pub old_from: u32,
+    /// The same line in the new file, 1-based.
+    pub new_from: u32,
+    pub count: u32,
+}
+
+impl Gap {
+    /// The first `n` lines of this gap -- what "read on downwards" asks for.
+    pub fn head(&self, n: u32) -> Gap {
+        Gap {
+            count: self.count.min(n),
+            ..*self
+        }
+    }
+
+    /// The last `n` lines -- what "look upwards" asks for, and the usual one:
+    /// the `fn` a hunk sits inside is a few lines above it.
+    pub fn tail(&self, n: u32) -> Gap {
+        let count = self.count.min(n);
+        let back = self.count - count;
+        Gap {
+            old_from: self.old_from + back,
+            new_from: self.new_from + back,
+            count,
+        }
+    }
+
+    /// What is still hidden once `from_top` lines have been revealed from the
+    /// top of this gap and `from_bottom` from the bottom.
+    ///
+    /// `None` when the two revealed runs have met, which is the panel's signal
+    /// to stop offering a control: there is nothing left behind it.
+    pub fn narrowed(&self, from_top: u32, from_bottom: u32) -> Option<Gap> {
+        let taken = from_top.saturating_add(from_bottom);
+        let count = self.count.checked_sub(taken).filter(|n| *n > 0)?;
+        Some(Gap {
+            old_from: self.old_from + from_top,
+            new_from: self.new_from + from_top,
+            count,
+        })
+    }
+}
+
+impl FileDiff {
+    /// Whether the unshown lines may be asked for at all.
+    ///
+    /// Only a whole comparison. **Truncated is the case this exists for**: rows
+    /// were dropped part-way through a hunk, so its declared range no longer
+    /// describes what is on screen, and a reveal computed from it would skip
+    /// the dropped lines without saying so. No control is a better answer than
+    /// a lying one, and the panel already says the comparison is partial.
+    pub fn may_expand(&self) -> bool {
+        matches!(self.verdict, DiffVerdict::Shown)
+    }
+
+    /// What is hidden immediately before hunk `index`.
+    ///
+    /// Hunk 0 included, and that is not an edge case being tolerated: a change
+    /// on line 400 of a file currently *starts* the panel, with no sign that
+    /// 399 lines come first.
+    pub fn gap_before(&self, index: usize) -> Option<Gap> {
+        let hunk = self.hunks.get(index)?;
+        let (old_from, new_from) = match index.checked_sub(1).and_then(|i| self.hunks.get(i)) {
+            Some(previous) => (previous.old_end(), previous.new_end()),
+            None => (1, 1),
+        };
+        gap(old_from, new_from, hunk.old_start, hunk.new_start)
+    }
+
+    /// What is hidden after the last hunk: the tail of the file.
+    pub fn gap_after_last(&self) -> Option<Gap> {
+        let last = self.hunks.last()?;
+        gap(
+            last.old_end(),
+            last.new_end(),
+            self.old_lines + 1,
+            self.new_lines + 1,
+        )
+    }
+}
+
+/// The run between two positions, or `None` if the hunks touch.
+///
+/// The two sides are measured separately and the **smaller** is taken. They are
+/// equal whenever the diff is honest, and taking the minimum means a diff that
+/// somehow is not offers to reveal too little rather than reading off the end of
+/// one of the two files.
+fn gap(old_from: u32, new_from: u32, old_until: u32, new_until: u32) -> Option<Gap> {
+    let count = old_until
+        .saturating_sub(old_from)
+        .min(new_until.saturating_sub(new_from));
+
+    (count > 0).then_some(Gap {
+        old_from,
+        new_from,
+        count,
+    })
 }
 
 /// One line of the side-by-side view: what was there, and what is there now.
@@ -591,5 +746,174 @@ mod tests {
         let empty = ChangeSummary::nothing("main", "Not a repository.");
         assert_eq!(empty.added(), 0);
         assert!(empty.note.is_some());
+    }
+
+    // -- What a diff is not showing ------------------------------------------
+
+    /// A hunk with the shape the gap arithmetic reads, and no rows: none of
+    /// these tests care what is *in* a hunk, only where it sits.
+    fn hunk(old_start: u32, old_len: u32, new_start: u32, new_len: u32) -> Hunk {
+        Hunk {
+            rows: Vec::new(),
+            old_start,
+            old_len,
+            new_start,
+            new_len,
+        }
+    }
+
+    fn diff_of(hunks: Vec<Hunk>, old_lines: u32, new_lines: u32) -> FileDiff {
+        FileDiff {
+            path: "src/lib.rs".into(),
+            base: "main".into(),
+            hunks,
+            old_lines,
+            new_lines,
+            verdict: DiffVerdict::Shown,
+        }
+    }
+
+    /// The three places lines can hide, in one file: before the first hunk,
+    /// between two, and after the last.
+    ///
+    /// The middle gap is the one that has to carry *both* numbers: by then the
+    /// first hunk has added two lines, so the same text is old line 21 and new
+    /// line 23, and a single number would put one of the two columns wrong.
+    #[test]
+    fn a_diff_says_what_it_is_not_showing() {
+        // Old 10..=20 became new 10..=22, then old 40..=45 became new 42..=47.
+        let diff = diff_of(vec![hunk(10, 11, 10, 13), hunk(40, 6, 42, 6)], 100, 102);
+
+        let leading = diff.gap_before(0).expect("the file before the first hunk");
+        assert_eq!(
+            (leading.old_from, leading.new_from, leading.count),
+            (1, 1, 9),
+            "nine lines precede a hunk that starts at line 10"
+        );
+
+        let between = diff.gap_before(1).expect("the run between the two hunks");
+        assert_eq!(
+            (between.old_from, between.new_from, between.count),
+            (21, 23, 19),
+            "the same text is old line 21 and new line 23 by then"
+        );
+
+        let trailing = diff.gap_after_last().expect("the tail of the file");
+        assert_eq!(
+            (trailing.old_from, trailing.new_from, trailing.count),
+            (46, 48, 55),
+            "the tail runs to the end of the shorter side"
+        );
+    }
+
+    /// Two hunks that touch hide nothing between them, and a file whose change
+    /// reaches its last line hides nothing after it. A control there would be a
+    /// button that reveals no lines.
+    #[test]
+    fn hunks_that_touch_have_no_gap_between_them() {
+        let diff = diff_of(vec![hunk(1, 5, 1, 5), hunk(6, 4, 6, 4)], 9, 9);
+
+        assert_eq!(diff.gap_before(0), None, "the first hunk starts the file");
+        assert_eq!(diff.gap_before(1), None, "the second begins where it ends");
+        assert_eq!(diff.gap_after_last(), None, "the change reaches the end");
+    }
+
+    /// A new file is one hunk covering everything, and there is nothing beside
+    /// it to reveal -- including on the old side, which does not exist.
+    #[test]
+    fn a_wholly_new_file_hides_nothing() {
+        let diff = diff_of(vec![hunk(1, 0, 1, 12)], 0, 12);
+
+        assert_eq!(diff.gap_before(0), None);
+        assert_eq!(diff.gap_after_last(), None);
+    }
+
+    /// A hunk that inserts without deleting covers no old lines, so the gap
+    /// after it must be measured from where it *began* on that side. Read as
+    /// though it had consumed a line, the old column would skip one.
+    #[test]
+    fn a_pure_insertion_does_not_consume_an_old_line() {
+        let diff = diff_of(vec![hunk(30, 0, 30, 4)], 60, 64);
+
+        let before = diff.gap_before(0).expect("the lines above");
+        assert_eq!((before.old_from, before.new_from, before.count), (1, 1, 29));
+
+        let after = diff.gap_after_last().expect("the lines below");
+        assert_eq!(
+            (after.old_from, after.new_from, after.count),
+            (30, 34, 31),
+            "old line 30 is still hidden: nothing was taken from that side"
+        );
+    }
+
+    /// The two directions the King reads in, off one gap.
+    #[test]
+    fn a_gap_can_be_taken_from_either_end() {
+        let gap = Gap {
+            old_from: 21,
+            new_from: 23,
+            count: 50,
+        };
+
+        let down = gap.head(20);
+        assert_eq!((down.old_from, down.new_from, down.count), (21, 23, 20));
+
+        let up = gap.tail(20);
+        assert_eq!(
+            (up.old_from, up.new_from, up.count),
+            (51, 53, 20),
+            "looking up means the twenty lines that sit against the hunk below"
+        );
+
+        // Asked for more than there is, either way, gives what there is.
+        assert_eq!(gap.head(200).count, 50);
+        assert_eq!(
+            gap.tail(200),
+            gap,
+            "the whole gap, still starting where it does"
+        );
+    }
+
+    /// What is left after revealing, and the moment there is nothing left.
+    ///
+    /// The `None` is load-bearing: it is what takes the control off screen when
+    /// the two revealed runs meet, rather than leaving a strip that reveals
+    /// nothing.
+    #[test]
+    fn a_gap_closes_when_both_ends_have_been_opened() {
+        let gap = Gap {
+            old_from: 21,
+            new_from: 23,
+            count: 50,
+        };
+
+        let left = gap.narrowed(20, 0).expect("thirty still hidden");
+        assert_eq!((left.old_from, left.new_from, left.count), (41, 43, 30));
+
+        let left = gap.narrowed(20, 20).expect("ten still hidden");
+        assert_eq!((left.old_from, left.new_from, left.count), (41, 43, 10));
+
+        assert_eq!(gap.narrowed(25, 25), None, "the two runs have met");
+        assert_eq!(gap.narrowed(40, 40), None, "and cannot overshoot into more");
+    }
+
+    /// A comparison that was cut off must not offer to reveal anything.
+    ///
+    /// Rows were dropped part-way through a hunk, so its declared range no
+    /// longer describes what is on screen -- an expansion computed from it
+    /// would skip the dropped lines silently.
+    #[test]
+    fn only_a_whole_comparison_may_be_opened_up() {
+        let mut diff = diff_of(vec![hunk(10, 4, 10, 4)], 100, 100);
+        assert!(diff.may_expand());
+
+        diff.verdict = DiffVerdict::Truncated(120);
+        assert!(
+            !diff.may_expand(),
+            "a truncated diff's ranges are not the rows shown"
+        );
+
+        diff.verdict = DiffVerdict::Binary;
+        assert!(!diff.may_expand());
     }
 }
