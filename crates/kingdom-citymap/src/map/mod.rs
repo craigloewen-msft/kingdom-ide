@@ -495,6 +495,43 @@ pub struct MapRoad {
     pub edge: MapColor,
 }
 
+/// The narrowest kerb drawn either side of a road.
+///
+/// A hairline drive still has to read as a path rather than as a scratch, so
+/// the verge never disappears entirely however thin the paving gets.
+pub const MIN_KERB: f32 = 0.45;
+
+/// The widest kerb drawn either side of a road.
+///
+/// Every road on the map used to get exactly this much, and no road gets more
+/// now — the ceiling is what guarantees the change to a proportional kerb
+/// cannot widen a street that was already drawn.
+pub const MAX_KERB: f32 = 1.6;
+
+/// What share of its own paving a road's kerb is.
+const KERB_SHARE: f32 = 0.35;
+
+impl MapRoad {
+    /// How wide the whole ribbon is drawn, paving plus the verge under it.
+    ///
+    /// **This, not [`width`](Self::width), is what the King actually sees**, and
+    /// keeping the two apart is what this function exists to prevent forgetting.
+    /// The verge used to be a flat `width + 1.6` for every road on the map, and
+    /// adding a constant to both ends of a range compresses it — hardest at the
+    /// quiet end, where the constant is most of the mark. Measured across a real
+    /// dev folder, driveway paving spanned 6.8x from an unreferenced file to the
+    /// busiest one while the ribbon drawn for it spanned only 3.9x, and the step
+    /// from *nothing imports this* to *one file does* came out at 1.27x — a third
+    /// of a world unit, at an isometric angle, which is no difference at all.
+    ///
+    /// A proportional verge keeps the ratio the width earned. The clamp is what
+    /// keeps it honest in both directions: [`MIN_KERB`] so a hairline still has
+    /// a verge, [`MAX_KERB`] so no road is drawn wider than it was before.
+    pub fn ribbon_width(&self) -> f32 {
+        self.width + (self.width * KERB_SHARE).clamp(MIN_KERB, MAX_KERB)
+    }
+}
+
 /// A single holding, described as geometry to build rather than pixels to draw.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1083,6 +1120,52 @@ mod tests {
             !MapPresence::Full.in_rail(),
             "the King's own map must never be scoped out from under him"
         );
+    }
+
+    fn road(width: f32) -> MapRoad {
+        MapRoad {
+            kind: RoadKind::Drive,
+            points: vec![[0.0, 0.0], [10.0, 0.0]],
+            width,
+            traffic: 1,
+            color: [0, 0, 0, 255],
+            edge: [0, 0, 0, 255],
+        }
+    }
+
+    /// The verge is part of how wide a road *looks*, so it must not flatten the
+    /// range the width earned. A flat kerb did exactly that: it is most of a
+    /// hairline's mark and almost none of a trunk road's, so it compressed the
+    /// quiet end into the busy one.
+    #[test]
+    fn a_kerb_never_swamps_the_paving_it_edges() {
+        let hairline = road(1.0).ribbon_width();
+        let busy = road(11.0).ribbon_width();
+        let paving = 11.0 / 1.0;
+        let drawn = busy / hairline;
+        assert!(
+            drawn > paving * 0.6,
+            "paving spans {paving:.1}x but the ribbon drawn for it spans only \
+             {drawn:.1}x, so most of what the width says is lost in the verge"
+        );
+    }
+
+    /// Both ends of the clamp, pinned directly. The ceiling is the load-bearing
+    /// one: every road used to get exactly `MAX_KERB`, so this is what promises
+    /// a proportional verge cannot widen a road that was already drawn.
+    #[test]
+    fn a_kerb_stays_between_its_floor_and_the_width_roads_had_before() {
+        for width in [0.0, 0.5, 1.0, 2.4, 5.0, 13.0, 34.0, 54.4] {
+            // Recovered by subtraction, so it carries the rounding of a sum of
+            // two f32s of very different sizes -- a 13.0 road comes back with a
+            // 1.6000004 kerb. The tolerance is for that, not for slack in the
+            // rule; anything actually out of range is out by far more.
+            let kerb = road(width).ribbon_width() - width;
+            assert!(
+                (MIN_KERB - 1e-3..=MAX_KERB + 1e-3).contains(&kerb),
+                "a {width} wide road was given a {kerb} kerb"
+            );
+        }
     }
 
     #[test]

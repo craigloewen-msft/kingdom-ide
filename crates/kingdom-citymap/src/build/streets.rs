@@ -161,29 +161,61 @@ const REALM_ROAD_EDGE: MapColor = [64, 54, 42, 255];
 
 /// How wide a driveway is drawn for a file nothing refers to.
 ///
-/// Narrow on purpose: a drive for an unreferenced holding marks a front door
-/// and nothing more, and drawn any heavier it would compete with the streets
-/// whose weight is the thing worth reading.
-const DRIVE_WIDTH: f32 = 1.6;
+/// A genuine hairline, and that is the whole point of the number. Measured
+/// across a real dev folder — five repositories, 2,174 files — **74% of every
+/// drive on the map sits at exactly this floor**, because most files are
+/// imported by nothing. The floor is therefore what the rest of the range is
+/// read *against*, so every unit given to it is a unit of contrast taken from
+/// the files that earned one. At 1.6 the mark for an unreferenced holding was
+/// heavy enough that a file with a single reference looked no different; at 1.0
+/// it still marks a front door and lets one arrival show.
+const DRIVE_WIDTH: f32 = 1.0;
 
 /// The widest a drive is drawn, before the wall it leaves has its own say.
 ///
 /// Reference counts have a long tail — one or two files in a repository are
 /// leaned on by dozens — so the curve is capped rather than left to run away
 /// with the most depended-upon file in the tree.
-const DRIVE_MAX_WIDTH: f32 = 13.0;
+///
+/// It was 13, which the top of the range actually *reached*: the busiest doors
+/// in a repository were flattened into each other at the one end where telling
+/// them apart matters most. The cap is meant to catch a runaway, not to be
+/// where the curve normally lands.
+const DRIVE_MAX_WIDTH: f32 = 20.0;
+
+/// How much of a drive's own frontage it may cover.
+///
+/// The wall a drive leaves is what bounds how wide it can be: a drive broader
+/// than the house it serves reads as a blot against the wall rather than as a
+/// path to a door.
+const DRIVE_FRONTAGE_SHARE: f32 = 0.8;
+
+/// How steeply a drive widens with the references arriving at its door.
+///
+/// **Not** the exponent a street uses, and the difference is the point. A
+/// street's traffic is a whole subtree's worth of journeys and spans thousands,
+/// so [`corridor_width`] compresses hard — what wants reading there is the
+/// order of things rather than the ratio. References do not span thousands:
+/// measured across a real dev folder the median file has 0, the 99th percentile
+/// has 16, and the busiest file in five repositories has 44. Borrowing the
+/// street's compression spent nearly all of the curve's slope on a range the
+/// data never enters, which is why a much-referenced holding and a quiet one
+/// arrived at nearly the same width.
+const DRIVE_CURVE: f32 = 0.80;
 
 /// How wide a drive serving a file with `references` inbound imports is,
 /// given the wall it comes out of is `frontage` across.
 ///
-/// The curve is the same shape as a street's: heavily compressed, because
-/// what wants reading is the order of things rather than the ratio. The wall
-/// is a hard limit — a drive broader than the house it serves stops looking
-/// like a drive.
+/// Still sub-linear — a file imported forty times is not forty times the door
+/// of one imported once — but spread across the range references actually
+/// occupy. See [`DRIVE_CURVE`]. The wall is a hard limit: a drive broader than
+/// the house it serves stops looking like a drive.
 fn drive_width(references: usize, frontage: f32) -> f32 {
     let arrivals = (references + 1) as f32;
-    let width = DRIVE_WIDTH * arrivals.powf(0.62);
-    let widest = DRIVE_MAX_WIDTH.min(frontage * 0.8).max(DRIVE_WIDTH);
+    let width = DRIVE_WIDTH * arrivals.powf(DRIVE_CURVE);
+    let widest = DRIVE_MAX_WIDTH
+        .min(frontage * DRIVE_FRONTAGE_SHARE)
+        .max(DRIVE_WIDTH);
     width.clamp(DRIVE_WIDTH, widest)
 }
 
@@ -1621,7 +1653,50 @@ mod tests {
             "{widths:?}"
         );
         // A narrow house never gets a drive broader than the wall it leaves.
-        assert!(drive_width(4_096, 6.0) <= 6.0 * 0.8 + 1e-5);
+        assert!(drive_width(4_096, 6.0) <= 6.0 * DRIVE_FRONTAGE_SHARE + 1e-5);
+    }
+
+    /// Rising is not the same as *readable*, and only the second one is what
+    /// the King was complaining about: the curve above has always risen, and a
+    /// file with twenty references still arrived at a door barely distinguishable
+    /// from a file with none.
+    ///
+    /// So this pins the property the eye actually judges — the whole ribbon,
+    /// verge included, at the reference counts a real repository holds rather
+    /// than at 4,096. It reads the drawn width through [`MapRoad::ribbon_width`]
+    /// for the same reason: the builder widening a drive that the renderer then
+    /// swallows in a flat kerb is precisely the failure this is guarding, and it
+    /// cannot be caught by a test that only looks at the paving.
+    #[test]
+    fn a_quiet_drive_and_a_busy_one_are_told_apart_at_a_glance() {
+        // Roomy enough that the wall is not what is being measured here; the
+        // frontage cap has its own assertion above.
+        let frontage = 80.0;
+        let drawn = |references: usize| {
+            MapRoad {
+                kind: RoadKind::Drive,
+                points: vec![[0.0, 0.0], [40.0, 0.0]],
+                width: drive_width(references, frontage),
+                traffic: references as u32 + 1,
+                color: LANE,
+                edge: LANE_EDGE,
+            }
+            .ribbon_width()
+        };
+
+        let (none, one, twenty) = (drawn(0), drawn(1), drawn(20));
+        assert!(
+            one >= none * 1.5,
+            "one reference draws {one:.2} against {none:.2} for none — a {:.2}x \
+             step, which at an isometric angle is no difference at all",
+            one / none
+        );
+        assert!(
+            twenty >= none * 5.0,
+            "twenty references draw {twenty:.2} against {none:.2} for none, a \
+             {:.2}x step",
+            twenty / none
+        );
     }
 
     /// through. This pins the bound directly. Both ends must lie inside the
