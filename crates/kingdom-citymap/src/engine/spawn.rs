@@ -39,6 +39,14 @@ const WARD_EDGE_WIDTH: f32 = 2.6;
 /// [`BOLD_TOWN_RING_WIDTH`] exists to answer.
 const TOWN_RING_WIDTH: f32 = 9.0;
 
+/// The lane the realm's packing leaves between neighbouring settlements.
+///
+/// `build::layout::pack_towns`'s own `TOWN_GAP`, restated rather than imported:
+/// `build` compiles only for `ssr` and `engine` only for `hydrate`, so the two
+/// genuinely cannot see each other -- see the crate docs on that split. It is
+/// here so the ring widths below can be checked against it.
+const TOWN_GAP: f32 = 24.0;
+
 /// Line weight of a working town's ring at the [`LodLevel::Districts`] tier.
 ///
 /// A width in world units is not a width on screen. The camera is fixed at the
@@ -58,17 +66,25 @@ const TOWN_RING_WIDTH: f32 = 9.0;
 /// # Why it stops here
 ///
 /// [`meshes::ribbon`] centres a band on its path, so half of this -- 11 units
-/// -- hangs *outside* the town it traces. The realm's packing leaves a lane of
-/// 24 units between neighbouring settlements (`build::layout::pack_towns`, its
-/// `TOWN_GAP`), so two working neighbours each spill 11 into a 24-unit lane and
-/// keep a seam between them instead of merging into one green mass. That is the
-/// ceiling on this number, and `the_bold_ring_cannot_spill_into_a_neighbouring_town`
-/// is what holds it.
-///
-/// The 24 is restated here rather than imported: `build` compiles only for
-/// `ssr` and `engine` only for `hydrate`, so the two constants genuinely cannot
-/// see each other -- see the crate docs on that split.
+/// -- hangs *outside* the town it traces, into [`TOWN_GAP`]. Two working
+/// neighbours each spend half of that lane and keep a seam between them instead
+/// of merging into one green mass. That is the ceiling on this number, and the
+/// `const` assertion below is what holds it.
 pub const BOLD_TOWN_RING_WIDTH: f32 = 22.0;
+
+// Checked when this compiles rather than when the suite runs, the same way
+// `works::SCAFFOLD_FLOOR`'s roofline clearance is: both of these are arithmetic
+// on literals rather than facts about behaviour, so a `#[test]` asserting them
+// could only ever fail on a build that had already been made. Widening a ring
+// into its neighbour's half of the lane is now a compile error.
+const _: () = assert!(
+    BOLD_TOWN_RING_WIDTH * 0.5 < TOWN_GAP * 0.5,
+    "a bold ring this wide meets its neighbour's across the lane between two towns"
+);
+const _: () = assert!(
+    BOLD_TOWN_RING_WIDTH > TOWN_RING_WIDTH,
+    "the bold ring is no heavier than the fine one, so the pair says nothing"
+);
 
 /// Each weight a town is traced at, and the zoom that weight is for.
 ///
@@ -1095,47 +1111,5 @@ mod tests {
                 "{lod:?} is traced no heavier than a ward kerb"
             );
         }
-    }
-
-    /// The ceiling on [`BOLD_TOWN_RING_WIDTH`], and the reason it is a
-    /// judgement with a limit rather than a free parameter.
-    ///
-    /// `meshes::ribbon` centres a band on its path, so half of a ring hangs
-    /// outside the town it traces, into the lane the realm's packing leaves
-    /// between settlements. Two working neighbours each spend half of that
-    /// lane; past this the bands touch and two towns read as one green mass,
-    /// which is the opposite of saying which one is busy.
-    ///
-    /// Read off [`TOWN_RINGS`] rather than off the constant, so it covers
-    /// whatever weights actually ship rather than the one that happens to be
-    /// widest today.
-    ///
-    /// The gap is restated rather than imported because `build::layout` is
-    /// `ssr`-only and this module is not -- see the constant's own doc.
-    #[test]
-    fn the_bold_ring_cannot_spill_into_a_neighbouring_town() {
-        // `build::layout::pack_towns`'s TOWN_GAP.
-        const TOWN_GAP: f32 = 24.0;
-
-        for (width, tier) in TOWN_RINGS {
-            let spill = width * 0.5;
-            assert!(
-                spill < TOWN_GAP * 0.5,
-                "a {tier:?} ring spilling {spill} units meets its neighbour's \
-                 across a {TOWN_GAP}-unit lane"
-            );
-        }
-
-        // And the bold one is genuinely the heavier, which is the whole point
-        // of having a second weight at all.
-        let widest = TOWN_RINGS
-            .into_iter()
-            .filter(|(_, tier)| *tier == activity::RingTier::Bold)
-            .map(|(width, _)| width)
-            .fold(0.0f32, f32::max);
-        assert!(
-            widest > TOWN_RING_WIDTH,
-            "the bold ring is {widest}, no heavier than the fine one"
-        );
     }
 }
