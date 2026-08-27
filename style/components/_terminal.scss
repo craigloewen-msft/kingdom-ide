@@ -226,11 +226,11 @@
   .ports-note + & { margin-top: 12px; }
 }
 
-// --- The network chip, in the prompt bar -------------------------------------
+// --- The isolation chip, in the prompt bar -----------------------------------
 
 // Shaped like `.workspace-chip`, which it sits beside: the two are the same
 // kind of decision and should not look like different kinds.
-.network-chip {
+.isolation-chip {
   flex: 0 0 auto;
   padding: 5px 10px;
   background: t.$panel-2;
@@ -245,13 +245,20 @@
     color: t.$ink;
   }
 
-  // The isolated case is marked, for `.workspace-chip`'s reason: the King
-  // should be able to see he asked for something out of the ordinary without
-  // opening the picker to check.
+  // The chip names the panel, not the setting, so the mark is what carries
+  // "something in here is off its default" -- for `.workspace-chip`'s reason:
+  // the King should be able to see he asked for something out of the ordinary
+  // without opening the picker to check.
   &.isolated {
     border-color: t.$gold-dim;
     color: t.$gold;
   }
+}
+
+// The dot beside "Isolation" when a setting inside is not the default.
+.chip-mark {
+  margin-left: 4px;
+  color: t.$gold;
 }
 
 // Why the isolated option is refused, and what to install to have it. Sits

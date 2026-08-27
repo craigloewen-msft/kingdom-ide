@@ -15,6 +15,7 @@ use super::activity::Activity;
 use super::bridge::LodLevel;
 use super::camera::MapCamera;
 use super::lod::ActiveLod;
+use super::network::{AGENT_HEIGHT, Network, well_label_height};
 use super::spawn::{Holding, LoadedMap};
 
 /// Labels beyond this many are dropped, newest first. A dense ward can put
@@ -31,6 +32,19 @@ const EDGE_MARGIN: f32 = 4.0;
 const FILE_FONT_SIZE: f32 = 11.0;
 const DISTRICT_FONT_SIZE: f32 = 13.0;
 const DETAIL_FONT_SIZE: f32 = 9.0;
+
+/// What an agent's plaque weighs, and what a well's does.
+///
+/// Both far above any holding's weight, which is a building's height in world
+/// units and is never more than a few hundred. In a crowded ward the file name
+/// is what gets dropped, not the agent standing in it: a house that has lost
+/// its label is still visibly a house, whereas an unlabelled marker is an
+/// anonymous coloured post -- which is the whole thing this exists to fix.
+///
+/// The agent outweighs the well because *who is working* is the first question
+/// in `AGENTS.md` and *what they share* is the second.
+const AGENT_WEIGHT: f32 = 100_000.0;
+const WELL_WEIGHT: f32 = 50_000.0;
 
 /// Marks the container every label lives under.
 #[derive(Component)]
@@ -160,6 +174,14 @@ fn overlaps(position: Vec2, size: Vec2, other: Vec2, other_size: Vec2) -> bool {
         && position.y + size.y + LABEL_GAP > other.y
 }
 
+/// Whether a projected anchor fell off the screen entirely.
+///
+/// Cheaper than placing it and rejecting it, and it is the common case at this
+/// tier: nearly every holding in the map is behind the camera.
+fn outside(anchor: Vec2, viewport: Vec2) -> bool {
+    anchor.x < 0.0 || anchor.y < 0.0 || anchor.x > viewport.x || anchor.y > viewport.y
+}
+
 /// Creates the container and a fixed pool of reusable slots.
 pub fn spawn_label_pool(mut commands: Commands, mut pool: ResMut<LabelPool>) {
     let layer = commands
@@ -242,12 +264,48 @@ pub fn with_activity(detail: &str, working: usize) -> String {
     }
 }
 
+/// An agent plaque's second line: which network it is on.
+///
+/// The one fact about an agent that is invisible everywhere else on the map
+/// except as the *absence* of a conduit to the rim -- see
+/// [`crate::map::network`], which records why isolation is worth saying
+/// positively.
+///
+/// ASCII only, for [`with_activity`]'s reason: the bundled font is a
+/// 95-codepoint subset and anything outside it renders as a tofu box.
+///
+/// Pure, so the wording is pinned without a camera.
+pub fn agent_detail(isolated: bool) -> String {
+    if isolated {
+        "OWN NETWORK".to_owned()
+    } else {
+        "ON HOST NETWORK".to_owned()
+    }
+}
+
+/// A wellhead plaque's second line: that it is a well, and who else is in it.
+///
+/// The count is the answer to "who else is in here?", which is the question the
+/// King has before he changes anything in a shared database. Zero users is a
+/// well that is standing but that no plan has reached for, and saying "shared
+/// by 0" would be worse than saying nothing.
+///
+/// ASCII only, for [`with_activity`]'s reason.
+pub fn well_detail(users: usize) -> String {
+    match users {
+        0 => "WELL".to_owned(),
+        1 => "WELL  [1 drawing]".to_owned(),
+        many => format!("WELL  [shared by {many}]"),
+    }
+}
+
 /// Projects anchors, places labels, and drives the pool.
 #[allow(clippy::too_many_arguments)]
 pub fn update_labels(
     active: Res<ActiveLod>,
     working: Res<Activity>,
     map: Res<LoadedMap>,
+    network: Res<Network>,
     camera: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
     holdings: Query<&Holding>,
     pool: Res<LabelPool>,
@@ -301,11 +359,7 @@ pub fn update_labels(
                 let Some(anchor) = project(holding.label_anchor) else {
                     continue;
                 };
-                if anchor.x < 0.0
-                    || anchor.y < 0.0
-                    || anchor.x > viewport.x
-                    || anchor.y > viewport.y
-                {
+                if outside(anchor, viewport) {
                     continue;
                 }
                 let Some(feature) = manifest
@@ -327,6 +381,53 @@ pub fn update_labels(
                     // moves because the weight comes from the world, not the
                     // screen.
                     weight: feature.height,
+                });
+            }
+            // The agents and the wells, named exactly as the houses around
+            // them are. Only at this tier: a dozen agent names strewn across a
+            // whole realm is the noise the district plaques were tuned to
+            // avoid, and up close is where the King is asking *which* of them
+            // this one is.
+            for well in &network.0.wells {
+                // The anchor is derived from this well's own radius rather
+                // than from a shared constant: several wells on one square are
+                // each drawn smaller, so one height would float a plaque over
+                // the small ones and bury it in the large.
+                let Some(anchor) = project(Vec3::new(
+                    well.center[0],
+                    well_label_height(well.radius),
+                    well.center[1],
+                )) else {
+                    continue;
+                };
+                if outside(anchor, viewport) {
+                    continue;
+                }
+                requests.push(LabelRequest {
+                    title: well.name.clone(),
+                    detail: well_detail(well.users),
+                    anchor,
+                    font_size: FILE_FONT_SIZE,
+                    detail_size: DETAIL_FONT_SIZE,
+                    weight: WELL_WEIGHT,
+                });
+            }
+            for agent in &network.0.agents {
+                let Some(anchor) =
+                    project(Vec3::new(agent.center[0], AGENT_HEIGHT, agent.center[1]))
+                else {
+                    continue;
+                };
+                if outside(anchor, viewport) {
+                    continue;
+                }
+                requests.push(LabelRequest {
+                    title: agent.label.clone(),
+                    detail: agent_detail(agent.isolated),
+                    anchor,
+                    font_size: FILE_FONT_SIZE,
+                    detail_size: DETAIL_FONT_SIZE,
+                    weight: AGENT_WEIGHT,
                 });
             }
             requests
@@ -473,6 +574,54 @@ mod tests {
         assert_eq!(with_activity("1,204 files", 2), "1,204 files  [2 working]");
         // Nothing to separate from, so no separator.
         assert_eq!(with_activity("", 1), "[1 working]");
+    }
+
+    /// The plaques for the marks that answer the two questions the map exists
+    /// for. Same font, so the same rule applies.
+    #[test]
+    fn an_agent_says_which_network_it_is_on() {
+        assert_eq!(agent_detail(false), "ON HOST NETWORK");
+        assert_eq!(agent_detail(true), "OWN NETWORK");
+    }
+
+    #[test]
+    fn a_well_says_who_else_is_drawing_from_it() {
+        // Standing but untouched: no count at all rather than "shared by 0".
+        assert_eq!(well_detail(0), "WELL");
+        assert_eq!(well_detail(1), "WELL  [1 drawing]");
+        assert_eq!(well_detail(4), "WELL  [shared by 4]");
+    }
+
+    #[test]
+    fn the_new_plaques_stay_within_the_font_too() {
+        for users in [0, 1, 2, 11] {
+            assert!(well_detail(users).is_ascii());
+        }
+        for isolated in [true, false] {
+            assert!(agent_detail(isolated).is_ascii());
+        }
+    }
+
+    /// An agent's name must survive a ward dense enough to drop file names --
+    /// the point of `AGENT_WEIGHT`. An unlabelled marker is an anonymous post;
+    /// an unlabelled house is still a house.
+    #[test]
+    fn an_agent_outranks_the_files_around_it() {
+        let mut requests: Vec<_> = (0..300)
+            .map(|index| {
+                let x = 20.0 + (index % 20) as f32 * 60.0;
+                let y = 20.0 + (index / 20) as f32 * 50.0;
+                // Above any real building height, to be sure it is the
+                // constant winning and not the fixture.
+                request(&format!("f{index}.rs"), Vec2::new(x, y), 900.0)
+            })
+            .collect();
+        let mut agent = request("Fix the parser", Vec2::new(640.0, 400.0), AGENT_WEIGHT);
+        agent.detail = agent_detail(true);
+        requests.push(agent);
+
+        let placed = place_labels(requests, VIEWPORT);
+        assert_eq!(placed[0].request.title, "Fix the parser");
     }
 
     /// Bevy's bundled font is a 95-codepoint subset of FiraMono, so a plaque

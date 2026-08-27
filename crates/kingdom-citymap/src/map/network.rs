@@ -129,6 +129,12 @@ pub struct AgentMark {
     pub center: [f32; 2],
     /// How far across the marker is.
     pub radius: f32,
+    /// What the King calls this agent -- its plan's title.
+    ///
+    /// Painted on a plaque over the marker at the closest tier, exactly as a
+    /// house is named. Carried here rather than looked up because the engine
+    /// knows nothing of plans: see the module docs on that seam.
+    pub label: String,
     /// This agent's banner colour -- the same colour as the columns it is
     /// raising and the chip in the rail. See [`resolve`].
     pub color: MapColor,
@@ -330,6 +336,7 @@ mod resolve {
                 town: town_name.to_owned(),
                 center,
                 radius: AGENT_RADIUS,
+                label: agent.title.clone(),
                 color,
                 isolated: !agent.on_host_network(),
             });
@@ -708,6 +715,7 @@ mod tests {
     fn an_agent(plan: &str, city: &str, network: NetworkMode, drawing: &[&str]) -> AgentNetwork {
         AgentNetwork {
             plan: PlanId::new(plan),
+            title: format!("Plan {plan}"),
             city: CityId::new(city),
             network,
             ports: Vec::new(),
@@ -775,6 +783,22 @@ mod tests {
             picture.agents[0].isolated,
             "and it is marked isolated, so the moat is drawn"
         );
+    }
+
+    /// The marker is named, so the plaque over it at the closest tier reads a
+    /// title rather than a random plan id -- the engine has no way to look one
+    /// up, so if it is not carried here it is not drawable at all.
+    #[test]
+    fn an_agent_marker_carries_the_plans_name() {
+        let map = a_map(&[("orchard", [0.0, 0.0])]);
+        let network = KingdomNetwork {
+            wells: Vec::new(),
+            agents: vec![an_agent("p1", "orchard", NetworkMode::Shared, &[])],
+        };
+
+        let picture = resolve(&map, &network);
+
+        assert_eq!(picture.agents[0].label, "Plan p1");
     }
 
     /// The other half: a plan on the shared network is joined to the rim.

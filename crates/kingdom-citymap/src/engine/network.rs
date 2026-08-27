@@ -50,7 +50,7 @@ use crate::map::network::{NetworkPicture, WELL_TIMBER_COLOR, WELL_WATER_COLOR, W
 /// Tall enough to read as a standing thing rather than a disc painted on the
 /// ground, and well below a house so it never competes with the settlement's
 /// own skyline.
-const AGENT_HEIGHT: f32 = 16.0;
+pub(crate) const AGENT_HEIGHT: f32 = 16.0;
 
 /// How tall a wellhead's drum stands, as a share of its own radius.
 ///
@@ -80,6 +80,21 @@ const WELL_POST: f32 = 1.5;
 
 /// How thick a canopy post is, as a share of the radius.
 const WELL_POST_WIDTH: f32 = 0.14;
+
+/// How high a well's name plaque is anchored, for a well of this radius.
+///
+/// A **function of the well** rather than the constant it replaced, and that is
+/// forced rather than tidy: a wellhead is no longer one fixed size. Several
+/// services on one square each shrink to a share of the paving
+/// (`map::network::well_stand`), so the single `WELL_HEIGHT` a plaque used to
+/// hang from would float over a small well and sink into a large one.
+///
+/// Anchored just over the canopy, which is the top of the object at the tier
+/// the names are drawn at -- `labels.rs` only asks at the closest tier, which
+/// is exactly where the canopy is shown.
+pub(crate) fn well_label_height(radius: f32) -> f32 {
+    radius * (WELL_POST + WELL_POST_WIDTH * 1.6)
+}
 
 /// How many segments a round mark is built from.
 ///
