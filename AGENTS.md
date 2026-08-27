@@ -317,7 +317,17 @@ crates/
                     back or leaves it still for `RELEASE_AFTER`
     view.rs         `CityMap` — the canvas, the click that selects a city, the
                     loading card with the bar on it, and the free-look chip that
-                    says the camera is his and offers it back
+                    says the camera is his and offers it back. Also
+                    `publish_status`: under automation only, the engine's
+                    `ViewerStatus` is mirrored onto `window.__kingdom_map` so a
+                    browser test can assert on *values* — `built`, `hovered`,
+                    `clicked.holding` — rather than on pixels
+    mode.rs         Whether the map draws at all, and at what pace. An
+                    automated browser stands the engine down by default;
+                    `?map=on` overrides that and is now sufficient on its own
+                    (WebGL is on by default), drawing a real, pickable map at
+                    a capped frame rate. `?map=off` is the mirror, for a King
+                    whose fans are loud
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -331,13 +341,24 @@ crates/
                     move in time, which is why nothing could click the map;
                     DEFAULT_VIEWPORT, chosen against Kingdom's own
                     responsive thresholds rather than as a round number
-                    (KINGDOM_BROWSER_VIEWPORT overrides it); and
-                    `disable-software-rasterizer`, which is what actually stops
-                    SwiftShader — NOT `--disable-gpu`, which was long assumed
-                    to and does not. Measured: a WebGL page costs 680–840% of a
-                    core with the software rasteriser and 12–18% without.
-                    KINGDOM_BROWSER_WEBGL=on gives it back, which a plan
-                    working on kingdom-citymap needs.
+                    (KINGDOM_BROWSER_VIEWPORT overrides it); and WebGL, which
+                    a plan's browser now has **by default** — it is what lets
+                    an agent look at Kingdom's own map. Two ceilings keep that
+                    affordable, and both are needed. Measured on the map,
+                    world standing, nothing happening: 9.50 cores uncapped and
+                    unconfined, 4.09 at one frame a second, 2.03 capped and
+                    confined to four CPUs. The frames are the engine's job
+                    (citymap engine::AUTOMATED_WAKE); the floor beneath them is
+                    KINGDOM_BROWSER_CPUS (default 4), because SwiftShader's
+                    thread pool sizes itself from the machine and spends most
+                    of what it spends whether or not a frame was asked for.
+                    Confinement is a `taskset` shim written into the profile,
+                    so the mask is set before Chrome forks and every rendering
+                    child inherits it. KINGDOM_BROWSER_WEBGL=off is the blunt
+                    instrument; KINGDOM_BROWSER_CPUS=0 lifts the ceiling.
+                    `--disable-gpu` does none of this and never did: it turns
+                    off *hardware* acceleration, which a headless machine did
+                    not have to begin with
 
                     A session also *ends*, which it did not use to: on the
                     plan settling (browser::dismiss, beside tmux::dismiss),
@@ -1316,6 +1337,9 @@ gap is invisible until a plan is halfway through a job and cannot finish:
 - **A browser**, for the `browser_*` tools. Any Chrome or Chromium on `PATH`.
   On arm64 note that Google Chrome has no Linux build at all -- Chromium is the
   native one, and is what Kingdom's own error text points at.
+- **`taskset`**, if a browser is to be held to its CPU ceiling. Present
+  wherever `util-linux` is, which is nearly everywhere; without it a browser
+  still launches, simply unconfined. See `session::CPUS_VAR`.
 - **Whatever the city itself needs to run.** `mommys-heart`, for instance,
   brings up Postgres and Azurite through `etc/dev.sh`, so a plan there needs a
   container runtime. That is the *project's* prerequisite rather than Kingdom's,
@@ -1325,6 +1349,34 @@ gap is invisible until a plan is halfway through a job and cannot finish:
 Neither is checked up front on purpose: a plan that only reads and proposes
 needs neither, and refusing to start without them would be worse than the
 diagnosis. Worth knowing before you ask a plan to prove its work.
+
+### Looking at the map from a plan's browser
+
+A plan's browser stands the map down by default — most plans never want it, and
+booting it is not free. Ask for it with `?map=on`:
+
+```
+browser_navigate  http://127.0.0.1:3000/?map=on
+```
+
+That is now sufficient on its own; there is no environment variable to remember
+first. The world takes a few seconds to stand, so **wait on a value rather than
+sleeping** — and assert on values afterwards too, rather than on pixels:
+
+```js
+__kingdom_map.built             // false until the world is up
+__kingdom_map.hovered           // "src/main.rs", after a mouse move
+__kingdom_map.clicked.holding   // what the last click actually hit
+```
+
+`window.__kingdom_map` is defined only under automation (`view::publish_status`)
+and carries the whole of `ViewerStatus`. Prefer it to a screenshot: it is stable
+against every change to how the map is drawn, and it *names* what was hit rather
+than leaving you to recognise it in an image.
+
+One caveat worth knowing before you aim: at the default zoom the whole kingdom
+is in view, so a single holding is a very small target. Move the pointer and
+read `hovered` back rather than assuming a coordinate landed.
 
 ```bash
 # Raise a proving ground: a synthetic dev folder, safe to work against.
