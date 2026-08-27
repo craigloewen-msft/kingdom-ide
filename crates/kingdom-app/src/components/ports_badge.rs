@@ -169,7 +169,9 @@ pub fn PortsBadge(
                             <p class="ports-note">
                                 "This plan has its own network, so these ports are its \
                                  own -- they do not collide with yours or with another \
-                                 plan's."
+                                 plan's. They stay open and clickable while it awaits \
+                                 your review, and close only when it is merged or \
+                                 archived."
                             </p>
                         </Show>
                     </div>
