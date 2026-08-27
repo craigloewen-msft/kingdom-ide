@@ -515,7 +515,8 @@ pub enum NetworkMode {
 }
 
 impl NetworkMode {
-    /// Short label for the prompt bar's chip.
+    /// Short label for the Network tab of the prompt bar's isolation panel.
+    /// The chip itself reads "Isolation" whatever this says.
     pub fn label(&self) -> &'static str {
         match self {
             NetworkMode::Shared => "shared network",
