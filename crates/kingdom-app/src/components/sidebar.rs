@@ -399,10 +399,34 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                 lines.join("\n\n")
                             };
                             let (badge, tint) = badge_for(plan.status, state.attention_of(&plan));
+                            // Which colour this agent's work is drawn in.
+                            // `preferred` rather than the city-wide assignment:
+                            // the rail lists every plan including settled ones,
+                            // and a collision is only resolved among those
+                            // actually working. For the common case -- no
+                            // collision -- the two agree exactly.
+                            let banner = kingdom_core::palette::preferred(&plan.id);
+                            let live = plan.is_live();
                             view! {
                                 <li>
                                     <A href=href attr:class="plan-row" attr:title=hover>
                                         <span class="plan-row-inner" class:current=current>
+                                            // This agent's banner: the key to
+                                            // every colour it wears on the map
+                                            // and in the review drawer. Shown
+                                            // only while the plan is live,
+                                            // because a settled plan has no
+                                            // works standing anywhere.
+                                            <Show when=move || live>
+                                                <span
+                                                    class="agent-pip"
+                                                    style:background=banner.growth
+                                                    title=format!(
+                                                        "This agent's colour on the map: {}",
+                                                        banner.name,
+                                                    )
+                                                ></span>
+                                            </Show>
                                             <span class="plan-title">{title}</span>
                                             <span class=format!("plan-badge plan-{tint}")>
                                                 {badge}

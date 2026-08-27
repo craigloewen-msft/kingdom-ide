@@ -23,6 +23,7 @@ pub mod ids;
 pub mod mockdata;
 pub mod model;
 pub mod naming;
+pub mod palette;
 pub mod permissions;
 pub mod proposal;
 pub mod review;
@@ -30,5 +31,6 @@ pub mod sample;
 
 pub use ids::*;
 pub use model::*;
+pub use palette::{assign_banners, AgentPalette, BANNERS};
 pub use permissions::*;
 pub use review::*;

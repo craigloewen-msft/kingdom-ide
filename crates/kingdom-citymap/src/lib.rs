@@ -125,12 +125,12 @@ pub fn CityMap(
     #[allow(unused_variables)]
     #[prop(into)]
     picked_file: leptos::prelude::RwSignal<Option<String>>,
-    /// What the open plan is proposing. Unused here, for the reason above --
-    /// only the browser has a manifest to resolve it against and an engine to
-    /// raise it with.
+    /// What every live agent in the focused city is changing. Unused here, for
+    /// the reason above -- only the browser has a manifest to resolve it
+    /// against and an engine to raise it with.
     #[allow(unused_variables)]
     #[prop(into)]
-    works: leptos::prelude::Signal<Option<kingdom_core::ChangeSummary>>,
+    works: leptos::prelude::Signal<Vec<(kingdom_core::PlanId, kingdom_core::ChangeSummary)>>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

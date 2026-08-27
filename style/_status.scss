@@ -28,3 +28,34 @@ $html-pips: ();
 // the old SVG map drew on each city. The map is a Bevy canvas now and has no
 // DOM to carry a class, so nothing could match it.
 #{$html-pips} { background: var(--status-colour); }
+
+// An agent's own colour: which of several agents did this.
+//
+// The third colour axis, and the reason it needs one is that the other two are
+// spoken for. The `.status-*` / `.plan-*` classes above say what an agent is
+// *doing*, and a language tint says what the code *is*; neither can say who is
+// touching a file, which is the first question in AGENTS.md and the one that
+// only bites when several agents share a town.
+//
+// The colours themselves are NOT defined here. They live in
+// `kingdom_core::palette`, which is where the map reads them from too, and they
+// arrive as an inline `background` on each pip. That is deliberate: a plan's
+// banner is chosen at runtime -- it depends on which *other* plans are live, so
+// that two agents are never drawn alike -- and a colour a stylesheet cannot
+// know is a colour a stylesheet must not restate. One source, no drift.
+.agent-pip {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  // A square-ish mark, unlike the round `.review-dot` beside it in the drawer.
+  // The two sit within a few pixels of each other and mean entirely different
+  // things -- one is the language, one is the agent -- so they are told apart
+  // by shape as well as by colour, which survives both a small pane and a
+  // colour-blind reader.
+  //
+  // The ring keeps a dark banner legible against the panel it sits on: the
+  // cutting values are deliberately deep, and one on a dark rail would
+  // otherwise read as a hole rather than as a colour.
+  box-shadow: 0 0 0 1px rgba(t.$void, 0.55);
+}

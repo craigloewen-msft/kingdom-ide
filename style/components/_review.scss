@@ -183,6 +183,45 @@
     background: t.$panel-2;
     box-shadow: inset 2px 0 0 t.$gold;
   }
+
+  // A file more than one agent has hands on. This is question two from
+  // AGENTS.md -- who is holding what, and who is blocked behind whom -- so it
+  // earns a mark of its own rather than being left to be inferred from the
+  // pips beside it.
+  //
+  // Deliberately not a status colour: contention is not a plan state, and
+  // painting it in one would say something false about every plan involved.
+  // The dotted edge reads as "unsettled" without competing with the gold
+  // selection bar, which may be on the same row at the same time.
+  &.contended {
+    background: linear-gradient(
+      90deg,
+      rgba(t.$gold, 0.09),
+      transparent 70%
+    );
+  }
+
+  &.contended.selected {
+    background: t.$panel-2;
+  }
+}
+
+// The other agents in a file, as a row of their own colours.
+//
+// A stack of pips rather than a count, because the question is *who*: "2" says
+// there is a collision and says nothing about whether it is the agent the King
+// is worried about. Each pip is the same hue that agent's bands wear on the
+// map, which is what makes the two views one picture.
+.review-sharers {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  // Overlapped rather than spaced: in a column this narrow, four agents at
+  // full spacing would push the filename out of view, and the name is what
+  // the row is for.
+  margin-right: 2px;
+
+  .agent-pip + .agent-pip { margin-left: -2px; }
 }
 
 // git's own letter. A reminder rather than a label -- the full word is on the

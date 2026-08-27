@@ -378,7 +378,9 @@ impl Language {
     ///
     /// Deliberately avoids the status palette (green/amber/red), which is
     /// reserved for what agents are doing; language colour says what the code
-    /// *is*.
+    /// *is*. The third axis is [`crate::palette`], which says *which agent* --
+    /// see its docs for why the three may not be collapsed into one another,
+    /// and for the test that keeps them apart.
     pub fn tint(&self) -> &'static str {
         match self {
             Language::Rust => "#fb923c",

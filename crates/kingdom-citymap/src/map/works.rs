@@ -29,25 +29,75 @@ use super::{MapRect, MapWard};
 use serde::{Deserialize, Serialize};
 
 /// One file a plan has changed, placed on the map.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// A file rather than a file-and-a-plan: several agents may be in the same file
+/// at once, and drawing that as several works would put two columns on one
+/// house and say the file was two files. So one work carries one
+/// [`WorkBand`] per agent -- see [`resolve`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Work {
     /// The ground this work stands on.
     pub site: WorkSite,
-    /// How much of this file moved, as a fraction of the busiest file in the
-    /// same plan -- `kingdom_core::ChangeSummary::busiest`.
+    /// Who is in this file, and how much each of them moved.
     ///
-    /// Always in `0.0..=1.0`. The normalising is done on the interface's side
-    /// of the bridge, so nothing downstream needs the rest of the plan in hand
-    /// to know how tall to build.
-    pub scale: f32,
-    /// What share of the churn was growth, from 0.0 (all deletion) to 1.0 (all
-    /// addition).
+    /// Never empty -- a work with no bands would be a house marked as worked on
+    /// by nobody -- and in a stable order, so the stack does not reshuffle
+    /// between refetches.
+    pub bands: Vec<WorkBand>,
+}
+
+impl Work {
+    /// How much moved here in total, across every agent.
     ///
-    /// Carried rather than the raw counts because it is what the drawing
-    /// actually asks: how much scaffold, and how much skirt. The counts
-    /// themselves are the review drawer's business.
-    pub growth: f32,
+    /// What the column as a whole is sized from, so that one agent changing
+    /// forty lines and two agents changing twenty each stand equally tall.
+    pub fn churn(&self) -> f32 {
+        self.bands.iter().map(WorkBand::churn).sum()
+    }
+
+    /// Whether more than one agent has hands on this file.
+    ///
+    /// The contention question from `AGENTS.md` -- question two -- answered at
+    /// the only place that knows it.
+    pub fn is_contended(&self) -> bool {
+        self.bands.len() > 1
+    }
+}
+
+/// One agent's share of one file.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkBand {
+    /// This agent's colour for lines added.
+    pub growth: super::MapColor,
+    /// This agent's colour for lines removed: the same hue, deepened.
+    pub cutting: super::MapColor,
+    /// Lines added, as an absolute count.
+    ///
+    /// **Absolute, not a share.** An earlier version carried `scale`, a
+    /// fraction of the busiest file in the same plan, and it made two agents
+    /// incomparable: each was measured against its own plan's ruler, so the
+    /// same forty-line edit stood at full height in one agent's stack and at a
+    /// tenth in another's. It also made a lone change unreadable -- see
+    /// `engine::works::band_height`, which records what that cost.
+    pub added: f32,
+    /// Lines removed, as an absolute count. Absolute for [`Self::added`]'s
+    /// reason.
+    pub removed: f32,
+    /// Whether this agent deleted the file outright.
+    ///
+    /// Drawn as a razed lot rather than as a column: a deletion is a house
+    /// coming down, and anything rising above the roofline would say the
+    /// opposite. See `engine::works`.
+    pub razing: bool,
+}
+
+impl WorkBand {
+    /// Everything that moved in this band.
+    pub fn churn(&self) -> f32 {
+        self.added + self.removed
+    }
 }
 
 /// Where a piece of work stands.
@@ -216,81 +266,143 @@ fn overlaps(a: &MapRect, b: &MapRect) -> bool {
 /// plan open and nothing to resolve.
 #[cfg(any(feature = "hydrate", test))]
 mod resolve {
-    use super::{Work, WorkSite, place_fresh};
+    use super::{Work, WorkBand, WorkSite, place_fresh};
     use crate::map::{MapManifest, MapRect, MapWard};
-    use kingdom_core::{ChangeKind, ChangeSummary};
-    use std::collections::HashMap;
+    use kingdom_core::{ChangeKind, ChangeSummary, PlanId};
+    use std::collections::{BTreeMap, HashMap};
 
-    /// Turns what a plan changed into ground on the map.
+    /// A banner colour, opaque, as the map's own colour type.
+    ///
+    /// The translucency the works are drawn with is `engine::works`'s business
+    /// -- it varies with what is being drawn, and a ghost is fainter than a
+    /// standing house -- so the wire carries the colour at full strength and
+    /// the renderer decides how solid a proposal looks.
+    fn with_alpha(rgb: kingdom_core::palette::Rgb) -> crate::map::MapColor {
+        [rgb[0], rgb[1], rgb[2], 255]
+    }
+
+    /// Turns what every agent in a city is changing into ground on the map.
     ///
     /// The whole of the domain-to-geometry translation. Everything above this
-    /// is Kingdom's domain -- paths, line counts, a `ChangeSummary` -- and
-    /// everything below it is world-space geometry, which is what keeps the
-    /// engine ignorant of what a plan is.
+    /// is Kingdom's domain -- paths, line counts, a `ChangeSummary`, a plan's
+    /// banner -- and everything below it is world-space geometry, which is what
+    /// keeps the engine ignorant of what a plan is.
+    ///
+    /// # Why it takes many plans rather than one
+    ///
+    /// Because the question is "who is touching this file", and one plan's
+    /// summary structurally cannot answer it. Taking the whole city's work at
+    /// once is also what lets a file two agents share be drawn as **one** house
+    /// with two bands rather than as two competing columns -- the grouping
+    /// below is by path, and the plan is what a band is, not what a work is.
     ///
     /// Every omission it makes is a judgement about what is *honest* to draw:
     ///
     /// - **Binary files are left out.** `ChangedFile::binary` exists because
     ///   `+0 -0` reads as "unchanged" for a file that certainly did change. Its
-    ///   numbers are not line counts, and a scaffold built from them would be an
+    ///   numbers are not line counts, and a column built from them would be an
     ///   invented figure standing over a real house.
-    /// - **Deletions are left out.** A deleted file is a lot that *empties*, not
-    ///   a house that grows -- and the map is drawn from the city's checkout,
-    ///   where the house is still standing. A scaffold on it would say the
-    ///   opposite of what happened.
     /// - **A file with no house and no ward is skipped.** An empty project is
     ///   dropped from the manifest entirely (`build::manifest_for`), and a
     ///   folder the layout merged away has no ward to stand a ghost in. Both are
     ///   the ordinary staleness `kingdom_app::citymap` documents as a deliberate
     ///   trade -- the map follows the shape of a codebase, not its contents.
     ///
-    /// Ghost houses are placed in the summary's order, and each is added to the
-    /// ground the next must avoid, so two new files in one folder never stand in
-    /// each other. The summary is sorted by path (`review::changes`), so that
-    /// order is stable across refetches and the houses do not shuffle.
-    pub fn resolve(map: &MapManifest, city: &str, summary: &ChangeSummary) -> Vec<Work> {
-        // The scale is taken over the files that will actually be *drawn*, not
-        // over the whole summary, and the difference is visible on screen. A
-        // plan that deleted a 400-line file and edited a 40-line one draws only
-        // the edit -- and normalised against the deletion it would draw it at a
-        // tenth height, so the one thing on the map would look like nothing had
-        // happened. `ChangeSummary::busiest` skips binaries for the same reason;
-        // this goes further because this knows what it is going to omit.
-        let drawable: Vec<&kingdom_core::ChangedFile> = summary
-            .files
-            .iter()
-            .filter(|file| !file.binary && file.kind != ChangeKind::Deleted && file.churn() > 0)
-            .collect();
-        let busiest = drawable.iter().map(|file| file.churn()).max().unwrap_or(0);
-        if busiest == 0 {
-            // Nothing with an honest line count is being drawn -- a rename-only,
-            // deletion-only or binary-only summary. Inventing a denominator
-            // here would draw a picture of nothing.
-            return Vec::new();
+    /// **Deletions are no longer left out**, which they were until this took
+    /// several plans. The old reasoning was sound as far as it went -- the map
+    /// is drawn from the city's checkout, where a deleted file's house is still
+    /// standing, so a scaffold on it would say the opposite of what happened --
+    /// but the conclusion was wrong: the answer is to draw the *opposite of a
+    /// scaffold*, not nothing at all. A razing band is carried here and
+    /// `engine::works` draws it as a lot being cleared. A deletion-only plan
+    /// used to resolve to an empty list and leave the map blank while an agent
+    /// was working hard.
+    ///
+    /// Ghost houses are placed once per **path**, not once per plan, so two
+    /// agents creating the same file get one house with two bands rather than
+    /// two houses in different corners of the folder. Each is added to the
+    /// ground the next must avoid, so two genuinely different new files never
+    /// stand in each other. Placement follows the sorted path order, so it is
+    /// stable across refetches and the houses do not shuffle.
+    pub fn resolve(
+        map: &MapManifest,
+        city: &str,
+        working: &[(PlanId, ChangeSummary)],
+    ) -> Vec<Work> {
+        // Everything worth drawing, gathered by path so that a file several
+        // agents are in becomes one entry with several bands. `BTreeMap` rather
+        // than `HashMap` because the iteration order *is* the placement order
+        // for ghost houses, and a hash order would move a new house between
+        // refetches -- which reads as a bug rather than as a plan.
+        let mut by_path: BTreeMap<&str, Vec<WorkBand>> = BTreeMap::new();
+
+        // Banners are assigned over the **whole set** rather than taken per
+        // plan, and that is what guarantees two agents on one house are two
+        // colours. `palette::preferred` alone is stable but may collide, and a
+        // collision here would draw exactly the picture this feature exists to
+        // prevent. See `kingdom_core::palette::assign_banners`.
+        let banners = kingdom_core::palette::assign_banners(
+            &working
+                .iter()
+                .map(|(plan, _)| plan.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        for ((plan, summary), (banner_plan, banner)) in working.iter().zip(banners.iter()) {
+            // `assign_banners` preserves order, so the two lists are in step.
+            // Cheap to state, and it is the sort of coupling that breaks
+            // silently by painting one agent in another's colour.
+            debug_assert_eq!(plan, banner_plan);
+            for file in &summary.files {
+                // A binary file's counts are not line counts. Everything else
+                // with something to say is drawn, deletions included.
+                if file.binary {
+                    continue;
+                }
+                let razing = file.kind == ChangeKind::Deleted;
+                if file.churn() == 0 && !razing {
+                    // A rename with no content change: nothing moved, and a
+                    // column over it would be an invented figure. A deletion
+                    // git reports as empty is still a deletion, so it stays.
+                    continue;
+                }
+
+                by_path
+                    .entry(file.path.as_str())
+                    .or_default()
+                    .push(WorkBand {
+                        growth: with_alpha(banner.growth_rgb),
+                        cutting: with_alpha(banner.cutting_rgb),
+                        added: file.added as f32,
+                        removed: file.removed as f32,
+                        razing,
+                    });
+            }
         }
 
         let mut raised = Vec::new();
         // Ground claimed by ghost houses as this pass places them.
         let mut claimed: HashMap<String, Vec<MapRect>> = HashMap::new();
 
-        for file in drawable {
-            let churn = file.churn();
-            let scale = (churn as f32 / busiest as f32).clamp(0.0, 1.0);
-            let growth = file.added as f32 / churn as f32;
-
-            let site = match map.holding_at(city, &file.path) {
+        for (path, bands) in by_path {
+            let site = match map.holding_at(city, path) {
                 // The house is on the map: the work happens on top of it.
                 Some(feature) => WorkSite::Standing {
                     footprint: feature.footprint,
                     height: feature.height,
                 },
-                // No house. Either the court created this file or the map is
+                // No house. Either an agent created this file or the map is
                 // stale about it, and the two are indistinguishable from here --
                 // which is fine, because both mean "there is no building for
                 // this, so give it ground of its own".
+                //
+                // A file that only ever existed to be deleted is the one case
+                // where that is wrong: raising a ghost for it would build a
+                // house to announce that a house is gone. Skipped instead.
+                None if bands.iter().all(|band| band.razing) => continue,
                 None => {
-                    let folder = match file.path.rfind('/') {
-                        Some(at) => &file.path[..at],
+                    let folder = match path.rfind('/') {
+                        Some(at) => &path[..at],
                         None => "",
                     };
                     let Some(ward) = map.ward_at(city, folder) else {
@@ -312,7 +424,7 @@ mod resolve {
                     // would drag the median up until a new file was drawn as a
                     // mansion.
                     let want = typical_lot(&lots, ward);
-                    let Some(footprint) = place_fresh(ward, &taken, seed(&file.path), want) else {
+                    let Some(footprint) = place_fresh(ward, &taken, seed(path), want) else {
                         continue;
                     };
                     claimed.entry(ward.id.clone()).or_default().push(footprint);
@@ -320,11 +432,7 @@ mod resolve {
                 }
             };
 
-            raised.push(Work {
-                site,
-                scale,
-                growth,
-            });
+            raised.push(Work { site, bands });
         }
 
         raised
@@ -529,7 +637,7 @@ mod resolve_tests {
         BuildingKind, MapBuilding, MapFeature, MapManifest, MapPalette, MapSun, MapTown,
         MapUnderside, MapWorld,
     };
-    use kingdom_core::{ChangeKind, ChangeSummary, ChangedFile, Language};
+    use kingdom_core::{ChangeKind, ChangeSummary, ChangedFile, Language, PlanId};
 
     fn summary(files: Vec<ChangedFile>) -> ChangeSummary {
         ChangeSummary {
@@ -652,8 +760,21 @@ mod resolve_tests {
         }
     }
 
+    /// One plan's work, as `resolve` now takes it.
+    fn alone(files: Vec<ChangedFile>) -> Vec<(PlanId, ChangeSummary)> {
+        vec![(PlanId::new("plan-1"), summary(files))]
+    }
+
+    /// Two agents' work, with ids chosen so their banners differ.
+    fn between(first: Vec<ChangedFile>, second: Vec<ChangedFile>) -> Vec<(PlanId, ChangeSummary)> {
+        vec![
+            (PlanId::new("plan-1"), summary(first)),
+            (PlanId::new("plan-2"), summary(second)),
+        ]
+    }
+
     /// A file that already has a house is worked on top of, not given new
-    /// ground -- and the scaffold has to start at the existing roof.
+    /// ground -- and the column has to start at the existing roof.
     #[test]
     fn a_changed_file_raises_works_on_the_house_it_already_has() {
         let lot = rect(10.0, 10.0, 8.0, 8.0);
@@ -661,7 +782,7 @@ mod resolve_tests {
         let raised = resolve(
             &map,
             "alpha",
-            &summary(vec![file("src/main.rs", ChangeKind::Modified, 30, 10)]),
+            &alone(vec![file("src/main.rs", ChangeKind::Modified, 30, 10)]),
         );
 
         assert_eq!(raised.len(), 1);
@@ -672,14 +793,103 @@ mod resolve_tests {
                 height: 9.0
             }
         );
-        assert_eq!(raised[0].scale, 1.0, "the only file is the busiest");
-        assert!(
-            (raised[0].growth - 0.75).abs() < 1e-6,
-            "30 of 40 was growth"
+        assert_eq!(raised[0].bands.len(), 1, "one agent, one band");
+        assert_eq!(raised[0].bands[0].added, 30.0);
+        assert_eq!(raised[0].bands[0].removed, 10.0);
+        assert!(!raised[0].bands[0].razing);
+    }
+
+    /// The counts are carried **absolutely**, not as a share of the plan's
+    /// busiest file. That is what makes two agents comparable, and it is the
+    /// heart of the "every bar looks the same" fix -- a 40-line edit says 40
+    /// whatever else its plan did.
+    #[test]
+    fn what_a_band_carries_does_not_depend_on_the_rest_of_the_plan() {
+        let map = world(
+            "alpha",
+            &[
+                ("src/big.rs", rect(10.0, 10.0, 8.0, 8.0)),
+                ("src/small.rs", rect(30.0, 30.0, 8.0, 8.0)),
+            ],
+        );
+        let with_a_giant = resolve(
+            &map,
+            "alpha",
+            &alone(vec![
+                file("src/big.rs", ChangeKind::Modified, 800, 200),
+                file("src/small.rs", ChangeKind::Modified, 10, 0),
+            ]),
+        );
+        let by_itself = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/small.rs", ChangeKind::Modified, 10, 0)]),
+        );
+
+        let small_of = |raised: &[Work]| {
+            raised
+                .iter()
+                .find(|w| w.churn() == 10.0)
+                .expect("the small file")
+                .bands[0]
+                .added
+        };
+        assert_eq!(
+            small_of(&with_a_giant),
+            small_of(&by_itself),
+            "a file's own size must not depend on what else its plan touched"
         );
     }
 
-    /// The feature the King asked for: a file the court created has no house,
+    /// **The feature this was all for.** One file, two agents, one house -- and
+    /// the bands say which agents, in their own colours.
+    #[test]
+    fn a_file_two_agents_share_is_one_house_with_two_bands() {
+        let lot = rect(10.0, 10.0, 8.0, 8.0);
+        let map = world("alpha", &[("src/main.rs", lot)]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &between(
+                vec![file("src/main.rs", ChangeKind::Modified, 30, 10)],
+                vec![file("src/main.rs", ChangeKind::Modified, 5, 40)],
+            ),
+        );
+
+        assert_eq!(raised.len(), 1, "one file is one house, not two");
+        assert_eq!(raised[0].bands.len(), 2);
+        assert!(raised[0].is_contended());
+        assert_eq!(raised[0].churn(), 85.0, "everyone's work, added up");
+        assert_ne!(
+            raised[0].bands[0].growth, raised[0].bands[1].growth,
+            "two agents on one house must be different colours"
+        );
+    }
+
+    /// Each agent's band carries that agent's own banner, and the map's colour
+    /// is the palette's colour -- two spellings of one fact is how a rail and a
+    /// map come to disagree.
+    #[test]
+    fn a_band_wears_its_own_agents_colours() {
+        let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
+        let plan = PlanId::new("plan-7");
+        let raised = resolve(
+            &map,
+            "alpha",
+            &[(
+                plan.clone(),
+                summary(vec![file("src/main.rs", ChangeKind::Modified, 3, 1)]),
+            )],
+        );
+
+        let banner = kingdom_core::palette::preferred(&plan);
+        let band = raised[0].bands[0];
+        assert_eq!(&band.growth[..3], &banner.growth_rgb[..]);
+        assert_eq!(&band.cutting[..3], &banner.cutting_rgb[..]);
+        assert_eq!(band.growth[3], 255, "the wire carries full strength");
+    }
+
+    /// The feature the King asked for: a file an agent created has no house,
     /// so it is given free ground inside its own folder.
     #[test]
     fn a_created_file_is_given_ground_inside_its_folder() {
@@ -688,7 +898,7 @@ mod resolve_tests {
         let raised = resolve(
             &map,
             "alpha",
-            &summary(vec![file("src/new.rs", ChangeKind::Untracked, 40, 0)]),
+            &alone(vec![file("src/new.rs", ChangeKind::Untracked, 40, 0)]),
         );
 
         assert_eq!(raised.len(), 1);
@@ -716,7 +926,7 @@ mod resolve_tests {
         let raised = resolve(
             &map,
             "alpha",
-            &summary(vec![
+            &alone(vec![
                 file("src/one.rs", ChangeKind::Added, 20, 0),
                 file("src/two.rs", ChangeKind::Untracked, 25, 0),
             ]),
@@ -731,16 +941,33 @@ mod resolve_tests {
         );
     }
 
-    /// A binary file's counts are not line counts, and a deleted file's house
-    /// is still standing in the checkout the map was drawn from. Neither is
-    /// honest to draw.
+    /// The same trap across two agents: both creating the same file must give
+    /// **one** ghost with two bands, not two houses in different corners of the
+    /// folder claiming to be the same file.
     #[test]
-    fn binary_and_deleted_files_are_left_out() {
+    fn two_agents_creating_one_file_raise_one_ghost() {
+        let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &between(
+                vec![file("src/new.rs", ChangeKind::Untracked, 20, 0)],
+                vec![file("src/new.rs", ChangeKind::Untracked, 9, 2)],
+            ),
+        );
+
+        assert_eq!(raised.len(), 1, "one path is one house");
+        assert_eq!(raised[0].bands.len(), 2);
+        assert!(matches!(raised[0].site, WorkSite::Fresh { .. }));
+    }
+
+    /// A binary file's counts are not line counts, so it is still left out.
+    #[test]
+    fn binary_files_are_left_out() {
         let map = world(
             "alpha",
             &[
                 ("src/main.rs", rect(10.0, 10.0, 8.0, 8.0)),
-                ("src/gone.rs", rect(30.0, 30.0, 8.0, 8.0)),
                 ("src/logo.png", rect(50.0, 50.0, 8.0, 8.0)),
             ],
         );
@@ -750,16 +977,69 @@ mod resolve_tests {
         let raised = resolve(
             &map,
             "alpha",
-            &summary(vec![
+            &alone(vec![
                 file("src/main.rs", ChangeKind::Modified, 10, 0),
-                file("src/gone.rs", ChangeKind::Deleted, 0, 200),
                 binary,
             ]),
         );
 
         assert_eq!(raised.len(), 1, "only the honest one is drawn");
-        // And the binary's 900 lines must not have set the scale either.
-        assert_eq!(raised[0].scale, 1.0);
+    }
+
+    /// **The third reported fault.** A deleted file used to be filtered out
+    /// entirely and drew nothing at all, so a deletion-only plan left the map
+    /// blank while an agent was working hard. It is now carried as a razing.
+    #[test]
+    fn a_deleted_file_is_drawn_rather_than_dropped() {
+        let lot = rect(30.0, 30.0, 8.0, 8.0);
+        let map = world("alpha", &[("src/gone.rs", lot)]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/gone.rs", ChangeKind::Deleted, 0, 200)]),
+        );
+
+        assert_eq!(raised.len(), 1, "a deletion is a thing that happened");
+        assert!(raised[0].bands[0].razing);
+        assert_eq!(raised[0].bands[0].removed, 200.0);
+        // On the house that is still standing in the checkout the map was
+        // drawn from -- which is exactly why it is drawn as a razing rather
+        // than as a column.
+        assert_eq!(
+            raised[0].site,
+            WorkSite::Standing {
+                footprint: lot,
+                height: 9.0
+            }
+        );
+    }
+
+    /// A deletion git reports with no line counts at all is still a deletion.
+    /// The zero-churn guard must not swallow it.
+    #[test]
+    fn a_deletion_with_no_counts_is_still_a_deletion() {
+        let map = world("alpha", &[("src/gone.rs", rect(30.0, 30.0, 8.0, 8.0))]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/gone.rs", ChangeKind::Deleted, 0, 0)]),
+        );
+        assert_eq!(raised.len(), 1);
+        assert!(raised[0].bands[0].razing);
+    }
+
+    /// But a file that has no house *and* only ever existed to be deleted must
+    /// not raise a ghost: building a house to announce that a house is gone is
+    /// the one thing worse than drawing nothing.
+    #[test]
+    fn a_deleted_file_with_no_house_raises_nothing() {
+        let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/vanished.rs", ChangeKind::Deleted, 0, 40)]),
+        );
+        assert!(raised.is_empty());
     }
 
     /// The map is drawn from the city's checkout and follows its *shape*, not
@@ -771,7 +1051,7 @@ mod resolve_tests {
         let raised = resolve(
             &map,
             "nowhere",
-            &summary(vec![file("src/main.rs", ChangeKind::Modified, 10, 2)]),
+            &alone(vec![file("src/main.rs", ChangeKind::Modified, 10, 2)]),
         );
         assert!(raised.is_empty());
     }
@@ -784,69 +1064,89 @@ mod resolve_tests {
         let raised = resolve(
             &map,
             "alpha",
-            &summary(vec![file("vendor/deep/new.rs", ChangeKind::Added, 40, 0)]),
+            &alone(vec![file("vendor/deep/new.rs", ChangeKind::Added, 40, 0)]),
         );
         assert!(raised.is_empty());
     }
 
-    /// The normaliser at work: the busiest file is full height and the others
-    /// are a real fraction of it, in the right order.
-    #[test]
-    fn every_scaffold_is_scaled_against_the_busiest_file() {
-        let map = world(
-            "alpha",
-            &[
-                ("src/big.rs", rect(10.0, 10.0, 8.0, 8.0)),
-                ("src/small.rs", rect(30.0, 30.0, 8.0, 8.0)),
-            ],
-        );
-        let raised = resolve(
-            &map,
-            "alpha",
-            &summary(vec![
-                file("src/big.rs", ChangeKind::Modified, 80, 20),
-                file("src/small.rs", ChangeKind::Modified, 10, 0),
-            ]),
-        );
-
-        assert_eq!(raised.len(), 2);
-        assert_eq!(raised[0].scale, 1.0);
-        assert!((raised[1].scale - 0.1).abs() < 1e-6);
-        // And every scale stays in range, which is what the renderer assumes.
-        for work in &raised {
-            assert!((0.0..=1.0).contains(&work.scale), "{:?}", work.scale);
-            assert!((0.0..=1.0).contains(&work.growth), "{:?}", work.growth);
-        }
-    }
-
-    /// A rename with no content change divides by zero. It must produce nothing
-    /// rather than a NaN that reaches the renderer -- the sibling of the guard
-    /// in `engine::works::scaffold_height`.
+    /// A rename with no content change has nothing to say, and must produce
+    /// nothing rather than a zero-sized column.
     #[test]
     fn a_summary_with_nothing_to_measure_draws_nothing() {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
             "alpha",
-            &summary(vec![file("src/main.rs", ChangeKind::Renamed, 0, 0)]),
+            &alone(vec![file("src/main.rs", ChangeKind::Renamed, 0, 0)]),
         );
         assert!(raised.is_empty());
-        assert!(resolve(&map, "alpha", &summary(Vec::new())).is_empty());
+        assert!(resolve(&map, "alpha", &alone(Vec::new())).is_empty());
+        assert!(resolve(&map, "alpha", &[]).is_empty(), "no agents at all");
+    }
+
+    /// Every band's counts must be finite and non-negative: they become mesh
+    /// dimensions, and a NaN reaches Bevy as a degenerate mesh.
+    #[test]
+    fn every_band_carries_a_drawable_number() {
+        let map = world(
+            "alpha",
+            &[
+                ("src/a.rs", rect(10.0, 10.0, 8.0, 8.0)),
+                ("src/b.rs", rect(30.0, 30.0, 8.0, 8.0)),
+            ],
+        );
+        let raised = resolve(
+            &map,
+            "alpha",
+            &between(
+                vec![file("src/a.rs", ChangeKind::Modified, 4000, 0)],
+                vec![file("src/b.rs", ChangeKind::Deleted, 0, 1)],
+            ),
+        );
+        for work in &raised {
+            assert!(!work.bands.is_empty(), "a work with no bands is nobody's");
+            for band in &work.bands {
+                assert!(band.added.is_finite() && band.added >= 0.0);
+                assert!(band.removed.is_finite() && band.removed >= 0.0);
+            }
+        }
     }
 
     /// The review is refetched on every transcript entry, so resolving the same
-    /// summary twice has to give the same map -- or the works would shuffle
-    /// while the King watched.
+    /// work twice has to give the same map -- or the works would shuffle while
+    /// the King watched. The grouping is a `BTreeMap` for exactly this reason.
     #[test]
     fn resolving_the_same_changes_twice_gives_the_same_works() {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
-        let changes = summary(vec![
-            file("src/main.rs", ChangeKind::Modified, 12, 3),
-            file("src/new.rs", ChangeKind::Untracked, 30, 0),
-        ]);
+        let changes = between(
+            vec![
+                file("src/main.rs", ChangeKind::Modified, 12, 3),
+                file("src/new.rs", ChangeKind::Untracked, 30, 0),
+            ],
+            vec![file("src/other.rs", ChangeKind::Added, 8, 0)],
+        );
         assert_eq!(
             resolve(&map, "alpha", &changes),
             resolve(&map, "alpha", &changes)
         );
+    }
+
+    /// And the order the agents are handed in must not move a house either: the
+    /// grouping is by path, so who was listed first is not a fact about ground.
+    #[test]
+    fn the_order_agents_are_listed_in_does_not_move_a_house() {
+        let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
+        let first = vec![file("src/new.rs", ChangeKind::Untracked, 30, 0)];
+        let second = vec![file("src/also.rs", ChangeKind::Added, 8, 0)];
+
+        let one_way = resolve(&map, "alpha", &between(first.clone(), second.clone()));
+        let other_way = resolve(&map, "alpha", &between(second, first));
+
+        let ground = |raised: &[Work]| {
+            let mut lots: Vec<_> = raised.iter().map(|w| w.site.footprint()).collect();
+            lots.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+            lots
+        };
+        assert_eq!(ground(&one_way), ground(&other_way));
     }
 }
