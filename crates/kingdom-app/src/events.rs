@@ -260,11 +260,29 @@ pub(crate) fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> P
         .map(|city_root| {
             crate::services::running_in(city_root)
                 .into_iter()
-                .map(|service| kingdom_core::SharedService {
-                    address: service.address(),
-                    users: crate::services::users_of(city_root, &service.name),
-                    name: service.name,
-                    image: service.image,
+                .map(|service| {
+                    // Which file this was declared in, which is what the badge
+                    // links the King to. Derived from the scope the service
+                    // carries: a project's sits in that project, the King's own
+                    // in his profile.
+                    let scope = match service.scope {
+                        kingdom_core::ServiceScope::Host => crate::services::Scope::Host,
+                        kingdom_core::ServiceScope::City => {
+                            crate::services::Scope::City(city_root.to_path_buf())
+                        }
+                    };
+                    kingdom_core::SharedService {
+                        address: service.address(),
+                        // By the service's own registry key, not by city root:
+                        // a host well is filed under `host`, so asking for it
+                        // by city would report a database five agents share as
+                        // used by nobody.
+                        users: crate::services::users_of_key(&service.key, &service.name),
+                        manifest_path: scope.manifest_path().to_string_lossy().to_string(),
+                        scope: service.scope,
+                        name: service.name,
+                        image: service.image,
+                    }
                 })
                 .collect()
         })
@@ -448,6 +466,8 @@ mod tests {
             image: "mongo:7".into(),
             address: "127.0.0.1:27017".into(),
             users: 1,
+            scope: kingdom_core::ServiceScope::City,
+            manifest_path: "/dev/shopfront/.kingdom/services.toml".into(),
         }];
 
         let wire = fitted(&plan, ports.clone(), services.clone());
@@ -516,7 +536,8 @@ mod tests {
         );
     }
 
-    /// A shared service is never persisted, only attached on the way out.    ///
+    /// A shared service is never persisted, only attached on the way out.
+    ///
     /// The same rule `Plan::ports` follows, and it matters for the same reason:
     /// an address belongs to a running Docker daemon, so one restored from a
     /// record would name a container that stopped when the server did. This
@@ -540,6 +561,31 @@ mod tests {
         let old = json.replace(",\"shared_services\":[]", "");
         let ancient: Plan = serde_json::from_str(&old).expect("an older record still loads");
         assert!(ancient.shared_services.is_empty());
+    }
+
+    /// A shared service sent before there were two levels still reads, as a
+    /// project's own.
+    ///
+    /// `scope` and `manifest_path` arrived with the host level. Both default,
+    /// and the default has to be `City`: a chamber that fell back to "the whole
+    /// machine" would tell the King a project's database was shared with every
+    /// other project he has open, which is the one thing about a well he most
+    /// needs to be right.
+    #[test]
+    fn a_shared_service_from_before_the_two_levels_reads_as_a_projects_own() {
+        let older = r#"{
+            "name": "db",
+            "image": "mongo:7",
+            "address": "172.31.44.10:27017",
+            "users": 3
+        }"#;
+
+        let service: kingdom_core::SharedService =
+            serde_json::from_str(older).expect("an older wire form still loads");
+
+        assert_eq!(service.scope, kingdom_core::ServiceScope::City);
+        assert!(service.manifest_path.is_empty());
+        assert_eq!(service.users, 3);
     }
 
     /// The whole point of the module: a change made through the funnel reaches

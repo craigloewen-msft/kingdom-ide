@@ -599,6 +599,12 @@ mod tests {
                     image: "mongo:7".into(),
                     address: "172.31.4.10:27017".into(),
                     users: 2,
+                    // A wellhead stands on a town's square, so everything the
+                    // map draws is a city's own. A machine-wide well belongs to
+                    // no town and is not fed to the map at all -- see the
+                    // filter in `api::kingdom_network`.
+                    scope: kingdom_core::ServiceScope::City,
+                    manifest_path: format!("/dev/{city}/.kingdom/services.toml"),
                 })
                 .collect(),
         }

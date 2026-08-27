@@ -569,6 +569,32 @@ pub struct SharedService {
     /// The answer to "who else is in here?", which is the question the King
     /// actually has when he is about to change something in a shared database.
     pub users: usize,
+    /// Which level it is shared at.
+    ///
+    /// The badge's second question, and the reason it is worth carrying: "three
+    /// plans are using this" means something quite different when the three are
+    /// on three different projects. Defaults to [`ServiceScope::City`], which is
+    /// what every service was before there were two levels.
+    #[serde(default = "city_scope")]
+    pub scope: crate::services::ServiceScope,
+    /// The absolute path of the manifest it is declared in.
+    ///
+    /// So a King who spots a well in a chamber can go and edit it without first
+    /// working out which of two files it came from. Empty when unknown, which
+    /// is what a record written before this field carried.
+    #[serde(default)]
+    pub manifest_path: String,
+}
+
+/// The scope an older record is read as.
+///
+/// A named function because `#[serde(default)]` on an enum wants one, and a
+/// `Default` impl on [`crate::services::ServiceScope`] would be a claim about
+/// the type rather than about this field: nothing else has a sensible default
+/// scope, and a form defaulting to "the whole machine" by accident is the one
+/// mistake that shares a project's database with every other project.
+fn city_scope() -> crate::services::ServiceScope {
+    crate::services::ServiceScope::City
 }
 
 /// A prepared place on disk for one plan to work.

@@ -1015,9 +1015,29 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
         .filter_map(|(city, root)| {
             let standing: Vec<kingdom_core::SharedService> = crate::services::running_in(root)
                 .into_iter()
+                // City scope only. `running_in` also answers with the King's
+                // own wells, because a plan working here can reach those too --
+                // but a `CityWells` puts a wellhead on a *town's square*, and a
+                // host well belongs to no town. Passed through, one Redis would
+                // be drawn once in every city with an agent in it: the same
+                // container claimed by three projects that do not own it.
+                //
+                // So the map does not show host wells yet. Its rim already
+                // draws the King's machine as a ring, which is where one
+                // belongs; putting it there is its own piece of work, noted in
+                // docs/roadmap.md rather than approximated here.
+                .filter(|service| service.scope == kingdom_core::ServiceScope::City)
                 .map(|service| kingdom_core::SharedService {
                     address: service.address(),
-                    users: crate::services::users_of(root, &service.name),
+                    // By the service's own registry key rather than by city
+                    // root. Identical for a city well, and the form that stays
+                    // correct if a host well is ever drawn here.
+                    users: crate::services::users_of_key(&service.key, &service.name),
+                    manifest_path: crate::services::Scope::City(root.clone())
+                        .manifest_path()
+                        .to_string_lossy()
+                        .to_string(),
+                    scope: service.scope,
                     name: service.name,
                     image: service.image,
                 })
@@ -1048,13 +1068,24 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
             // Which of its city's wells this plan is actually registered as
             // drawing from -- not merely which its city has. See
             // `AgentNetwork::drawing_from`.
+            //
+            // Filtered to city scope to match `wells` above: these names are
+            // looked up against the wellheads drawn on that town's square, and
+            // a channel to a well the map does not draw would join an agent to
+            // nothing.
             let drawing_from = city_roots
                 .iter()
                 .find(|(known, _)| known == &city)
                 .map(|(_, root)| {
                     crate::services::running_in(root)
                         .into_iter()
-                        .filter(|service| crate::services::draws_from(root, &service.name, &plan))
+                        .filter(|service| service.scope == kingdom_core::ServiceScope::City)
+                        // By the service's own key: a well is filed under the
+                        // scope that declared it, and asking by city root would
+                        // answer "nobody" for anything that is not a city's.
+                        .filter(|service| {
+                            crate::services::draws_from(&service.key, &service.name, &plan)
+                        })
                         .map(|service| service.name)
                         .collect()
                 })
@@ -2477,6 +2508,94 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     }
 
     Ok(to_browser_in(&kingdom, plan))
+}
+
+/// Every shared resource this kingdom knows about, and what each is doing.
+///
+/// The whole ledger in one call, host scope and every city at once. See
+/// [`crate::services::inventory`] for why it is not per city and why it costs
+/// one Docker question rather than one per row.
+///
+/// The kingdom's lock is taken and **released** before the await: `inventory`
+/// shells out to `docker`, and holding a `std::sync::Mutex` across an await
+/// point is the deadlock `city_root_in` already warns about, with a subprocess
+/// on top of it.
+#[server(SharedResources, "/api")]
+pub async fn shared_resources() -> Result<kingdom_core::ResourceInventory, ServerFnError> {
+    let kingdom = { lock()?.clone() };
+    Ok(crate::services::inventory(&kingdom).await)
+}
+
+/// Declares a new shared resource, writing it to the manifest its scope keeps.
+///
+/// Returns the path written to, which is the thing the King needs next: the
+/// file is the source of truth and editing it by hand is the supported way to
+/// change or remove what is there.
+///
+/// # Why the city is a `CityId` and not a path
+///
+/// The browser cannot be trusted with a filesystem path -- that is the whole
+/// reason the opening screen asks the King to type one rather than accepting
+/// one from a page. A city id is resolved against the open kingdom here, so the
+/// only paths this can write to are a city of the kingdom he opened, or his own
+/// profile.
+///
+/// # Why `env` is a string
+///
+/// It arrives as the `KEY=value` text the King typed, and is parsed by
+/// [`kingdom_core::services::parse_env`] here. Not cosmetic: a `Vec` of pairs
+/// that happens to be **empty** does not survive a server function's argument
+/// encoding at all, and a service with no environment is the ordinary case.
+/// Measured against a running server, where the form failed with "missing
+/// field `env`" for exactly that input.
+#[server(DeclareSharedResource, "/api")]
+pub async fn declare_shared_resource(
+    scope: String,
+    city: Option<String>,
+    name: String,
+    image: String,
+    port: u16,
+    env: String,
+    volume: String,
+) -> Result<String, ServerFnError> {
+    use kingdom_core::services::ServiceScope;
+
+    let Some(kind) = ServiceScope::from_wire(&scope) else {
+        return Err(ServerFnError::new(format!(
+            "`{scope}` is not a level a shared resource can run at."
+        )));
+    };
+
+    let scope = match kind {
+        ServiceScope::Host => crate::services::Scope::Host,
+        ServiceScope::City => {
+            let kingdom = lock()?;
+            let Some(city) = city
+                .map(kingdom_core::CityId::new)
+                .and_then(|id| kingdom.city(&id).cloned())
+            else {
+                return Err(ServerFnError::new(
+                    "A resource that belongs to one project needs a project. \
+                     Pick one, or share it with the whole machine instead.",
+                ));
+            };
+            crate::services::Scope::City(std::path::Path::new(&kingdom.root).join(&city.path))
+        }
+    };
+
+    let spec = kingdom_core::ServiceSpec {
+        name: name.trim().to_string(),
+        image: image.trim().to_string(),
+        port,
+        env: kingdom_core::services::parse_env(&env),
+        // An empty box is "no volume", which is a different declaration from a
+        // volume named "" -- and the one the parser would refuse.
+        volume: Some(volume.trim().to_string()).filter(|v| !v.is_empty()),
+    };
+
+    let path =
+        crate::services::declare(&scope, &spec).map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Every model the user can choose between, and what each will accept.

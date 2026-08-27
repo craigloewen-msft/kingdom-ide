@@ -85,6 +85,9 @@ pub fn Sidebar() -> impl IntoView {
     // overlay, asked here to reserve the room for it.
     let location = use_location();
     let map_in_rail = Memo::new(move |_| location.pathname.get() != "/");
+    // Whether the ledger is the screen currently open, so the rail's own entry
+    // reads as where you are rather than as somewhere to go.
+    let on_resources = Memo::new(move |_| location.pathname.get() == "/resources");
 
     // Clearing the kingdom locally is what returns the app to the opening
     // screen; the server call is what stops the next start reopening it.
@@ -171,6 +174,20 @@ pub fn Sidebar() -> impl IntoView {
                     on:click=move |_| state.toggle_rail()
                 >"\u{ab}"</button>
             </div>
+
+            // The way to the ledger. In the rail rather than on the map screen
+            // because it is navigation like everything else here, and because
+            // it must be reachable from a chamber too -- a King who has just
+            // seen a well in the ports badge is exactly the one who wants it.
+            <a
+                class="rail-resources"
+                class:current=move || on_resources.get()
+                href="/resources"
+                title="Databases and other containers your projects share"
+            >
+                <span class="rail-resources-mark">"\u{26c1}"</span>
+                <span class="rail-resources-label">"Shared resources"</span>
+            </a>
 
             <div class="sidebar-body">
                 <ul class="registry">

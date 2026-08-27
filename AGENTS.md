@@ -67,6 +67,7 @@ The translation, in full:
 | a remit | `Permissions::ReadOnly` / `Permissions::Full` |
 | a workshop | `Sandbox` |
 | a well | a shared container — `ServiceSpec`, `RunningService`, `SharedService` |
+| shared resources (the screen) | `SharedResource`, `ResourceInventory`, `wells.rs` |
 | a realm (fixture) | `FixtureSpec`, `fixtures.rs` |
 | a ward | `Language` |
 | a district / building | `Folder` / `SourceFile` |
@@ -121,6 +122,7 @@ folder he opened:
 ```
 ~/.kingdom/
   settings.json                durable IDE settings; today, the last kingdom opened
+  services.toml                shared resources the King keeps for every project
   kingdoms/<key>/
     kingdom.json               which root this folder is for
     plans/<plan-id>.json       one document per plan
@@ -147,8 +149,9 @@ host port the chamber shows — with a terminal into it. Off by default, chosen
 per plan; see [`docs/architecture.md`](docs/architecture.md#a-network-of-a-plans-own).
 A project can also declare **shared services** it needs standing — a database,
 say — which Kingdom starts once for the whole city and every plan reaches at one
-address; see
-[`docs/architecture.md`](docs/architecture.md#a-database-of-the-citys-own).
+address; the King can also keep his own, shared by every project he opens. There
+is a screen for seeing and declaring both:
+[`docs/shared-resources.md`](docs/shared-resources.md).
 
 **Faked:** the *opening* court — the plans a kingdom starts with, before any
 decree (`kingdom_core::sample::starter_plans`). Plans the King opens are real.
@@ -246,9 +249,10 @@ is invisible until a plan is halfway through a job:
   refuses to open one and names the package instead of degrading. Nothing else
   needs it, and the default plan does not.
 - **Docker**, but only for a project that declares shared services in
-  `<city>/.kingdom/services.toml`. Kingdom starts one container per service for
-  the whole city and hands its address to every plan. Without a daemon such a
-  city refuses to run rather than starting an agent that cannot reach its own
+  `<city>/.kingdom/services.toml`, or a King who keeps his own in
+  `~/.kingdom/services.toml`. Kingdom starts one container per service and hands
+  its address to every plan that can reach it. Without a daemon such a city
+  refuses to run rather than starting an agent that cannot reach its own
   database. Almost no project needs this and no test does.
 - **Whatever the city itself needs to run.** That is the *project's*
   prerequisite, not Kingdom's, and Kingdom cannot install it.

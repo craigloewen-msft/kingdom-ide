@@ -86,7 +86,7 @@ pub fn PortsBadge(
                         // with other plans -- so it is the fact that changes
                         // what he does next.
                         <Show when=move || !services.get().is_empty()>
-                            <p class="ports-section">"This project's shared services"</p>
+                            <p class="ports-section">"Shared resources you can reach"</p>
                             <ul class="wells-list">
                                 <For
                                     each=move || services.get()
@@ -102,6 +102,30 @@ pub fn PortsBadge(
                                         // honest affordance.
                                         <code class="wells-address">{service.address.clone()}</code>
                                         <span class="wells-image">{service.image.clone()}</span>
+                                        // Which level it is shared at, because
+                                        // it changes what the count beside it
+                                        // means: three plans on this project is
+                                        // a different fact from three plans
+                                        // across three projects.
+                                        <span
+                                            class="wells-scope"
+                                            class:machine=matches!(
+                                                service.scope, kingdom_core::ServiceScope::Host
+                                            )
+                                            title=match service.scope {
+                                                kingdom_core::ServiceScope::Host =>
+                                                    "Declared in your profile and shared with \
+                                                     every project you open",
+                                                kingdom_core::ServiceScope::City =>
+                                                    "Declared by this project and shared with \
+                                                     every plan working on it",
+                                            }
+                                        >
+                                            {match service.scope {
+                                                kingdom_core::ServiceScope::Host => "machine",
+                                                kingdom_core::ServiceScope::City => "project",
+                                            }}
+                                        </span>
                                         // Who else is in here -- the question
                                         // the King actually has before he
                                         // changes something in a shared
@@ -125,6 +149,14 @@ pub fn PortsBadge(
                                  them at these addresses too; they are not published \
                                  on your localhost."
                             </p>
+                            // The badge answers "where do I connect?". "Where is
+                            // this declared, and what else does this machine
+                            // share?" is a different question, and it has a
+                            // screen -- so this is a way there rather than a
+                            // second, smaller version of it.
+                            <a class="ports-manage" href="/resources">
+                                "Manage shared resources \u{2192}"
+                            </a>
                         </Show>
 
                         <Show when=move || isolated.get()>

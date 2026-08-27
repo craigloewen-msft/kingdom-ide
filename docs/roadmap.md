@@ -61,12 +61,25 @@ detail and the reasoning for each gap.
   says so. Isolation is also still off by default and per plan, so the King has
   to know to ask for it.
 
-  What the map *does* now show is the standing arrangement: the host network as
-  a ring at the realm's rim, each city's wells on its square, and every live
-  agent joined to what it reaches -- or moated, with nothing joining it to the
-  edge. That answers "what is each agent plugged into, and who shares this
-  database?" at a glance. It still does not answer "these two are fighting over
-  it", because nothing anywhere detects that yet.
+  The *sharing* half now has two surfaces. There is a screen —
+  [`shared-resources.md`](shared-resources.md) — which answers "what is shared,
+  with whom, and who is in it right now", and lets the King declare a resource
+  at a project or at his whole machine. And the map shows the standing
+  arrangement: the host network as a ring at the realm's rim, each city's wells
+  on its square, and every live agent joined to what it reaches — or moated,
+  with nothing joining it to the edge.
+
+  Together they answer "what is each agent plugged into, and who shares this
+  database?" at a glance. Neither answers "these two are fighting over it",
+  because nothing anywhere detects that yet: it is still only containers, and
+  still only reporting. Naming what is shared is a prerequisite for arbitrating
+  it, not the thing itself.
+
+  The two surfaces do not yet show the same set. A wellhead stands on a town's
+  square, so the map draws a *project's* wells only — a machine-wide one belongs
+  to no town, and drawing it on each would claim one container for every project
+  that merely reaches it. The host ring at the rim is where one belongs; see
+  [`citymap.md`](citymap.md#only-a-projects-wells-are-drawn).
 - Naming a plan with a model. A plan's branch is cut from its title today —
   `kingdom/<slug>`, via `kingdom_core::naming::slugify`, with `-2`, `-3` walked
   past on collision — but that title is still just the first clause of the

@@ -16,6 +16,7 @@ mod review_notes;
 mod sidebar;
 mod source_view;
 mod terminal_view;
+mod wells;
 
 pub use browser_view::BrowserView;
 pub use city_rail::CityRail;
@@ -31,3 +32,4 @@ pub use review_notes::ReviewMargin;
 pub use sidebar::Sidebar;
 pub use source_view::SourceView;
 pub use terminal_view::TerminalView;
+pub use wells::SharedResourcesView;

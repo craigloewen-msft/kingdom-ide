@@ -133,6 +133,24 @@ means it binds the King's own ports; a closed **moat** around an agent and *no*
 conduit means it has a network of its own; a **channel** to a wellhead means it
 is actually drawing from that well.
 
+### Only a *project's* wells are drawn
+
+A shared resource can also be declared at the King's own machine, in
+`~/.kingdom/services.toml`, and reached by every project he opens — see
+[`shared-resources.md`](shared-resources.md). Those are **not** on the map.
+
+A wellhead stands on a town's square, and a machine-wide well belongs to no
+town: drawn from `services::running_in` unfiltered, one Redis would appear once
+in every city that had an agent in it, the same container claimed by three
+projects that do not own it. So `api::kingdom_network` filters on scope, and a
+test in `services.rs` pins the fact that makes the filter necessary.
+
+The honest home for one is the **host ring** — it already draws the King's
+machine, which is precisely what such a well belongs to. Putting it there is its
+own piece of work rather than a line in this one, because it needs a mark that
+reads as "shared by everything" without looking like a city's, and channels from
+agents in several different towns converging on the rim.
+
 ### The one fact this exists to draw
 
 **An isolated agent still reaches its city's well.** That is the fact nothing

@@ -35,4 +35,7 @@ pub use model::*;
 pub use palette::{assign_banners, AgentPalette, BANNERS};
 pub use permissions::*;
 pub use review::*;
-pub use services::{ManifestError, ServiceManifest, ServiceSpec};
+pub use services::{
+    ManifestError, ManifestTrouble, ResourceInventory, ServiceManifest, ServiceScope, ServiceSpec,
+    ServiceState, SharedResource,
+};

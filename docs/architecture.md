@@ -432,7 +432,26 @@ project's database is not a collision to prevent — it is a common good every
 agent must reach, started once and stopped once.
 
 Shown to the King as **the well**; called a shared service in code
-(`ServiceSpec`, `RunningService`, `SharedService`).
+(`ServiceSpec`, `RunningService`, `SharedService`). There is a screen for seeing
+and declaring them — `components/wells.rs`, at `/resources`; what the King can
+do there, and every field of a manifest, is
+[`shared-resources.md`](shared-resources.md). What follows is the mechanism
+under it.
+
+A well is declared at one of **two levels**, and the level decides only which
+file the declaration lives in:
+
+| Level | File | Reached by | Registry key |
+|---|---|---|---|
+| a project | `<city>/.kingdom/services.toml`, committed | plans on that project | the city's key |
+| the King's machine | `$KINGDOM_HOME/services.toml`, never committed | plans on **every** project | `host` |
+
+Everything downstream is a function of that key — the network `kingdom-<key>`,
+the container `kingdom-<key>-<name>`, the `/24` hashed from it, the reference
+count. So the second level cost a `Scope` type rather than a branch in six
+places, and a host well is stopped when the last plan *anywhere* lets go rather
+than the last plan in one city. Where both levels set the same environment
+variable, the project's wins: the more specific declaration is the one it meant.
 
 A well is **drawn on the map**, standing on its city's square, with a channel to
 each agent actually drawing from it — and the map draws the host network and
@@ -531,6 +550,7 @@ he opened:
 ```
 ~/.kingdom/
   settings.json                  durable IDE settings; today, the last kingdom opened
+  services.toml                  shared resources the King keeps for every project
   kingdoms/<key>/
     kingdom.json                 which root this folder is for
     plans/<plan-id>.json         one document per plan
@@ -538,6 +558,12 @@ he opened:
     archive/<plan-id>.patch      the work an archived plan set aside
   realms/<name>/                 the proving grounds
 ```
+
+`services.toml` sits at the top rather than under `kingdoms/<key>/` because a
+host well is offered to every kingdom the King opens — that is the whole
+difference between it and a project's own. It also means a plan rehearsing
+Kingdom itself declares and sees its own, since `tools::child_environment`
+points such a plan at a `KINGDOM_HOME` inside its workspace.
 
 `<key>` is the folder's own name plus a hash of its resolved path, so two
 projects both called `dev` do not share a drawer. It is derived and never
