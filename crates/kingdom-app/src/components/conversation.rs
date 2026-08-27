@@ -476,6 +476,11 @@ fn ConversationBody(
     // Named so the menu offers the branch this plan will really land on, rather
     // than a hopeful "main" it might not have been cut from. `StoredValue`
     // because the label sits inside a reactive closure, which must be `Fn`.
+    //
+    // The fallback is for the Done menu only. `catch_up_decree` also reads this,
+    // and cannot see the fallback: a plan with no recorded base is refused by
+    // `worktree::merge` before git is ever asked, as `Finish::Refused` -- so the
+    // button that would say "catch up with the project" is never offered.
     let base = StoredValue::new(
         plan.workspace
             .base
@@ -647,6 +652,33 @@ fn ConversationBody(
         set_showing_done.set(false);
         finish.dispatch((id.get_value(), how));
     };
+
+    // Sending words the King did not have to type.
+    //
+    // Deliberately the *same* door as the composer -- `on_say`, and so
+    // `api::say` -- rather than a second route that re-drafts directly. The
+    // whole reason a prod can rescue a court that answered with silence is that
+    // the King's words land in the transcript and change the next request; see
+    // `turn::follows_silence`, and `tasks/00200` for the bug a quieter retry
+    // brought back.
+    let decree = move |text: String| {
+        // Sending is an act that says "show me what happens next", exactly as in
+        // `submit`.
+        follow.to_the_newest();
+        on_say.run((id.get_value(), text));
+    };
+
+    // Whether to offer to prod a court that stopped. See `can_keep_going` for
+    // which stops count and which deliberately do not.
+    let offer_keep_going = Memo::new(move |_| can_keep_going(status.get(), is_subagent));
+
+    // Whether the last thing that happened to this plan is a merge git refused.
+    // Read live, because it arrives while the King is looking at the chamber --
+    // he pressed Done a second ago -- and must vanish again the moment anything
+    // else happens.
+    let offer_catch_up = Memo::new(move |_| {
+        !is_subagent && live.with(|p| p.as_ref().is_some_and(merge_wants_the_court))
+    });
 
     // Accepting a plan makes no model call of its own -- it grants, and then
     // the court is asked again through exactly the path `say` uses. Splitting
@@ -1445,6 +1477,43 @@ fn ConversationBody(
                         </div>
                     </Show>
 
+                    // The decree the King is almost certainly about to type, offered as a
+                    // button. Between the error strip and the composer, and outside the log
+                    // for the error strip's reason: the log is what was said and done, and
+                    // this is a decision still to make.
+                    //
+                    // Deliberately *not* in the composer row. That row is Send, Stop and
+                    // Done -- a fourth control appearing and vanishing there would move the
+                    // others under the King's cursor.
+                    //
+                    // Not gold either. Gold in this chamber means "this is yours to decide";
+                    // these decide nothing, they send words he could have typed himself.
+                    <Show when=move || offer_keep_going.get() || offer_catch_up.get()>
+                        <div class="chamber-nudges">
+                            <Show when=move || offer_keep_going.get()>
+                                <button
+                                    class="nudge-btn"
+                                    title="Send the court round again"
+                                    on:click=move |_| decree(KEEP_GOING.to_string())
+                                >
+                                    "\u{21bb} Keep going"
+                                </button>
+                            </Show>
+                            // Both can stand at once -- a plan can have failed *and* have
+                            // just had a merge refused -- and two offers read honestly.
+                            <Show when=move || offer_catch_up.get()>
+                                <button
+                                    class="nudge-btn"
+                                    title="Ask the court to merge the latest base branch in \
+                                           and settle the conflicts"
+                                    on:click=move |_| decree(catch_up_decree(&base.get_value()))
+                                >
+                                    {move || format!("\u{2387} Catch up with {}", base.get_value())}
+                                </button>
+                            </Show>
+                        </div>
+                    </Show>
+
                     // The King's move, when the court has put something to him. Above the
                     // composer rather than inside the log for the same reason the error
                     // strip is: the log is what was said and done, and this is a decision
@@ -2185,6 +2254,73 @@ fn Subagents(tool_call: kingdom_core::ToolCall, plan: Memo<Option<PlanId>>) -> i
             </ul>
         </div>
     }
+}
+
+/// The words the "Keep going" button sends.
+///
+/// A constant so the button and the test that pins it cannot drift, and so what
+/// reaches the model is exactly what the King would have typed. Nothing about
+/// it is special on the way through: `api::say` receives an ordinary decree.
+const KEEP_GOING: &str = "Keep going";
+
+/// Whether the chamber offers to prod a court that stopped.
+///
+/// Only [`PlanStatus::Failed`], which is where all three ways a turn can die
+/// converge: a model error, the round cap running out, and a drafting task that
+/// panicked. Each of those already leaves a note telling the King to say
+/// something; this is that sentence with a button under it.
+///
+/// Two exclusions, both deliberate:
+///
+/// - **A halt the King called.** `turn::halted` leaves such a plan
+///   `AwaitingReview` precisely so a deliberate act is not dressed as a
+///   breakage. Offering to undo his own stop with one click would be the same
+///   misreport wearing a button.
+/// - **A subagent.** It answers to the plan that sent it, its chamber renders no
+///   composer at all, and `api::say` refuses one server-side.
+fn can_keep_going(status: PlanStatus, is_subagent: bool) -> bool {
+    status == PlanStatus::Failed && !is_subagent
+}
+
+/// Whether the last thing that happened to this plan is a merge git refused.
+///
+/// Matched on [`kingdom_core::NoteKind::MergeConflict`] rather than on the
+/// note's prose, which is git's wording and not ours.
+///
+/// **The last entry, not any entry**, and that does two jobs. The offer
+/// withdraws itself the moment anything else happens -- the court acts, the
+/// King says something -- so a stale button cannot ask for work that is already
+/// done. And it disarms the button by pressing it: `api::say` appends the
+/// King's words, so a second click finds the offer gone.
+///
+/// The same shape as `turn::follows_silence`, and for the same reason. It does
+/// *not* need that function's walk past the King's own words: this offer should
+/// stop being made the instant he says anything, whereas that one exists
+/// precisely to survive him having spoken.
+fn merge_wants_the_court(plan: &Plan) -> bool {
+    matches!(
+        plan.transcript.last(),
+        Some(Entry::Note(n)) if n.kind == kingdom_core::NoteKind::MergeConflict
+    )
+}
+
+/// What the "Catch up" button says to the court.
+///
+/// Names the branch the plan was really cut from rather than assuming `main`:
+/// the workspace records its base, and a plan cut from a release branch told to
+/// merge `main` would be sent at the wrong history.
+///
+/// It asks for the build and the tests as well as the merge. Resolving a
+/// conflict is the easy half; a resolution that compiles is the thing the King
+/// actually wants, and a decree that stops at "resolve the conflicts" reliably
+/// gets a branch that merges and does not build.
+fn catch_up_decree(base: &str) -> String {
+    format!(
+        "Merging this branch into {base} was refused: it has diverged. Merge the \
+         latest {base} into this branch and resolve every conflict, then check \
+         that the project still builds and its tests still pass. Tell me when it \
+         is ready to merge."
+    )
 }
 
 /// How a subagent's state reads, which is not how a plan's does.
@@ -3363,6 +3499,119 @@ mod tests {
             kingdom_core::Workspace::in_place("forge"),
             kingdom_core::NetworkMode::Shared,
         )
+    }
+
+    /// "Keep going" is offered to a court that broke, and to nothing else.
+    ///
+    /// The button exists because all three ways a turn can die converge on
+    /// `Failed` -- a model error, the round cap, a panicking task -- and each
+    /// already leaves a note telling the King to say something. What a
+    /// regression here costs is not the button but its *absence* being wrong:
+    /// offered to a plan the King deliberately halted, one click undoes his own
+    /// decision, which is the misreport `turn::halted` was written to avoid.
+    #[test]
+    fn keep_going_is_offered_only_to_a_court_that_failed() {
+        assert!(can_keep_going(PlanStatus::Failed, false));
+
+        // A halt the King called leaves the plan here, on purpose. So does a
+        // court that finished and is waiting on him -- prodding either would be
+        // answering a question nobody asked.
+        assert!(!can_keep_going(PlanStatus::AwaitingReview, false));
+        // Still working. There is a Stop button for this, not a start one.
+        assert!(!can_keep_going(PlanStatus::Drafting, false));
+        // History. `api::say` refuses a settled plan outright, so the button
+        // would be one that always errors.
+        assert!(!can_keep_going(PlanStatus::Merged, false));
+        assert!(!can_keep_going(PlanStatus::Archived, false));
+
+        // An errand answers to the plan that sent it. Its chamber renders no
+        // composer at all, and `api::say` refuses it server-side -- so a button
+        // here would be a second hand on a conversation its parent is waiting to
+        // be reported.
+        for status in PlanStatus::ALL {
+            assert!(
+                !can_keep_going(status, true),
+                "an errand is never prodded from here: {status:?}"
+            );
+        }
+    }
+
+    /// The catch-up offer stands only while the refusal is still the last word.
+    ///
+    /// Both halves matter. Withdrawing it the moment anything else happens is
+    /// what stops a stale button asking for work already done -- and it is also
+    /// what disarms the button by pressing it, since `api::say` appends the
+    /// King's words to the very transcript this reads.
+    #[test]
+    fn catching_up_is_offered_only_while_the_refusal_is_the_last_word() {
+        use kingdom_core::NoteKind;
+
+        let mut plan = a_plan("plan-diverged");
+        assert!(
+            !merge_wants_the_court(&plan),
+            "a plan nobody has tried to merge is not waiting on a merge"
+        );
+
+        // The other two merge refusals are the King's to clear, and are noted as
+        // plain `Merge` for exactly that reason. Offering to send an agent at
+        // his own checked-out branch would point at the wrong hand.
+        plan.note(NoteKind::Merge, "Switch back to main and try again.");
+        assert!(!merge_wants_the_court(&plan));
+
+        // git tried and declined. This one is work, and work is what an agent is
+        // for.
+        plan.note(NoteKind::MergeConflict, "CONFLICT in README.md");
+        assert!(merge_wants_the_court(&plan));
+
+        // The court got on with it. The offer goes: whatever it would ask for is
+        // already being done.
+        plan.transcript.push(call("bash", true));
+        assert!(
+            !merge_wants_the_court(&plan),
+            "a refusal the court has already moved past is history, not a question"
+        );
+
+        // And pressing the button is itself enough to withdraw it, because what
+        // pressing it does is say something. Deliberately unlike
+        // `turn::follows_silence`, which walks *past* the King's words -- that
+        // one exists to survive him speaking; this one should stop the instant
+        // he does.
+        let mut spoken = a_plan("plan-answered");
+        spoken.note(NoteKind::MergeConflict, "CONFLICT in README.md");
+        assert!(merge_wants_the_court(&spoken));
+        spoken.say(Speaker::User, catch_up_decree("main"));
+        assert!(
+            !merge_wants_the_court(&spoken),
+            "a second click must find the offer gone, not send the decree twice"
+        );
+    }
+
+    /// The decree names the branch the plan was actually cut from.
+    ///
+    /// A plan cut from a release branch and told to merge `main` would be sent
+    /// at the wrong history -- and would do it, competently, which is the worst
+    /// version of this bug. The workspace records its base; this spends it.
+    #[test]
+    fn catching_up_names_the_branch_this_plan_was_cut_from() {
+        let decree = catch_up_decree("release/2.1");
+        assert!(
+            decree.contains("release/2.1"),
+            "the decree must name the real base: {decree}"
+        );
+        assert!(
+            !decree.contains("main"),
+            "and must not assume main: {decree}"
+        );
+
+        // Merging is the easy half. A resolution that does not build is a branch
+        // that merges and breaks the project, so the decree asks for both.
+        let decree = catch_up_decree("main");
+        assert!(decree.contains("conflict"), "{decree}");
+        assert!(
+            decree.contains("builds") && decree.contains("tests"),
+            "a conflict resolved into a broken build is not a plan ready to \
+             merge: {decree}"
+        );
     }
 
     /// Focus is a property of a panel being *open*.

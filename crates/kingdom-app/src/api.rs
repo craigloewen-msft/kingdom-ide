@@ -2502,6 +2502,10 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         // Nothing about the plan has changed, so nothing about its status
         // does either: it is still awaiting review, because it is.
         Finish::Refused(why) => p.note(NoteKind::Merge, why),
+        // The same on disk, and a different kind on purpose. This is the one
+        // refusal an agent can clear, and the chamber finds it by matching on
+        // the kind -- see `NoteKind::MergeConflict`.
+        Finish::Diverged(why) => p.note(NoteKind::MergeConflict, why),
     })
     .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))?;
 
