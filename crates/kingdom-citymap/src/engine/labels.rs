@@ -317,7 +317,9 @@ pub fn update_labels(
                 };
                 requests.push(LabelRequest {
                     title: feature.name.clone(),
-                    detail: format!("{} · {}", feature.building_kind, feature.category),
+                    // Just the name at this tier -- no "GUILDHALL · SOURCE"
+                    // style subtitle under each building.
+                    detail: String::new(),
                     anchor,
                     font_size: FILE_FONT_SIZE,
                     detail_size: DETAIL_FONT_SIZE,
