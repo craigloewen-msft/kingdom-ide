@@ -194,20 +194,92 @@
   display: contents;
 }
 
-// The break between two hunks. A jump in the line numbers is announced rather
-// than left to be discovered.
+// A gap: lines the diff is not showing, and the ways to open them. A jump in
+// the line numbers is announced rather than left to be discovered, and now it
+// is also the control that closes the jump.
+//
+// The strip spans the grid rather than sitting in a column, the same trick
+// `.diff-composer` uses and for the same reason: `.diff-row` is
+// `display: contents`, so there is no row box to put anything in.
 .diff-gap {
   grid-column: 1 / -1;
-  padding: 2px 0;
   background: t.$panel;
   border-top: 1px solid t.$edge;
   border-bottom: 1px solid t.$edge;
   color: t.$ink-faint;
-  text-align: center;
-  line-height: 1;
 }
 
-.diff-gap-mark { font-size: 12px; }
+// The strip's own content, pinned to the panel's left edge.
+//
+// Sticky and `100cqi` for `.diff-composer`'s reason: unwrapped, the grid is as
+// wide as the longest line in the file, so a strip that scrolled with it would
+// carry its own buttons off the right-hand edge exactly when a long line has
+// scrolled the King sideways.
+.diff-gap-strip {
+  position: sticky;
+  left: 0;
+  box-sizing: border-box;
+  width: 100cqi;
+  max-width: 100cqi;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  line-height: 1.6;
+}
+
+.diff-gap-mark {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.diff-gap-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 10.5px;
+  // Never selected with the code, as the line numbers are not: copying a diff
+  // should give the King the lines, not a sentence about the ones it omitted.
+  user-select: none;
+}
+
+.diff-gap-acts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+}
+
+// Shaped like `.diff-chip` in the bar above, because it is the same kind of
+// thing: a quiet control over how much the King is being shown. Gilded on
+// hover rather than when "on" — there is no on state, only a press.
+.diff-gap-act {
+  padding: 1px 7px;
+  background: transparent;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  color: t.$ink-faint;
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+  }
+
+  // While a run is on its way. Dimmed rather than removed: a control that
+  // vanishes under the pointer moves the two beside it.
+  &:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+}
+
+.diff-gap-failed {
+  color: t.$failed;
+  font-size: 10.5px;
+}
 
 .diff-cell {
   display: flex;

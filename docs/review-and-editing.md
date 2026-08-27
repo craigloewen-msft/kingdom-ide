@@ -97,6 +97,55 @@ the source view is deliberately untouched: `_source.scss` argues that wrapping
 there breaks the correspondence between what he types and the line number he just
 read, and that argument does not apply to a read-only pair of columns.
 
+**And he can open the diff up.** Three lines of context either side of a change
+say *what* moved and often not *where* — the function a hunk sits inside starts
+above the first row drawn, so the King reads a rewritten line with no idea which
+`fn` it belongs to. Every break between hunks is now a control strip that says
+how many lines it is hiding and offers to reveal them: **↑ 20** for the lines
+against the change below (the usual one, since that is where the signature is),
+**↓ 20** to read on from the change above, and **Show all N** while what remains
+fits one answer. The run **before the first hunk and after the last** gets a
+strip too, which the panel never had at all — a change on line 400 used simply
+to be the top of the panel, with no sign that 399 lines came first.
+
+Four decisions there are load-bearing.
+
+**The lines are fetched, not shipped with the diff.** Sending the whole file and
+folding it in the browser would be simpler and would undo the cap the panel is
+built around: `MOST_ROWS` exists because the cost of a diff is DOM nodes, and a
+40,000-line file with one changed line is cheap today precisely because the
+unchanged 39,990 never leave the server. So expansion is a request
+(`plan_diff_context` → `review::context`), the sixth path where an outsider names
+a file and the server opens it — held to `within_workspace` like the other five,
+which the source-reading test now pins. One answer is capped at `MOST_CONTEXT`,
+and that constant lives in `kingdom-core` rather than beside the reader, because
+the browser decides whether to offer "show all" against the same number the
+server enforces.
+
+**Nothing is re-diffed to answer.** The region between two hunks is the same text
+in both versions by construction — a grouped diff only ever breaks inside a run
+of unchanged lines — so `context` takes the two slices and pairs them straight
+across. It **checks** they match and refuses if they do not, because the ordinary
+way to get there is the court rewriting the file between the panel fetching the
+diff and the King pressing the button, and pairing two lines that no longer
+correspond would put unrelated text opposite itself with nothing saying so. The
+refusal reads *"this file has changed since it was compared"*, in the strip's own
+place: it is a fact about those lines, not about the comparison.
+
+**A truncated diff offers no control at all** (`FileDiff::may_expand`). Rows were
+dropped part-way through a hunk, so its declared range no longer describes what
+is on screen and a reveal computed from it would silently skip them. No button is
+a better answer than a lying one, and the panel already says the comparison is
+partial.
+
+**A reveal is forgotten when the diff refetches.** The counts live in the `Gap`
+component and clear when the gap it was handed moves — which is exactly when the
+court has edited the file. Lines left standing across that would be text the King
+is still reading and the workspace no longer holds. Revealed rows are otherwise
+ordinary rows: they render through the same `Row` component the hunks do, so a
+line he opened up takes a margin note the same way — which is usually why he
+opened it.
+
 What yields instead is the **cities rail**, which folds itself to a strip below
 1250px (`app.rs::fold_rail_when_cramped`). A chamber can want four columns at
 once, and that rail is the one the King has finished using by the time he is

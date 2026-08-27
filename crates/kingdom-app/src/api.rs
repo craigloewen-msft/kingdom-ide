@@ -876,6 +876,60 @@ pub async fn plan_diff(
     Ok(crate::review::diff(&workspace, &inside).await)
 }
 
+/// The lines a diff left out, when the King asks to see further.
+///
+/// The panel keeps a change and three lines either side of it, which is often
+/// not enough to say *where* a change is -- the function it sits inside starts
+/// above the first row shown. This is how the strip between two hunks fills
+/// itself in.
+///
+/// # Why this is a request at all
+///
+/// Sending the whole file with the diff and folding it in the browser would be
+/// simpler and would undo the row cap the panel is built around: a 40,000-line
+/// file with one changed line is cheap today precisely because the unchanged
+/// 39,990 never leave the server. So the King pays for what he asks to see,
+/// when he asks -- and [`crate::review::context`] caps one answer in turn.
+///
+/// # The boundary
+///
+/// The sixth place in Kingdom where an outsider names a path and the server
+/// opens it, held to the rule the other five keep: resolved through
+/// [`within_workspace`] before git or the filesystem sees it.
+#[server(PlanDiffContext, "/api")]
+pub async fn plan_diff_context(
+    plan: String,
+    path: String,
+    /// Where the run begins in each version, 1-based, and how long it is. Three
+    /// numbers rather than a `Gap` because a server function's arguments are a
+    /// wire format, and the browser holds the `Gap` they were taken from either
+    /// way -- see [`kingdom_core::Gap`] for why both files are named.
+    old_from: u32,
+    new_from: u32,
+    count: u32,
+) -> Result<Vec<kingdom_core::DiffRow>, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = {
+        let kingdom = lock()?;
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+        grounded(&kingdom.root, &plan.workspace)
+    };
+
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    let gap = kingdom_core::Gap {
+        old_from,
+        new_from,
+        count,
+    };
+
+    crate::review::context(&workspace, &inside, gap)
+        .await
+        .map_err(ServerFnError::new)
+}
+
 /// One file of a plan's workspace, as it stands, for the King to read and write
 /// against.
 ///
@@ -2420,6 +2474,7 @@ pub(crate) mod tests {
 
         for route in [
             "pub async fn plan_diff(",
+            "pub async fn plan_diff_context(",
             "pub async fn plan_source(",
             "pub async fn plan_file_text(",
             "pub async fn plan_write_file(",
