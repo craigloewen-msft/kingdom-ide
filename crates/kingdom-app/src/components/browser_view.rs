@@ -26,8 +26,8 @@
 //! Kingdom does not have: a plan that *knows* it owns a session (a field, set
 //! when a browser tool call first launches one, published by the event bus like
 //! any other change), and live updates reaching the map at all -- which
-//! `AGENTS.md` lists as unbuilt. Both are real; neither is this. Guessing at UI
-//! nobody has asked for is how the lease machinery happened.
+//! `docs/roadmap.md` lists as unbuilt. Both are real; neither is this. Guessing
+//! at UI nobody has asked for is how the lease machinery happened.
 
 use leptos::prelude::*;
 
