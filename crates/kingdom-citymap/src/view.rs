@@ -33,6 +33,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::engine;
 use crate::engine::bridge::{Bridge, TownActivity, ViewerCommand, ViewerStatus};
+use crate::follow;
 use crate::map::{MapManifest, MapPresence};
 use crate::mode::{MapMode, decide};
 use crate::progress::{Transfer, Wait};
@@ -355,6 +356,16 @@ pub fn CityMap(
         builder.send(ViewerCommand::SetWorks(raised));
     });
 
+    // What the follow rule below last did to the camera. Declared here because
+    // the re-framing effect clears it too: a change of home puts the camera
+    // somewhere that rule did not choose.
+    //
+    // A `StoredValue` rather than a signal, for `file_tree.rs`'s reason about
+    // its own `revealed`: nothing renders from this, and writing it must not
+    // schedule anything. A signal would make the memory of the last move a
+    // dependency of the very effect that writes it.
+    let followed = StoredValue::new(follow::Followed::default());
+
     // Re-framing when the map changes home.
     //
     // The two homes are wildly different shapes, and the rig is re-fitted only
@@ -411,144 +422,138 @@ pub fn CityMap(
                 Some((center, extent)) => ViewerCommand::Focus { center, extent },
                 None => ViewerCommand::Fit,
             });
+            // The camera is now somewhere the follow rule did not put it, so
+            // its memory of where it aimed last is no longer true. Forgetting
+            // is what makes the next file opened here an arrival rather than a
+            // glide from a building the camera has already left -- and, when a
+            // city was scoped to just now, what lets the rule point at the open
+            // file again rather than answering `Stay` because the town it just
+            // framed is the one it remembers.
+            followed.update_value(follow::Followed::forget);
         })
         .forget();
     });
 
-    // Scoping the rail's map to the city the conversation is about.
+    // Following the King: the one place the rail's map moves its own camera.
     //
-    // Only in the rail: on his own map the King drives the camera, and a view
-    // that jumped every time the selection changed would take it from him.
+    // This was two effects -- one scoping to the city, one narrowing to the
+    // open file -- each with its own memory and both able to fire on a single
+    // wake. The rule the King wants is a rule about both at once, so they are
+    // one effect over one decision: `follow::decide`, which is where the rule
+    // is written down and tested. Everything here is the plumbing that reads
+    // signals, resolves a place into geometry, and sends at most one command.
     //
-    // `built` is tracked as well as the city, and that is load-bearing rather
-    // than tidy. A world is raised a slice at a time, and the frame it
-    // finishes on calls `fit()` (see `raise::raise_world`) -- so on a page
-    // opened straight into a chamber this effect would send its `Focus` while
-    // the cities were still going up, and the raise would overwrite it with
-    // the whole kingdom a moment later. Re-running once the world is standing
-    // is what puts the scope back.
+    // # What it must not move for
+    //
+    // Anything that is not the King going somewhere new. An agent writing a
+    // file wakes `works` and the activity rings, a poll of the engine's status
+    // lands sixteen times a second, and a pan re-sets the whole status signal
+    // -- and for every one of those `decide` answers `Stay`. The map then sends
+    // nothing, which is the difference between a camera that follows him and
+    // one that twitches at every other agent in the kingdom.
+    //
+    // `built` is tracked, and that is load-bearing rather than tidy. A world is
+    // raised a slice at a time and the frame it finishes on calls `fit()` (see
+    // `raise::raise_world`), so on a page opened straight into a chamber a
+    // command sent while the cities were still going up would be overwritten by
+    // the whole kingdom a moment later. Re-running once the world stands is
+    // what puts the scope back.
     //
     // And `manual` is tracked for the opposite reason: while the King has the
-    // camera this must not move it, and the moment the engine hands it back
-    // this must re-run and put the map where it now belongs.
-    let scoper = bridge.clone();
+    // camera nothing may move it, and the moment the engine hands it back --
+    // the free-look chip, or `input::RELEASE_AFTER` -- this re-runs and puts
+    // the map on the work in front of him.
+    //
+    // Both memos, not bare status reads: `status` is re-set wholesale on every
+    // poll whose revision moved, and the revision moves for a camera rect that
+    // shifted half a world unit. A `Memo` only notifies when its own value
+    // changes, so panning no longer wakes the thing that would undo the pan.
+    let follower = bridge.clone();
     Effect::new(move |_| {
-        if manual.get() {
+        let in_rail = presence.get().in_rail();
+        let standing = built.get();
+        let by_hand = manual.get();
+        let city = focus_city.get();
+        let open = focus_file.get();
+
+        let step = followed.with_value(|last| {
+            follow::decide(
+                last,
+                in_rail,
+                standing,
+                by_hand,
+                city.as_ref().map(CityId::as_str),
+                open.as_deref(),
+            )
+        });
+
+        // The camera is about to be somewhere this rule did not choose, so what
+        // it remembers is no longer true. Written on the way out rather than in
+        // the branch that took it: a glide from a remembered building the
+        // camera has already left is a quarter second of travelling from
+        // nowhere.
+        if by_hand || !in_rail || !standing {
+            followed.update_value(follow::Followed::forget);
+        }
+
+        if matches!(step, follow::Step::Stay) {
             return;
         }
-        let Some(city) = focus_city.get() else {
+        let Some(city) = city else {
             return;
         };
-        if !presence.get().in_rail() || !built.get() {
-            return;
-        }
+
         // Tracked, not `_untracked`: the manifest arrives after the first run
         // of this effect, and without the dependency a chamber opened from a
         // cold page would never frame its city at all.
-        let Some((center, extent)) = manifest.with(|map| {
-            let town = map.as_ref()?.town_named(city.as_str())?;
-            Some((town.center, town.extent))
-        }) else {
-            return;
-        };
-        scoper.send(ViewerCommand::Focus { center, extent });
-    });
-
-    // And narrowing it to the building of the file he is reading.
-    //
-    // `Inspect` rather than `LookAt`: this centres on the holding *and* zooms
-    // until a house is `camera::INSPECT_HOLDING_PIXELS` wide, which is the
-    // tier that draws per-file labels. A bare `LookAt` kept the town's zoom,
-    // which in a rail pane is a twenty-pixel house -- the coarsest tier there
-    // is -- so the map aimed at the file without ever arriving at it.
-    //
-    // Closing the panel pulls back to the town, which reverses what this did
-    // before. That older behaviour was right when the difference was a pan of
-    // a town-wide frame and re-framing would have been motion for nothing; it
-    // is wrong now that opening a file fills the pane with one building,
-    // because a closed panel would leave the map staring at a file the King is
-    // no longer reading. Which city he is in is still true, so the town is
-    // what it falls back to.
-    //
-    // `built` for the same reason as the effect above: a camera pointed at a
-    // holding before the world it stands in has finished going up is undone by
-    // the raise's closing `fit()`. And `manual` for the same reason too.
-    //
-    // # Gliding, and when not to
-    //
-    // Moving between two files of one city is a short hop, and travelling it
-    // over `camera::GLIDE_SECONDS` is what tells the King *which way* the map
-    // went -- the new building arrives from somewhere rather than replacing
-    // what was there. Arriving in a city for the first time is not a journey
-    // worth animating: the whole frame changes, so a tween across it is a
-    // smear. So the last city an `Inspect` was sent for is remembered, and the
-    // glide is asked for only when this one matches it.
-    //
-    // The decision is made here rather than in the engine because it is a
-    // question about *cities*, and the engine does not know what one is -- the
-    // same boundary the works effect above is written against.
-    let inspected_city = RwSignal::new(None::<CityId>);
-    let pointer = bridge.clone();
-    Effect::new(move |_| {
-        // Every early return below forgets where the camera was pointed, and
-        // that is the point of writing it here rather than in one branch. Each
-        // one means the camera is about to be somewhere this effect did not put
-        // it -- the King has taken it, the map has moved home and re-framed, or
-        // a world is going up and will end with its own `fit()`. A glide from a
-        // *remembered* building the camera is no longer at would be a quarter
-        // second of travelling from nowhere.
-        if manual.get() {
-            inspected_city.set(None);
-            return;
-        }
-        let open = focus_file.get();
-        if !presence.get().in_rail() || !built.get() {
-            inspected_city.set(None);
-            return;
-        }
-        let Some(city) = focus_city.get() else {
-            inspected_city.set(None);
-            return;
-        };
-        let framed = manifest.with(|map| {
+        //
+        // The resolving from a city and a path to world-space geometry happens
+        // here for the same reason `SetWorks` and `SetActivity` translate here:
+        // this is the boundary the engine's ignorance of Kingdom's domain is
+        // kept at.
+        let aimed = manifest.with(|map| {
             let map = map.as_ref()?;
-            match open.as_deref() {
-                // A file to point at: its building, close enough to read.
-                Some(path) => {
-                    map.holding_at(city.as_str(), path)
-                        .map(|holding| ViewerCommand::Inspect {
-                            point: holding.center,
-                            // Only when the camera is already in this city --
-                            // and only when it is already pointed at a
-                            // *building* there. Coming from the town-wide frame
-                            // is the arrival, not a hop between neighbours.
-                            glide: inspected_city.get_untracked().as_ref() == Some(&city),
-                        })
+            match step {
+                follow::Step::Inspect { glide } => {
+                    let path = open.as_deref()?;
+                    let holding = map.holding_at(city.as_str(), path)?;
+                    Some(ViewerCommand::Inspect {
+                        point: holding.center,
+                        glide,
+                    })
                 }
-                // None open: back out to the town the chamber is about.
-                None => map
-                    .town_named(city.as_str())
-                    .map(|town| ViewerCommand::Focus {
+                _ => {
+                    let town = map.town_named(city.as_str())?;
+                    Some(ViewerCommand::Focus {
                         center: town.center,
                         extent: town.extent,
-                    }),
+                    })
+                }
             }
         });
-        let Some(command) = framed else {
+        let Some(command) = aimed else {
             // Nothing to point at -- a file with no building on the map, most
-            // often. The camera stays where it is, so what it is pointed at is
-            // still true and is deliberately left alone.
+            // often, or a manifest that has not arrived. The camera stays where
+            // it is, and the memory is deliberately not written: nothing was
+            // sent, so nothing about where it stands has changed.
             return;
         };
-        // Remembered *after* the send, and only for a command that actually
-        // pointed at a building: pulling back to the town leaves the camera
-        // framing the whole place, so the next file opened there is an arrival
-        // again rather than a hop from wherever the last one stood.
-        inspected_city.set(match command {
-            ViewerCommand::Inspect { .. } => Some(city),
-            _ => None,
+
+        // Remembered *after* the send, and from the command that was actually
+        // sent rather than from the step that was asked for -- a `Frame` that
+        // could not find its town must not be recorded as having framed it, or
+        // the rule would answer `Stay` for a city it never moved to.
+        followed.update_value(|last| match &command {
+            ViewerCommand::Inspect { .. } => {
+                // The path is what was resolved into this command, so it is
+                // read back from the same place rather than assumed.
+                if let Some(path) = open.as_deref() {
+                    last.inspect(city.as_str(), path);
+                }
+            }
+            _ => last.frame(city.as_str()),
         });
-        pointer.send(command);
+        follower.send(command);
     });
 
     // Clicking a building: on the King's own map it selects the city, and in

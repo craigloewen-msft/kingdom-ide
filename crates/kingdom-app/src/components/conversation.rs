@@ -220,10 +220,31 @@ pub fn Conversation() -> impl IntoView {
             .with(|k| k.city(&plan.city).map(|c| c.name.clone()))
     });
 
+    // The city this chamber is about, by identity rather than by value.
+    //
+    // `open_plan` above records why the distinction matters for the body; this
+    // is the same trap on a different signal, and it reaches further. `plan`
+    // differs on every watch-socket push, because a growing transcript makes
+    // the memo's value differ -- so an effect over it re-runs once per deed of
+    // every turn in this plan.
+    let plan_city = Memo::new(move |_| plan.with(|p| p.as_ref().map(|p| p.city.clone())));
+
     // The rail and the map should agree with the URL about where the user is.
+    //
+    // Written only when it actually moves, and the comparison is the point of
+    // the line rather than an optimisation. `set` notifies whether or not the
+    // value changed -- `reactive_graph`'s `Set::set` is a bare `try_update`,
+    // with no equality check anywhere in it -- and this signal is the map's
+    // `focus_city` prop. So re-announcing the same city swept the rail's camera
+    // out to the town and back down onto the open file, once per file any agent
+    // in that project touched. The map was obeying an instruction it should
+    // never have been given.
     Effect::new(move |_| {
-        if let Some(p) = plan.get() {
-            state.selected.set(Some(p.city));
+        let Some(city) = plan_city.get() else {
+            return;
+        };
+        if state.selected.get_untracked().as_ref() != Some(&city) {
+            state.selected.set(Some(city));
         }
     });
 
@@ -809,7 +830,17 @@ fn ConversationBody(
     //
     // Cleared on the way out, so the map does not go on pointing at a building
     // in a plan the King has left.
-    Effect::new(move |_| state.focus_file.set(open_file.get()));
+    //
+    // Guarded for `state.selected`'s reason above: `set` notifies even when the
+    // value has not moved, and `ConversationBody` is built afresh whenever the
+    // open plan changes identity -- so an unguarded write re-announced the same
+    // open file and moved a camera nobody had asked to move.
+    Effect::new(move |_| {
+        let open = open_file.get();
+        if state.focus_file.get_untracked() != open {
+            state.focus_file.set(open);
+        }
+    });
     on_cleanup(move || {
         state.focus_file.try_set(None);
         // And any building pressed but not yet read. A pick that outlived its
