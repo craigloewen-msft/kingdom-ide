@@ -34,7 +34,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::engine;
 use crate::engine::bridge::{Bridge, TownActivity, ViewerCommand, ViewerStatus};
 use crate::map::{MapManifest, MapPresence};
-use crate::mode::{decide, MapMode};
+use crate::mode::{MapMode, decide};
 use crate::progress::{Transfer, Wait};
 
 /// How often the component picks up what the engine is showing.

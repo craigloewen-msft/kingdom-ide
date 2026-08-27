@@ -45,6 +45,12 @@ const STAR: [u8; 4] = [226, 232, 246, 255];
 /// Fixed, so the sky is the same sky every time the map is opened. There is
 /// nothing for it to vary with -- unlike woodland, which is seeded from the
 /// repository it grows on.
+///
+/// The grouping spells the word rather than dividing the number evenly, which
+/// is what clippy objects to. Regrouping it to `0x005e_ed0f_57a5` would say the
+/// same thing about a constant nobody reads for its magnitude, so the lint is
+/// waived here rather than obeyed.
+#[allow(clippy::unusual_byte_groupings)]
 const SEED: u64 = 0x5eed_0f_57a5;
 
 /// Marks the star field, which rides on the camera.

@@ -16,7 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-
 use ignore::WalkBuilder;
 
 use crate::build::model::{Category, Metrics, Node, NodeKind, Repository};
@@ -108,7 +107,10 @@ fn discover_recursive(
             whichever(error, format!("could not inspect {}", directory.display()))
         })?;
         let file_type = entry.file_type().map_err(|error| {
-            whichever(error, format!("could not inspect {}", entry.path().display()))
+            whichever(
+                error,
+                format!("could not inspect {}", entry.path().display()),
+            )
         })?;
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
@@ -154,8 +156,8 @@ pub fn scan_repository(root: &Path, options: &ScanOptions) -> Result<Repository>
 
     let mut files = Vec::new();
     for entry in builder.build() {
-        let entry =
-            entry.map_err(|error| whichever(error, format!("could not walk {}", root.display())))?;
+        let entry = entry
+            .map_err(|error| whichever(error, format!("could not walk {}", root.display())))?;
         if entry.file_type().is_some_and(|kind| kind.is_file()) {
             let relative = entry
                 .path()
@@ -593,13 +595,12 @@ fn is_import_line(trimmed: &str) -> bool {
 }
 
 fn analyze_file(absolute: &Path, relative: &Path) -> Result<(Node, Vec<Vec<String>>)> {
-    let metadata = fs::metadata(absolute)
-        .map_err(|error| {
-            whichever(
-                error,
-                format!("could not read metadata for {}", absolute.display()),
-            )
-        })?;
+    let metadata = fs::metadata(absolute).map_err(|error| {
+        whichever(
+            error,
+            format!("could not read metadata for {}", absolute.display()),
+        )
+    })?;
     let name = relative
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -618,10 +619,8 @@ fn analyze_file(absolute: &Path, relative: &Path) -> Result<(Node, Vec<Vec<Strin
     };
     let mut imports = Vec::new();
     if metadata.len() <= MAX_ANALYZED_BYTES && is_text_file(&extension, &name) {
-        let content =
-            fs::read(absolute).map_err(|error| {
-                whichever(error, format!("could not read {}", absolute.display()))
-            })?;
+        let content = fs::read(absolute)
+            .map_err(|error| whichever(error, format!("could not read {}", absolute.display())))?;
         let text = String::from_utf8_lossy(&content);
         metrics.lines = text.lines().count();
         metrics.code_lines = text.lines().filter(|line| is_code_line(line)).count();

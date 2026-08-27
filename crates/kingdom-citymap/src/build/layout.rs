@@ -991,9 +991,7 @@ fn pack_wards<'a>(
         })
         .collect();
 
-    pack_onto(&sized, extent, gap, |(node, _)| {
-        stable_hash(&node.name)
-    })
+    pack_onto(&sized, extent, gap, |(node, _)| stable_hash(&node.name))
 }
 
 fn rects_overlap(left: Rect, right: Rect, gap: f32) -> bool {

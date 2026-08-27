@@ -69,7 +69,7 @@ pub struct Brief {
     /// How many bytes of conversation this request may carry.
     ///
     /// On the `Brief` rather than on the provider because it is a property of
-    /// *this attempt*, not of the gateway: `api::converse` lowers it and asks
+    /// *this attempt*, not of the gateway: `turn::converse` lowers it and asks
     /// again when a request comes back too large, and a provider that held its
     /// own budget would have no way to be told.
     ///
@@ -367,7 +367,7 @@ pub enum ModelError {
     /// Folding this into `Refused` is what made a real plan unrecoverable: 413
     /// is a 4xx, `Refused` is fatal, and every "keep going" rebuilt the same
     /// oversized body from the same transcript and was rejected identically.
-    /// See [`Budget`] for what shrinking means, and `api::converse` for where it
+    /// See [`Budget`] for what shrinking means, and `turn::converse` for where it
     /// happens.
     #[error("{0}")]
     TooLarge(String),
@@ -392,7 +392,7 @@ impl ModelError {
     /// not the same as saying it is fatal. Resending the identical body would
     /// be rejected identically, so it fails this question honestly; what it
     /// earns instead is a retry that *changes* the request first, which
-    /// `api::converse` asks for separately through [`ModelError::is_shrinkable`].
+    /// `turn::converse` asks for separately through [`ModelError::is_shrinkable`].
     /// Answering `true` here would have this loop resend the same oversized
     /// request twice more and call the result a retry.
     pub fn is_transient(&self) -> bool {

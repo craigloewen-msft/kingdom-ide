@@ -174,11 +174,7 @@ impl ViewerCommand {
     pub fn moves_the_camera(&self) -> bool {
         matches!(
             self,
-            Self::Load(_)
-                | Self::Fit
-                | Self::ZoomBy(_)
-                | Self::ActualSize
-                | Self::Focus { .. }
+            Self::Load(_) | Self::Fit | Self::ZoomBy(_) | Self::ActualSize | Self::Focus { .. }
         )
     }
 }

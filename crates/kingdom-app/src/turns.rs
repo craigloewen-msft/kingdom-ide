@@ -46,6 +46,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::watch;
 
+/// Each running turn, by plan: the token that names the registration and the
+/// channel its future watches for a halt.
+///
+/// A named type because the pair appears in both the static and the accessor
+/// below, and spelling it out twice is what clippy's `type_complexity` is
+/// pointing at.
+type Running = HashMap<PlanId, (u64, watch::Sender<bool>)>;
+
 /// The turns running in this process, keyed by the plan each is drawing up.
 ///
 /// The value carries a *token* as well as the signal. Two turns can briefly
@@ -61,12 +69,12 @@ use tokio::sync::watch;
 /// channel into a running future, and writing a record of it to disk would
 /// leave the next process holding a handle to a turn that no longer exists.
 /// `store::reconcile` repairs what a restart leaves behind.
-static RUNNING: OnceLock<Mutex<HashMap<PlanId, (u64, watch::Sender<bool>)>>> = OnceLock::new();
+static RUNNING: OnceLock<Mutex<Running>> = OnceLock::new();
 
 /// Names each registration, so a guard can only ever remove its own.
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
-fn running() -> &'static Mutex<HashMap<PlanId, (u64, watch::Sender<bool>)>> {
+fn running() -> &'static Mutex<Running> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

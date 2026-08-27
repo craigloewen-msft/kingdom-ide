@@ -134,10 +134,8 @@ pub fn apply_activity(
         if *visibility != wanted {
             *visibility = wanted;
         }
-        if !working {
-            if let Some(mut material) = materials.get_mut(&ring.material) {
-                material.base_color = ring_color(PULSE_FLOOR);
-            }
+        if !working && let Some(mut material) = materials.get_mut(&ring.material) {
+            material.base_color = ring_color(PULSE_FLOOR);
         }
     }
 }
@@ -276,10 +274,7 @@ mod tests {
             );
             // Never brighter than the colour itself, which is what keeps the
             // display from clamping the channels together into white.
-            assert!(
-                c.green <= 1.0,
-                "the ring can clip to white at {at}s: {c:?}"
-            );
+            assert!(c.green <= 1.0, "the ring can clip to white at {at}s: {c:?}");
             assert!(c.alpha == 1.0, "the ring is drawn opaque");
         }
     }

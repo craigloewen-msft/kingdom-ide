@@ -9,7 +9,7 @@
 //! Phoenix's equivalent (`propose_task`) is intercepted in its state machine
 //! before it ever reaches the executor, leaving `run()` as a bug fallback.
 //! Kingdom has no state machine to intercept in -- the turn loop is a `for` loop
-//! in `api::converse` -- so this runs like any other tool and signals the ending
+//! in `turn::converse` -- so this runs like any other tool and signals the ending
 //! through its *outcome*. `converse` checks for it by name after settling the
 //! deed, which keeps the recording, the pushing and the persistence on exactly
 //! the path every other tool already takes.
@@ -144,7 +144,7 @@ pub fn discard_draft(workspace: &kingdom_core::Workspace) {
 
 /// What the tool reports when a proposal is accepted for review.
 ///
-/// Matched by [`crate::api::converse`] to know the turn is over. A constant
+/// Matched by [`crate::turn::converse`] to know the turn is over. A constant
 /// rather than a literal in two places: the check and the message it looks for
 /// must not drift, and the failure would be silent -- a model that proposed and
 /// then carried straight on to do the work anyway.
