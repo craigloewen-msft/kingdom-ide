@@ -103,6 +103,27 @@ async fn run(mut socket: WebSocket, plan: String) {
         crate::netns::watch(&plan_id);
     }
 
+    // The well, for the same reason and on the same terms as the namespace
+    // above: the King's shell must be able to reach this city's database, and a
+    // shell that silently could not would send him hunting for a fault in the
+    // project. Nothing happens for a city that declares no services.
+    if let Some(city_root) = crate::api::city_root_of(&plan_id) {
+        if let Err(e) = crate::services::ensure(&plan_id, &city_root).await {
+            let _ = socket
+                .send(Message::Text(
+                    format!(
+                        "This project declares shared services, and they could \
+                         not be raised -- so no shell was started. A shell that \
+                         cannot reach the database would send you looking for \
+                         the wrong fault.\r\n\r\n{e}\r\n"
+                    )
+                    .into(),
+                ))
+                .await;
+            return;
+        }
+    }
+
     // The same prefix every tool gets, and empty for a shared-network plan --
     // so this is the King's ordinary shell unless he asked for isolation.
     let enter = crate::netns::enter_prefix(&plan_id);

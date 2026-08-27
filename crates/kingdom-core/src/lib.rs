@@ -28,9 +28,11 @@ pub mod permissions;
 pub mod proposal;
 pub mod review;
 pub mod sample;
+pub mod services;
 
 pub use ids::*;
 pub use model::*;
 pub use palette::{assign_banners, AgentPalette, BANNERS};
 pub use permissions::*;
 pub use review::*;
+pub use services::{ManifestError, ServiceManifest, ServiceSpec};

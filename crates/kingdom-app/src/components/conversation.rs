@@ -1123,6 +1123,16 @@ fn ConversationBody(
         Memo::new(move |_| live.with(|p| p.as_ref().is_some_and(|p| p.network.is_isolated())));
     let plan_ports =
         Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.ports.clone()).unwrap_or_default()));
+    // The city's shared services. Unlike the two above this is not conditional
+    // on isolation: a shared service is used by every plan on the project
+    // whatever network each one is on.
+    let plan_services = Memo::new(move |_| {
+        live.with(|p| {
+            p.as_ref()
+                .map(|p| p.shared_services.clone())
+                .unwrap_or_default()
+        })
+    });
 
     view! {
         // A flex row: the city's files, then everything that is read against
@@ -1323,7 +1333,7 @@ fn ConversationBody(
                         // What this plan has open, and where to reach it. Drawn
                         // only for a plan with a network of its own; see
                         // `PortsBadge`.
-                        <PortsBadge ports=plan_ports isolated=plan_isolated/>
+                        <PortsBadge ports=plan_ports services=plan_services isolated=plan_isolated/>
                         // What the court was told before it was asked anything. The
                         // transcript carries every word since; this is the one text
                         // that shaped all of them and is otherwise invisible.

@@ -45,6 +45,10 @@ pub mod review;
 pub mod scan;
 #[cfg(feature = "ssr")]
 pub mod screencast;
+// The well: containers a whole city shares. Server-only, for the same reason
+// `netns` is -- it spawns `docker`, which has no meaning in a browser.
+#[cfg(feature = "ssr")]
+pub mod services;
 #[cfg(feature = "ssr")]
 pub mod skills;
 #[cfg(feature = "ssr")]

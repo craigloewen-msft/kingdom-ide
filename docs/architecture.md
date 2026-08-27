@@ -424,6 +424,98 @@ not hold.
 plan and the picker says which package to install, rather than degrading to
 something that breaks every build.
 
+## A database of the city's own
+
+The other half of the second question. Network isolation stops agents colliding
+over a port; this is for the resources that are meant to be **shared**. A
+project's database is not a collision to prevent — it is a common good every
+agent must reach, started once and stopped once.
+
+Shown to the King as **the well**; called a shared service in code
+(`ServiceSpec`, `RunningService`, `SharedService`).
+
+A city declares what it needs in `<city>/.kingdom/services.toml`, committed:
+
+```toml
+[[service]]
+name  = "db"
+image = "mongo:7"
+port  = 27017
+env   = { MONGODB_URI = "mongodb://{host}:{port}/shopfront" }
+volume = "shopfront-db"
+```
+
+```mermaid
+flowchart LR
+  subgraph Plans["five plans, five namespaces"]
+    P1["plan 1 :3000"]
+    P2["plan 2 :3000"]
+    P5["plan 5 :3000"]
+  end
+  W["mongo:7 @ 172.31.x.10:27017"]
+  P1 --> W
+  P2 --> W
+  P5 --> W
+  K["King's machine"] -->|"direct, via the bridge route"| W
+  K -->|"slirp forwards"| Plans
+```
+
+The design turns on **one measurement**, taken from inside a real namespace:
+
+| Probe | Result |
+|---|---|
+| namespace → container on a bridge (`172.17.0.2`, `172.31.77.10`) | **reachable** |
+| namespace → host loopback (`127.0.0.1`, a published port) | **refused** |
+
+`slirp4netns` runs with `--disable-host-loopback`, which blocks `127.0.0.1` and
+*nothing else*; every other address routes out through the host's stack, and a
+Docker bridge is just another host route. So the obvious design is the one that
+cannot work: publishing the container and pointing plans at `127.0.0.1` is
+exactly the second line. Kingdom publishes **nothing** and gives each service a
+fixed address on a per-city network instead.
+
+Six things worth knowing:
+
+- **The address is assigned, not allocated.** A service's IP comes from its
+  position in the manifest, which is what makes it knowable *before* the
+  container exists — and therefore substitutable into `MONGODB_URI` and
+  printable in the badge.
+- **It is an IP, not a name.** Docker's DNS resolves service names only between
+  containers on the same network; neither the host nor a plan's namespace can
+  resolve `db`. That is why the address is pinned rather than left to Docker.
+- **Plans find it through `tools::child_environment`**, which `bash`, `tmux` and
+  the King's terminal already route through — the same reasoning that makes
+  `netns::enter_prefix` a no-op rather than a thing each call site remembers.
+  The system prompt says it too, because every model's prior for "connect to the
+  database" is `localhost`, and here that is precisely wrong.
+- **Reference counted by plan id, not by an integer.** The last plan out stops
+  the container; a plan closed twice cannot decrement twice and strand the four
+  still using it. A test pins that.
+- **Adopted on restart, not killed** — the one place this deliberately differs
+  from `netns::reclaim_previous`. A stale namespace is worthless; a stale
+  database holds state. The container is stopped rather than removed and its
+  named volume is kept, because losing the King's data because five agents
+  finished would be the worst reading of "tear down".
+- **The host needs nothing built.** `docker network create --subnet` installs a
+  host route via its own `br-*` interface, so the King can open the address
+  directly. An in-process TCP proxy was drafted for this and deleted: it
+  re-solved a problem the kernel had already solved. Nothing is on his loopback,
+  so the service takes no port from him — but it *is* routable by anything on
+  the machine, which is Docker's behaviour rather than something Kingdom adds.
+
+**Not a sandbox**, and the same admission `netns.rs` makes: a container Kingdom
+starts is an ordinary container, visible to `docker ps`, and a plan can still
+run `docker` itself.
+
+**Docker missing is a refusal**, on the rule `NetworkError::SlirpMissing` sets —
+a city that declares a database and silently runs without one fails later in a
+way that reads as a bug in the project.
+
+The `shopfront` realm is the rehearsal: one city, one MongoDB, and a real
+runnable Node ledger for five agents to write to at once. Unlike every other
+fixture its files are real code, because a claim about the network cannot be
+tested with sized filler.
+
 ## Where state lives
 
 Everything Kingdom records about itself lives in the King's own profile —
