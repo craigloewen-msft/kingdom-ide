@@ -67,10 +67,12 @@ const IDLE_WAKE: Duration = Duration::from_millis(250);
 ///
 /// The middle gear between `Continuous` and [`IDLE_WAKE`]. A rail map is a
 /// small pane the King glances at beside a conversation, not one he flies
-/// through, and the only thing on it that moves on its own is the activity
-/// ring -- whose breath takes `activity::PULSE_SECONDS`, several hundred times
-/// this interval. So this is far more than enough to render it smoothly while
-/// costing a fraction of a full frame rate for the length of a conversation.
+/// through, and nothing on it animates itself: the works and the working ring
+/// are both drawn once and left alone. What still moves is the camera --
+/// `Focus` and `Inspect` glide it when the King opens a file -- and a quarter
+/// of a second of travel at this interval is some thirty frames, which is
+/// smooth. So this costs a fraction of a full frame rate for the length of a
+/// conversation and loses nothing.
 ///
 /// A guess in the same spirit as `IDLE_WAKE`, and a one-constant change if it
 /// ever reads as janky or still costs too much.
@@ -333,12 +335,10 @@ impl Plugin for RepoCityPlugin {
                     // -- which is what keeps the two mechanisms from both
                     // claiming the same visibility flag.
                     activity::apply_activity,
-                    activity::pulse_rings,
-                    // Beside the activity systems and after `apply_lod` for the
+                    // Beside the activity system and after `apply_lod` for the
                     // same reason: the works carry no `VisibleFrom`, so nothing
                     // may hide them in the frame this has just raised them in.
                     works::apply_works,
-                    works::pulse_works,
                     camera::sync_camera,
                     wards::apply_label_legibility,
                     wards::track_active_ward,
@@ -551,12 +551,10 @@ fn apply_commands(
                 // beside a conversation. It keeps the camera -- the pane is
                 // genuinely on screen and must genuinely be drawn -- and pays
                 // for it by ticking at `RAIL_WAKE` instead of continuously.
-                // That is enough for what a rail map has to show: the activity
-                // ring's own breath takes `activity::PULSE_SECONDS`, so it
-                // reads perfectly well at this cadence, and the King is
-                // glancing at this map rather than flying through it. Running
-                // `Continuous` behind every chamber is exactly the cost this
-                // arm exists to avoid.
+                // That is enough for what a rail map has to show: nothing on it
+                // animates itself, and the camera's own glides read perfectly
+                // well at this cadence. Running `Continuous` behind every
+                // chamber is exactly the cost this arm exists to avoid.
                 if let Ok((mut camera, _, _)) = cameras.single_mut() {
                     camera.is_active = presence.showing();
                 }
@@ -644,8 +642,8 @@ fn winit_for(presence: MapPresence, cap: PaceCap) -> WinitSettings {
         // a conversation: the pane is genuinely on screen and must genuinely be
         // drawn, so it keeps the camera and pays for it by ticking at
         // `RAIL_WAKE` rather than continuously. Enough for what a rail map has
-        // to show -- the activity ring's breath takes `PULSE_SECONDS` -- and a
-        // fraction of the cost of running `Continuous` behind every chamber.
+        // to show -- nothing on it animates itself -- and a fraction of the
+        // cost of running `Continuous` behind every chamber.
         MapPresence::Rail => WinitSettings {
             focused_mode: UpdateMode::reactive_low_power(RAIL_WAKE),
             unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),

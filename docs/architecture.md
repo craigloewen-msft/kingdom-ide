@@ -179,12 +179,14 @@ crates/
     map/            The manifest: world-space geometry, plain serialisable
                     data. The one *seam* on both targets — where the two halves
                     meet. `works.rs` is the exception that proves it: what
-                    EVERY live agent in a city is changing, resolved from their
-                    `ChangeSummary`s into ground to build on, and the placer
+                    EVERY live agent in the KINGDOM is changing, resolved from
+                    their `PlanChanges` into ground to build on, and the placer
                     that finds free land inside a folder for a file that has no
-                    house yet. Grouped by PATH rather than by plan, so a file
-                    three agents share is one house wearing three bands rather
-                    than three houses claiming to be the same file. It lives here
+                    house yet. Grouped by (CITY, PATH) rather than by plan, so a
+                    file three agents share is one house wearing three bands
+                    rather than three houses claiming to be the same file — and
+                    so two projects' `src/main.rs` stay two files rather than
+                    fusing into one falsely-contended house. It lives here
                     rather than in `engine` so `cargo test` can pin it without
                     a browser — a ghost house landing on a real one is then a
                     test failure rather than something noticed by eye
@@ -200,11 +202,13 @@ crates/
                     walks `Kingdom::cities` instead
     engine/         Drawing it with Bevy (hydrate, plus native for its tests).
                     `activity.rs` is the one part fed from outside the manifest:
-                    which towns have agents working in them, traced as a pulsing
-                    ring, polled rather than pushed and never cached with the
-                    geometry. `works.rs` is the second, for the same reason and
-                    on the same channel: every agent's changes, raised over the
-                    city. What is being BUILT rises above the roof as stacked
+                    which towns have agents working in them, traced as a steady
+                    green ring, polled rather than pushed and never cached with
+                    the geometry. `works.rs` is the second, for the same reason
+                    and on the same channel: EVERY live agent's changes, raised
+                    over the whole kingdom at once — not the selected city, which
+                    drew nothing for a town nobody had clicked. What is being
+                    BUILT rises above the roof as stacked
                     colour-per-agent columns; what is being TAKEN AWAY covers
                     the house as a shroud, over as much of it as the file is
                     losing (`WorkBand::cover`, a share of the file's own length,
@@ -214,7 +218,11 @@ crates/
                     grew a taller tower. Column height AND girth ramp with
                     ABSOLUTE churn (`FULL_CHURN`) — never a share of a plan's
                     own busiest file, which made two agents incomparable and
-                    flattened a 400-line change against a 4-line one. Ghost
+                    flattened a 400-line change against a 4-line one. NOTHING on
+                    the map animates itself: neither the ring nor the bands
+                    pulse, and a band's colour is its agent's exactly rather than
+                    dimmed by how small the change is. Size is the only channel
+                    magnitude has. Ghost
                     houses stand for files that do not exist yet. `stars.rs` is the
                     one part not in the world at all:
                     the projection is orthographic, so a star out in the scene

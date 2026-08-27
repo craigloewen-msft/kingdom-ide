@@ -25,7 +25,7 @@
 
 use gloo_net::http::Request;
 use gloo_timers::callback::{Interval, Timeout};
-use kingdom_core::{ChangeSummary, CityActivity, CityId, PlanId};
+use kingdom_core::{CityActivity, CityId, PlanChanges};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -170,7 +170,7 @@ pub fn CityMap(
     /// same building openable twice.
     #[prop(into)]
     picked_file: RwSignal<Option<String>>,
-    /// What every live agent in the focused city is changing.
+    /// What every live agent in the kingdom is changing.
     ///
     /// Resolved against the manifest here and handed to the engine as plain
     /// geometry -- see the effect below, which is the boundary the engine's
@@ -181,8 +181,14 @@ pub fn CityMap(
     /// is *who* is touching a file, and one plan's summary structurally cannot
     /// answer it. Ordered by plan id by the caller, so a banner does not swap
     /// between two agents from one refetch to the next.
+    ///
+    /// **The whole kingdom rather than the focused city**, and each entry
+    /// carries its own city. Scoped to the selection, a project the King had
+    /// not clicked drew nothing at all -- so the map answered "what is every
+    /// agent doing" with one project's worth of work, and with no selection
+    /// with none. See [`crate::map::works`].
     #[prop(into)]
-    works: Signal<Vec<(PlanId, ChangeSummary)>>,
+    works: Signal<Vec<PlanChanges>>,
 ) -> impl IntoView {
     // First, and before anything is created: an engine that is not to run must
     // not be half-started and then told to stop. See the module doc.
@@ -326,13 +332,20 @@ pub fn CityMap(
     // waiting for the next time one of them changes.
     let manual = Memo::new(move |_| status.with(|state| state.manual));
 
-    // What the open plan is proposing, resolved into ground and handed over.
+    // What every agent is proposing, resolved into ground and handed over.
     //
     // **This is the boundary.** Everything above it is Kingdom's domain -- a
     // `ChangeSummary` of `ChangedFile`s with paths and line counts -- and
     // everything below it is world-space geometry. The engine never learns what
     // a plan or a changed file is, exactly as it never learns what a `CityId`
     // is: `SetActivity` above translates for the same reason.
+    //
+    // **Deliberately not gated on `focus_city`.** It used to be, and that is
+    // what made an unselected city draw nothing: the works were resolved only
+    // for the town the King had clicked, so with no selection -- the ordinary
+    // state of the map's own screen -- there was nothing to draw anywhere. Each
+    // entry now carries its own city and `resolve` places it in its own town,
+    // so every agent's work stands wherever it belongs.
     //
     // Tracks the manifest as well as the works, and must: a chamber opened from
     // a cold page has its summary in hand long before the map has arrived, and
@@ -350,11 +363,10 @@ pub fn CityMap(
     let builder = bridge.clone();
     Effect::new(move |_| {
         let working = works.get();
-        let city = focus_city.get();
         let standing = built.get();
-        let raised = manifest.with(|map| match (map, &city) {
-            (Some(map), Some(city)) if standing && !working.is_empty() => {
-                crate::map::works::resolve(map, city.as_str(), &working)
+        let raised = manifest.with(|map| match map {
+            Some(map) if standing && !working.is_empty() => {
+                crate::map::works::resolve(map, &working)
             }
             // Nobody working, or nothing to draw against yet. An empty list is
             // how the works are torn down, so this is sent rather than skipped.

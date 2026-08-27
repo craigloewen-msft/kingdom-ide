@@ -743,32 +743,41 @@ pub async fn plan_changes(plan: String) -> Result<kingdom_core::ChangeSummary, S
     Ok(crate::review::changes(&workspace).await)
 }
 
-/// What **every live agent in one city** has changed, as one answer.
+/// What **every live agent in the kingdom** has changed, as one answer.
 ///
 /// The plural of [`plan_changes`], and it exists because the map's question
-/// changed. "What did my agent do?" is answered by one plan's summary; "who is
-/// touching this file?" cannot be, however many times it is asked -- the
-/// browser would have to know which other plans are live and fetch each in
-/// turn, and would still be assembling the picture a request at a time while
-/// the answer moved under it.
+/// changed twice. "What did my agent do?" is answered by one plan's summary;
+/// "who is touching this file?" cannot be, however many times it is asked. And
+/// "what is every agent doing right now?" -- the first of the three questions in
+/// `AGENTS.md` -- cannot be answered by *one city's* agents either, which is
+/// what this used to take.
+///
+/// # Why it is no longer given a city
+///
+/// It was, and a city nobody had selected therefore drew nothing: the browser
+/// blanked the works whenever the selection was empty, so the map answered
+/// "what is every agent doing" with a picture of at most one project. The
+/// selection is a statement about *where the King is looking*, and what his
+/// agents are doing is true whether he is looking or not.
 ///
 /// # Which plans
 ///
-/// Live, non-subagent plans in that city. [`Kingdom::plans_in`] already excludes
-/// subagents, and its doc gives the reason this endpoint would need anyway: a
-/// subagent works inside the worktree of the plan that sent it, so counting it
-/// would draw one piece of work several times over. Settled plans are excluded
-/// because their worktrees are gone -- there is nothing on disk to diff.
+/// Live, non-subagent plans, anywhere in the kingdom. The subagent exclusion is
+/// [`Kingdom::plans_in`]'s and is kept for its reason: a subagent works inside
+/// the worktree of the plan that sent it, so counting it would draw one piece of
+/// work several times over. Settled plans are excluded because their worktrees
+/// are gone -- there is nothing on disk to diff.
 ///
 /// # Why the reads are concurrent
 ///
 /// Each summary is a few `git` invocations against a different worktree, and
-/// they share nothing. Run in sequence, a city with six agents would cost six
+/// they share nothing. Run in sequence, a kingdom with six agents would cost six
 /// times one plan's latency on every refetch; spawned together, it costs the
-/// slowest one. The kingdom lock is released before any of them start, which
-/// matters more than the concurrency: `review::changes` shells out, and holding
-/// the mutex across that would park every other request behind the slowest git
-/// in the city.
+/// slowest one. That bargain is what makes the wider question affordable at all.
+/// The kingdom lock is released before any of them start, which matters more
+/// than the concurrency: `review::changes` shells out, and holding the mutex
+/// across that would park every other request behind the slowest git in the
+/// kingdom.
 ///
 /// # Why one bad plan does not fail the request
 ///
@@ -782,22 +791,31 @@ pub async fn plan_changes(plan: String) -> Result<kingdom_core::ChangeSummary, S
 /// Sorted by plan id, and that is load-bearing rather than tidiness:
 /// `kingdom_core::palette::assign_banners` resolves a colour collision by
 /// position, so an unstable order here would let two agents swap colours
-/// between refetches.
-#[server(CityChanges, "/api")]
-pub async fn city_changes(
-    city: String,
-) -> Result<Vec<(kingdom_core::PlanId, kingdom_core::ChangeSummary)>, ServerFnError> {
-    let city_id = kingdom_core::CityId::new(city);
-
+/// between refetches. It matters more now than it did: the banners are assigned
+/// across the whole kingdom, so the set being ordered is every live plan rather
+/// than one city's.
+#[server(KingdomChanges, "/api")]
+pub async fn kingdom_changes() -> Result<Vec<kingdom_core::PlanChanges>, ServerFnError> {
     // The lock is taken only to decide *what* to read, never across the reads
     // themselves.
-    let workspaces: Vec<(kingdom_core::PlanId, kingdom_core::Workspace)> = {
+    let workspaces: Vec<(
+        kingdom_core::PlanId,
+        kingdom_core::CityId,
+        kingdom_core::Workspace,
+    )> = {
         let kingdom = lock()?;
         let root = &kingdom.root;
-        let mut found: Vec<(kingdom_core::PlanId, kingdom_core::Workspace)> = kingdom
-            .plans_in(&city_id)
-            .filter(|plan| plan.is_live())
-            .map(|plan| (plan.id.clone(), grounded(root, &plan.workspace)))
+        let mut found: Vec<_> = kingdom
+            .plans
+            .iter()
+            .filter(|plan| plan.is_live() && !plan.is_subagent())
+            .map(|plan| {
+                (
+                    plan.id.clone(),
+                    plan.city.clone(),
+                    grounded(root, &plan.workspace),
+                )
+            })
             .collect();
         found.sort_by(|a, b| a.0.cmp(&b.0));
         found
@@ -805,8 +823,14 @@ pub async fn city_changes(
 
     let reads: Vec<_> = workspaces
         .into_iter()
-        .map(|(id, workspace)| {
-            tokio::spawn(async move { (id, crate::review::changes(&workspace).await) })
+        .map(|(plan, city, workspace)| {
+            tokio::spawn(async move {
+                kingdom_core::PlanChanges {
+                    plan,
+                    city,
+                    changes: crate::review::changes(&workspace).await,
+                }
+            })
         })
         .collect();
 
