@@ -1591,6 +1591,27 @@ impl Plan {
         })
     }
 
+    /// When anything last happened in this plan, of any kind.
+    ///
+    /// Words spoken, a deed settling, one of Kingdom's own notices -- all of
+    /// them count, and that is the point. The question the rail asks with this
+    /// is *has this agent gone quiet?*, and a plan grinding through a build has
+    /// not gone quiet even though nobody has said anything for ten minutes.
+    ///
+    /// The **maximum** rather than the last entry that carries a stamp, because
+    /// position in the log and time do not agree. An entry is stamped when it
+    /// is appended, but a deed is dated by [`Entry::at`] from when it *settled*
+    /// -- so a batch of parallel deeds finishes in an order that has nothing to
+    /// do with the order it was written down in, and reading the last one would
+    /// report a plan as older than it is.
+    ///
+    /// `None` for a plan whose log predates timing entirely. The rail renders
+    /// that as silence: no number at all is the right rendering of "not known",
+    /// where any number would be a claim.
+    pub fn last_activity(&self) -> Option<Timestamp> {
+        self.transcript.iter().rev().filter_map(Entry::at).max()
+    }
+
     /// What this plan wants of the user, if anything.
     ///
     /// The one place "does this need me?" is decided, and the reason it is here
@@ -1631,6 +1652,7 @@ impl Plan {
             working_on: self.working_on.clone(),
             needs: self.wants_attention(),
             is_subagent: self.is_subagent(),
+            last_activity: self.last_activity(),
         }
     }
 
@@ -1802,6 +1824,27 @@ pub enum Entry {
     Note(Note),
     /// Something the model did with its own hands, and what came back.
     Tool(ToolCall),
+}
+
+impl Entry {
+    /// When this line of the log happened.
+    ///
+    /// A deed answers with `settled_at` where it has one, because a deed is
+    /// dated by when it *finished*: a `cargo build` that started ten minutes
+    /// ago and returned a second ago is a plan that moved a second ago. One
+    /// still running has only its start, which is the honest answer for it --
+    /// the thing that last happened in that plan is that the call was made.
+    ///
+    /// `None` where nothing was recorded: an entry written before the log was
+    /// timed, or a deed `store::reconcile` settled after a server died. See
+    /// [`Timestamp`] on why that absence is never papered over with a zero.
+    pub fn at(&self) -> Option<Timestamp> {
+        match self {
+            Entry::Message(m) => m.at,
+            Entry::Note(n) => n.at,
+            Entry::Tool(t) => t.settled_at.or(t.at),
+        }
+    }
 }
 
 /// A tool call the model made, and its result.
@@ -2671,6 +2714,24 @@ pub struct PlanPulse {
     /// Subagents are excluded from the rail, so a pulse says which it is rather
     /// than making the rail look the plan up to find out.
     pub is_subagent: bool,
+    /// When anything last happened in this plan. See [`Plan::last_activity`].
+    ///
+    /// Here rather than derived by the browser because the browser *cannot*
+    /// derive it: this channel is the only thing that speaks about a plan whose
+    /// chamber is shut, and it carries no transcript to read. A rail left to
+    /// work it out from the plans it holds would report the age of the opening
+    /// fetch forever, which is worse than reporting nothing.
+    ///
+    /// It is also the one field here that moves on its own, and so the one that
+    /// costs the dedupe something. Not much: a plan actually working already
+    /// pulses about once per deed, because `working_on` changes with it, and a
+    /// plan doing nothing publishes nothing at all -- which is the case the
+    /// dedupe was defending.
+    ///
+    /// `#[serde(default)]` so a browser from before this field still parses a
+    /// pulse, and vice versa.
+    #[serde(default)]
+    pub last_activity: Option<Timestamp>,
 }
 
 /// What the user chose to do with a plan when he closed it.
@@ -4828,5 +4889,88 @@ mod attention_tests {
         let mut kingdom = Kingdom::unopened();
         assert!(!kingdom.apply(&plan().pulse()));
         assert!(kingdom.plans.is_empty());
+    }
+
+    /// What the rail's age line is read from: the newest moment in the log,
+    /// whoever or whatever made it.
+    ///
+    /// The maximum rather than the last stamped entry, and this is the case
+    /// that separates them -- a deed is dated from when it *settled*, so a
+    /// long-running call recorded before a later note can still be the most
+    /// recent thing that happened. Reading the end of the log would report the
+    /// plan as older than it is, which is the one direction of error that
+    /// matters: it says an agent has gone quiet when it has not.
+    #[test]
+    fn the_newest_moment_wins_wherever_it_sits_in_the_log() {
+        let mut plan = plan();
+        plan.transcript.clear();
+
+        plan.transcript.push(Entry::Message(Message {
+            speaker: Speaker::User,
+            body: "Start".into(),
+            at: Some(Timestamp(1_000)),
+        }));
+
+        let mut deed = ToolCall::started("t1", "bash", serde_json::json!({}));
+        deed.at = Some(Timestamp(2_000));
+        deed.settled_at = Some(Timestamp(9_000));
+        deed.outcome = Some(ToolOutcome::done("ok"));
+        plan.transcript.push(Entry::Tool(deed));
+
+        plan.transcript.push(Entry::Note(Note {
+            kind: NoteKind::Failed,
+            body: "Could not reach the model".into(),
+            at: Some(Timestamp(5_000)),
+        }));
+
+        assert_eq!(
+            plan.last_activity(),
+            Some(Timestamp(9_000)),
+            "the deed settled last, even though the note was written down after it"
+        );
+    }
+
+    /// A deed still running is dated from when it began, because that is the
+    /// last thing that actually happened in the plan. The number therefore
+    /// climbs while a build runs -- which is the reading that lets a wedged
+    /// agent be spotted from the rail.
+    #[test]
+    fn a_running_deed_is_dated_from_when_it_started() {
+        let mut deed = ToolCall::started("t1", "bash", serde_json::json!({}));
+        deed.at = Some(Timestamp(4_000));
+        deed.settled_at = None;
+
+        assert_eq!(Entry::Tool(deed).at(), Some(Timestamp(4_000)));
+    }
+
+    /// Nothing recorded reads as nothing known. A plan whose log predates timing
+    /// must not be given a moment it never had -- the rail draws no number at
+    /// all rather than claiming the epoch.
+    #[test]
+    fn a_log_with_no_stamps_reports_no_moment() {
+        let mut plan = plan();
+        plan.transcript = vec![Entry::Message(Message {
+            speaker: Speaker::Assistant,
+            body: "From before entries were timed".into(),
+            at: None,
+        })];
+
+        assert_eq!(plan.last_activity(), None);
+        assert_eq!(plan.pulse().last_activity, None);
+    }
+
+    /// The age rides on the pulse, and that is the whole reason it is on the
+    /// wire: the rail's channel is the only thing that speaks about a plan whose
+    /// chamber is shut, and it carries no transcript for the browser to read.
+    #[test]
+    fn a_pulse_carries_when_the_plan_last_moved() {
+        let mut plan = plan();
+        plan.transcript = vec![Entry::Message(Message {
+            speaker: Speaker::Assistant,
+            body: "Drafted".into(),
+            at: Some(Timestamp(7_000)),
+        })];
+
+        assert_eq!(plan.pulse().last_activity, Some(Timestamp(7_000)));
     }
 }

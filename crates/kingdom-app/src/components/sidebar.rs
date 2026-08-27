@@ -11,8 +11,9 @@
 //! the result would be a dead end.
 
 use crate::app::{KingdomState, DEFAULT_MAP_HEIGHT, DEFAULT_SIDEBAR_WIDTH};
+use crate::components::conversation::clock;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
-use kingdom_core::{Attention, City, CityId, Plan, PlanStatus};
+use kingdom_core::{Attention, City, CityId, Plan, PlanStatus, Timestamp};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -44,6 +45,19 @@ const MAP_BOUNDS: Bounds = Bounds {
 
 const MAP_HEIGHT_KEY: &str = "kingdom.map_height";
 
+/// How often the rail re-reads the clock, in milliseconds.
+///
+/// Half a minute, because the finest thing the age line ever says is a whole
+/// minute -- so half of that bounds the lag at a number nobody can catch being
+/// wrong, at a fraction of the wakeups a per-second tick would cost. The
+/// chamber's `ticking_clock` runs at one second because it is drawing tenths of
+/// a second on a running deed; this is drawing minutes on thirty rows.
+///
+/// Browser-only, like every other cadence and storage key that only the client
+/// half reads: there is no timer under SSR to give it to.
+#[cfg(feature = "hydrate")]
+const RAIL_TICK_MS: u64 = 30_000;
+
 #[component]
 pub fn Sidebar() -> impl IntoView {
     let state = expect_context::<KingdomState>();
@@ -59,6 +73,11 @@ pub fn Sidebar() -> impl IntoView {
     restore_width(state.map_height, MAP_HEIGHT_KEY, MAP_BOUNDS);
 
     let collapsed_rail = move || state.rail_collapsed.get();
+
+    // One clock for the whole rail, read by every plan row's age line. One per
+    // row would be thirty timers redrawing thirty strings that change once a
+    // minute; see `rail_clock`.
+    let now = rail_clock();
 
     // Whether the map is standing at the foot of this rail, which it does only
     // in a chamber -- on `/` the map has the whole screen and the rail is beside
@@ -156,7 +175,7 @@ pub fn Sidebar() -> impl IntoView {
             <div class="sidebar-body">
                 <ul class="registry">
                     <For each=cities key=|c: &City| c.id.clone() let:city>
-                        <CityBranch city=city collapsed=collapsed/>
+                        <CityBranch city=city collapsed=collapsed now=now/>
                     </For>
                 </ul>
             </div>
@@ -210,7 +229,13 @@ pub fn Sidebar() -> impl IntoView {
 
 /// One city and, beneath it, the plans drawn up there.
 #[component]
-fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView {
+fn CityBranch(
+    city: City,
+    collapsed: RwSignal<HashSet<CityId>>,
+    /// The rail's one clock, for the age line under each plan. Passed down
+    /// rather than made here, so a kingdom of twelve cities still has one timer.
+    now: Memo<Option<Timestamp>>,
+) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let id = city.id.clone();
 
@@ -399,6 +424,43 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                 lines.join("\n\n")
                             };
                             let (badge, tint) = badge_for(plan.status, state.attention_of(&plan));
+                            // When this plan last moved, as the row will draw
+                            // it. Two halves, because they are known at
+                            // different times: the plan's own transcript is read
+                            // *now*, once, and kept as the fallback -- so the
+                            // row does not hold a whole plan alive to ask again
+                            // -- while the cache is read reactively, because the
+                            // rail's socket is the only thing that keeps a shut
+                            // chamber's plan current.
+                            let recorded = plan.last_activity();
+                            let plan_id = plan.id.clone();
+                            // A `Memo` rather than a closure, as `current` above
+                            // is, and for the same reason: it is read twice --
+                            // by the line and by its tooltip -- and a closure
+                            // capturing the id is `FnOnce`. It also earns its
+                            // keep: it does not read the clock, so it wakes only
+                            // when the cache moves, and a push about some other
+                            // plan settles to the same moment and re-renders
+                            // neither string.
+                            let moved_at =
+                                Memo::new(move |_| state.activity_of(&plan_id).or(recorded));
+                            // Deliberately **not** in the `For` key above. Every
+                            // other member of that key is a value captured when
+                            // the row is built, so a change to one must rebuild
+                            // the row; this one moves on every tick of the
+                            // clock, and keying on it would rebuild every row in
+                            // the rail twice a minute to change one word. A
+                            // closure re-renders just this span.
+                            let age = move || since(now.get(), moved_at.get());
+                            // The coarse number resolves to an exact one on
+                            // hover. Its own tooltip rather than a fourth line
+                            // on the row's, because the row's is built once from
+                            // values that do not move and this one changes with
+                            // the plan.
+                            let age_hover = move || match moved_at.get() {
+                                Some(at) => format!("Last activity at {}", clock(Some(at))),
+                                None => String::new(),
+                            };
                             // Which colour this agent's work is drawn in.
                             // `preferred` rather than the city-wide assignment:
                             // the rail lists every plan including settled ones,
@@ -411,6 +473,7 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                 <li>
                                     <A href=href attr:class="plan-row" attr:title=hover>
                                         <span class="plan-row-inner" class:current=current>
+                                            <span class="plan-row-head">
                                             // This agent's banner: the key to
                                             // every colour it wears on the map
                                             // and in the review drawer. Shown
@@ -431,6 +494,23 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
                                             <span class=format!("plan-badge plan-{tint}")>
                                                 {badge}
                                             </span>
+                                            </span>
+                                            // How long since anything happened
+                                            // here. Its own line under the row
+                                            // rather than a fourth thing
+                                            // competing for the first: it is
+                                            // context for the badge above it,
+                                            // not a call to act.
+                                            //
+                                            // Always rendered, empty when
+                                            // nothing is known, so the server's
+                                            // markup and the hydrated markup
+                                            // have the same shape -- the age is
+                                            // browser-only for the same reason
+                                            // `clock` is.
+                                            <span class="plan-row-meta" title=age_hover>
+                                                {age}
+                                            </span>
                                         </span>
                                     </A>
                                 </li>
@@ -441,6 +521,90 @@ fn CityBranch(city: City, collapsed: RwSignal<HashSet<CityId>>) -> impl IntoView
             </Show>
         </li>
     }
+}
+
+/// How long ago something happened, written for a glance in a rail.
+///
+/// Four bands, chosen for what the number is *for* -- "has this agent gone
+/// quiet?" -- rather than for precision:
+///
+/// | Since | Reads as | Why |
+/// |---|---|---|
+/// | under a minute | `just now` | still moving; a number here would be noise |
+/// | under an hour | `6m ago` | the range where quiet becomes suspicious |
+/// | under a day | `3h ago` | it stopped, and roughly when |
+/// | -- | `5d ago` | history |
+///
+/// Empty for a moment nothing is known about, and that is deliberate: a plan
+/// recorded before the log was timed has no age, and every alternative --
+/// `0m ago`, `unknown`, a dash -- is either a claim or a word taking up a line
+/// the King reads thirty of. Silence is what "not known" looks like.
+///
+/// A moment in the *future* reads `just now` rather than a negative. Both stamps
+/// come from the same machine in practice, so the only way to get one is a clock
+/// stepping under a running rail, and "just now" is the least wrong thing to say
+/// about an entry made a second in the future.
+fn since(now: Option<Timestamp>, at: Option<Timestamp>) -> String {
+    let (Some(Timestamp(now)), Some(Timestamp(at))) = (now, at) else {
+        return String::new();
+    };
+
+    let seconds = (now - at).max(0) / 1_000;
+    if seconds < 60 {
+        return "just now".to_string();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", hours / 24)
+}
+
+/// The rail's one clock, ticking every `RAIL_TICK_MS`.
+///
+/// The sibling of `conversation.rs`'s `ticking_clock`, and the same shape for
+/// the same two reasons: one timer for every row rather than one per row,
+/// because a rail of thirty plans would otherwise wake thirty times to redraw
+/// thirty strings; and browser-only, because [`Timestamp::now`] is deliberately
+/// `None` on wasm and the server has no reason to guess at a number it cannot
+/// keep current.
+///
+/// It differs in two respects. **It never stops**: the chamber's clock ticks
+/// only while a deed is in flight, because a settled deed's elapsed time cannot
+/// change, but an age can and does -- a plan that has done nothing for an hour
+/// is exactly what the rail is trying to show -- so stopping when nothing runs
+/// would freeze precisely the rows worth reading. Twice a minute is what makes
+/// that affordable. And because it never stops it is never *restarted* either,
+/// which is why plain `on_cleanup` suffices here: that function owns its
+/// interval handle to survive an effect that re-runs on every turn, and this one
+/// is started once, when the rail is built.
+fn rail_clock() -> Memo<Option<Timestamp>> {
+    let (now, set_now) = signal(None::<Timestamp>);
+
+    #[cfg(feature = "hydrate")]
+    {
+        use crate::components::conversation::browser_now;
+
+        // Read straight away, so an age appears on first paint rather than
+        // thirty seconds into the visit.
+        set_now.set(browser_now());
+
+        if let Ok(handle) = leptos::leptos_dom::helpers::set_interval_with_handle(
+            move || set_now.set(browser_now()),
+            std::time::Duration::from_millis(RAIL_TICK_MS),
+        ) {
+            on_cleanup(move || handle.clear());
+        }
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_now;
+
+    Memo::new(move |_| now.get())
 }
 
 /// What one plan's badge says, and what colour it is.
@@ -503,5 +667,53 @@ mod tests {
     fn a_settled_plan_asks_for_nothing() {
         assert_eq!(badge_for(PlanStatus::Merged, None), ("Merged", "merged"));
         assert_eq!(badge_for(PlanStatus::Failed, None), ("Failed", "failed"));
+    }
+
+    /// The four bands, at each boundary.
+    ///
+    /// Worth pinning at the edges rather than in the middle of each range,
+    /// because every one of them is an integer division that is off by one if
+    /// the comparison is: `59m ago` must not become `0h ago`, and the last
+    /// second of a day must not become `0d ago`.
+    #[test]
+    fn an_age_says_the_coarsest_true_thing() {
+        let now = Some(Timestamp(100 * 86_400_000));
+        let ago = |ms: i64| since(now, Some(Timestamp(100 * 86_400_000 - ms)));
+
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(59_000), "just now");
+        assert_eq!(ago(60_000), "1m ago");
+        assert_eq!(ago(6 * 60_000), "6m ago");
+        assert_eq!(ago(59 * 60_000), "59m ago");
+        assert_eq!(ago(60 * 60_000), "1h ago");
+        assert_eq!(ago(3 * 3_600_000), "3h ago");
+        assert_eq!(ago(23 * 3_600_000 + 3_599_000), "23h ago");
+        assert_eq!(ago(24 * 3_600_000), "1d ago");
+        assert_eq!(ago(5 * 86_400_000), "5d ago");
+    }
+
+    /// Nothing known reads as nothing said.
+    ///
+    /// Both halves can be missing independently and for different reasons: a
+    /// plan whose log predates timing has no moment, and the clock itself is
+    /// `None` under SSR, where there is no browser to read it. Either way the
+    /// row draws an empty line rather than inventing a number -- and the span is
+    /// rendered regardless, so hydration finds the shape the server left.
+    #[test]
+    fn an_unknown_moment_says_nothing_at_all() {
+        assert_eq!(since(Some(Timestamp(60_000)), None), "");
+        assert_eq!(since(None, Some(Timestamp(0))), "");
+        assert_eq!(since(None, None), "");
+    }
+
+    /// A stamp from the future is a clock that stepped, not a plan that will
+    /// move later. `just now` is the least wrong thing to say about it; the
+    /// arithmetic must not run backwards into `-1m ago`.
+    #[test]
+    fn a_moment_in_the_future_reads_as_now() {
+        assert_eq!(
+            since(Some(Timestamp(0)), Some(Timestamp(600_000))),
+            "just now"
+        );
     }
 }

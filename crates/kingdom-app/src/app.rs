@@ -230,6 +230,23 @@ pub struct KingdomState {
     /// stored as an *absent* entry the badge would fall back to a transcript
     /// fetched before the answer and go on showing a question nobody is asking.
     pub attention: RwSignal<std::collections::HashMap<kingdom_core::PlanId, Option<Attention>>>,
+    /// When each plan last moved, as the server last said.
+    ///
+    /// Beside `attention` and for exactly the same reason: the rail draws this
+    /// for *every* plan, and a plan whose chamber is shut is only ever spoken
+    /// about by the rail's socket -- which carries a
+    /// [`kingdom_core::PlanPulse`] and no transcript. A rail left to work the
+    /// age out from the plans this browser holds would report the age of the
+    /// opening fetch, forever, for every plan the King is not looking at.
+    ///
+    /// A plain [`kingdom_core::Timestamp`] rather than the double `Option` that
+    /// one needs, because the two absences that had to stay distinct there are
+    /// the same answer here: "the server says this plan has no stamped entries"
+    /// and "nothing has been said about this plan" both fall through to the
+    /// plan's own transcript, and a plan with no stamps has nothing there
+    /// either. Read through [`KingdomState::activity_of`].
+    pub last_activity:
+        RwSignal<std::collections::HashMap<kingdom_core::PlanId, kingdom_core::Timestamp>>,
 }
 
 impl KingdomState {
@@ -253,6 +270,7 @@ impl KingdomState {
             picked_file: RwSignal::new(None),
             works: RwSignal::new(Vec::new()),
             attention: RwSignal::new(std::collections::HashMap::new()),
+            last_activity: RwSignal::new(std::collections::HashMap::new()),
         }
     }
 
@@ -278,6 +296,33 @@ impl KingdomState {
         // one entry per plan, and the rail is the only reader.
         self.attention.update(|known| {
             known.insert(plan.clone(), needs);
+        });
+    }
+
+    /// When a plan last moved, as this browser has been told.
+    ///
+    /// By id rather than by plan, and `None` when no socket has spoken about it
+    /// yet: the caller supplies the fallback. That is not a convenience -- the
+    /// rail draws this line for every plan and would otherwise have to keep a
+    /// whole [`Plan`], transcript and all, alive per row to ask the question.
+    /// It reads [`kingdom_core::Plan::last_activity`] once, when the row is
+    /// built, and falls back to that.
+    ///
+    /// The fallback matters only until a socket speaks, which is the opening
+    /// HTTP fetch -- a plain response carrying no pulse at all.
+    pub fn activity_of(&self, plan: &kingdom_core::PlanId) -> Option<kingdom_core::Timestamp> {
+        self.last_activity.with(|known| known.get(plan).copied())
+    }
+
+    /// Records when a plan last moved, from either socket.
+    ///
+    /// Nothing is written for a plan the server reports no moment for: there is
+    /// no fact to record, and an entry would only shadow the transcript's own
+    /// answer with the same silence.
+    pub fn note_activity(&self, plan: &kingdom_core::PlanId, at: Option<kingdom_core::Timestamp>) {
+        let Some(at) = at else { return };
+        self.last_activity.update(|known| {
+            known.insert(plan.clone(), at);
         });
     }
 
@@ -1191,6 +1236,10 @@ fn absorb(state: KingdomState, pulse: &kingdom_core::PlanPulse) -> bool {
     // map entry and it means the badge is already right at the instant the
     // refetch below lands, rather than one push later.
     state.note_attention(&pulse.id, pulse.needs);
+    // The age travels with it, and is the half the browser could not work out
+    // for itself: a pulse is all a rail ever hears about a plan whose chamber
+    // is shut, and it carries no transcript. See `PlanPulse::last_activity`.
+    state.note_activity(&pulse.id, pulse.last_activity);
     state
         .kingdom
         .try_update(|k| k.apply(pulse))

@@ -325,24 +325,18 @@
   color: inherit;
 }
 
+// One plan's row, in two lines: what it is, and how long since it moved.
+//
+// A column, so the age can sit under the title rather than compete with the
+// badge for the end of the first line. The hover and `current` treatments stay
+// here rather than on the head, so the highlight covers both lines -- a
+// selected plan whose second line was left unpainted would read as two rows.
 .plan-row-inner {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  flex-direction: column;
   padding: 5px 8px;
   border-left: 1px solid t.$edge;
   border-radius: 0 4px 4px 0;
-
-  // The agent's banner. This row is where the King *learns* the colour -- the
-  // map and the drawer only ever use it -- so it sits before the title, at the
-  // start of the reading order, rather than being tucked in beside the badge.
-  //
-  // Nudged down off the baseline the flex row aligns on: a 7px square aligned
-  // by its bottom edge sits visibly high against lowercase text.
-  .agent-pip {
-    position: relative;
-    top: 1px;
-  }
 
   .plan-row:hover & {
     background: t.$panel-2;
@@ -356,6 +350,45 @@
     border-left-color: t.$gold;
     .plan-title { color: t.$ink; }
   }
+}
+
+// The first line: banner, title, badge. Exactly the row this used to be.
+.plan-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+
+  // The agent's banner. This row is where the King *learns* the colour -- the
+  // map and the drawer only ever use it -- so it sits before the title, at the
+  // start of the reading order, rather than being tucked in beside the badge.
+  //
+  // Nudged down off the baseline the flex row aligns on: a 7px square aligned
+  // by its bottom edge sits visibly high against lowercase text.
+  .agent-pip {
+    position: relative;
+    top: 1px;
+  }
+}
+
+// How long since anything happened in this plan.
+//
+// The quietest thing in the rail on purpose. It is context for the badge above
+// it -- "awaiting review, and has been for three hours" -- not a call to act, so
+// it must be skippable when the King is scanning the column for something that
+// wants him. Smaller and fainter than the title, and with no colour of its own:
+// a tinted age would compete with the one thing in the row that is allowed to.
+//
+// It takes no room when there is nothing known: an inline box with no text
+// draws no line, and `margin-top` on it is 2px of nothing. Kept as a margin
+// rather than a gap on the column for exactly that -- a gap would space a row
+// whose second line says nothing.
+.plan-row-meta {
+  @include m.truncate;
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: t.$ink-faint;
 }
 
 // A plan's title gets the room, because it is the one thing in the row that
