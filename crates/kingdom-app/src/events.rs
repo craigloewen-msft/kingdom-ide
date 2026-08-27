@@ -211,55 +211,94 @@ pub fn publish_within(plan: &Plan, city_root: Option<&std::path::Path>) {
     pulse(plan);
 }
 
-/// A plan as a browser should receive it, with its live ports and shared
-/// services attached.
+/// A plan as a browser should receive it, with the given runtime facts
+/// attached.
 ///
 /// [`Plan::for_wire`] trims what the browser does not need; this adds the two
-/// things it needs that the *record* does not have. Ports belong to a running
-/// slirp4netns and a shared service to a running Docker daemon rather than to
-/// the plan,
-/// so both are answered here, at the moment of sending, rather than stored -- a
-/// forward or an address written to disk would name something that stopped
-/// answering when the server did.
+/// things it needs that the *record* does not have -- ports and shared-service
+/// addresses. Both belong to a running process (a slirp4netns, a Docker
+/// daemon) rather than to the plan, so neither is stored: a forward or an
+/// address written to disk would name something that stopped answering when
+/// the server did.
 ///
-/// The city is given rather than looked up: see [`publish_within`].
-fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> Plan {
+/// Pure and cheap on purpose: this is the seam every route to a browser must
+/// cross. `Plan::for_wire` alone is never enough -- a plan handed to a browser
+/// without going through here is a plan that will render an empty ports badge
+/// the instant nothing else happens to publish it. [`on_the_wire`] is the
+/// version that looks the facts up; this is the version a test can call
+/// without a namespace or a Docker daemon.
+pub(crate) fn fitted(
+    plan: &Plan,
+    ports: Vec<kingdom_core::PortForward>,
+    services: Vec<kingdom_core::SharedService>,
+) -> Plan {
     let mut wire = plan.for_wire();
     if plan.network.is_isolated() {
-        wire.ports = crate::netns::forwards_of(&plan.id)
+        wire.ports = ports;
+    }
+    // Unconditional, unlike ports: a shared service is used by every plan in
+    // the city whether or not this one has a network of its own, and the King
+    // wants the address either way. Empty for the overwhelming majority of
+    // projects, which declare no services at all.
+    wire.shared_services = services;
+    wire
+}
+
+/// [`fitted`], with the facts looked up from the namespace and the daemon.
+///
+/// The city is given rather than looked up: see [`publish_within`].
+pub(crate) fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> Plan {
+    let ports = if plan.network.is_isolated() {
+        crate::netns::forwards_of(&plan.id)
             .into_iter()
             .map(|(guest, host)| kingdom_core::PortForward { guest, host })
-            .collect();
-    }
-    // Unconditional, unlike ports: a shared service is used by every plan in the
-    // city
-    // whether or not this one has a network of its own, and the King wants the
-    // address either way. Empty for the overwhelming majority of projects,
-    // which declare no services at all.
-    if let Some(city_root) = city_root {
-        wire.shared_services = crate::services::running_in(city_root)
-            .into_iter()
-            .map(|service| {
-                let scope = match service.scope {
-                    kingdom_core::ServiceScope::Host => crate::services::Scope::Host,
-                    kingdom_core::ServiceScope::City => {
-                        crate::services::Scope::City(city_root.to_path_buf())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let services = city_root
+        .map(|city_root| {
+            crate::services::running_in(city_root)
+                .into_iter()
+                .map(|service| {
+                    // Which file this was declared in, which is what the badge
+                    // links the King to. Derived from the scope the service
+                    // carries: a project's sits in that project, the King's own
+                    // in his profile.
+                    let scope = match service.scope {
+                        kingdom_core::ServiceScope::Host => crate::services::Scope::Host,
+                        kingdom_core::ServiceScope::City => {
+                            crate::services::Scope::City(city_root.to_path_buf())
+                        }
+                    };
+                    kingdom_core::SharedService {
+                        address: service.address(),
+                        // By the service's own registry key, not by city root:
+                        // a host well is filed under `host`, so asking for it
+                        // by city would report a database five agents share as
+                        // used by nobody.
+                        users: crate::services::users_of_key(&service.key, &service.name),
+                        manifest_path: scope.manifest_path().to_string_lossy().to_string(),
+                        scope: service.scope,
+                        name: service.name,
+                        image: service.image,
                     }
-                };
-                kingdom_core::SharedService {
-                    address: service.address(),
-                    // By key, not by city root: a host well is filed under
-                    // `host` and asking for it by city would count nobody.
-                    users: crate::services::users_of_key(&service.key, &service.name),
-                    manifest_path: scope.manifest_path().to_string_lossy().to_string(),
-                    scope: service.scope,
-                    name: service.name,
-                    image: service.image,
-                }
-            })
-            .collect();
-    }
-    wire
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    fitted(plan, ports, services)
+}
+
+/// [`on_the_wire`] for a caller outside the publish path that holds no lock --
+/// a snapshot for an opening watch socket, say.
+///
+/// Resolves the plan and its city itself, exactly as [`publish`] does, so a
+/// caller need only name the plan.
+pub(crate) fn for_browser(id: &PlanId) -> Option<Plan> {
+    let plan = crate::api::snapshot(id)?;
+    let city_root = crate::api::city_root_of(id);
+    Some(on_the_wire(&plan, city_root.as_deref()))
 }
 
 /// Tells every open rail what this plan is and what it wants, if that changed.
@@ -406,6 +445,95 @@ mod tests {
         );
 
         drop(listening);
+    }
+
+    /// `fitted` attaches the runtime facts to a plan whose record carries
+    /// none -- the state every server-held plan is in -- without touching a
+    /// namespace or a Docker daemon. This is the whole reason `on_the_wire`
+    /// was split: the wiring can be exercised without either running.
+    #[test]
+    fn fitted_attaches_ports_and_services_to_a_bare_record() {
+        let mut plan = a_plan("fitted");
+        plan.network = kingdom_core::NetworkMode::Isolated;
+        assert!(plan.ports.is_empty(), "the record itself must carry none");
+
+        let ports = vec![kingdom_core::PortForward {
+            guest: 3000,
+            host: 41000,
+        }];
+        let services = vec![kingdom_core::SharedService {
+            name: "db".into(),
+            image: "mongo:7".into(),
+            address: "127.0.0.1:27017".into(),
+            users: 1,
+            scope: kingdom_core::ServiceScope::City,
+            manifest_path: "/dev/shopfront/.kingdom/services.toml".into(),
+        }];
+
+        let wire = fitted(&plan, ports.clone(), services.clone());
+        assert_eq!(wire.ports, ports, "the fitted copy must carry the forward");
+        assert_eq!(
+            wire.shared_services, services,
+            "the fitted copy must carry the service"
+        );
+
+        // The caller's own plan is untouched -- `fitted` reads a plan, it does
+        // not mutate one.
+        assert!(
+            plan.ports.is_empty() && plan.shared_services.is_empty(),
+            "fitted must not reach back and mutate the caller's plan"
+        );
+    }
+
+    /// A shared plan (no network of its own) gets no ports even if some are
+    /// passed in -- the field is gated on `network.is_isolated()`, matching
+    /// `PortsBadge`'s own gate, so a caller cannot accidentally show a shared
+    /// plan ports it has no way to have bound.
+    #[test]
+    fn fitted_never_shows_ports_for_a_shared_plan() {
+        let plan = a_plan("shared-fitted");
+        assert!(!plan.network.is_isolated());
+
+        let ports = vec![kingdom_core::PortForward {
+            guest: 3000,
+            host: 41000,
+        }];
+        let wire = fitted(&plan, ports, vec![]);
+        assert!(
+            wire.ports.is_empty(),
+            "a plan on the shared network must never show ports it cannot have"
+        );
+    }
+
+    /// `fitted` still strips the opaque half of the model's thinking -- the
+    /// size win `for_wire` exists for must survive the split.
+    #[test]
+    fn fitted_still_strips_opaque_thinking() {
+        let mut thinking = kingdom_core::Reasoning {
+            text: Some("thinking".to_string()),
+            ..Default::default()
+        };
+        thinking
+            .opaque
+            .insert("signature".to_string(), serde_json::json!("opaque"));
+
+        let mut plan = a_plan("fitted-thinking");
+        plan.begin_tool_call(
+            kingdom_core::ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
+                "reply-1",
+                Some(thinking),
+                None,
+            ),
+        );
+
+        let wire = fitted(&plan, vec![], vec![]);
+        let Some(kingdom_core::Entry::Tool(deed)) = wire.transcript.last() else {
+            panic!("the deed must survive");
+        };
+        assert!(
+            deed.reasoning.as_ref().is_some_and(|r| r.opaque.is_empty()),
+            "fitted must still strip what for_wire strips"
+        );
     }
 
     /// A shared service is never persisted, only attached on the way out.

@@ -141,12 +141,33 @@ pub fn city_root_in(kingdom: &Kingdom, id: &PlanId) -> Option<std::path::PathBuf
 /// megabytes of provider signatures, parsed and cloned in the same frame as his
 /// next keystroke.
 ///
+/// This is also where the plan's runtime facts -- ports, shared services --
+/// are fitted, exactly as the watch socket's push path does it (see
+/// `crate::events::on_the_wire`). A reply that skipped this used to be how a
+/// browser's own request for a fresh copy of a plan overwrote a good,
+/// ports-carrying copy the watch socket had just pushed: this function and
+/// [`to_browser_in`] are now the one seam every route to a browser must cross,
+/// and `Plan::for_wire` alone is never enough.
+///
 /// Named rather than inlined so that the rule is visible at each call site, and
 /// so a function that is ever consumed server-side is an obvious exception
 /// rather than a silent one. Nothing here changes what is stored.
 #[cfg(feature = "ssr")]
 fn to_browser(plan: Plan) -> Plan {
-    plan.for_wire()
+    let city_root = city_root_of(&plan.id);
+    crate::events::on_the_wire(&plan, city_root.as_deref())
+}
+
+/// [`to_browser`] for a caller that is already holding the kingdom.
+///
+/// The kingdom's mutex is a plain [`std::sync::Mutex`], not reentrant -- the
+/// same reason [`city_root_in`] exists next to [`city_root_of`]. A caller with
+/// the guard in hand resolves the city through that guard rather than through
+/// `to_browser`, which would deadlock the server while holding the lock.
+#[cfg(feature = "ssr")]
+fn to_browser_in(kingdom: &Kingdom, plan: Plan) -> Plan {
+    let city_root = city_root_in(kingdom, &plan.id);
+    crate::events::on_the_wire(&plan, city_root.as_deref())
 }
 
 /// Writes a plan to the records, turning a failed write into something the user
@@ -169,15 +190,38 @@ pub(crate) fn remember(root: &std::path::Path, plan: &mut Plan) {
     }
 }
 
+/// [`to_browser_in`] for a caller that has an entire [`Kingdom`], not one
+/// plan -- `get_kingdom`, `open_kingdom`, `enter_proving_grounds`. Fits every
+/// plan's runtime facts the same way, resolving each plan's city through the
+/// kingdom it was already given rather than re-locking, so it is safe to call
+/// whether or not the caller holds the global guard.
+///
+/// Without this, a whole-kingdom reply overwrote a plan's ports and shared
+/// services with nothing the moment it crossed: the browser's own refetches
+/// after `speak`, `finish`, `send_review` and `draft` were exactly how the
+/// ports badge went blank the instant a turn ended, because each of those
+/// asks for the whole kingdom again right after the good, ports-carrying copy
+/// the watch socket had just pushed.
+#[cfg(feature = "ssr")]
+fn kingdom_to_browser(kingdom: &Kingdom) -> Kingdom {
+    let mut wire = kingdom.for_wire();
+    for plan in wire.plans.iter_mut() {
+        let city_root = city_root_in(kingdom, &plan.id);
+        *plan = crate::events::on_the_wire(plan, city_root.as_deref());
+    }
+    wire
+}
+
 /// Returns the currently open kingdom, or an empty one if none is open.
 ///
-/// [`Kingdom::for_wire`], because this is the app's opening fetch and the
+/// [`kingdom_to_browser`], because this is the app's opening fetch and the
 /// largest single transfer it makes: every plan at once, where a push carries
 /// one. Stripping the model's opaque thinking here is what takes a real
 /// kingdom's page from 13.9 MB down. Server state is untouched.
 #[server(GetKingdom, "/api")]
 pub async fn get_kingdom() -> Result<Kingdom, ServerFnError> {
-    Ok(lock()?.for_wire())
+    let kingdom = lock()?;
+    Ok(kingdom_to_browser(&kingdom))
 }
 
 /// Opens a dev folder as the kingdom: scans it for cities and seats a model.
@@ -195,10 +239,10 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
     }
 
     enforce_sandbox(&root)?;
-    // `for_wire` on the way out only. `assemble` has already stored the whole
-    // kingdom, opaque thinking and all; what is narrowed is the copy this
-    // browser is handed.
-    assemble(&root, None).map(|k| k.for_wire())
+    // `kingdom_to_browser` on the way out only. `assemble` has already stored
+    // the whole kingdom, opaque thinking and all; what is narrowed and fitted
+    // is the copy this browser is handed.
+    assemble(&root, None).map(|k| kingdom_to_browser(&k))
 }
 
 /// Seeds a proving ground if needed and opens it.
@@ -210,10 +254,10 @@ pub async fn open_kingdom(path: String) -> Result<Kingdom, ServerFnError> {
 #[server(EnterProvingGrounds, "/api")]
 pub async fn enter_proving_grounds(fixture: Option<String>) -> Result<Kingdom, ServerFnError> {
     let name = fixture.unwrap_or_else(|| kingdom_core::mockdata::DEFAULT_FIXTURE.to_string());
-    // `for_wire` here and not inside `open_fixture`, which the boot path also
-    // calls with no browser in sight. See `get_kingdom`.
+    // `kingdom_to_browser` here and not inside `open_fixture`, which the boot
+    // path also calls with no browser in sight. See `get_kingdom`.
     open_fixture(&name)
-        .map(|k| k.for_wire())
+        .map(|k| kingdom_to_browser(&k))
         .map_err(ServerFnError::new)
 }
 
@@ -1432,7 +1476,7 @@ pub async fn say(plan: String, prompt: String) -> Result<Plan, ServerFnError> {
         let running = crate::turns::is_running(&plan_id);
         receive(p, prompt, running);
     })
-    .map(to_browser)
+    .map(|p| to_browser_in(&kingdom, p))
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -1505,7 +1549,7 @@ pub async fn unqueue(plan: String, queued_id: String) -> Result<Plan, ServerFnEr
         ));
     }
 
-    Ok(to_browser(updated))
+    Ok(to_browser_in(&kingdom, updated))
 }
 
 /// The user calls a halt on a turn that is running.
@@ -1593,7 +1637,7 @@ pub async fn stop_plan(plan: String) -> Result<Plan, ServerFnError> {
              set right. Say something to send the court round again.",
         );
     })
-    .map(to_browser)
+    .map(|p| to_browser_in(&kingdom, p))
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -1709,7 +1753,7 @@ pub async fn draft_plan(plan: String) -> Result<Plan, ServerFnError> {
                 );
             });
             repaired
-                .map(to_browser)
+                .map(|p| to_browser_in(&kingdom, p))
                 .ok_or_else(|| ServerFnError::new(format!("drafting task failed: {e}")))
         }
     }
@@ -1846,7 +1890,7 @@ pub async fn approve_plan(plan: String) -> Result<Plan, ServerFnError> {
         p.say(Speaker::User, kingdom_core::APPROVAL);
         p.status = PlanStatus::Drafting;
     })
-    .map(to_browser)
+    .map(|p| to_browser_in(&kingdom, p))
     .ok_or_else(|| ServerFnError::new("That plan vanished as it was being approved."))
 }
 
@@ -1863,7 +1907,7 @@ pub async fn set_aside_plan(plan: String) -> Result<Plan, ServerFnError> {
     let mut kingdom = lock()?;
 
     update(&mut kingdom, &plan_id, |p| p.set_aside_proposal())
-        .map(to_browser)
+        .map(|p| to_browser_in(&kingdom, p))
         .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))
 }
 
@@ -1911,7 +1955,7 @@ pub async fn annotate_proposal(
         ));
     }
 
-    Ok(to_browser(updated))
+    Ok(to_browser_in(&kingdom, updated))
 }
 
 /// The King removes one entry from a plan's transcript -- a message, or a
@@ -1948,7 +1992,7 @@ pub async fn delete_entry(plan: String, index: usize) -> Result<Plan, ServerFnEr
     .ok_or_else(|| ServerFnError::new("That plan is no longer in the records."))?;
 
     outcome.map_err(ServerFnError::new)?;
-    Ok(to_browser(updated))
+    Ok(to_browser_in(&kingdom, updated))
 }
 
 /// The King takes a note back before the court has been told of it.
@@ -1974,7 +2018,7 @@ pub async fn withdraw_note(plan: String, note_id: String) -> Result<Plan, Server
         ));
     }
 
-    Ok(to_browser(updated))
+    Ok(to_browser_in(&kingdom, updated))
 }
 
 /// The King sends his notes back for the court to answer.
@@ -2022,7 +2066,7 @@ pub async fn send_notes(plan: String) -> Result<Plan, ServerFnError> {
         let running = crate::turns::is_running(&plan_id);
         receive(p, notes_as_decree(&notes), running);
     })
-    .map(to_browser)
+    .map(|p| to_browser_in(&kingdom, p))
     .ok_or_else(|| ServerFnError::new("That plan vanished as its notes were sent."))
 }
 
@@ -2463,7 +2507,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         crate::tools::propose_plan::discard_draft(&workspace);
     }
 
-    Ok(to_browser(plan))
+    Ok(to_browser_in(&kingdom, plan))
 }
 
 /// Every shared resource this kingdom knows about, and what each is doing.
@@ -2716,6 +2760,34 @@ pub(crate) mod tests {
         // exactly as it stands -- joining a root onto it would corrupt it.
         let absolute = Workspace::in_place("/dev/testburg/.kingdom/abc");
         assert_eq!(grounded("/dev", &absolute), absolute);
+    }
+
+    /// `kingdom_to_browser` fits every plan while already holding the guard
+    /// its own caller (`get_kingdom`) took -- it must resolve each plan's city
+    /// through the kingdom it was handed, not by taking the lock a second
+    /// time. A caller that got this wrong would deadlock the server while
+    /// still holding the lock, exactly as `events::publishing_while_the_
+    /// kingdom_is_held_does_not_deadlock` exists to catch for the per-plan
+    /// path.
+    ///
+    /// Run on its own thread with a deadline, so a reintroduced deadlock is a
+    /// failing test rather than a suite that never finishes.
+    #[test]
+    fn fitting_a_whole_kingdom_while_it_is_held_does_not_deadlock() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let kingdom = lock().expect("the kingdom locks");
+            let _ = kingdom_to_browser(&kingdom);
+            let _ = done.send(());
+        });
+
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "fitting a whole kingdom while its own lock is held must return -- a \
+             second lock from inside it deadlocks the whole server"
+        );
     }
 
     /// The review drawer's diff and the source view are the third and fourth
