@@ -434,6 +434,12 @@ agent must reach, started once and stopped once.
 Shown to the King as **the well**; called a shared service in code
 (`ServiceSpec`, `RunningService`, `SharedService`).
 
+A well is **drawn on the map**, standing on its city's square, with a channel to
+each agent actually drawing from it — and the map draws the host network and
+each agent's own network beside it, which is what makes "isolated, yet still
+reaching the database" a picture rather than a paragraph. See
+[`docs/citymap.md`](citymap.md#wells-and-networks-what-each-agent-is-plugged-into).
+
 A city declares what it needs in `<city>/.kingdom/services.toml`, committed:
 
 ```toml

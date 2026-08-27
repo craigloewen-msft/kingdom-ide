@@ -213,6 +213,17 @@ pub struct KingdomState {
     ///
     /// Empty when nothing is live, which is what tears the works down.
     pub works: RwSignal<Vec<kingdom_core::PlanChanges>>,
+    /// What every live agent is connected to, and what each city shares.
+    ///
+    /// The map's half of the second question in `AGENTS.md`. Kept current by
+    /// [`watch_kingdom_network`], and empty when nothing is open and no project
+    /// declares a service -- which is the ordinary state of a dev folder.
+    ///
+    /// Named apart from `network` above deliberately: that one is the *choice*
+    /// of network for the next plan the King opens, a single mode on a chip,
+    /// and this is what the whole kingdom is currently plugged into. Two very
+    /// different questions that the word "network" answers both of.
+    pub plumbing: RwSignal<kingdom_core::KingdomNetwork>,
     /// What each plan wants of the King, as the server last said.
     ///
     /// A cache beside the kingdom rather than a field on `Plan`, and the reason
@@ -275,6 +286,7 @@ impl KingdomState {
             focus_file: RwSignal::new(None),
             picked_file: RwSignal::new(None),
             works: RwSignal::new(Vec::new()),
+            plumbing: RwSignal::new(kingdom_core::KingdomNetwork::default()),
             attention: RwSignal::new(std::collections::HashMap::new()),
             last_activity: RwSignal::new(std::collections::HashMap::new()),
         }
@@ -741,6 +753,69 @@ fn watch_kingdom_works(state: KingdomState) {
     });
 }
 
+/// Keeps [`KingdomState::network`] current: what each agent is plugged into.
+///
+/// The sibling of [`watch_kingdom_works`], and push-driven for the same reason:
+/// the rail's socket already carries a `PlanPulse` for every plan whenever it
+/// moves, so "has anything changed?" is answered locally, for free, at the
+/// moment it changes. A timer would be both slower and more expensive.
+///
+/// # What it is keyed on, and why that is not `working_on`
+///
+/// A deliberately *smaller* digest than the works watcher's. What an agent is
+/// connected to does not change when it edits a file -- a namespace is settled
+/// when the plan opens and never changes, and a well is started once for the
+/// whole city. So this is keyed on each live plan's id and network mode only.
+///
+/// Keying it on `working_on` as well, as the works watcher must, would refetch
+/// on every deed of every turn in the kingdom to redraw marks that had not
+/// moved -- the exact cost `kingdom_activity` records for the working rings.
+///
+/// The ports a plan has forwarded *do* move under this digest without changing
+/// it. That is accepted rather than overlooked: the map draws a conduit for
+/// *having* a network, not one line per port, so a new forward changes nothing
+/// on screen. The chamber's ports badge is what reports those, and it is fed by
+/// the per-plan socket, which `netns::watch` already pushes on every change.
+fn watch_kingdom_network(state: KingdomState) {
+    let plugged = Memo::new(move |_| {
+        state.kingdom.with(|k| {
+            k.plans
+                .iter()
+                .filter(|plan| plan.is_live() && !plan.is_subagent())
+                .map(|plan| (plan.id.clone(), plan.network))
+                .collect::<Vec<_>>()
+        })
+    });
+
+    let fetching = RwSignal::new(false);
+
+    Effect::new(move |_| {
+        let live = plugged.get();
+        if live.is_empty() {
+            // No agent anywhere. The wells belong to cities that have plans in
+            // them, so with nothing open there is nothing standing either --
+            // answered here rather than by a request that could only come back
+            // empty.
+            state.plumbing.set(kingdom_core::KingdomNetwork::default());
+            return;
+        }
+        if fetching.get_untracked() {
+            return;
+        }
+        fetching.set(true);
+
+        leptos::task::spawn_local(async move {
+            if let Ok(found) = crate::api::kingdom_network().await {
+                // A failed fetch leaves the last good answer standing, exactly
+                // as the works watcher's does: blanking the map because one
+                // request was dropped is worse than a slightly stale picture.
+                state.plumbing.set(found);
+            }
+            fetching.set(false);
+        });
+    });
+}
+
 /// One agent's line in the rail map's header: who, how much, and its banner.
 ///
 /// A named alias because it is the key of a `<For>` as well as its item, and
@@ -782,6 +857,10 @@ pub fn App() -> impl IntoView {
     // any one conversation -- and because the works are now about the kingdom
     // rather than about whichever plan, or whichever city, happens to be open.
     watch_kingdom_works(state);
+    // Beside the works watcher, and kept apart from it deliberately: the two
+    // track different digests, so an agent editing a file does not also refetch
+    // the network picture. See `watch_kingdom_network`.
+    watch_kingdom_network(state);
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the user back to the folder picker.
@@ -977,6 +1056,7 @@ fn ThroneRoom() -> impl IntoView {
                     focus_file=state.focus_file
                     picked_file=state.picked_file
                     works=state.works
+                    network=state.plumbing
                 />
                 // The rail's map is a view rather than a control -- clicking it
                 // cannot select, because the chamber force-sets the selection

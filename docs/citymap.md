@@ -114,6 +114,64 @@ The shroud is a different question and has its own scale — *how much of this f
 is going away* is a ratio of the file's own length, not of churn. See
 `tasks/00260`.
 
+## Wells and networks: what each agent is plugged into
+
+A holding is sized from the file and the works from the change. These are a
+third ruler again, and they answer the **second** of the three questions in
+`AGENTS.md` — *what shared resources are they holding?* Three marks, drawn by
+`crates/kingdom-citymap/src/map/network.rs` (the geometry, and every judgement
+behind it) and `engine/network.rs` (the meshes).
+
+| Mark | What it is | Where it stands |
+|---|---|---|
+| the **host ring** | the King's own machine | a slate band just inside the realm's rim |
+| a **wellhead** | one container a whole city shares | on that town's square |
+| an **agent mark** | one live plan, in its own banner colour | ringing the town it works in |
+
+And the lines between them: a **conduit** from an agent out to the host ring
+means it binds the King's own ports; a closed **moat** around an agent and *no*
+conduit means it has a network of its own; a **channel** to a wellhead means it
+is actually drawing from that well.
+
+### The one fact this exists to draw
+
+**An isolated agent still reaches its city's well.** That is the fact nothing
+else in the interface says, and it is not obvious — it looks like a
+contradiction. `slirp4netns` runs with `--disable-host-loopback`, which blocks
+`127.0.0.1` and *nothing else*, so a Docker bridge address is simply another
+host route. The picture that says it is a moat with no conduit to the rim and a
+channel to the wellhead anyway. `services.rs` records the measurements.
+
+### Why it is not one mark per port
+
+A conduit says the agent *has* a network, not what it is listening on. Ports
+move constantly; what an agent is plugged into does not. The chamber's ports
+badge reports the numbers, fed by the per-plan socket — see
+`watch_kingdom_network`, whose digest deliberately excludes them.
+
+### What is drawn from what an agent *did*, not what it could
+
+`drawing_from` names the wells a plan is registered as using, from the same
+reference set that decides when a container is stopped. Every plan in a city
+*could* reach its database; drawing a channel from all of them would claim five
+connections where there is one.
+
+### Three things settled by looking at it
+
+The first render of this was wrong in three ways that no test caught, and each
+is now pinned by one:
+
+- **the well was the same colour as an agent.** `#38bdf8` sits 110.5 from the
+  `azure` banner on the palette's own ruler, where the two closest banners are
+  126.1 apart — so an azure agent's conduit and the well it ran to were one
+  colour. The test now asserts a *margin*, not inequality, which is what let the
+  first attempt pass.
+- **the conduits were roads.** At 3.4 units they were heavier than the streets
+  they crossed. A connection is a thread; the marks carry the meaning.
+- **the agents stood among the buildings** — one on the keep in the middle of
+  the square. They are now placed from the town's own `extent`, so they ring the
+  settlement rather than standing in it.
+
 ## Reporting progress while the map loads
 
 **The map says how far along it is, and had to be rebuilt to be able to.** The

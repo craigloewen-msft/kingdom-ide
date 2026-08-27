@@ -60,6 +60,13 @@ detail and the reasoning for each gap.
   building the same crate still block each other on the same lock, and nothing
   says so. Isolation is also still off by default and per plan, so the King has
   to know to ask for it.
+
+  What the map *does* now show is the standing arrangement: the host network as
+  a ring at the realm's rim, each city's wells on its square, and every live
+  agent joined to what it reaches -- or moated, with nothing joining it to the
+  edge. That answers "what is each agent plugged into, and who shares this
+  database?" at a glance. It still does not answer "these two are fighting over
+  it", because nothing anywhere detects that yet.
 - Naming a plan with a model. A plan's branch is cut from its title today —
   `kingdom/<slug>`, via `kingdom_core::naming::slugify`, with `-2`, `-3` walked
   past on collision — but that title is still just the first clause of the

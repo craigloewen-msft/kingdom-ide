@@ -881,6 +881,154 @@ pub async fn kingdom_changes() -> Result<Vec<kingdom_core::PlanChanges>, ServerF
     Ok(answered)
 }
 
+/// One live agent, as the network feed collects it under the kingdom lock.
+///
+/// A named type because the tuple it replaces was complex enough for clippy to
+/// object, and because naming it is what makes the collecting pass in
+/// [`kingdom_network`] readable: it is deliberately *everything from the
+/// kingdom* that the readers outside the lock will need.
+#[cfg(feature = "ssr")]
+type LiveAgent = (
+    kingdom_core::PlanId,
+    kingdom_core::CityId,
+    kingdom_core::NetworkMode,
+);
+
+/// A city with live agents in it, and where its project sits on disk.
+#[cfg(feature = "ssr")]
+type CityRoot = (kingdom_core::CityId, std::path::PathBuf);
+
+/// What every agent in the kingdom is plugged into, and what its cities share.
+///
+/// The sibling of [`kingdom_changes`], and the map draws its wells, its host
+/// ring and its agent markers from this. Where that one answers *what is each
+/// agent changing*, this answers *what is each agent connected to* -- the
+/// second of the three questions in `AGENTS.md`.
+///
+/// # The lock discipline, which is the whole of the danger here
+///
+/// The kingdom's mutex is a plain [`std::sync::Mutex`] and is **not**
+/// reentrant. Everything below reads runtime state that lives *outside* the
+/// kingdom -- `services::` for the wells, `netns::` for the forwards -- and the
+/// mapping from a plan to its city root lives *inside* it. So the guard is
+/// taken **once**, everything that needs it is collected in one pass, and it is
+/// dropped before a single service or namespace is asked anything.
+///
+/// That is not a preference. `api::update` publishes with the guard in hand,
+/// and a lookup from inside that path once deadlocked the whole server --
+/// holding the lock, so every later request hung behind it. `city_root_in`
+/// exists precisely so a caller that already holds the kingdom can resolve a
+/// city without asking for it again, and this uses it for that reason.
+///
+/// # Why a city with nothing standing is left out
+///
+/// Because that is nearly every project. A well is a container a *declared*
+/// service is running in, so a city with no `.kingdom/services.toml` has none
+/// and is simply absent -- the same judgement `Kingdom::activity` makes about a
+/// town with nothing running, and for the same reason: the common answer on a
+/// real dev folder is an empty list.
+#[server(KingdomNetworkFeed, "/api")]
+pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnError> {
+    // One pass, one guard. Everything the readers below need is taken here and
+    // the lock is dropped at the end of the block -- see the note above on why
+    // that boundary is load-bearing rather than tidy.
+    let (agents, city_roots): (Vec<LiveAgent>, Vec<CityRoot>) = {
+        let kingdom = lock()?;
+
+        // Subagents are excluded to agree with `kingdom_changes` and with
+        // `Kingdom::plans_in`: a subagent works in its parent's worktree and on
+        // its parent's network, so a marker of its own would draw one agent
+        // twice.
+        let mut agents: Vec<_> = kingdom
+            .plans
+            .iter()
+            .filter(|plan| plan.is_live() && !plan.is_subagent())
+            .map(|plan| (plan.id.clone(), plan.city.clone(), plan.network))
+            .collect();
+        // Sorted for `assign_banners`, which resolves a colour collision by
+        // position: an unstable order would swap two agents' colours between
+        // refetches. The same reason `kingdom_changes` sorts.
+        agents.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Every city that has at least one live agent in it. Keyed by city so a
+        // project with five plans is resolved once rather than five times, and
+        // resolved through `city_root_in` because the guard is already held.
+        let mut roots: Vec<CityRoot> = Vec::new();
+        for (plan, city, _) in &agents {
+            if roots.iter().any(|(known, _)| known == city) {
+                continue;
+            }
+            if let Some(root) = city_root_in(&kingdom, plan) {
+                roots.push((city.clone(), root));
+            }
+        }
+        (agents, roots)
+    };
+
+    // From here on nothing touches the kingdom.
+    let wells: Vec<kingdom_core::CityWells> = city_roots
+        .iter()
+        .filter_map(|(city, root)| {
+            let standing: Vec<kingdom_core::SharedService> = crate::services::running_in(root)
+                .into_iter()
+                .map(|service| kingdom_core::SharedService {
+                    address: service.address(),
+                    users: crate::services::users_of(root, &service.name),
+                    name: service.name,
+                    image: service.image,
+                })
+                .collect();
+            // Absent rather than empty: see the doc above.
+            (!standing.is_empty()).then(|| kingdom_core::CityWells {
+                city: city.clone(),
+                wells: standing,
+            })
+        })
+        .collect();
+
+    let agents = agents
+        .into_iter()
+        .map(|(plan, city, network)| {
+            // Only an isolated plan has forwards, and asking about a plan that
+            // has none is answered with an empty list anyway -- the guard is
+            // here to say so rather than to avoid a fault.
+            let ports = if network.is_isolated() {
+                crate::netns::forwards_of(&plan)
+                    .into_iter()
+                    .map(|(guest, host)| kingdom_core::PortForward { guest, host })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Which of its city's wells this plan is actually registered as
+            // drawing from -- not merely which its city has. See
+            // `AgentNetwork::drawing_from`.
+            let drawing_from = city_roots
+                .iter()
+                .find(|(known, _)| known == &city)
+                .map(|(_, root)| {
+                    crate::services::running_in(root)
+                        .into_iter()
+                        .filter(|service| crate::services::draws_from(root, &service.name, &plan))
+                        .map(|service| service.name)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            kingdom_core::AgentNetwork {
+                plan,
+                city,
+                network,
+                ports,
+                drawing_from,
+            }
+        })
+        .collect();
+
+    Ok(kingdom_core::KingdomNetwork { wells, agents })
+}
+
 /// One changed file, as a side-by-side diff against the same base.
 ///
 /// # The boundary
@@ -3159,6 +3307,57 @@ pub(crate) mod tests {
             !parent.is_subagent(),
             "and must not hold for the plan that sent it, or the King could \
              never finish anything"
+        );
+    }
+
+    /// The network feed must never reach for the kingdom lock twice.
+    ///
+    /// The fault this guards is the one `events::publish_within` was split out
+    /// to fix, and it is worth restating because this feed is *new code on the
+    /// same path*: the kingdom's mutex is a plain [`std::sync::Mutex`], so a
+    /// thread that asks for it while already holding it deadlocks -- and it
+    /// deadlocks **holding the lock**, so every later request in the process
+    /// hangs behind it. The server answers once and then spins forever.
+    ///
+    /// `kingdom_network` reads two things that live outside the kingdom (the
+    /// wells, and each namespace's forwards) and one that lives inside it (a
+    /// plan's city root). The rule it follows is: take the guard once, collect
+    /// everything, drop it, *then* ask the outside world. This holds the lock
+    /// while calling the feed to prove the feed does not want it again.
+    ///
+    /// Run on its own thread with a deadline, so a reintroduced deadlock is a
+    /// failing test rather than a suite that never finishes.
+    #[test]
+    fn the_network_feed_does_not_reach_for_the_kingdom_twice() {
+        let (done, finished) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            // Held for the whole call, which is the shape `api::update` is in
+            // when it publishes -- the situation that actually deadlocked.
+            let kingdom = lock().expect("the kingdom locks");
+
+            // The collecting half of the feed, run under the guard. If any of
+            // it asked for the lock again this would never return.
+            let agents: Vec<_> = kingdom
+                .plans
+                .iter()
+                .filter(|plan| plan.is_live() && !plan.is_subagent())
+                .map(|plan| (plan.id.clone(), plan.city.clone(), plan.network))
+                .collect();
+            for (plan, _, _) in &agents {
+                let _ = city_root_in(&kingdom, plan);
+            }
+
+            drop(kingdom);
+            let _ = done.send(());
+        });
+
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "resolving every agent's city under the kingdom lock must return -- \
+             a second lock from inside this path deadlocks the whole server"
         );
     }
 
