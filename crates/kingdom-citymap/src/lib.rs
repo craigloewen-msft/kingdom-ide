@@ -16,6 +16,7 @@
 //! | Module | Target | What it is |
 //! |---|---|---|
 //! | [`map`] | both | the manifest: plain serialisable world-space geometry |
+//! | [`follow`] | `hydrate` | when the rail's map may move its camera, and where |
 //! | [`progress`] | both | how much of that manifest has arrived, as a bar |
 //! | [`build`] | `ssr` | scanning a kingdom on disk and laying it out |
 //! | [`engine`] | `hydrate` | drawing a manifest with Bevy |
@@ -54,6 +55,13 @@ pub mod build;
 // non-optional native dependency would.
 #[cfg(any(feature = "hydrate", test))]
 pub mod engine;
+// The same gate as `engine`, and for the same reason: when the map may move its
+// camera is a decision about a browser, but it is made out of six plain values
+// and is exactly the kind of rule that is worth pinning without one. `view.rs`
+// is `hydrate`-only and there is no DOM under `cargo test`, so a rule left in
+// an effect is a rule nothing can test.
+#[cfg(any(feature = "hydrate", test))]
+pub mod follow;
 pub mod map;
 // The same gate as `engine`, for a related reason: deciding whether to draw at
 // all is a decision about a browser, but it is made out of two plain values and

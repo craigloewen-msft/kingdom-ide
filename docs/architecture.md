@@ -234,10 +234,23 @@ crates/
                     the camera away from the interface, so the map stops
                     re-framing itself on the open file until the King hands it
                     back or leaves it still for `RELEASE_AFTER`
+    follow.rs       When the rail's map may move its camera, and where to. The
+                    rule is: the King opens a file, the chamber becomes about a
+                    different city, or the map changes home — and NOTHING else.
+                    It answers `Stay` for every other wake, which is what an
+                    agent writing a file, a status poll and a pan all are. A
+                    pure function for `input.rs`'s reason: `view.rs` is
+                    hydrate-only and there is no DOM under `cargo test`, so a
+                    rule left in an effect is a rule nothing can pin. Its
+                    memory holds the PATH as well as the city — remembering
+                    only the city cannot tell a new file from a stray wake
     view.rs         `CityMap` — the canvas, the click that selects a city, the
                     loading card with the bar on it, and the free-look chip that
-                    says the camera is his and offers it back. Also
-                    `publish_status`: under automation only, the engine's
+                    says the camera is his and offers it back. One effect reads
+                    `follow::decide` and resolves its answer into geometry;
+                    that resolving is here because the engine does not know
+                    what a city is, the same boundary `SetWorks` is written to.
+                    Also `publish_status`: under automation only, the engine's
                     `ViewerStatus` is mirrored onto `window.__kingdom_map` so a
                     browser test can assert on *values* — `built`, `hovered`,
                     `clicked.holding` — rather than on pixels
