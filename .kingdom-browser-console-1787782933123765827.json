@@ -1,0 +1,22 @@
+[
+  {
+    "level": "error",
+    "text": "panicked at /home/omarchy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_render-0.19.1/src/renderer/mod.rs:233:22:\nFailed to create wgpu surface: CreateSurfaceError { inner: Hal(FailedToCreateSurfaceForAnyBackend({Gl: InstanceError { message: \"canvas.getContext() returned null; webgl2 not available or canvas already in use\", source: None }})) }\n\nStack:\n\nError\n    at __wbg_new_227d7c05414eb861 (http://127.0.0.1:39217/pkg/kingdom-ide.js:1457:25)\n    at kingdom_app.wasm.<console_error_panic_hook[a23bf712ef871435]::Error>::new::__wbg_new_227d7c05414eb861 externref shim (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[150620]:0x32d0124)\n    at kingdom_app.wasm.console_error_panic_hook[a23bf712ef871435]::hook (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[14959]:0x1aef5f5)\n    at kingdom_app.wasm.<console_error_panic_hook[a23bf712ef871435]::hook as core[9b3796e30d99ddb7]::ops::function::Fn<(&std[9b61791517946214]::panic::PanicHookInfo,)>>::call[1] (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[208642]:0x33d0238)\n    at kingdom_app.wasm.std[9b61791517946214]::panicking::panic_with_hook (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[52556]:0x2a4c265)\n    at kingdom_app.wasm.std[9b61791517946214]::panicking::panic_handler::{closure#0} (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[74787]:0x2e6e6d3)\n    at kingdom_app.wasm.std[9b61791517946214]::sys::backtrace::__rust_end_short_backtrace::<std[9b61791517946214]::panicking::panic_handler::{closure#0}, !> (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[205175]:0x33c910c)\n    at kingdom_app.wasm.__rustc[6ef78fba13ac776c]::rust_begin_unwind (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[113883]:0x31c5257)\n    at kingdom_app.wasm.core[9b3796e30d99ddb7]::panicking::panic_fmt (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[102961]:0x31213a1)\n    at kingdom_app.wasm.core[9b3796e30d99ddb7]::result::unwrap_failed (http://127.0.0.1:39217/pkg/kingdom-ide.wasm:wasm-function[84687]:0x2f9296a)\n\n"
+  },
+  {
+    "level": "warning",
+    "text": "At crates/kingdom-app/src/components/prompt_bar.rs:46:25, you are reading a resource in `hydrate` mode outside a <Suspense/> or <Transition/> or effect. This can cause hydration mismatch errors and loses out on a significant performance optimization. To fix this issue, you can either: \n1. Wrap the place where you read the resource in a <Suspense/> or <Transition/> component, or \n2. Switch to using LocalResource::new(), which will wait to load the resource until the app is hydrated on the client side. (This will have worse performance in most cases.)"
+  },
+  {
+    "level": "warning",
+    "text": "At crates/kingdom-app/src/components/prompt_bar.rs:46:25, you are reading a resource in `hydrate` mode outside a <Suspense/> or <Transition/> or effect. This can cause hydration mismatch errors and loses out on a significant performance optimization. To fix this issue, you can either: \n1. Wrap the place where you read the resource in a <Suspense/> or <Transition/> component, or \n2. Switch to using LocalResource::new(), which will wait to load the resource until the app is hydrated on the client side. (This will have worse performance in most cases.)"
+  },
+  {
+    "level": "warning",
+    "text": "At crates/kingdom-app/src/components/prompt_bar.rs:46:25, you are reading a resource in `hydrate` mode outside a <Suspense/> or <Transition/> or effect. This can cause hydration mismatch errors and loses out on a significant performance optimization. To fix this issue, you can either: \n1. Wrap the place where you read the resource in a <Suspense/> or <Transition/> component, or \n2. Switch to using LocalResource::new(), which will wait to load the resource until the app is hydrated on the client side. (This will have worse performance in most cases.)"
+  },
+  {
+    "level": "warning",
+    "text": "At crates/kingdom-app/src/components/prompt_bar.rs:46:25, you are reading a resource in `hydrate` mode outside a <Suspense/> or <Transition/> or effect. This can cause hydration mismatch errors and loses out on a significant performance optimization. To fix this issue, you can either: \n1. Wrap the place where you read the resource in a <Suspense/> or <Transition/> component, or \n2. Switch to using LocalResource::new(), which will wait to load the resource until the app is hydrated on the client side. (This will have worse performance in most cases.)"
+  }
+]

@@ -62,6 +62,14 @@ pub(crate) const REFERENCE_WORLD: f32 = 1000.0;
 /// makes reaching one setback safe from ever touching the lot next door.
 pub(crate) const LOT_SETBACK: f32 = 12.0;
 
+/// World units of height per branch-per-line.
+///
+/// Tuned against the density this repository actually shows: a median file
+/// runs about 0.08 branches per line and the densest around 0.22. At this
+/// figure that spread lands between roughly 23 and 50 units, which uses most
+/// of the 11–54 range without piling files up against either end.
+const DENSITY_HEIGHT: f32 = 190.0;
+
 /// An axis-aligned rectangle on the ground plane, in world units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -284,6 +292,11 @@ pub struct Building {
     pub bytes: u64,
     /// Total lines.
     pub lines: usize,
+    /// Lines that are neither blank nor an obvious comment.
+    ///
+    /// This rather than [`lines`](Self::lines) is what [`height`](Self::height)
+    /// divides by, so a heavily commented file does not read as a simple one.
+    pub code_lines: usize,
     /// A rough branch count.
     pub complexity: usize,
     /// How many other files import or include this one.
@@ -297,13 +310,36 @@ pub struct Building {
 }
 
 impl Building {
-    /// How tall the building stands, from its line count and complexity.
+    /// How tall the building stands: how *branchy* the file is, not how big.
+    ///
+    /// Size is already the footprint — a file's lot is its share of its
+    /// folder's ground, weighted by `√bytes`. Height used to follow
+    /// `ln(lines)` as well, which spent a second dimension restating the
+    /// first: measured across this repository, lines and total complexity
+    /// correlate at 0.94, so the two axes rose and fell together and the
+    /// skyline carried one fact drawn twice.
+    ///
+    /// Worse, it ran out of room saying it. With `ln(lines)` driving the
+    /// number, the five largest files here all pinned flat against the 54
+    /// clamp — the holdings most worth picking out were the ones height could
+    /// no longer tell apart.
+    ///
+    /// Branches *per line* is the signal that is actually independent of size
+    /// (correlation 0.06). So the base answers "how much code is here?" and
+    /// the height answers "how tangled is it?", and a long plain file is now a
+    /// broad low hall rather than another spike.
     pub fn height(&self) -> f32 {
-        let line_height = ((self.lines + 1) as f32).ln() * 4.1;
-        let complexity_height = (self.complexity as f32).sqrt() * 1.2;
-        let intrinsic =
-            (8.0 + line_height + complexity_height).clamp(11.0, 54.0) * self.scale.clamp(0.24, 1.0);
+        let intrinsic = (8.0 + self.complexity_density() * DENSITY_HEIGHT).clamp(11.0, 54.0)
+            * self.scale.clamp(0.24, 1.0);
         intrinsic.min(self.height_ceiling())
+    }
+
+    /// Branches per line of code, the measure height is drawn from.
+    ///
+    /// Zero for every file the scanner does not score — see
+    /// [`Category`] — which is why documentation and assets sit low.
+    pub fn complexity_density(&self) -> f32 {
+        self.complexity as f32 / self.code_lines.max(1) as f32
     }
 
     /// The tallest a holding may stand before it starts hiding its neighbours.
@@ -473,6 +509,7 @@ impl CityLayout {
                         lot: ward_rect.inset_relative(10.0, 0.16),
                         bytes: child.metrics.bytes,
                         lines: child.metrics.lines,
+                        code_lines: child.metrics.code_lines,
                         complexity: child.metrics.complexity,
                         references: child.metrics.references,
                         scale: 1.0,
@@ -534,6 +571,7 @@ impl CityLayout {
                         lot: child_rect.inset_relative(gap, 0.14),
                         bytes: child.metrics.bytes,
                         lines: child.metrics.lines,
+                        code_lines: child.metrics.code_lines,
                         complexity: child.metrics.complexity,
                         references: child.metrics.references,
                         scale: 1.0,
@@ -1108,6 +1146,72 @@ mod tests {
         }
     }
 
+    /// A holding standing on a lot big enough not to cap its height, so a test
+    /// measures the formula rather than the ceiling.
+    fn holding(lines: usize, code_lines: usize, complexity: usize) -> Building {
+        Building {
+            name: "module.rs".to_owned(),
+            path: "src/module.rs".to_owned(),
+            ward_id: None,
+            category: Category::Source,
+            kind: BuildingKind::Guildhall,
+            lot: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 400.0,
+            },
+            bytes: 4_096,
+            lines,
+            code_lines,
+            complexity,
+            references: 0,
+            scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn height_follows_tangle_rather_than_length() {
+        // The point of the axis. A long plain file has plenty of code and
+        // little branching, so it should read as a broad low hall; a short
+        // knotty one should stand up. Length is the footprint's job.
+        let long_and_plain = holding(4_000, 3_600, 180);
+        let short_and_dense = holding(300, 260, 60);
+
+        assert!(
+            short_and_dense.height() > long_and_plain.height(),
+            "a {:.0}-line plain file stood {:.1} tall against {:.1} for a dense {:.0}-line one",
+            long_and_plain.code_lines,
+            long_and_plain.height(),
+            short_and_dense.height(),
+            short_and_dense.code_lines,
+        );
+    }
+
+    #[test]
+    fn a_file_the_scanner_does_not_score_sits_at_the_floor() {
+        // Documentation, config and assets never get a complexity score, so
+        // they must land on the minimum rather than on a divide-by-zero.
+        let unscored = holding(500, 0, 0);
+        assert_eq!(unscored.height(), 11.0);
+    }
+
+    #[test]
+    fn length_alone_no_longer_buys_height() {
+        // The regression the change was made for: with ln(lines) driving the
+        // number, every large file pinned against the 54 clamp and the map
+        // could not tell them apart. Same density, ten times the code.
+        let modest = holding(400, 360, 36);
+        let enormous = holding(4_000, 3_600, 360);
+
+        assert!(
+            (modest.height() - enormous.height()).abs() < 1e-3,
+            "length shifted height from {:.1} to {:.1}",
+            modest.height(),
+            enormous.height(),
+        );
+    }
+
     #[test]
     fn gives_each_file_a_non_overlapping_lot() {
         let mut root = Node::directory("project".to_owned(), PathBuf::new());
@@ -1153,6 +1257,7 @@ mod tests {
                 let mut node = file(&format!("module_{index}.rs"), 400 + index as u64 * 25);
                 node.relative_path = PathBuf::from(format!("src/module_{index}.rs"));
                 node.metrics.lines = 40 + index * 3;
+                node.metrics.code_lines = 30 + index * 2;
                 node.metrics.complexity = index % 40;
                 node
             })

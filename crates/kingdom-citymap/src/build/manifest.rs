@@ -357,6 +357,7 @@ mod tests {
             },
             bytes: 2048,
             lines: 90,
+            code_lines: 80,
             complexity: 7,
             references: 3,
             scale: 1.0,

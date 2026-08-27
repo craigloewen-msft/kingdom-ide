@@ -623,16 +623,7 @@ fn analyze_file(absolute: &Path, relative: &Path) -> Result<(Node, Vec<Vec<Strin
             .map_err(|error| whichever(error, format!("could not read {}", absolute.display())))?;
         let text = String::from_utf8_lossy(&content);
         metrics.lines = text.lines().count();
-        metrics.code_lines = text
-            .lines()
-            .filter(|line| {
-                let line = line.trim();
-                !line.is_empty()
-                    && !line.starts_with("//")
-                    && !line.starts_with('#')
-                    && !line.starts_with("<!--")
-            })
-            .count();
+        metrics.code_lines = text.lines().filter(|line| is_code_line(line)).count();
         metrics.complexity = estimate_complexity(&text, category);
         imports = imported_paths(&text);
     }
@@ -775,6 +766,23 @@ fn is_text_file(extension: &str, name: &str) -> bool {
     ) && name != "Cargo.lock"
 }
 
+/// Whether a line is code rather than blank or an obvious comment.
+///
+/// Shared by the line count and the complexity estimate on purpose. Height is
+/// now branches *per line of code*, so if the two disagreed about which lines
+/// count the ratio would be meaningless: `citymap`'s own `lib.rs` scores 14
+/// branches against 29 lines of code, and every one of those branches comes
+/// from prose like "for exactly this reason" in a doc comment. Counting both
+/// over the same lines is what keeps a heavily documented file from reading as
+/// the most tangled thing in the repository.
+fn is_code_line(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty()
+        && !line.starts_with("//")
+        && !line.starts_with('#')
+        && !line.starts_with("<!--")
+}
+
 fn estimate_complexity(text: &str, category: Category) -> usize {
     if !matches!(
         category,
@@ -788,6 +796,7 @@ fn estimate_complexity(text: &str, category: Category) -> usize {
         " else ",
     ];
     text.lines()
+        .filter(|line| is_code_line(line))
         .map(|line| {
             let padded = format!(" {} ", line.trim());
             TOKENS
@@ -815,6 +824,43 @@ mod tests {
             .map(|child| find(child, name))
             .find(|found| found.name == name)
             .unwrap_or(node)
+    }
+
+    #[test]
+    fn prose_in_a_comment_is_not_a_branch() {
+        // Height is branches per line of code, so the two have to count the
+        // same lines. A doc comment saying "for exactly this reason" is not a
+        // for loop, and a file that is mostly prose is not the most tangled
+        // thing in the repository.
+        let documented = "\
+//! A module that explains itself at length, for exactly this reason.\n\
+//! It matches on nothing, and loops for nobody, while saying so.\n\
+// Another remark: if this counted, the file would tower over its neighbours.\n\
+pub fn plain() -> usize {\n\
+    42\n\
+}\n";
+
+        assert_eq!(
+            estimate_complexity(documented, Category::Source),
+            0,
+            "prose was counted as branching"
+        );
+    }
+
+    #[test]
+    fn real_branches_are_still_counted() {
+        let branching = "\
+pub fn choose(value: usize) -> usize {\n\
+    if value > 3 && value < 9 {\n\
+        for _ in 0..value {}\n\
+    } else {\n\
+        return 0;\n\
+    }\n\
+    value\n\
+}\n";
+
+        // `if`, `&&`, `for`, `else`.
+        assert_eq!(estimate_complexity(branching, Category::Source), 4);
     }
 
     #[test]
