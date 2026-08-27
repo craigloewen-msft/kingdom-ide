@@ -20,8 +20,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod network;
 pub mod works;
 
+pub use network::{AgentMark, HostRing, Link, LinkKind, NetworkPicture, Wellhead};
 pub use works::{Work, WorkBand, WorkSite};
 
 /// An sRGB colour with alpha.

@@ -141,6 +141,16 @@ pub enum ViewerCommand {
     /// the engine's ignorance of Kingdom's domain is kept at -- exactly as
     /// [`TownActivity`] is a bare name and a count rather than a `CityId`.
     SetWorks(Vec<Work>),
+    /// What every agent is connected to, and what its city shares.
+    ///
+    /// Replaces rather than amends, for [`Self::SetWorks`]'s reasons: an agent
+    /// that has finished must *stop* being drawn, and an empty picture is the
+    /// ordinary way to say "nothing is connected to anything".
+    ///
+    /// Everything here is already world-space geometry, resolved in `view.rs`.
+    /// The engine never learns what a plan, a city or a container is -- the
+    /// same boundary [`TownActivity`] is a bare name and a count for.
+    SetNetwork(Box<crate::map::NetworkPicture>),
     /// Where the map is standing, and therefore how hard it should work.
     ///
     /// The map is mounted once for the life of the page -- see

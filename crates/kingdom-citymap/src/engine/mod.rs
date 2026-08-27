@@ -16,6 +16,7 @@ pub mod input;
 pub mod labels;
 pub mod materials;
 pub mod meshes;
+pub mod network;
 pub mod raise;
 pub mod spawn;
 pub mod stars;
@@ -293,6 +294,7 @@ impl Plugin for RepoCityPlugin {
             .init_resource::<Standing>()
             .init_resource::<wards::ActiveWard>()
             .init_resource::<works::Works>()
+            .init_resource::<network::Network>()
             .init_resource::<input::PointerState>()
             .init_resource::<input::Steering>()
             .init_resource::<labels::LabelPool>()
@@ -339,13 +341,31 @@ impl Plugin for RepoCityPlugin {
                     // same reason: the works carry no `VisibleFrom`, so nothing
                     // may hide them in the frame this has just raised them in.
                     works::apply_works,
+                    // Beside the works. It spawns its own marks carrying
+                    // `VisibleFrom`, and it runs *after* `apply_lod` -- so a
+                    // mark raised in this frame is drawn in it and culled on
+                    // the next if the tier does not want it, rather than
+                    // flickering out and back in the same frame.
+                    network::apply_network,
                     camera::sync_camera,
+                )
+                    .chain(),
+            )
+            // A second call rather than a longer tuple: Bevy implements its
+            // system tuples up to twenty elements and the list above had
+            // reached exactly that. Ordering is preserved explicitly by the
+            // `.after` below, so the schedule is the same one a single chained
+            // tuple would have produced.
+            .add_systems(
+                Update,
+                (
                     wards::apply_label_legibility,
                     wards::track_active_ward,
                     wards::apply_ward_highlight,
                     labels::update_labels,
                 )
-                    .chain(),
+                    .chain()
+                    .after(camera::sync_camera),
             );
     }
 }
@@ -372,6 +392,24 @@ fn setup(mut commands: Commands, bridge: Res<Bridge>) {
     stars::spawn_stars(&mut commands);
 }
 
+/// The three resources that say what is drawn *over* the settlement.
+///
+/// Grouped into one [`SystemParam`] rather than taken as three, because
+/// `apply_commands` had reached Bevy's sixteen-parameter ceiling and the next
+/// one would not compile. Grouping these three is the honest cut: they are the
+/// live overlays -- which towns are alight, what each agent is building, and
+/// what each is connected to -- as against the world underneath them, which is
+/// rebuilt only when a manifest arrives.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Overlays<'w> {
+    /// Which towns have work under way in them.
+    pub working: ResMut<'w, Activity>,
+    /// What each agent is proposing, as ground to raise columns on.
+    pub works: ResMut<'w, works::Works>,
+    /// What each agent is plugged into, and what its city shares.
+    pub network: ResMut<'w, network::Network>,
+}
+
 /// Drains and applies everything the interface has asked for.
 #[allow(clippy::too_many_arguments)]
 fn apply_commands(
@@ -383,8 +421,7 @@ fn apply_commands(
     mut raise: ResMut<Raise>,
     mut rig: ResMut<CameraRig>,
     mut glide: ResMut<CameraGlide>,
-    mut working: ResMut<Activity>,
-    mut works: ResMut<works::Works>,
+    mut overlays: Overlays,
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
@@ -428,8 +465,14 @@ fn apply_commands(
                 // And works raised over a settlement that is being torn down
                 // would hang in the air above whatever replaces it. The
                 // interface re-sends them if the plan is still open.
-                if !works.is_quiet() {
-                    *works = works::Works::default();
+                if !overlays.works.is_quiet() {
+                    *overlays.works = works::Works::default();
+                }
+                // The same for the network picture, and for the same reason: a
+                // conduit drawn to the rim of a world being torn down would
+                // hang over whatever replaced it. The interface re-sends it.
+                if !overlays.network.0.is_quiet() {
+                    *overlays.network = network::Network::default();
                 }
                 spawn::clear_world(
                     &mut commands,
@@ -526,7 +569,7 @@ fn apply_commands(
                 // an equal assignment still marks the resource changed, which
                 // costs one pass over a handful of rings. Guarding it here
                 // would trade that for a comparison on every poll.
-                *working = Activity(towns);
+                *overlays.working = Activity(towns);
             }
             ViewerCommand::SetWorks(raised) => {
                 // Guarded, unlike `SetActivity` above, and the asymmetry is
@@ -536,8 +579,18 @@ fn apply_commands(
                 // and re-raise the whole construction site. The comparison is
                 // over a few dozen plain structs -- far cheaper than the work it
                 // avoids.
-                if works.0 != raised {
-                    *works = works::Works(raised);
+                if overlays.works.0 != raised {
+                    *overlays.works = works::Works(raised);
+                }
+            }
+            ViewerCommand::SetNetwork(picture) => {
+                // Guarded like `SetWorks` and for its reason: `apply_network`
+                // despawns and rebuilds every mark, so a redundant set would
+                // tear down and re-raise the whole picture. The comparison is
+                // over a few dozen plain structs, far cheaper than the work it
+                // avoids.
+                if overlays.network.0 != *picture {
+                    *overlays.network = network::Network(*picture);
                 }
             }
             ViewerCommand::Show(presence) => {

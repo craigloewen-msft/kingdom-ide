@@ -139,6 +139,12 @@ pub fn CityMap(
     #[allow(unused_variables)]
     #[prop(into)]
     works: leptos::prelude::Signal<Vec<kingdom_core::PlanChanges>>,
+    /// What every live agent is connected to, and what its city shares.
+    /// Unused here, for the reason above -- only the browser has a manifest to
+    /// resolve it against and an engine to draw it with.
+    #[allow(unused_variables)]
+    #[prop(into)]
+    network: leptos::prelude::Signal<kingdom_core::KingdomNetwork>,
 ) -> impl leptos::IntoView {
     use leptos::prelude::*;
     view! {

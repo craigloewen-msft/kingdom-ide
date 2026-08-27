@@ -275,6 +275,25 @@ pub fn users_of(city_root: &Path, service: &str) -> usize {
     registry().users.get(&key).map_or(0, HashSet::len)
 }
 
+/// Whether one particular plan is drawing from a given service.
+///
+/// [`users_of`] counts the drawers; this asks whether a named one is among
+/// them. The map needs the distinction: a channel is drawn from an agent to a
+/// well it has actually reached for, and every plan in the city *could* reach
+/// the database without any of them having done so. Drawing from the count
+/// alone would claim five connections where there is one.
+///
+/// Reads the same reference set [`ensure`] registers into and [`release`]
+/// removes from, so it is true at the moment it is asked and makes no record of
+/// its own.
+pub fn draws_from(city_root: &Path, service: &str, plan: &PlanId) -> bool {
+    let key = (city_key(city_root), service.to_string());
+    registry()
+        .users
+        .get(&key)
+        .is_some_and(|users| users.contains(plan))
+}
+
 /// The address of one named service, or `None` if it is not up.
 pub fn address_of(city_root: &Path, service: &str) -> Option<String> {
     let key = (city_key(city_root), service.to_string());

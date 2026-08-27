@@ -190,6 +190,17 @@ pub fn CityMap(
     /// with none. See [`crate::map::works`].
     #[prop(into)]
     works: Signal<Vec<PlanChanges>>,
+    /// What every live agent is connected to, and what its city shares.
+    ///
+    /// Resolved against the manifest here and handed over as plain geometry,
+    /// exactly as `works` is and at the same boundary -- see the effect below.
+    /// This is the map's half of the second question in `AGENTS.md`: *what
+    /// shared resources are they holding?*
+    ///
+    /// Empty when nothing is open and no project declares a service, which is
+    /// the ordinary state of a dev folder and what tears the picture down.
+    #[prop(into)]
+    network: Signal<kingdom_core::KingdomNetwork>,
 ) -> impl IntoView {
     // First, and before anything is created: an engine that is not to run must
     // not be half-started and then told to stop. See the module doc.
@@ -374,6 +385,32 @@ pub fn CityMap(
             _ => Vec::new(),
         });
         builder.send(ViewerCommand::SetWorks(raised));
+    });
+
+    // And the same for the network picture: what each agent is plugged into,
+    // and what its city shares.
+    //
+    // **The same boundary as the works above.** Everything above this line is
+    // Kingdom's domain -- a `KingdomNetwork` of plans, cities and containers --
+    // and everything below it is world-space geometry. The engine never learns
+    // what a plan or a well is.
+    //
+    // Tracks `built` for the reason the works effect does, and it is not
+    // theoretical: raising a world clears the picture (`apply_commands`, the
+    // `Load` arm), and on a cold page the feed usually answers *before* that
+    // `Load` lands. Without the dependency the first send would be thrown away
+    // and nothing would ask again, because the signal itself has not changed.
+    let plumber = bridge.clone();
+    Effect::new(move |_| {
+        let picture = network.get();
+        let standing = built.get();
+        let resolved = manifest.with(|map| match map {
+            Some(map) if standing => crate::map::network::resolve(map, &picture),
+            // Nothing to draw against yet. An empty picture is how the marks
+            // are torn down, so this is sent rather than skipped.
+            _ => crate::map::NetworkPicture::default(),
+        });
+        plumber.send(ViewerCommand::SetNetwork(Box::new(resolved)));
     });
 
     // What the follow rule below last did to the camera. Declared here because
