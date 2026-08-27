@@ -5,17 +5,27 @@
 //! colours into meshes -- it knows nothing about a plan, a city or a container,
 //! exactly as [`super::works`] knows nothing about a changed file.
 //!
-//! # Everything here is unlit
+//! # Everything here is unlit, except the well
 //!
-//! Every mark this draws is *interface that happens to be in world space*: a
+//! Every *mark* this draws is interface that happens to be in world space: a
 //! colour that means "this agent", "this is your machine", "this is shared".
 //! [`super::activity::WORKING_COLOR`] records the three attempts that
 //! established why such a colour cannot be a lit material -- emissive scaled
 //! for the sun's lux clips to white, a value near 1.0 is washed out by the
 //! tonemapper, and a lit surface adds the sun's white specular on top, which
 //! measured `(168, 231, 167)` for a green that was supposed to be `(34, 197,
-//! 94)`. So all of this is [`Surface::Unlit`] and its colours are exactly the
-//! colours asked for.
+//! 94)`. So the agent marks, the host ring, the moats and the channels are all
+//! [`Surface::Unlit`] and their colours are exactly the colours asked for.
+//!
+//! **A wellhead is the exception, deliberately.** It is not a colour that means
+//! something -- it is a *building*, standing on a town's square among lit
+//! houses. Drawn unlit it was the only thing in the settlement with no shading
+//! and no shadow, which is the definition of a light source, and it read as one:
+//! a pale disc that looked switched on. So the well is [`Surface::Matte`] like
+//! the houses around it, takes the sun, and casts the shadow that is most of
+//! what makes a thing look like it is standing on the ground. Nothing is lost by
+//! it, because no part of a well carries an identity that has to survive the
+//! trip exactly.
 //!
 //! # What is animated: nothing
 //!
@@ -33,7 +43,7 @@ use super::materials::{MaterialCache, Surface};
 use super::meshes;
 use super::spawn::{VisibleFrom, layer};
 use crate::map::MapColor;
-use crate::map::network::NetworkPicture;
+use crate::map::network::{NetworkPicture, WELL_TIMBER_COLOR, WELL_WATER_COLOR, Wellhead};
 
 /// How tall an agent's marker stands, in world units.
 ///
@@ -42,12 +52,34 @@ use crate::map::network::NetworkPicture;
 /// own skyline.
 const AGENT_HEIGHT: f32 = 16.0;
 
-/// How tall a wellhead stands.
+/// How tall a wellhead's drum stands, as a share of its own radius.
 ///
-/// Lower than an agent and wider (see `map::network::WELL_RADIUS`): a well is a
-/// thing in the ground that agents gather at, so it reads as a basin rather
-/// than as another figure standing about.
-const WELL_HEIGHT: f32 = 9.0;
+/// A proportion rather than the fixed height it once was, because the radius
+/// now varies: a square with three wells on it shrinks each one
+/// (`map::network::well_stand`), and a fixed height would turn those into
+/// chimneys. Just under one radius reads as a low wall a person could lean on
+/// rather than as a barrel.
+const WELL_DRUM: f32 = 0.85;
+
+/// How thick the stone rim around the mouth is, as a share of the radius.
+///
+/// The wall has to be visibly *thick* for the mark to read as masonry rather
+/// than as a hoop, and this is what leaves a mouth two thirds the width of the
+/// drum -- enough dark water to see at a glance.
+const WELL_WALL: f32 = 0.3;
+
+/// How far the water sits below the rim, as a share of the radius.
+///
+/// Deep enough that the shaft's inside face is visible from the map's fixed
+/// isometric angle, which is what says "there is a hole here"; shallow enough
+/// that the water is never hidden behind the near wall.
+const WELL_DEPTH: f32 = 0.42;
+
+/// How tall the canopy's posts stand, as a share of the radius.
+const WELL_POST: f32 = 1.5;
+
+/// How thick a canopy post is, as a share of the radius.
+const WELL_POST_WIDTH: f32 = 0.14;
 
 /// How many segments a round mark is built from.
 ///
@@ -157,17 +189,14 @@ pub fn apply_network(
 
     // The wellheads, standing on their squares.
     for well in &network.0.wells {
-        let mesh = round_mark(well.center, well.radius, WELL_HEIGHT);
-        commands.spawn((
-            ChildOf(root),
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(cache.get(&mut materials, well.color, Surface::Unlit)),
-            Transform::default(),
-            // Kept at every tier, deliberately. "This project has a database
-            // five agents share" is exactly the kind of fact worth seeing when
-            // the whole realm is in frame.
-            Pickable::IGNORE,
-        ));
+        spawn_wellhead(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut cache,
+            root,
+            well,
+        );
     }
 
     // The agents, and the moat around any that has a network of its own.
@@ -201,6 +230,112 @@ pub fn apply_network(
             );
         }
     }
+}
+
+/// One well: a stone drum with water in it, and a timber canopy over it.
+///
+/// Built rather than marked. A well is the only thing this module draws that is
+/// a *thing in the town* rather than a fact about an agent, so it is made of the
+/// same stuff the town is -- masonry, water and timber, all lit by the same sun
+/// -- and the module doc says why that is worth the exception.
+///
+/// Four parts, and each earns its triangles:
+///
+/// - the **drum**, whose outer wall is the whole silhouette when the camera is
+///   pulled back;
+/// - the **rim**, an annulus rather than a disc, because a capped drum is a
+///   plinth and the hole is the point;
+/// - the **shaft and water**, recessed, which is what makes it read as a well
+///   and not a barrel;
+/// - the **canopy**, two posts and a beam, shown only from the `Architecture`
+///   tier.
+fn spawn_wellhead(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut MaterialCache,
+    root: Entity,
+    well: &Wellhead,
+) {
+    let center = Vec2::from_array(well.center);
+    let radius = well.radius;
+    let rim_y = radius * WELL_DRUM;
+    let inner = (radius * (1.0 - WELL_WALL)).max(0.1);
+    let water_y = rim_y - radius * WELL_DEPTH;
+
+    let stone = cache.get(materials, well.color, Surface::Matte);
+    let timber = cache.get(materials, WELL_TIMBER_COLOR, Surface::Matte);
+    let water = cache.get(materials, WELL_WATER_COLOR, Surface::Matte);
+
+    // The masonry: the outer wall, the flat rim, and the inside of the shaft.
+    // One mesh, because all three are the same stone and a single draw is
+    // cheaper than three.
+    let mut drum = meshes::MeshBuilder::new();
+    let outer_ring = circle(center, radius);
+    let inner_ring = circle(center, inner);
+    drum.wall_ring(&outer_ring, 0.0, rim_y);
+    drum.annulus(center, inner, radius, rim_y, SEGMENTS);
+    // Down to the water rather than to the ground: below the surface there is
+    // nothing to see, and a wall drawn there would z-fight with the water.
+    drum.inward_wall_ring(&inner_ring, water_y, rim_y);
+
+    commands.spawn((
+        ChildOf(root),
+        Mesh3d(meshes.add(drum.build())),
+        MeshMaterial3d(stone),
+        Transform::from_xyz(0.0, layer::PLAZA, 0.0),
+        // Kept at every tier, deliberately. "This project has a database five
+        // agents share" is exactly the kind of fact worth seeing when the whole
+        // realm is in frame.
+        Pickable::IGNORE,
+    ));
+
+    let mut pool = meshes::MeshBuilder::new();
+    pool.ground_polygon(&inner_ring, water_y);
+    commands.spawn((
+        ChildOf(root),
+        Mesh3d(meshes.add(pool.build())),
+        MeshMaterial3d(water),
+        Transform::from_xyz(0.0, layer::PLAZA, 0.0),
+        Pickable::IGNORE,
+    ));
+
+    // The canopy, from the tier where a house shows its architecture. At the
+    // furthest tier it would be a few dark pixels floating over the drum, which
+    // is noise -- the drum alone says a shared thing stands here, and that is
+    // the whole of what is legible from that far out.
+    let post = radius * WELL_POST_WIDTH;
+    let top = radius * WELL_POST;
+    let mut frame = meshes::MeshBuilder::new();
+    for side in [-1.0f32, 1.0] {
+        let x = center.x + side * (radius - post);
+        frame.box_from_to(
+            Vec3::new(x - post, 0.0, center.y - post),
+            Vec3::new(x + post, top, center.y + post),
+        );
+    }
+    frame.box_from_to(
+        Vec3::new(center.x - radius, top, center.y - post),
+        Vec3::new(center.x + radius, top + post * 1.6, center.y + post),
+    );
+    commands.spawn((
+        ChildOf(root),
+        Mesh3d(meshes.add(frame.build())),
+        MeshMaterial3d(timber),
+        Transform::from_xyz(0.0, layer::PLAZA, 0.0),
+        VisibleFrom(super::bridge::LodLevel::Architecture),
+        Pickable::IGNORE,
+    ));
+}
+
+/// A closed ring of points around a centre, as ground coordinates.
+fn circle(center: Vec2, radius: f32) -> Vec<Vec2> {
+    (0..SEGMENTS)
+        .map(|index| {
+            let angle = index as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            center + Vec2::new(angle.cos(), angle.sin()) * radius
+        })
+        .collect()
 }
 
 /// A round mark standing on the ground.

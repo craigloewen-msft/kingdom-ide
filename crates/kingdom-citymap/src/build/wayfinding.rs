@@ -731,6 +731,38 @@ mod tests {
         );
     }
 
+    /// The name stays inside the band a wellhead is placed clear of.
+    ///
+    /// `map::network::SQUARE_LABEL_SHARE` is a second copy of the `0.26` this
+    /// module sizes a square's lettering by. It has to be a copy: a well's
+    /// placement compiles to both targets and this module is server-only. So
+    /// the copy is pinned here instead of trusted -- raise the size a name is
+    /// painted at and this fails, rather than a town's name quietly appearing
+    /// underneath the well standing on its square.
+    ///
+    /// Checked against the *shortest* name too, which is the case that pushes
+    /// the lettering largest: `square_label` grows the cap height until the
+    /// text fills the paving, so a two-letter name is the one that tests the
+    /// ceiling.
+    #[test]
+    fn a_squares_name_stays_inside_the_band_a_well_avoids() {
+        let square = rect(100.0, 200.0, 52.0, 52.0);
+        let share = crate::map::network::SQUARE_LABEL_SHARE;
+
+        for name in ["ab", "repo-city", "repo-city-visualizer"] {
+            let Some(label) = square_label(square, name, [54, 40, 24, 255]) else {
+                continue;
+            };
+            assert!(
+                label.size <= square.height * share + 0.01,
+                "`{name}` is painted at a cap of {} on a {}-unit square, past \
+                 the {share} share a wellhead is placed clear of",
+                label.size,
+                square.height
+            );
+        }
+    }
+
     /// A name too long for the paving is painted smaller rather than cut, so
     /// that it still names the settlement.
     ///

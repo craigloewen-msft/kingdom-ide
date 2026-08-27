@@ -125,13 +125,31 @@ behind it) and `engine/network.rs` (the meshes).
 | Mark | What it is | Where it stands |
 |---|---|---|
 | the **host ring** | the King's own machine | a slate band just inside the realm's rim |
-| a **wellhead** | one container a whole city shares | on that town's square |
+| a **wellhead** | one container a whole city shares | built on that town's square |
 | an **agent mark** | one live plan, in its own banner colour | ringing the town it works in |
 
 And the lines between them: a **conduit** from an agent out to the host ring
 means it binds the King's own ports; a closed **moat** around an agent and *no*
 conduit means it has a network of its own; a **channel** to a wellhead means it
 is actually drawing from that well.
+
+### A well is built, not marked
+
+Everything else in that table is *interface drawn in world space*: a colour that
+means "this agent", "this is your machine". All of it is unlit, and
+`engine::activity::WORKING_COLOR` records the three measurements that established
+why such a colour cannot be a lit material.
+
+A wellhead is the one exception. It is not a colour that means something — it is
+a thing standing on a town's square among lit houses — so it is a stone drum
+with water in it and a timber canopy over it, `Surface::Matte` like the
+buildings, taking the sun and casting a shadow. The canopy shows from the
+`Architecture` tier only; the drum carries "a shared thing stands here" at every
+zoom.
+
+Drawn unlit it had been the only object in the settlement with no shading and no
+shadow, which is the definition of a light source, and it read as exactly that:
+a pale disc that looked switched on.
 
 ### Only a *project's* wells are drawn
 
@@ -174,10 +192,10 @@ reference set that decides when a container is stopped. Every plan in a city
 *could* reach its database; drawing a channel from all of them would claim five
 connections where there is one.
 
-### Three things settled by looking at it
+### Four things settled by looking at it
 
-The first render of this was wrong in three ways that no test caught, and each
-is now pinned by one:
+The render of this was wrong in four ways that no test caught, and each is now
+pinned by one. The fourth came a version later than the others, from the King:
 
 - **the well was the same colour as an agent.** `#38bdf8` sits 110.5 from the
   `azure` banner on the palette's own ruler, where the two closest banners are
@@ -189,6 +207,21 @@ is now pinned by one:
 - **the agents stood among the buildings** — one on the keep in the middle of
   the square. They are now placed from the town's own `extent`, so they ring the
   settlement rather than standing in it.
+- **and so did the well.** The same fault as the one above it, unnoticed because
+  the code *said* it stood on the square: `well_stand` placed it at the town's
+  centre **point**, which is not the square. `streets::square_site` walks a
+  square outward from the settlement's middle until it finds ground no ward has
+  claimed — the middle being the one place the largest folder has already taken
+  — and on a real kingdom of seven towns that walk landed between 94 and 1,622
+  units out, against a square 52 across. So every well on the map stood among
+  the houses. `MapPlaza` now carries its town's name and `MapManifest::square_of`
+  finds it, which is also what finally makes the documented rule *a town with no
+  square gets no wellhead* true rather than merely written down.
+
+Worth stating plainly, since it is now the fourth: a test suite that passes is
+not a picture that reads. Twelve tests were green while the well was standing in
+somebody's garden, because every one of them measured the well against the
+placement rule instead of against the town.
 
 ## Reporting progress while the map loads
 
