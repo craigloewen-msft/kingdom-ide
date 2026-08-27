@@ -2657,6 +2657,7 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
     let root = std::path::PathBuf::from(&kingdom.root);
 
     Ok(SystemPrompt::assemble(
+        &plan_id,
         &brief,
         &plan.workspace,
         plan.permissions,
