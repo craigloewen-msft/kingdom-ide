@@ -54,6 +54,66 @@ Treat a tall building as "this file has a lot of decisions per line, take a
 look", not as a metric to optimise. The real rules live in
 `crates/kingdom-citymap/src/build/layout.rs`.
 
+## How a change is sized
+
+A holding is sized from the file. The **works** — what a plan is proposing — are
+sized from the change, and they are a separate ruler: a column of the agent's
+colour above the roof for lines added, a shroud over the house for lines removed.
+`crates/kingdom-citymap/src/engine/works.rs` draws them.
+
+One number does most of the work. `magnitude(churn)` turns a count of lines into
+`0.0..=1.0`, and height, girth, the pulse's brightness and the removal skirt all
+read it. **It has been wrong twice, in opposite directions**, and both are worth
+knowing before touching it.
+
+It was first **relative** — a share of the busiest file in the same plan. That
+made two agents incomparable, since each was measured against its own plan's
+ruler, and drew a plan that touched one file at exactly the height of a plan that
+rewrote four thousand lines. `tasks/00250` replaced it with an absolute count,
+and that part stands: the input is lines, and nothing local to a plan is
+consulted.
+
+It was then **logarithmic**, `ln1p(churn) / ln1p(600)`, and the King reported the
+result: a `+8` looked about the same size as a `+100`. Four faults in one curve.
+`ln1p` rises fastest near zero, so a one-line edit already took 11% of the range
+and an eight-line one took 34% — the bottom third of the scale went to changes
+that had barely happened. What was left had no resolution where changes actually
+live: measured over 400 commits of this repository, per-file added lines run p25
+= 6, median = 27, p75 = 115, p90 = 246, p99 = 935, and across the middle of that
+the curve moved 1.37×. The clamp at 600 was a plateau on real work, drawing p99
+and a 3,872-line rewrite identically. And girth, added specifically to widen the
+range, multiplied *the same compressed number*, so it was the first channel
+restated rather than a second one.
+
+What is drawn now is a **saturating ratio**, `churn / (churn + HALF_CHURN)`:
+
+- near zero it is very nearly linear, so small changes differ in proportion to
+  their size instead of all being lifted to one stub;
+- it never plateaus, so 935 lines and 3,872 stay different marks;
+- its knee can be put where the data is. `HALF_CHURN` is 110 — close to this
+  repository's p75 — so the steep part covers p25 to p90 and the flattening
+  happens out among the rewrites, where *very large* is a good enough answer.
+
+Girth ramps with the **square root** of that, which is what makes it a genuine
+second channel: height carries the proportionality and girth keeps a small change
+wide enough to resolve in the rail's pane. The removal skirt uses the same
+gentler curve, so making the low end honest did not undo `tasks/00260`'s fix for
+invisible removals.
+
+| | +100 vs +8 | p75 vs median | +4000 vs +600 |
+|---|---|---|---|
+| height, before | 1.91× | 1.37× | 1.00× |
+| height, now | 4.09× | 2.20× | 1.14× |
+| height × girth, now | 6.28× | 2.80× | 1.19× |
+
+The trade made deliberately: the very top of the range is compressed, so a
+1,000-line change and a 4,000-line one come out nearly alike. Both mean *very
+large*, and telling `+8` from `+100` does not.
+
+The shroud is a different question and has its own scale — *how much of this file
+is going away* is a ratio of the file's own length, not of churn. See
+`tasks/00260`.
+
 ## Reporting progress while the map loads
 
 **The map says how far along it is, and had to be rebuilt to be able to.** The
