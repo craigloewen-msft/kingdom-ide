@@ -575,6 +575,7 @@ mod tests {
 
     fn plaza() -> MapPlaza {
         MapPlaza {
+            town: "orchard".to_owned(),
             rect: MapRect {
                 x: 0.0,
                 y: 0.0,

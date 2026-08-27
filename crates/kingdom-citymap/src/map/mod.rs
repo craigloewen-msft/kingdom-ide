@@ -165,6 +165,27 @@ impl MapManifest {
         self.locations.iter().find(|place| place.label == name)
     }
 
+    /// The paved square at the heart of a town, if this map drew one.
+    ///
+    /// Matched on the name for [`Self::town_named`]'s reason, which applies
+    /// here word for word: a manifest's `town-N` identifiers are numbered from
+    /// two different orderings, so matching on an id would answer with some
+    /// other settlement's square -- silently, and only on kingdoms whose two
+    /// orderings happen to disagree.
+    ///
+    /// `None` is an ordinary answer, not a fault. A settlement with no wards
+    /// and no loose files is given no square at all
+    /// (`build::streets::settlement_roads`), and a caller that wanted to stand
+    /// something on the paving must draw nothing rather than put it in
+    /// somebody's front garden.
+    pub fn square_of(&self, town: &str) -> Option<MapRect> {
+        self.world
+            .plazas
+            .iter()
+            .find(|plaza| plaza.town == town)
+            .map(|plaza| plaza.rect)
+    }
+
     /// Where one file's holding stands, if this map drew one for it.
     ///
     /// Both halves of the identity are checked. `path` alone would be ambiguous
@@ -448,6 +469,19 @@ pub struct MapGroundLabel {
 #[serde(rename_all = "camelCase")]
 /// The paved square at the heart of a settlement.
 pub struct MapPlaza {
+    /// The town whose square this is, by repository name.
+    ///
+    /// Carried so anything standing something *on* the square can find it.
+    /// Geometry alone cannot: [`crate::build::streets`] walks a square outward
+    /// from the settlement's centre until it finds ground no ward has claimed,
+    /// so a square is nowhere near the middle of its town -- measured across a
+    /// real kingdom, between 94 and 1,622 world units out, against a square 52
+    /// units across. Asking which town rectangle a square happens to fall
+    /// inside would be a rule that holds only until that walk goes further.
+    ///
+    /// Empty for a single-repository city, which has exactly one square and
+    /// therefore nothing to tell apart.
+    pub town: String,
     /// The ground it covers.
     pub rect: MapRect,
     /// Its paving colour.
@@ -776,6 +810,20 @@ mod tests {
         }
     }
 
+    /// A paved square belonging to one town.
+    fn square(town: &str, x: f32, y: f32) -> MapPlaza {
+        MapPlaza {
+            town: town.to_owned(),
+            rect: MapRect {
+                x,
+                y,
+                width: 52.0,
+                depth: 52.0,
+            },
+            color: [0, 0, 0, 255],
+        }
+    }
+
     /// A feature standing for one file.
     ///
     /// `folder` is derived from the path exactly as `manifest::feature_from_building`
@@ -891,6 +939,30 @@ mod tests {
             Some([10.0, 20.0]),
             "the name has to win over the position in the list"
         );
+    }
+
+    /// A square is found by its town's name, and never by a position.
+    ///
+    /// The same trap [`MapManifest::town_named`] is held to, and it matters
+    /// here for the same reason: a wellhead stands on the square this returns,
+    /// so answering with the wrong town's paving would put a city's database in
+    /// another city's marketplace. The list is deliberately out of order.
+    #[test]
+    fn a_square_is_found_by_its_towns_name() {
+        let mut map = manifest(Vec::new(), Vec::new());
+        map.world.plazas = vec![
+            square("scratch", 300.0, 400.0),
+            square("kingdom-ide", 10.0, 20.0),
+        ];
+
+        assert_eq!(
+            map.square_of("kingdom-ide").map(|rect| [rect.x, rect.y]),
+            Some([10.0, 20.0]),
+            "the name has to win over the position in the list"
+        );
+        // A town the map drew no square for. An absence, not somebody else's
+        // paving -- a well must then not be drawn at all.
+        assert!(map.square_of("not-a-city").is_none());
     }
 
     /// Opening a file in the chamber points the rail's map at its building.
