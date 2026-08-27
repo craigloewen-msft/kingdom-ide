@@ -352,6 +352,12 @@ pub fn Conversation() -> impl IntoView {
     // because `wants_attention` is the single definition on both ends.
     watch_plan(plan_id, move |updated| {
         state.note_attention(&updated.id, updated.wants_attention());
+        // And when it last moved, for the same reason and by the same rule.
+        // The rail draws this for every plan from its own socket; without this
+        // line the one plan the King is actually watching would be the one row
+        // whose age lagged, because the chamber's socket is what carries its
+        // news and the pulse channel dedupes what it has already sent.
+        state.note_activity(&updated.id, updated.last_activity());
         state.kingdom.update(|k| k.insert(updated));
     });
 
@@ -3014,8 +3020,13 @@ fn ticking_clock(while_busy: Memo<bool>) -> Memo<Option<Timestamp>> {
 }
 
 /// The wall clock, as the browser reads it.
+///
+/// `pub(crate)` because the rail has a clock of its own -- a slower one, for a
+/// number that moves once a minute -- and "what time is it here" must have one
+/// answer. [`Timestamp::now`] is deliberately `None` on wasm, so this is the
+/// only way to ask.
 #[cfg(feature = "hydrate")]
-fn browser_now() -> Option<Timestamp> {
+pub(crate) fn browser_now() -> Option<Timestamp> {
     Some(Timestamp(js_sys::Date::now() as i64))
 }
 

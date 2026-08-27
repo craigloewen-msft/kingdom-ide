@@ -306,11 +306,12 @@ channel keyed *per plan*, where one watcher is looking at exactly what is sent.
 The rail asks "which of my thirty plans needs me?", and answering it the same way
 would wake every open tab with every transcript on every round to repaint a
 badge. So `/watch/kingdom` carries `PlanPulse` — id, city, title, status, what it
-is doing, what it wants — and is **deduped** against the last pulse sent for that
-plan. The digest makes a message cheap; the dedupe makes most rounds send nothing
-at all. Dedupe narrows what is *sent*, never what a message *says*: a pulse is a
-whole digest, so a listener that falls behind has still missed only intermediate
-states, which is the same property that makes lag survivable on the plan channel.
+is doing, what it wants, and when it last moved — and is **deduped** against the
+last pulse sent for that plan. The digest makes a message cheap; the dedupe makes
+most rounds send nothing at all. Dedupe narrows what is *sent*, never what a
+message *says*: a pulse is a whole digest, so a listener that falls behind has
+still missed only intermediate states, which is the same property that makes lag
+survivable on the plan channel.
 
 Two details there are load-bearing. The badge cache in `KingdomState` stores an
 `Option` *inside* the map, because "the server says this plan wants nothing" and
@@ -320,6 +321,18 @@ back to a transcript fetched before the answer and go on showing a question
 nobody is asking. And **both** sockets write it: the chamber's, which holds the
 whole plan and computes it, and the rail's, which is told. They cannot disagree,
 because `wants_attention` is the one definition on both ends.
+
+**Why the age is on the pulse rather than worked out in the browser.** The rail
+also draws, under each plan, how long since anything happened in it
+(`Plan::last_activity` → `PlanPulse::last_activity`, cached beside the badge in
+`KingdomState::last_activity`). The transcript would answer that too — and only
+for the *one* plan whose chamber is open, because that is the only plan the
+browser is ever sent whole. Every other row would report the age of the opening
+fetch, forever, which is worse than reporting nothing: the number would look
+right and say an agent had gone quiet when it had not. It is also the one field
+that moves on its own, and so the only cost this feature charges the dedupe — a
+small one, since a plan actually working already pulses about once per deed as
+`working_on` changes with it, and an idle plan publishes nothing at all.
 
 **The King can speak over a running turn, and can stop one.** The composer is
 never disabled. Words sent mid-turn are queued on the plan (`Plan::queued`, kept
