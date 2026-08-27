@@ -99,6 +99,13 @@ pub struct AgentNetwork {
     /// Whose this is. Also what its banner colour is assigned from, so the
     /// marker on the map is the colour of the columns that agent is raising.
     pub plan: PlanId,
+    /// What the King calls this plan -- its title, as shown in the rail.
+    ///
+    /// Carried rather than derived because a [`PlanId`] is a random identifier
+    /// and the map now writes a plaque over each agent's marker: a name is the
+    /// only thing worth painting there, and nothing downstream of here can
+    /// look one up.
+    pub title: String,
     /// The town its marker stands in.
     pub city: CityId,
     /// Whether it has a network of its own, or shares the King's.

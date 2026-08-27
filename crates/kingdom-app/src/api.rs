@@ -934,6 +934,9 @@ pub async fn kingdom_changes() -> Result<Vec<kingdom_core::PlanChanges>, ServerF
 #[cfg(feature = "ssr")]
 type LiveAgent = (
     kingdom_core::PlanId,
+    // The plan's title: the map paints it on a plaque over the agent's marker,
+    // and it is read here because only the kingdom knows it.
+    String,
     kingdom_core::CityId,
     kingdom_core::NetworkMode,
 );
@@ -987,7 +990,14 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
             .plans
             .iter()
             .filter(|plan| plan.is_live() && !plan.is_subagent())
-            .map(|plan| (plan.id.clone(), plan.city.clone(), plan.network))
+            .map(|plan| {
+                (
+                    plan.id.clone(),
+                    plan.title.clone(),
+                    plan.city.clone(),
+                    plan.network,
+                )
+            })
             .collect();
         // Sorted for `assign_banners`, which resolves a colour collision by
         // position: an unstable order would swap two agents' colours between
@@ -998,7 +1008,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
         // project with five plans is resolved once rather than five times, and
         // resolved through `city_root_in` because the guard is already held.
         let mut roots: Vec<CityRoot> = Vec::new();
-        for (plan, city, _) in &agents {
+        for (plan, _, city, _) in &agents {
             if roots.iter().any(|(known, _)| known == city) {
                 continue;
             }
@@ -1052,7 +1062,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
 
     let agents = agents
         .into_iter()
-        .map(|(plan, city, network)| {
+        .map(|(plan, title, city, network)| {
             // Only an isolated plan has forwards, and asking about a plan that
             // has none is answered with an empty list anyway -- the guard is
             // here to say so rather than to avoid a fault.
@@ -1093,6 +1103,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
 
             kingdom_core::AgentNetwork {
                 plan,
+                title,
                 city,
                 network,
                 ports,
@@ -3533,9 +3544,16 @@ pub(crate) mod tests {
                 .plans
                 .iter()
                 .filter(|plan| plan.is_live() && !plan.is_subagent())
-                .map(|plan| (plan.id.clone(), plan.city.clone(), plan.network))
+                .map(|plan| {
+                    (
+                        plan.id.clone(),
+                        plan.title.clone(),
+                        plan.city.clone(),
+                        plan.network,
+                    )
+                })
                 .collect();
-            for (plan, _, _) in &agents {
+            for (plan, _, _, _) in &agents {
                 let _ = city_root_in(&kingdom, plan);
             }
 

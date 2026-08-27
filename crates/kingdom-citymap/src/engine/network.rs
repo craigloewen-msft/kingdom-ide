@@ -40,14 +40,14 @@ use crate::map::network::NetworkPicture;
 /// Tall enough to read as a standing thing rather than a disc painted on the
 /// ground, and well below a house so it never competes with the settlement's
 /// own skyline.
-const AGENT_HEIGHT: f32 = 16.0;
+pub(crate) const AGENT_HEIGHT: f32 = 16.0;
 
 /// How tall a wellhead stands.
 ///
 /// Lower than an agent and wider (see `map::network::WELL_RADIUS`): a well is a
 /// thing in the ground that agents gather at, so it reads as a basin rather
 /// than as another figure standing about.
-const WELL_HEIGHT: f32 = 9.0;
+pub(crate) const WELL_HEIGHT: f32 = 9.0;
 
 /// How many segments a round mark is built from.
 ///
