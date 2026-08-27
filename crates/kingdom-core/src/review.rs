@@ -16,8 +16,38 @@
 //! would have to reconstruct it from a sequence and would get it wrong on any
 //! uneven replace. The browser renders two columns and re-decides nothing.
 
+use crate::ids::{CityId, PlanId};
 use crate::model::Language;
 use serde::{Deserialize, Serialize};
+
+/// One agent's changes, and enough about the agent to draw them.
+///
+/// What `kingdom_app::api::kingdom_changes` answers with, once per live plan in
+/// the whole kingdom, and what the map raises its works from.
+///
+/// # Why the city travels with the changes
+///
+/// Because the answer is no longer about one city. It used to be a
+/// `(PlanId, ChangeSummary)` pair fetched for whichever city was selected, so
+/// the city was known by the caller and did not need carrying -- and the map
+/// drew nothing at all for a city nobody had selected. Now every live agent
+/// everywhere is drawn at once, so *which project this file is in* is part of
+/// the answer rather than context around it.
+///
+/// That matters more than it sounds. A path alone does not identify a file in a
+/// kingdom: `src/main.rs` exists in every Rust project on the map, and
+/// [`MapManifest::holding_at`](../../kingdom_citymap/map/struct.MapManifest.html)
+/// needs the repository for exactly that reason. Without the city here, two
+/// projects' files would resolve to one house.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanChanges {
+    /// Whose work this is. Also what its banner colour is assigned from.
+    pub plan: PlanId,
+    /// The project it was done in, which is half of a file's identity.
+    pub city: CityId,
+    /// What moved.
+    pub changes: ChangeSummary,
+}
 
 /// Everything a plan has changed against its city's default branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

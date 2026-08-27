@@ -594,7 +594,7 @@ fn spawn_towns(
             Pickable::IGNORE,
         ));
 
-        spawn_town_ring(commands, meshes, materials, root, town);
+        spawn_town_ring(commands, meshes, materials, cache, root, town);
     }
 }
 
@@ -670,22 +670,24 @@ fn spawn_plazas(
 ///
 /// **Two** rings, one per [`activity::RingTier`], because a fixed width in world
 /// units is a different width on screen at every zoom -- see
-/// [`BOLD_TOWN_RING_WIDTH`] for the measurements. They share one material: a
-/// town is one plan breathing, and two handles would be two clocks.
+/// [`BOLD_TOWN_RING_WIDTH`] for the measurements.
 ///
-/// Two departures from the ward kerb this is otherwise modelled on, both
-/// deliberate. The material is **its own** rather than the shared cache's,
-/// because the pulse writes to it and the cache hands one handle to every mesh
-/// of a similar colour. And there is **no** [`VisibleFrom`], so `apply_lod`
-/// leaves both rings alone: which of them shows is decided by
-/// [`activity::shows`] against the same tier, so that a ring is hidden for want
-/// of *activity* rather than for want of zoom, and the town's answer to "who is
-/// working here" survives at every zoom rather than only at the tier one of
-/// them was drawn to be legible from.
+/// One departure from the ward kerb this is otherwise modelled on, and it is
+/// deliberate: there is **no** [`VisibleFrom`], so `apply_lod` leaves both rings
+/// alone. Which of them shows is decided by [`activity::shows`] against the same
+/// tier, so that a ring is hidden for want of *activity* rather than for want of
+/// zoom, and the town's answer to "who is working here" survives at every zoom
+/// rather than only at the tier one of them was drawn to be legible from.
+///
+/// The material comes from the shared cache, like every other unlit surface
+/// here. It could not while the ring breathed: the cache quantises by colour and
+/// hands one handle to hundreds of meshes, so writing to it each frame would
+/// have pulsed whatever else landed in the same bucket. Nothing writes to it now.
 fn spawn_town_ring(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    cache: &mut MaterialCache,
     root: Entity,
     town: &crate::map::MapTown,
 ) {
@@ -693,14 +695,10 @@ fn spawn_town_ring(
     // A ring is a loop, so the ribbon has to come back to where it started.
     points.push(points[0]);
 
-    let material = materials.add(StandardMaterial {
-        base_color: activity::ring_color(1.0),
-        // Unlit: this is interface drawn in world space, not a surface in the
-        // scene, and its colour is the whole of its meaning. Lit, it took the
-        // sun's white specular and came out mint -- see `activity::PULSE_PEAK`.
-        unlit: true,
-        ..default()
-    });
+    // Unlit: this is interface drawn in world space, not a surface in the
+    // scene, and its colour is the whole of its meaning. Lit, it took the
+    // sun's white specular and came out mint -- see `activity::WORKING_COLOR`.
+    let material = cache.get(materials, activity::WORKING_COLOR, Surface::Unlit);
 
     for (width, tier) in TOWN_RINGS {
         commands.spawn((
@@ -711,7 +709,6 @@ fn spawn_town_ring(
             activity::TownRing {
                 town: town.name.clone(),
                 tier,
-                material: material.clone(),
             },
             // Nothing is running when a world loads, and a ring shown around a
             // quiet town would be a lie for as long as it took the first poll

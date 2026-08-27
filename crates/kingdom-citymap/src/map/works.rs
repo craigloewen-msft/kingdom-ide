@@ -1,10 +1,26 @@
-//! What a plan proposes, as ground on the map.
+//! What every agent proposes, as ground on the map.
 //!
-//! The King opens a chamber and the map shows him what his agent is building:
-//! a house that gained lines wears a scaffold above its roof, one that lost them
-//! is covered by a shroud rising from the ground over as much of the house as
-//! the file is losing, and a file that did not exist an hour ago stands as a
-//! ghost on free land inside the folder it belongs to.
+//! The King's agents are at work across his kingdom and the map shows him what
+//! each of them is building: a house that gained lines wears a scaffold above
+//! its roof, one that lost them is covered by a shroud rising from the ground
+//! over as much of the house as the file is losing, and a file that did not
+//! exist an hour ago stands as a ghost on free land inside the folder it
+//! belongs to.
+//!
+//! # Why every city at once, rather than the selected one
+//!
+//! This used to be resolved for whichever city the King had selected, and a
+//! city nobody had selected drew nothing at all -- so the map answered *what is
+//! every agent doing right now?* with a picture of at most one project, and
+//! with no selection it answered with nothing. Which town is selected is a fact
+//! about where the King is **looking**; what his agents are doing is true
+//! whether he looks or not. So [`resolve`] takes the whole kingdom's work and
+//! every agent's changes stand on the map at all times.
+//!
+//! That is what makes the city part of a file's identity here rather than
+//! context around it -- see the grouping key in [`resolve`], and
+//! [`MapManifest::holding_at`](super::MapManifest::holding_at), which has
+//! needed the repository all along for the same reason.
 //!
 //! # Why this is in `map` and not in `engine`
 //!
@@ -274,7 +290,7 @@ fn overlaps(a: &MapRect, b: &MapRect) -> bool {
     a.x < b.max_x() && b.x < a.max_x() && a.y < b.max_y() && b.y < a.max_y()
 }
 
-/// Turning what a plan changed into ground on the map.
+/// Turning what every agent changed into ground on the map.
 ///
 /// Gated exactly as [`crate::engine`] is, and for the same two reasons: it is
 /// only ever called from the browser, and `kingdom-core` is a *dev*-dependency
@@ -286,7 +302,7 @@ fn overlaps(a: &MapRect, b: &MapRect) -> bool {
 mod resolve {
     use super::{Work, WorkBand, WorkSite, place_fresh};
     use crate::map::{MapManifest, MapRect, MapWard};
-    use kingdom_core::{ChangeKind, ChangeSummary, PlanId};
+    use kingdom_core::{ChangeKind, PlanChanges};
     use std::collections::{BTreeMap, HashMap};
 
     /// A banner colour, opaque, as the map's own colour type.
@@ -299,7 +315,7 @@ mod resolve {
         [rgb[0], rgb[1], rgb[2], 255]
     }
 
-    /// Turns what every agent in a city is changing into ground on the map.
+    /// Turns what every agent in the kingdom is changing into ground on the map.
     ///
     /// The whole of the domain-to-geometry translation. Everything above this
     /// is Kingdom's domain -- paths, line counts, a `ChangeSummary`, a plan's
@@ -309,10 +325,24 @@ mod resolve {
     /// # Why it takes many plans rather than one
     ///
     /// Because the question is "who is touching this file", and one plan's
-    /// summary structurally cannot answer it. Taking the whole city's work at
-    /// once is also what lets a file two agents share be drawn as **one** house
-    /// with two bands rather than as two competing columns -- the grouping
-    /// below is by path, and the plan is what a band is, not what a work is.
+    /// summary structurally cannot answer it. Taking every agent's work at once
+    /// is also what lets a file two agents share be drawn as **one** house with
+    /// two bands rather than as two competing columns -- the grouping below is
+    /// by file, and the plan is what a band is, not what a work is.
+    ///
+    /// # Why the key is a city *and* a path
+    ///
+    /// Because a path alone does not name a file in a kingdom. Every Rust
+    /// project on the map has a `src/main.rs`, so grouping by path would fuse
+    /// two projects' files into one house wearing two bands -- drawing
+    /// contention where there is none, and hiding one of the two files
+    /// entirely. [`MapManifest::holding_at`] has taken the repository for
+    /// exactly this reason since it was written; the grouping simply has to
+    /// agree with it. Ghost placement is seeded from both halves too, so two
+    /// projects' new files do not chase each other around one folder.
+    ///
+    /// It could not come up while this took a single city, which is why the
+    /// looser key was right then and is a bug now.
     ///
     /// Every omission it makes is a judgement about what is *honest* to draw:
     ///
@@ -325,6 +355,9 @@ mod resolve {
     ///   folder the layout merged away has no ward to stand a ghost in. Both are
     ///   the ordinary staleness `kingdom_app::citymap` documents as a deliberate
     ///   trade -- the map follows the shape of a codebase, not its contents.
+    ///   A whole *city* missing from the manifest falls out of the same rule at
+    ///   no extra cost, which is what a plan in a project too new to have been
+    ///   scanned looks like.
     ///
     /// **Deletions are no longer left out**, which they were until this took
     /// several plans. The old reasoning was sound as far as it went -- the map
@@ -337,42 +370,46 @@ mod resolve {
     /// deletion-only plan used to resolve to an empty list and leave the map
     /// blank while an agent was working hard.
     ///
-    /// Ghost houses are placed once per **path**, not once per plan, so two
+    /// Ghost houses are placed once per **file**, not once per plan, so two
     /// agents creating the same file get one house with two bands rather than
     /// two houses in different corners of the folder. Each is added to the
     /// ground the next must avoid, so two genuinely different new files never
-    /// stand in each other. Placement follows the sorted path order, so it is
+    /// stand in each other. Placement follows the sorted key order, so it is
     /// stable across refetches and the houses do not shuffle.
-    pub fn resolve(
-        map: &MapManifest,
-        city: &str,
-        working: &[(PlanId, ChangeSummary)],
-    ) -> Vec<Work> {
-        // Everything worth drawing, gathered by path so that a file several
+    pub fn resolve(map: &MapManifest, working: &[PlanChanges]) -> Vec<Work> {
+        // Everything worth drawing, gathered by file so that a file several
         // agents are in becomes one entry with several bands. `BTreeMap` rather
         // than `HashMap` because the iteration order *is* the placement order
         // for ghost houses, and a hash order would move a new house between
         // refetches -- which reads as a bug rather than as a plan.
-        let mut by_path: BTreeMap<&str, Vec<WorkBand>> = BTreeMap::new();
+        //
+        // The key is (city, path): see the doc above for why a path alone is
+        // not a file once the whole kingdom is drawn at once.
+        let mut by_file: BTreeMap<(&str, &str), Vec<WorkBand>> = BTreeMap::new();
 
         // Banners are assigned over the **whole set** rather than taken per
         // plan, and that is what guarantees two agents on one house are two
         // colours. `palette::preferred` alone is stable but may collide, and a
         // collision here would draw exactly the picture this feature exists to
         // prevent. See `kingdom_core::palette::assign_banners`.
+        //
+        // The set is now every live agent in the kingdom rather than one
+        // city's, which is what makes an agent's colour mean the same thing
+        // wherever the King sees it -- on the map, in the rail's chips, and in
+        // another project's chamber.
         let banners = kingdom_core::palette::assign_banners(
             &working
                 .iter()
-                .map(|(plan, _)| plan.clone())
+                .map(|entry| entry.plan.clone())
                 .collect::<Vec<_>>(),
         );
 
-        for ((plan, summary), (banner_plan, banner)) in working.iter().zip(banners.iter()) {
+        for (entry, (banner_plan, banner)) in working.iter().zip(banners.iter()) {
             // `assign_banners` preserves order, so the two lists are in step.
             // Cheap to state, and it is the sort of coupling that breaks
             // silently by painting one agent in another's colour.
-            debug_assert_eq!(plan, banner_plan);
-            for file in &summary.files {
+            debug_assert_eq!(&entry.plan, banner_plan);
+            for file in &entry.changes.files {
                 // A binary file's counts are not line counts. Everything else
                 // with something to say is drawn, deletions included.
                 if file.binary {
@@ -386,8 +423,8 @@ mod resolve {
                     continue;
                 }
 
-                by_path
-                    .entry(file.path.as_str())
+                by_file
+                    .entry((entry.city.as_str(), file.path.as_str()))
                     .or_default()
                     .push(WorkBand {
                         growth: with_alpha(banner.growth_rgb),
@@ -404,10 +441,12 @@ mod resolve {
         }
 
         let mut raised = Vec::new();
-        // Ground claimed by ghost houses as this pass places them.
+        // Ground claimed by ghost houses as this pass places them. Keyed by
+        // ward id, which is already unique across the kingdom -- `move_city`
+        // prefixes it with the town name.
         let mut claimed: HashMap<String, Vec<MapRect>> = HashMap::new();
 
-        for (path, mut bands) in by_path {
+        for ((city, path), mut bands) in by_file {
             // The house's own length as the map last scanned it, which is the
             // denominator `WorkBand::cover` is a share of. Zero stands for "not
             // known" -- a `Fresh` site has no prior file at all, and the scanner
@@ -455,7 +494,7 @@ mod resolve {
                     // would drag the median up until a new file was drawn as a
                     // mansion.
                     let want = typical_lot(&lots, ward);
-                    let Some(footprint) = place_fresh(ward, &taken, seed(path), want) else {
+                    let Some(footprint) = place_fresh(ward, &taken, seed(city, path), want) else {
                         continue;
                     };
                     claimed.entry(ward.id.clone()).or_default().push(footprint);
@@ -554,16 +593,24 @@ mod resolve {
         [widths[widths.len() / 2], depths[depths.len() / 2]]
     }
 
-    /// A stable number for a path, so a ghost house does not move between
+    /// A stable number for a file, so a ghost house does not move between
     /// refetches -- and the review is refetched on every transcript entry.
+    ///
+    /// Takes the city as well as the path for [`resolve`]'s reason: `src/lib.rs`
+    /// exists in most projects on the map, and one seed for all of them would
+    /// offer the same ground in every folder that shares a name.
     ///
     /// FNV-1a, which is what `build::layout::stable_hash` gives a real holding
     /// its variation from. Copied rather than shared because that function is
     /// server-only and this runs in the browser.
-    fn seed(path: &str) -> u32 {
-        path.bytes().fold(2_166_136_261u32, |hash, byte| {
-            hash.wrapping_mul(16_777_619) ^ byte as u32
-        })
+    fn seed(city: &str, path: &str) -> u32 {
+        let hash = |start: u32, text: &str| {
+            text.bytes().fold(start, |hash, byte| {
+                hash.wrapping_mul(16_777_619) ^ byte as u32
+            })
+        };
+        // The separator is hashed too, so ("ab", "c") and ("a", "bc") differ.
+        hash(hash(hash(2_166_136_261u32, city), "/"), path)
     }
 }
 
@@ -735,7 +782,9 @@ mod resolve_tests {
         BuildingKind, MapBuilding, MapFeature, MapManifest, MapPalette, MapSun, MapTown,
         MapUnderside, MapWorld,
     };
-    use kingdom_core::{ChangeKind, ChangeSummary, ChangedFile, Language, PlanId};
+    use kingdom_core::{
+        ChangeKind, ChangeSummary, ChangedFile, CityId, Language, PlanChanges, PlanId,
+    };
 
     fn summary(files: Vec<ChangedFile>) -> ChangeSummary {
         ChangeSummary {
@@ -868,16 +917,255 @@ mod resolve_tests {
         }
     }
 
-    /// One plan's work, as `resolve` now takes it.
-    fn alone(files: Vec<ChangedFile>) -> Vec<(PlanId, ChangeSummary)> {
-        vec![(PlanId::new("plan-1"), summary(files))]
+    /// A map of **several** towns, each with its own `src` ward and houses.
+    ///
+    /// [`world_of`]'s sibling, and what the kingdom-wide tests need: the fault
+    /// this whole change is about could not be seen on a one-town map, because
+    /// one town is exactly what the old resolver could draw.
+    ///
+    /// Each town's ward gets a disjoint rectangle and a ward id prefixed with
+    /// the town name -- which is what `build::layout::move_city` does to a real
+    /// manifest, and what makes `lots_in` and the ghost placer's `claimed` map
+    /// keyed correctly across towns.
+    fn kingdom_of(towns: &[(&str, &[(&str, MapRect)])]) -> MapManifest {
+        let mut map = world("unused", &[]);
+        map.world.towns.clear();
+        map.world.wards.clear();
+
+        for (index, (city, houses)) in towns.iter().enumerate() {
+            let ward_id = format!("{city}/ward-0");
+            // Side by side, so no town's ground overlaps another's.
+            let origin = index as f32 * 200.0;
+
+            map.world.towns.push(MapTown {
+                id: format!("town-{index}"),
+                name: (*city).to_owned(),
+                rect: MapRect::default(),
+                polygon: Vec::new(),
+                ground: [0, 0, 0, 255],
+                edge: [0, 0, 0, 255],
+            });
+            map.world.wards.push(MapWard {
+                id: ward_id.clone(),
+                name: "src".to_owned(),
+                path: "src".to_owned(),
+                parent: None,
+                files: houses.len() as u32,
+                rect: MapRect {
+                    x: origin,
+                    y: 0.0,
+                    width: 120.0,
+                    depth: 120.0,
+                },
+                polygon: Vec::new(),
+                depth: 0,
+                ground: [0, 0, 0, 255],
+                edge: [0, 0, 0, 255],
+            });
+
+            for (path, lot) in *houses {
+                // A house's lot is given in ward-local terms and shifted onto
+                // this town's ground, so two towns' "same" file is genuinely in
+                // two places.
+                let lot = MapRect {
+                    x: lot.x + origin,
+                    ..*lot
+                };
+                // Unique across the manifest: a feature id is a key, and two
+                // towns' `src/main.rs` must not share one.
+                let id = format!("{city}:{path}");
+                map.features.push(MapFeature {
+                    id: id.clone(),
+                    name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+                    path: (*path).to_owned(),
+                    repository: (*city).to_owned(),
+                    folder: "src".to_owned(),
+                    breadcrumb: Vec::new(),
+                    building_kind: String::new(),
+                    meaning: String::new(),
+                    category: String::new(),
+                    bytes: 0,
+                    lines: 0,
+                    complexity: 0,
+                    references: 0,
+                    footprint: lot,
+                    height: 9.0,
+                    center: lot.center(),
+                });
+                map.world.buildings.push(MapBuilding {
+                    feature_id: id,
+                    ward_id: Some(ward_id.clone()),
+                    kind: BuildingKind::Guildhall,
+                    footprint: lot,
+                    lot,
+                    height: 9.0,
+                    palette: MapPalette::default(),
+                    complexity: 0,
+                    seed: 0,
+                });
+            }
+        }
+
+        map
     }
 
-    /// Two agents' work, with ids chosen so their banners differ.
-    fn between(first: Vec<ChangedFile>, second: Vec<ChangedFile>) -> Vec<(PlanId, ChangeSummary)> {
+    /// One plan's work in a named city, for the tests that care which.
+    fn working_in(plan: &str, city: &str, files: Vec<ChangedFile>) -> PlanChanges {
+        PlanChanges {
+            plan: PlanId::new(plan),
+            city: CityId::new(city),
+            changes: summary(files),
+        }
+    }
+
+    /// **The reported bug.** An agent's work is drawn whether or not the King
+    /// has that town selected -- so every town with an agent in it shows one.
+    ///
+    /// This could not be written before: `resolve` took a single city and drew
+    /// only that one, and the browser handed it whichever town was selected --
+    /// or, with no selection at all, cleared the works outright. Two agents in
+    /// two projects therefore drew at most one project's work, and usually
+    /// none, which is the whole of what was reported.
+    #[test]
+    fn every_city_with_an_agent_raises_works() {
+        let map = kingdom_of(&[
+            ("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]),
+            ("beta", &[("src/other.rs", rect(30.0, 30.0, 8.0, 8.0))]),
+        ]);
+
+        let raised = resolve(
+            &map,
+            &[
+                working_in(
+                    "plan-1",
+                    "alpha",
+                    vec![file("src/main.rs", ChangeKind::Modified, 30, 10)],
+                ),
+                working_in(
+                    "plan-2",
+                    "beta",
+                    vec![file("src/other.rs", ChangeKind::Modified, 12, 4)],
+                ),
+            ],
+        );
+
+        assert_eq!(raised.len(), 2, "both towns' work must stand");
+        // And each stands on its own town's ground rather than both landing on
+        // whichever city was asked about.
+        let mut lots: Vec<f32> = raised.iter().map(|w| w.site.footprint().x).collect();
+        lots.sort_by(f32::total_cmp);
+        assert_eq!(lots, vec![10.0, 230.0]);
+    }
+
+    /// **The trap that comes with drawing every city at once.** Two projects
+    /// both have a `src/main.rs`, and they are two files.
+    ///
+    /// Grouped by path alone -- which is what the key was while this took one
+    /// city, and was correct there -- they would fuse into one house wearing
+    /// two bands: the map would claim two agents were contending over a file,
+    /// and one of the two real files would not be drawn at all. A kingdom of
+    /// Rust projects is the common case, not a corner.
+    #[test]
+    fn the_same_path_in_two_cities_is_two_houses() {
+        let map = kingdom_of(&[
+            ("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]),
+            ("beta", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]),
+        ]);
+
+        let raised = resolve(
+            &map,
+            &[
+                working_in(
+                    "plan-1",
+                    "alpha",
+                    vec![file("src/main.rs", ChangeKind::Modified, 30, 0)],
+                ),
+                working_in(
+                    "plan-2",
+                    "beta",
+                    vec![file("src/main.rs", ChangeKind::Modified, 5, 0)],
+                ),
+            ],
+        );
+
+        assert_eq!(
+            raised.len(),
+            2,
+            "one file per project, not one shared house"
+        );
+        for work in &raised {
+            assert_eq!(work.bands.len(), 1, "one agent each");
+            assert!(
+                !work.is_contended(),
+                "two projects' files are not a contended file"
+            );
+        }
+    }
+
+    /// The same trap, for a file that has no house yet: two projects both
+    /// gaining a `src/new.rs` get a ghost each, in their own folders.
+    #[test]
+    fn a_new_file_of_the_same_name_in_two_cities_is_two_ghosts() {
+        let map = kingdom_of(&[
+            ("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]),
+            ("beta", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]),
+        ]);
+
+        let raised = resolve(
+            &map,
+            &[
+                working_in(
+                    "plan-1",
+                    "alpha",
+                    vec![file("src/new.rs", ChangeKind::Untracked, 40, 0)],
+                ),
+                working_in(
+                    "plan-2",
+                    "beta",
+                    vec![file("src/new.rs", ChangeKind::Untracked, 40, 0)],
+                ),
+            ],
+        );
+
+        assert_eq!(raised.len(), 2);
+        // Each ghost stands inside its own town's ward rather than both being
+        // placed in whichever was found first.
+        let mut centres: Vec<f32> = raised
+            .iter()
+            .map(|work| work.site.footprint().center()[0])
+            .collect();
+        centres.sort_by(f32::total_cmp);
+        assert!(centres[0] < 120.0, "the first ghost belongs to alpha");
+        assert!(centres[1] >= 200.0, "the second belongs to beta");
+    }
+
+    /// One plan's work in the ordinary test city, as `resolve` now takes it.
+    fn alone(files: Vec<ChangedFile>) -> Vec<PlanChanges> {
+        alone_in("alpha", files)
+    }
+
+    /// One plan's work in a named city, for the tests that care which.
+    fn alone_in(city: &str, files: Vec<ChangedFile>) -> Vec<PlanChanges> {
+        vec![PlanChanges {
+            plan: PlanId::new("plan-1"),
+            city: CityId::new(city),
+            changes: summary(files),
+        }]
+    }
+
+    /// Two agents' work in one city, with ids chosen so their banners differ.
+    fn between(first: Vec<ChangedFile>, second: Vec<ChangedFile>) -> Vec<PlanChanges> {
         vec![
-            (PlanId::new("plan-1"), summary(first)),
-            (PlanId::new("plan-2"), summary(second)),
+            PlanChanges {
+                plan: PlanId::new("plan-1"),
+                city: CityId::new("alpha"),
+                changes: summary(first),
+            },
+            PlanChanges {
+                plan: PlanId::new("plan-2"),
+                city: CityId::new("alpha"),
+                changes: summary(second),
+            },
         ]
     }
 
@@ -889,7 +1177,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", lot)]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/main.rs", ChangeKind::Modified, 30, 10)]),
         );
 
@@ -922,7 +1209,6 @@ mod resolve_tests {
         );
         let with_a_giant = resolve(
             &map,
-            "alpha",
             &alone(vec![
                 file("src/big.rs", ChangeKind::Modified, 800, 200),
                 file("src/small.rs", ChangeKind::Modified, 10, 0),
@@ -930,7 +1216,6 @@ mod resolve_tests {
         );
         let by_itself = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/small.rs", ChangeKind::Modified, 10, 0)]),
         );
 
@@ -957,7 +1242,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", lot)]);
         let raised = resolve(
             &map,
-            "alpha",
             &between(
                 vec![file("src/main.rs", ChangeKind::Modified, 30, 10)],
                 vec![file("src/main.rs", ChangeKind::Modified, 5, 40)],
@@ -983,11 +1267,11 @@ mod resolve_tests {
         let plan = PlanId::new("plan-7");
         let raised = resolve(
             &map,
-            "alpha",
-            &[(
-                plan.clone(),
-                summary(vec![file("src/main.rs", ChangeKind::Modified, 3, 1)]),
-            )],
+            &[PlanChanges {
+                plan: plan.clone(),
+                city: CityId::new("alpha"),
+                changes: summary(vec![file("src/main.rs", ChangeKind::Modified, 3, 1)]),
+            }],
         );
 
         let banner = kingdom_core::palette::preferred(&plan);
@@ -1005,7 +1289,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", taken)]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/new.rs", ChangeKind::Untracked, 40, 0)]),
         );
 
@@ -1033,7 +1316,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![
                 file("src/one.rs", ChangeKind::Added, 20, 0),
                 file("src/two.rs", ChangeKind::Untracked, 25, 0),
@@ -1057,7 +1339,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &between(
                 vec![file("src/new.rs", ChangeKind::Untracked, 20, 0)],
                 vec![file("src/new.rs", ChangeKind::Untracked, 9, 2)],
@@ -1084,7 +1365,6 @@ mod resolve_tests {
 
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![
                 file("src/main.rs", ChangeKind::Modified, 10, 0),
                 binary,
@@ -1103,7 +1383,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/gone.rs", lot)]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/gone.rs", ChangeKind::Deleted, 0, 200)]),
         );
 
@@ -1129,7 +1408,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/gone.rs", rect(30.0, 30.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/gone.rs", ChangeKind::Deleted, 0, 0)]),
         );
         assert_eq!(raised.len(), 1);
@@ -1144,7 +1422,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/vanished.rs", ChangeKind::Deleted, 0, 40)]),
         );
         assert!(raised.is_empty());
@@ -1158,8 +1435,10 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "nowhere",
-            &alone(vec![file("src/main.rs", ChangeKind::Modified, 10, 2)]),
+            &alone_in(
+                "nowhere",
+                vec![file("src/main.rs", ChangeKind::Modified, 10, 2)],
+            ),
         );
         assert!(raised.is_empty());
     }
@@ -1171,7 +1450,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("vendor/deep/new.rs", ChangeKind::Added, 40, 0)]),
         );
         assert!(raised.is_empty());
@@ -1184,12 +1462,11 @@ mod resolve_tests {
         let map = world("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/main.rs", ChangeKind::Renamed, 0, 0)]),
         );
         assert!(raised.is_empty());
-        assert!(resolve(&map, "alpha", &alone(Vec::new())).is_empty());
-        assert!(resolve(&map, "alpha", &[]).is_empty(), "no agents at all");
+        assert!(resolve(&map, &alone(Vec::new())).is_empty());
+        assert!(resolve(&map, &[]).is_empty(), "no agents at all");
     }
 
     /// **The King's own rule, at the seam that computes it.** Two hundred lines
@@ -1205,7 +1482,6 @@ mod resolve_tests {
         let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 400)]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/main.rs", ChangeKind::Modified, 0, 200)]),
         );
 
@@ -1225,7 +1501,6 @@ mod resolve_tests {
             );
             resolve(
                 &map,
-                "alpha",
                 &alone(vec![file("src/main.rs", ChangeKind::Modified, 0, 100)]),
             )[0]
             .bands[0]
@@ -1245,7 +1520,6 @@ mod resolve_tests {
         for counted in [0, 3, 900] {
             let raised = resolve(
                 &map,
-                "alpha",
                 &alone(vec![file("src/gone.rs", ChangeKind::Deleted, 0, counted)]),
             );
             assert_eq!(
@@ -1264,7 +1538,6 @@ mod resolve_tests {
         let map = world("alpha", &[("src/huge.rs", rect(10.0, 10.0, 8.0, 8.0))]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/huge.rs", ChangeKind::Modified, 0, 100)]),
         );
 
@@ -1284,7 +1557,6 @@ mod resolve_tests {
         let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 10)]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/main.rs", ChangeKind::Modified, 0, 4_000)]),
         );
 
@@ -1299,7 +1571,6 @@ mod resolve_tests {
         let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 400)]);
         let raised = resolve(
             &map,
-            "alpha",
             &between(
                 vec![file("src/main.rs", ChangeKind::Modified, 0, 100)],
                 vec![file("src/main.rs", ChangeKind::Modified, 0, 100)],
@@ -1323,7 +1594,6 @@ mod resolve_tests {
         let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 400)]);
         let raised = resolve(
             &map,
-            "alpha",
             &alone(vec![file("src/main.rs", ChangeKind::Modified, 120, 0)]),
         );
 
@@ -1348,7 +1618,6 @@ mod resolve_tests {
         );
         let raised = resolve(
             &map,
-            "alpha",
             &between(
                 vec![file("src/a.rs", ChangeKind::Modified, 4000, 0)],
                 vec![file("src/b.rs", ChangeKind::Deleted, 0, 1)],
@@ -1381,10 +1650,7 @@ mod resolve_tests {
             ],
             vec![file("src/other.rs", ChangeKind::Added, 8, 0)],
         );
-        assert_eq!(
-            resolve(&map, "alpha", &changes),
-            resolve(&map, "alpha", &changes)
-        );
+        assert_eq!(resolve(&map, &changes), resolve(&map, &changes));
     }
 
     /// And the order the agents are handed in must not move a house either: the
@@ -1395,8 +1661,8 @@ mod resolve_tests {
         let first = vec![file("src/new.rs", ChangeKind::Untracked, 30, 0)];
         let second = vec![file("src/also.rs", ChangeKind::Added, 8, 0)];
 
-        let one_way = resolve(&map, "alpha", &between(first.clone(), second.clone()));
-        let other_way = resolve(&map, "alpha", &between(second, first));
+        let one_way = resolve(&map, &between(first.clone(), second.clone()));
+        let other_way = resolve(&map, &between(second, first));
 
         let ground = |raised: &[Work]| {
             let mut lots: Vec<_> = raised.iter().map(|w| w.site.footprint()).collect();
