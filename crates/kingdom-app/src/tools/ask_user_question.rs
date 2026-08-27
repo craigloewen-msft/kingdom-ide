@@ -44,6 +44,13 @@ use tokio::sync::oneshot;
 /// again -- see the module docs.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// Questions in front of the user, keyed by the plan and tool call that asked,
+/// each holding the half of a oneshot its call is blocked on.
+///
+/// A named type because the map appears in both the static and the accessor
+/// below; clippy's `type_complexity` flags spelling it out twice.
+type Pending = HashMap<(PlanId, String), oneshot::Sender<String>>;
+
 /// Questions currently in front of the user, keyed by the plan and tool call
 /// that asked.
 ///
@@ -52,10 +59,9 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// record the server could never resolve -- a question the conversation renders
 /// as answerable and that nothing is listening for. The tool call is on disk;
 /// the waiting is not, and `store::reconcile` closes the gap on restart.
-static PENDING: OnceLock<Mutex<HashMap<(PlanId, String), oneshot::Sender<String>>>> =
-    OnceLock::new();
+static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 
-fn pending() -> &'static Mutex<HashMap<(PlanId, String), oneshot::Sender<String>>> {
+fn pending() -> &'static Mutex<Pending> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

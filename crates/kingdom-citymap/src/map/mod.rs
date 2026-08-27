@@ -941,7 +941,10 @@ mod tests {
             MapRect::default(),
         )];
 
-        assert_eq!(map.ward_at("solo", "src").map(|w| w.id.as_str()), Some("ward-0"));
+        assert_eq!(
+            map.ward_at("solo", "src").map(|w| w.id.as_str()),
+            Some("ward-0")
+        );
         // A folder the layout merged away is an ordinary absence, exactly as a
         // breadcrumb step with no `ward_id` is.
         assert!(map.ward_at("solo", "src/deep/nested").is_none());
@@ -989,7 +992,10 @@ mod tests {
     /// would have nowhere to stand.
     #[test]
     fn a_folder_of_folders_still_belongs_to_its_repository() {
-        let mut map = manifest(Vec::new(), vec![holding("alpha", "crates/core/lib.rs", [1.0, 1.0])]);
+        let mut map = manifest(
+            Vec::new(),
+            vec![holding("alpha", "crates/core/lib.rs", [1.0, 1.0])],
+        );
         map.world.towns = vec![town("alpha"), town("beta")];
         map.world.wards = vec![
             test_ward("alpha/ward-0", "crates", None),

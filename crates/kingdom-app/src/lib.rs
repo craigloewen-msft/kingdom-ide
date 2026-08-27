@@ -8,6 +8,12 @@ pub mod api;
 pub mod app;
 pub mod components;
 
+// Taking turns with the model. Carved out of `api`, which was holding both the
+// `#[server]` wire and the agent loop; see the module's own note on the seam
+// between the two.
+#[cfg(feature = "ssr")]
+pub mod turn;
+
 // Both targets: the browser builds the link, the server answers it. See the
 // module's own note on what inside it is server-only.
 pub mod artifact;

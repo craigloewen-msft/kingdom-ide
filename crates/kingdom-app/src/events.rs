@@ -198,16 +198,13 @@ pub fn pulse(plan: &Plan) {
         return;
     }
 
-    match last_pulse().lock() {
-        Ok(mut seen) => {
-            if seen.get(&pulse.id) == Some(&pulse) {
-                return;
-            }
-            seen.insert(pulse.id.clone(), pulse.clone());
+    // A poisoned dedupe must not silence the rail: send it anyway. A duplicate
+    // message costs a repaint; a swallowed one costs the King a badge.
+    if let Ok(mut seen) = last_pulse().lock() {
+        if seen.get(&pulse.id) == Some(&pulse) {
+            return;
         }
-        // A poisoned dedupe must not silence the rail: send it. A duplicate
-        // message costs a repaint; a swallowed one costs the King a badge.
-        Err(_) => {}
+        seen.insert(pulse.id.clone(), pulse.clone());
     }
 
     let _ = pulses_channel().send(pulse);

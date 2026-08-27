@@ -226,7 +226,11 @@ async fn the_reaper_closes_a_cold_browser_and_spares_a_busy_one() {
 
     let closed = browsers.reap_idle(Duration::from_millis(500)).await;
 
-    assert_eq!(closed, vec!["gone-cold".to_string()], "the wrong set closed");
+    assert_eq!(
+        closed,
+        vec!["gone-cold".to_string()],
+        "the wrong set closed"
+    );
     assert_eq!(browsers.live().await, 1, "exactly one should remain");
 
     for _ in 0..50 {

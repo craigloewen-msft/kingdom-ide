@@ -29,7 +29,7 @@ pub async fn catalogue() -> ModelCatalogue {
     }
 
     ModelCatalogue {
-        default_id: default_id(&options),
+        default_id: default_id(&options, super::preferred_model_id().as_deref()),
         options,
         credential,
         detail: details.join(" "),
@@ -38,16 +38,25 @@ pub async fn catalogue() -> ModelCatalogue {
 
 /// What the picker opens on before the user has chosen.
 ///
-/// The environment's `KINGDOM_MODEL` wins, but only if it names a model
-/// somebody actually serves -- otherwise it is a default pointing at nothing.
-/// Failing that: the best on offer, which means the first recommended model,
-/// then simply the first. With no working credential the only entry is the
-/// mock, so a fresh clone still drafts offline with no setup -- not because the
-/// mock is privileged, but because it is what is left.
-fn default_id(options: &[kingdom_core::ModelOption]) -> String {
-    if let Some(wanted) = super::preferred_model_id() {
+/// `preferred` -- the King's `KINGDOM_MODEL` -- wins, but only if it names a
+/// model somebody actually serves; otherwise it is a default pointing at
+/// nothing. Failing that: the best on offer, which means the first recommended
+/// model, then simply the first. With no working credential the only entry is
+/// the mock, so a fresh clone still drafts offline with no setup -- not because
+/// the mock is privileged, but because it is what is left.
+///
+/// The preference is a *parameter* rather than a read of the environment, and
+/// that is load-bearing. This function used to call `preferred_model_id()`
+/// itself, which made its answer depend on the process's environment -- so the
+/// tests below passed on a bare machine and failed under Kingdom's own tooling,
+/// which pins `KINGDOM_MODEL=mock` for a plan working in a Kingdom checkout
+/// (see `tools::child_environment`). A plan reviewing this repository was shown
+/// a red suite it had not caused. Injecting it keeps the decision pure and lets
+/// the override be tested rather than only suffered.
+fn default_id(options: &[kingdom_core::ModelOption], preferred: Option<&str>) -> String {
+    if let Some(wanted) = preferred {
         if options.iter().any(|o| o.id == wanted) {
-            return wanted;
+            return wanted.to_string();
         }
     }
 
@@ -111,7 +120,7 @@ mod tests {
         let options = vec![option("mock", false)];
 
         assert_eq!(
-            default_id(&options),
+            default_id(&options, None),
             "mock",
             "the last model standing is the one the King lands on"
         );
@@ -131,6 +140,37 @@ mod tests {
             option("copilot/claude-opus-5", true),
             option("mock", false),
         ];
-        assert_eq!(default_id(&options), "copilot/claude-opus-5");
+        assert_eq!(default_id(&options, None), "copilot/claude-opus-5");
+    }
+
+    /// The King's `KINGDOM_MODEL` overrides the recommendation.
+    ///
+    /// This is the path Kingdom's own tooling takes when a plan works on a
+    /// Kingdom checkout -- `tools::child_environment` pins it to the mock so a
+    /// rehearsal never spends a real token. Until the preference became a
+    /// parameter, this behaviour had no test of its own: it was only ever
+    /// observed by *breaking* the test above, on exactly the machines that
+    /// mattered most.
+    #[test]
+    fn a_named_preference_beats_the_recommendation() {
+        let options = vec![option("copilot/claude-opus-5", true), option("mock", false)];
+
+        assert_eq!(
+            default_id(&options, Some("mock")),
+            "mock",
+            "a model the King asked for by name must be the one he gets"
+        );
+    }
+
+    /// A preference naming a model no provider serves is ignored rather than
+    /// honoured, because honouring it would open the picker on nothing.
+    #[test]
+    fn a_preference_nobody_serves_falls_back_to_the_best_on_offer() {
+        let options = vec![option("copilot/claude-opus-5", true), option("mock", false)];
+
+        assert_eq!(
+            default_id(&options, Some("copilot/a-model-that-retired")),
+            "copilot/claude-opus-5"
+        );
     }
 }

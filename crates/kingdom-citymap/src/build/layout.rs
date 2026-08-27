@@ -924,7 +924,6 @@ fn pack_wards<'a>(
     buildable: f32,
     gap: f32,
 ) -> Packing<(&'a Node, Rect)> {
-
     // The longest a single ward may be, measured against the settlement the
     // file count called for rather than against the ground it was finally
     // given: an island grown to make room must not stretch its wards with it.
@@ -954,9 +953,7 @@ fn pack_wards<'a>(
         })
         .collect();
 
-    pack_onto(&sized, extent, gap, |(node, _)| {
-        stable_hash(&node.name)
-    })
+    pack_onto(&sized, extent, gap, |(node, _)| stable_hash(&node.name))
 }
 
 fn rects_overlap(left: Rect, right: Rect, gap: f32) -> bool {

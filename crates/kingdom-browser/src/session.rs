@@ -1671,7 +1671,10 @@ mod tests {
         // And the holder is still running: an unclaimed profile never earns
         // anything a signal.
         assert!(
-            holder.try_wait().expect("the holder must be waitable").is_none(),
+            holder
+                .try_wait()
+                .expect("the holder must be waitable")
+                .is_none(),
             "the sweep killed a process it could not prove was abandoned"
         );
 

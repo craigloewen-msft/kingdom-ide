@@ -88,6 +88,15 @@ const SCAFFOLD_REACH: f32 = 52.0;
 /// building rather than a bump in it.
 const SCAFFOLD_FLOOR: f32 = 9.0;
 
+// Checked when this compiles rather than when the suite runs: the roofline
+// clearance above is a fact about the constant, not about any behaviour, and a
+// `#[test]` asserting it could only ever fail on a build that had already been
+// made. Lowering the floor past a roof is now a compile error.
+const _: () = assert!(
+    SCAFFOLD_FLOOR > 6.0,
+    "a stub shorter than this disappears into the roof it stands on"
+);
+
 /// How far a skirt of cleared ground spreads past the lot it surrounds.
 const SKIRT_SPREAD: f32 = 1.9;
 
@@ -262,12 +271,7 @@ fn raise_one(
     if let WorkSite::Fresh { .. } = work.site {
         let plan_size = Vec2::new(footprint.width, footprint.depth);
         let height = scaffold_height(work.scale) * 0.5;
-        let shape = BuildingShape::new(
-            crate::map::BuildingKind::Cottage,
-            plan_size,
-            height,
-            0,
-        );
+        let shape = BuildingShape::new(crate::map::BuildingKind::Cottage, plan_size, height, 0);
         let handles = mesh_cache.building(meshes, shape);
         // The archetypes are modelled inside a unit footprint with height as a
         // multiple of the shorter side, so a placed one stands `height() * plan`
@@ -279,8 +283,11 @@ fn raise_one(
         let entity = commands
             .spawn((
                 ChildOf(root),
-                Transform::from_xyz(center[0], 0.0, center[1])
-                    .with_scale(Vec3::new(plan_size.x, plan, plan_size.y)),
+                Transform::from_xyz(center[0], 0.0, center[1]).with_scale(Vec3::new(
+                    plan_size.x,
+                    plan,
+                    plan_size.y,
+                )),
                 Visibility::default(),
             ))
             .id();
@@ -319,10 +326,7 @@ fn raise_one(
             // Cuboids are built about their own centre, so the box is lifted by
             // half its height to stand *on* the roof rather than through it.
             Transform::from_xyz(center[0], base + height * 0.5, center[1]),
-            Scaffold {
-                material,
-                strength,
-            },
+            Scaffold { material, strength },
             Pickable::IGNORE,
         ));
     }
@@ -403,16 +407,14 @@ mod tests {
 
     /// The floor is what keeps a small change visible. Without it a file that
     /// moved three lines beside one that moved four hundred is drawn as nothing.
+    ///
+    /// That the floor also clears a typical roofline is pinned at the constant
+    /// itself, as a `const` assertion -- it is arithmetic on a literal, so it
+    /// is checked at compile time rather than here.
     #[test]
     fn even_the_smallest_change_stands_high_enough_to_see() {
         assert!(scaffold_height(0.0) >= SCAFFOLD_FLOOR);
         assert!(scaffold_height(0.001) >= SCAFFOLD_FLOOR);
-        // And the floor has to clear a typical roof, or a small change is drawn
-        // inside the silhouette of its own house and reads as part of it.
-        assert!(
-            SCAFFOLD_FLOOR > 6.0,
-            "a stub shorter than this disappears into the roof it stands on"
-        );
     }
 
     /// The curve is what makes a lopsided plan legible: the dozen touched files
@@ -525,14 +527,16 @@ mod tests {
     #[test]
     fn no_open_plan_is_a_quiet_map() {
         assert!(Works::default().is_quiet());
-        assert!(!Works(vec![Work {
-            site: WorkSite::Standing {
-                footprint: MapRect::default(),
-                height: 1.0,
-            },
-            scale: 0.5,
-            growth: 1.0,
-        }])
-        .is_quiet());
+        assert!(
+            !Works(vec![Work {
+                site: WorkSite::Standing {
+                    footprint: MapRect::default(),
+                    height: 1.0,
+                },
+                scale: 0.5,
+                growth: 1.0,
+            }])
+            .is_quiet()
+        );
     }
 }

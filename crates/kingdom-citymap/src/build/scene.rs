@@ -4,7 +4,6 @@
 //! *where things stand and what colour they are*; the rendering engine owns the
 //! camera, depth sorting, lighting, and culling.
 
-
 use crate::map::{
     MapBuilding, MapColor, MapPalette, MapPlaza, MapRect, MapSun, MapTown, MapUnderside, MapWard,
     MapWorld,

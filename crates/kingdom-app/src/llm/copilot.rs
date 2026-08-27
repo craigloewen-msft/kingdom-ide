@@ -2230,11 +2230,7 @@ mod tests {
 
         // And they must be the *last* ones. Keeping the oldest would satisfy the
         // count while losing exactly the thinking that is still in use.
-        let newest = messages
-            .iter()
-            .filter(|m| m["role"] == "assistant")
-            .next_back()
-            .unwrap();
+        let newest = messages.iter().rfind(|m| m["role"] == "assistant").unwrap();
         assert!(
             !newest["signature"].is_null(),
             "the newest reply's signature is the one that must never go: {newest:#?}"

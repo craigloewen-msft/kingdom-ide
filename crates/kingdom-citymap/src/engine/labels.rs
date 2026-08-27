@@ -285,10 +285,7 @@ pub fn update_labels(
                     // activity is keyed on. In a single-settlement map the
                     // plaques are wards instead, and no ward shares a name with
                     // a town, so the lookup simply finds nothing.
-                    detail: with_activity(
-                        &district.detail,
-                        working.working_in(&district.label),
-                    ),
+                    detail: with_activity(&district.detail, working.working_in(&district.label)),
                     anchor,
                     font_size: DISTRICT_FONT_SIZE,
                     detail_size: DETAIL_FONT_SIZE,
@@ -351,10 +348,10 @@ pub fn update_labels(
                             if text.0 != label.request.title {
                                 text.0 = label.request.title.clone();
                             }
-                        } else if let Ok(mut text) = details.get_mut(child) {
-                            if text.0 != label.request.detail {
-                                text.0 = label.request.detail.clone();
-                            }
+                        } else if let Ok(mut text) = details.get_mut(child)
+                            && text.0 != label.request.detail
+                        {
+                            text.0 = label.request.detail.clone();
                         }
                     }
                 }
@@ -484,10 +481,7 @@ mod tests {
     fn the_plaque_stays_within_the_font_it_is_drawn_with() {
         for count in [1, 2, 17] {
             let line = with_activity("1,204 files", count);
-            assert!(
-                line.is_ascii(),
-                "the default font cannot draw {line:?}"
-            );
+            assert!(line.is_ascii(), "the default font cannot draw {line:?}");
         }
     }
 }

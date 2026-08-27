@@ -76,8 +76,14 @@ and set either a token (`KINGDOM_API_KEY`) or a command that prints one
 means a configured clone spends tokens on its first decree; pick `mock` in the
 picker to work offline.
 
-Plans still cannot *do* anything beyond replying — no tool use, no edits — and
-the court a kingdom opens with is placeholder data.
+Plans *act*. A plan works in its own git worktree and has hands: reading and
+searching files, patching them, running commands under `bash` and `tmux`,
+driving a headless browser, profiling a page, and spawning subagents. It puts a
+proposal to you, you approve or annotate it, and the work is merged or archived
+from the review drawer.
+
+Still placeholder: the court a kingdom opens with is fabricated data, and
+resource arbitration — question 2 above — is **not built**.
 
 See [AGENTS.md](./AGENTS.md) for the architecture, the philosophy behind the
 metaphor, and an honest breakdown of what is real versus faked.
@@ -87,6 +93,16 @@ metaphor, and an honest breakdown of what is real versus faked.
 ```bash
 cargo test -p kingdom-core
 cargo test -p kingdom-app --features ssr --no-default-features
+cargo test -p kingdom-citymap
+cargo test -p kingdom-browser
+
+# The client half is a separate target and a separate compile, so it is only
+# ever proven by building it:
+cargo check -p kingdom-app --target wasm32-unknown-unknown \
+    --features hydrate --no-default-features
+
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --features ssr --no-default-features
 ```
 
 No test launches a browser, so the suite needs nothing installed. Kingdom finds

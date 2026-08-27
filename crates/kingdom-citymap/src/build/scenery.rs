@@ -1042,10 +1042,7 @@ mod tests {
         // does not. The thing that must not happen is the sampler filling one
         // corner at full density and running out before it reaches the rest —
         // so density is traded away evenly, across the whole coastline.
-        let huge: Vec<[f32; 2]> = RIM
-            .iter()
-            .map(|[x, y]| [x * 18.0, y * 18.0])
-            .collect();
+        let huge: Vec<[f32; 2]> = RIM.iter().map(|[x, y]| [x * 18.0, y * 18.0]).collect();
         let input = SceneryInput {
             rim: &huge,
             building_lots: &[],

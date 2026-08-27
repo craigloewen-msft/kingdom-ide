@@ -100,7 +100,7 @@ subject matter rather than a euphemism for something else.
 
 **Beware one collision.** In that crate a **`Ward` is a folder** — the ground a
 directory's files stand on. Everywhere else in Kingdom "a ward" is
-`Language`, and `ward_tree.rs` is the files rail. The two never meet — nothing
+`Language`, and `file_tree.rs` is the files rail. The two never meet — nothing
 outside `kingdom-citymap` names a `Ward` — but the word means different things
 on either side of that boundary, and its `lib.rs` says so at the top.
 
@@ -143,7 +143,19 @@ crates/
     main.rs         Axum binary          (feature: ssr)
     bin/kingdom-seed.rs   Seeds a proving ground   (feature: ssr)
     lib.rs          wasm entry point     (feature: hydrate)
-    api.rs          #[server] functions  — the browser/server bridge
+    api.rs          #[server] functions  — the browser/server bridge, and
+                    nothing else. The kingdom's records live behind `lock`,
+                    `update`, `snapshot` and `remember` here, which is why
+                    `turn.rs` calls back into it
+    turn.rs         Taking turns with the model: the agent loop (`converse`),
+                    the subagents it sends (`spawn_subagents`), and how a turn
+                    settles, stops or is asked again. Carved out of `api.rs`,
+                    which was holding both the wire and the loop — one is a
+                    request, the other a conversation that outlives the request
+                    that started it. Two ways in: `api::draft_plan` and
+                    `tools::spawn_agents`. Stopping is shared with
+                    `api::stop_plan` through `turns.rs` rather than by either
+                    side reaching into the other (ssr only)
     scan.rs         Filesystem scanning  (ssr only)
     events.rs       Publishing a plan's changes to its watchers, and a digest of
                     every plan to the rail (ssr only)
@@ -1230,6 +1242,8 @@ cargo leptos serve      # build + serve at http://127.0.0.1:3000
 cargo leptos watch      # same, with rebuild on change
 cargo test -p kingdom-core
 cargo test -p kingdom-app --features ssr --no-default-features
+cargo test -p kingdom-citymap
+cargo test -p kingdom-browser
 
 # No test launches a browser *by default*, so the suite needs nothing installed
 # and stays fast. The exception is opt-in and marked as such:
@@ -1240,6 +1254,41 @@ cargo test -p kingdom-browser -- --ignored   # launches a real Chrome
 # Puppeteer already downloaded. Set KINGDOM_CHROME_EXECUTABLE only to override
 # that on a machine where the guess is wrong.
 ```
+
+### The full check before you hand work back
+
+The test commands above do not cover the client, and neither `fmt` nor `clippy`
+was written down here for a long time -- which is a fair part of why both had
+drifted by the time anyone looked. The whole sequence:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --features ssr --no-default-features
+cargo test -p kingdom-core
+cargo test -p kingdom-app --features ssr --no-default-features
+cargo test -p kingdom-citymap
+cargo test -p kingdom-browser
+
+# `kingdom-app` compiles TWICE and the suites above only ever build the native
+# half. The wasm half is proven by building it, and nothing else does:
+cargo check -p kingdom-app --target wasm32-unknown-unknown \
+    --features hydrate --no-default-features
+```
+
+Two things worth knowing about that list:
+
+- **`cargo fmt` is edition-sensitive, and this workspace is mixed.**
+  `kingdom-citymap` is edition 2024; everything else is 2021. `cargo fmt` picks
+  each crate's style edition from its own manifest, so a file formatted by a
+  bare `rustfmt` (which defaults elsewhere) can come out dirty under `cargo
+  fmt`. Always run `cargo fmt --all`, never `rustfmt` on a single file.
+- **A test must not read the process environment.** Kingdom's own
+  `tools::child_environment` pins `KINGDOM_MODEL=mock` for a plan working in a
+  Kingdom checkout, so a test that reads that variable passes on your machine
+  and fails inside Kingdom -- in front of the plan least able to explain it.
+  `llm::catalogue::default_id` takes the preference as a parameter for exactly
+  this reason; do the same rather than reaching for `std::env::var` in a
+  decision you want to test.
 
 ### What a plan needs that the tests do not
 

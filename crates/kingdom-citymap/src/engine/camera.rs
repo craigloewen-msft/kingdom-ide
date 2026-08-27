@@ -819,8 +819,7 @@ mod tests {
         ] {
             let offset = corner - rig.focus;
             assert!(
-                offset.dot(right).abs() <= half.x + 1e-2
-                    && offset.dot(up).abs() <= half.y + 1e-2,
+                offset.dot(right).abs() <= half.x + 1e-2 && offset.dot(up).abs() <= half.y + 1e-2,
                 "{corner:?} fell outside the fitted view"
             );
         }
@@ -869,7 +868,13 @@ mod tests {
         pointwise.frame_points(&points, viewport);
 
         let mut boxed = rig();
-        boxed.frame_range(Vec2::ZERO, Vec2::splat(radius * 2.0), -depth, 60.0, viewport);
+        boxed.frame_range(
+            Vec2::ZERO,
+            Vec2::splat(radius * 2.0),
+            -depth,
+            60.0,
+            viewport,
+        );
 
         assert!(
             pointwise.scale < boxed.scale,
@@ -884,8 +889,7 @@ mod tests {
         for point in &points {
             let offset = *point - pointwise.focus;
             assert!(
-                offset.dot(right).abs() <= half.x + 1e-2
-                    && offset.dot(up).abs() <= half.y + 1e-2,
+                offset.dot(right).abs() <= half.x + 1e-2 && offset.dot(up).abs() <= half.y + 1e-2,
                 "{point:?} fell outside the fitted view"
             );
         }
@@ -1128,7 +1132,10 @@ mod tests {
             }
             // It cannot finish early, and it overshoots by at most the one
             // frame that carried it past the end.
-            assert!(spent >= GLIDE_SECONDS, "finished early at {frame}s: {spent}");
+            assert!(
+                spent >= GLIDE_SECONDS,
+                "finished early at {frame}s: {spent}"
+            );
             assert!(
                 spent < GLIDE_SECONDS + frame + 1e-6,
                 "ran long at {frame}s: {spent}"
