@@ -51,10 +51,15 @@ detail and the reasoning for each gap.
   (`poll_activity`) and it stops the engine drawing (`ViewerCommand::Show`).
   Keeping them on one signal is what stops the map from polling for a ring that
   nothing is rendering, or rendering a ring nothing is refreshing.
-- **Any resource arbitration at all** — the second of the product's three
-  questions. This matters more now than it
-  did: the court can bind ports and run builds, so two plans genuinely can
-  collide. Nothing detects it.
+- **Resource arbitration beyond ports** — the second of the product's three
+  questions, now half-answered. A plan can be given a network of its own
+  (`netns.rs`), so two agents no longer collide on 3000: each has its own, and
+  the chamber shows where to reach it. That is *avoidance*, not arbitration —
+  nothing detects or reports a genuine clash, and the other shared resources are
+  untouched. A shared `target/` directory is the obvious next one: two plans
+  building the same crate still block each other on the same lock, and nothing
+  says so. Isolation is also still off by default and per plan, so the King has
+  to know to ask for it.
 - Naming a plan with a model. A plan's branch is cut from its title today —
   `kingdom/<slug>`, via `kingdom_core::naming::slugify`, with `-2`, `-3` walked
   past on collision — but that title is still just the first clause of the

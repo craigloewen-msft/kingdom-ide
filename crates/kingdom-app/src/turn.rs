@@ -171,6 +171,26 @@ pub(crate) async fn converse(
         Err(e) => return settle(plan_id, Err(e)),
     };
 
+    // A network of this plan's own, if it was opened with one. Raised here --
+    // once per turn, before the first round -- rather than inside each tool,
+    // because all of them must land in the *same* namespace and a per-call
+    // check would be three chances to forget.
+    //
+    // A failure here is fatal to the turn on purpose. The alternative is
+    // running the agent on the shared network after the King asked for
+    // isolation, which is the one outcome this feature must never produce
+    // silently: he would find out when it took the port he was using.
+    if snapshot(&plan_id).is_some_and(|p| p.network.is_isolated()) {
+        if let Err(e) = crate::netns::ensure(&plan_id).await {
+            // `Refused` rather than `Transport`: a missing slirp4netns or a
+            // kernel that forbids namespaces is a settled answer, and
+            // `is_transient` must not send the turn round again to be told the
+            // same thing. The message names the package to install.
+            return settle(plan_id, Err(crate::llm::ModelError::Refused(e.to_string())));
+        }
+        crate::netns::watch(&plan_id);
+    }
+
     // Distinguishes this turn's rounds from every other turn's on the same
     // plan. See `batch_id`.
     let turn = uuid::Uuid::new_v4().to_string();

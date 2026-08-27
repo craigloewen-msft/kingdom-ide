@@ -57,6 +57,11 @@ ignore = { version = "0.4", optional = true }
 globset = { version = "0.4", optional = true }
 regex = { version = "1", optional = true }
 
+# A real terminal for the King's own shell into a plan's workspace and network
+# namespace. Server-only: it opens a pty and forks a shell, neither of which
+# exists in a browser. The client half is xterm.js, vendored under public/.
+portable-pty = { version = "0.9", optional = true }
+
 # Process groups and signals for the `bash` tool: a command's children must die
 # with it, which needs setpgid/kill on a negated pgid.
 libc = { version = "0.2", optional = true }
@@ -108,6 +113,9 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "BlobPropertyBag",
     "CanvasRenderingContext2d",
+    # Reporting a failure inside the terminal panel's injected script, which is
+    # otherwise invisible: a blank panel with no explanation.
+    "console",
     "DomRect",
     "DomTokenList",
     "Element",
@@ -156,6 +164,7 @@ ssr = [
     "dep:globset",
     "dep:regex",
     "dep:libc",
+    "dep:portable-pty",
     "dep:base64",
     "dep:syntect",
     "dep:two-face",

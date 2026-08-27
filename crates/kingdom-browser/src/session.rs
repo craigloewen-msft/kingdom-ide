@@ -26,7 +26,7 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -221,6 +221,11 @@ struct BrowserSession {
     console_task: JoinHandle<()>,
     /// This session's user-data directory, so closing can take it with it.
     profile: PathBuf,
+    /// The namespace shim this session launched through, if it had one.
+    ///
+    /// Kept only so shutting down can delete it. See
+    /// [`write_namespace_wrapper`].
+    namespace_wrapper: Option<PathBuf>,
     /// When this session was last asked to do anything.
     ///
     /// Read by the reaper, written by every operation that goes through
@@ -327,7 +332,47 @@ impl BrowserSession {
         // The profile is this session's alone -- named from the plan id -- so
         // it goes with it. This is the reclaim that keeps /tmp from filling.
         let _ = std::fs::remove_dir_all(&self.profile);
+        // And the shim that put it in a namespace, for the same reason.
+        if let Some(wrapper) = &self.namespace_wrapper {
+            let _ = std::fs::remove_file(wrapper);
+        }
     }
+}
+
+/// How a plan's Chrome is placed inside that plan's network namespace: given a
+/// plan id, the argv prefix to launch under, or empty for no namespace.
+type EnterNamespace = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+
+/// How a plan's Chrome is placed inside that plan's network namespace.
+///
+/// A hook rather than a direct call because `kingdom-browser` must not know
+/// what a network namespace is: it is the crate that drives a browser, and
+/// `kingdom-app` is the crate that owns namespaces. `kingdom-app` installs this
+/// at startup and this crate simply asks.
+///
+/// **Why Chrome must be in the namespace at all.** A plan with its own network
+/// runs its dev server on *its* `127.0.0.1:3000`. A Chrome on the host asked to
+/// navigate there would reach the host's `:3000` -- which belongs to the King,
+/// or to another plan entirely -- and screenshot the wrong project while
+/// reporting success. That is a silent wrong answer, which is worse than a
+/// failure, so the browser goes where the server is.
+static ENTER_NAMESPACE: OnceLock<EnterNamespace> = OnceLock::new();
+
+/// Teaches this crate how to enter a plan's network namespace.
+///
+/// Called once, by `kingdom-app`, before any browser is launched. A process
+/// that never calls it gets ordinary host-network browsers, which is exactly
+/// what a plan on the shared network should have.
+pub fn on_enter_namespace(hook: impl Fn(&str) -> Vec<String> + Send + Sync + 'static) {
+    let _ = ENTER_NAMESPACE.set(Box::new(hook));
+}
+
+/// The argv prefix that puts this plan's Chrome in its own namespace, if any.
+fn enter_prefix(plan: &str) -> Vec<String> {
+    ENTER_NAMESPACE
+        .get()
+        .map(|hook| hook(plan))
+        .unwrap_or_default()
 }
 
 impl BrowserSession {
@@ -391,6 +436,27 @@ impl BrowserSession {
         if let Some(executable) = chrome_executable()? {
             builder = builder.chrome_executable(executable);
         }
+
+        // A plan with its own network needs its browser in that network. See
+        // [`ENTER_NAMESPACE`] for why -- in short, a host Chrome told to open
+        // `localhost:3000` would silently screenshot another project.
+        //
+        // It has to be a wrapper script because chromiumoxide takes an
+        // *executable*, not an argv: there is nowhere to put `nsenter` and its
+        // flags except inside something that looks like a browser binary.
+        let namespace_wrapper = match enter_prefix(plan).split_first() {
+            None => None,
+            Some(_) => {
+                let chrome = match chrome_executable()? {
+                    Some(path) => path,
+                    None => chromiumoxide::detection::default_executable(Default::default())
+                        .map_err(BrowserError::ChromeUnavailable)?,
+                };
+                let wrapper = write_namespace_wrapper(plan, &chrome)?;
+                builder = builder.chrome_executable(wrapper.clone());
+                Some(wrapper)
+            }
+        };
 
         let config = builder.build().map_err(BrowserError::ChromeUnavailable)?;
         let (mut browser, mut handler) =
@@ -476,6 +542,7 @@ impl BrowserSession {
             handler: handler_task,
             console_task,
             profile,
+            namespace_wrapper,
             last_used: Mutex::new(Instant::now()),
             page,
             console,
@@ -1005,6 +1072,61 @@ fn chrome_executable() -> Result<Option<PathBuf>, BrowserError> {
     }
 
     Ok(cached_chrome())
+}
+
+/// Writes the shim that launches Chrome inside a plan's network namespace.
+///
+/// chromiumoxide is handed an executable path and builds the argument list
+/// itself, so `nsenter` cannot be prepended to the command -- there is no
+/// command to prepend it to yet. A tiny `exec` wrapper is the one place the
+/// prefix fits, and `exec` matters: it replaces the shell rather than forking,
+/// so the pid chromiumoxide waits on is Chrome's own and killing the session
+/// still kills the browser.
+///
+/// `"$@"` quoted, because Chrome's flags contain paths that can contain spaces.
+fn write_namespace_wrapper(plan: &str, chrome: &Path) -> Result<PathBuf, BrowserError> {
+    use std::io::Write as _;
+
+    let prefix = enter_prefix(plan)
+        .into_iter()
+        .map(|part| shell_quote(&part))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut hasher = DefaultHasher::new();
+    plan.hash(&mut hasher);
+    let path = std::env::temp_dir().join(format!("kingdom-chrome-ns-{:016x}.sh", hasher.finish()));
+
+    let script = format!(
+        "#!/bin/sh\nexec {prefix} {} \"$@\"\n",
+        shell_quote(&chrome.to_string_lossy())
+    );
+
+    let mut file = std::fs::File::create(&path).map_err(|e| {
+        BrowserError::ChromeUnavailable(format!("the namespace wrapper could not be written: {e}"))
+    })?;
+    file.write_all(script.as_bytes()).map_err(|e| {
+        BrowserError::ChromeUnavailable(format!("the namespace wrapper could not be written: {e}"))
+    })?;
+    drop(file);
+
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+        BrowserError::ChromeUnavailable(format!("the namespace wrapper is not executable: {e}"))
+    })?;
+
+    Ok(path)
+}
+
+/// Single-quotes a string for `/bin/sh`.
+///
+/// The one escape that matters: a `'` inside is closed, escaped and reopened.
+/// Paths here come from `PATH` lookups and a plan id, so this is belt and
+/// braces rather than a live threat -- but a browser that fails to launch
+/// because someone's home directory has an apostrophe in it is a miserable bug
+/// to track down.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Hunts for a Chromium that some other tool downloaded.

@@ -140,14 +140,19 @@ orphans real work. `store.rs` is the seam. The full reasoning, including the
 that act — a plan works in its own git worktree with tools for reading,
 searching, patching, `bash`, `tmux`, a headless browser, profiling and
 subagents. It drafts to `.kingdom/draft.md`, calls `propose_plan`, and waits;
-the King approves or annotates, and the work is merged or archived.
+the King approves or annotates, and the work is merged or archived. A plan can
+also be given a **network of its own** — its own `:3000`, forwarded back to a
+host port the chamber shows — with a terminal into it. Off by default, chosen
+per plan; see [`docs/architecture.md`](docs/architecture.md#a-network-of-a-plans-own).
 
 **Faked:** the *opening* court — the plans a kingdom starts with, before any
 decree (`kingdom_core::sample::starter_plans`). Plans the King opens are real.
 The sample deliberately includes a failed plan, one mid-draft and one with a
 standing proposal; do not "clean up" those states away. A test pins it.
 
-**Not built:** any resource arbitration at all — question 2 above. Also:
+**Not built:** resource arbitration beyond ports — question 2 above is only
+half-answered, because a network namespace *avoids* a port clash rather than
+detecting or reporting one, and a shared `target/` still blocks. Also:
 subagents with tools, subagents while proposing, restoring an archived plan, and
 live updates on the map. See [`docs/roadmap.md`](docs/roadmap.md) for why each
 gap is its own decision.
@@ -229,11 +234,17 @@ is invisible until a plan is halfway through a job:
 
 - **A browser**, for the `browser_*` tools. Any Chrome or Chromium on `PATH`.
   On arm64, Google Chrome has no Linux build — Chromium is the native one.
+- **`slirp4netns`**, but only for a plan the King opens with a network of its
+  own. Without it such a plan has no DNS, no crates.io and no git, so Kingdom
+  refuses to open one and names the package instead of degrading. Nothing else
+  needs it, and the default plan does not.
 - **Whatever the city itself needs to run.** That is the *project's*
   prerequisite, not Kingdom's, and Kingdom cannot install it.
 
-Neither is checked up front on purpose: a plan that only reads and proposes
-needs neither, and refusing to start without them would be worse than the
+None is checked up front on purpose — except the middle one, which *is* checked
+before the plan opens, because "you asked for isolation and silently did not get
+it" is a worse answer than a refusal. A plan that only reads and proposes needs
+none of them, and refusing to start without them would be worse than the
 diagnosis.
 
 The browser cannot hand a server a real filesystem path, so the opening screen

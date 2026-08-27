@@ -173,7 +173,13 @@ impl Tool for TmuxRun {
             .unwrap_or(true);
 
         let socket = socket_for(shop);
-        if let Err(reason) = ensure_server(&socket, shop.root()).await {
+        if let Err(reason) = ensure_server(
+            &socket,
+            shop.root(),
+            &crate::netns::enter_prefix(shop.plan()),
+        )
+        .await
+        {
             return Refusal::Refused(reason).into();
         }
 
@@ -515,13 +521,18 @@ fn fingerprint(s: &str) -> u64 {
 /// like any other: the user may have killed it, or the machine may have
 /// rebooted, and a cached "it exists" would turn that into a confusing failure
 /// on the next window instead of a silent recovery.
-async fn ensure_server(socket: &Path, root: &Path) -> Result<(), String> {
+async fn ensure_server(socket: &Path, root: &Path, enter: &[String]) -> Result<(), String> {
     let alive = cli(socket, &["has-session", "-t", SESSION]).await?;
     if alive.status.success() {
         return Ok(());
     }
 
-    let created = cli(
+    // The *server* is what has to be inside the namespace, not each window: a
+    // tmux server is a daemon, and every pane it later opens is its child and
+    // inherits its network. Entering per-window would be both redundant and
+    // wrong -- the first `new-session` already forked the daemon outside.
+    let created = enter_cli(
+        enter,
         socket,
         &[
             "new-session",
@@ -557,7 +568,24 @@ async fn ensure_server(socket: &Path, root: &Path) -> Result<(), String> {
 /// through, so no caller -- and no model -- can arrange for a tmux that talks
 /// to somebody else's server.
 async fn cli(socket: &Path, args: &[&str]) -> Result<Output, String> {
-    let mut command = std::process::Command::new("tmux");
+    enter_cli(&[], socket, args).await
+}
+
+/// One tmux invocation, optionally inside a plan's network namespace.
+///
+/// Only the call that *starts* the server passes a prefix; every later call
+/// talks to that daemon over its socket, and a UNIX socket crosses a network
+/// namespace freely -- so the rest of this module needs no knowledge of any of
+/// this.
+async fn enter_cli(enter: &[String], socket: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut command = match enter.split_first() {
+        Some((program, rest)) => {
+            let mut command = std::process::Command::new(program);
+            command.args(rest).arg("tmux");
+            command
+        }
+        None => std::process::Command::new("tmux"),
+    };
     command
         .arg("-S")
         .arg(socket)

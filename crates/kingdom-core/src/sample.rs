@@ -52,6 +52,7 @@ pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
             prompt,
             &mock,
             Workspace::in_place(&city.path),
+            NetworkMode::Shared,
         );
         plan.title = format!("{} of {}", plan_title(i), city.name);
         plan.summary = match status {
@@ -82,6 +83,7 @@ pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
         "Harden the error paths",
         &mock,
         Workspace::in_place(&first.path),
+        NetworkMode::Shared,
     );
     merged.title = format!("The Old Ramparts of {}", first.name);
     merged.summary = "Hardened the error paths. Landed on main.".into();
@@ -97,6 +99,7 @@ pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
         "Rewrite the scanner from scratch",
         &mock,
         Workspace::in_place(&first.path),
+        NetworkMode::Shared,
     );
     archived.title = format!("The Folly of {}", first.name);
     archived.summary = "Proposed rewriting the scanner. Set aside.".into();
@@ -120,6 +123,7 @@ pub fn starter_plans(cities: &[City]) -> Vec<Plan> {
         "Speed up the start-up path",
         &mock,
         Workspace::in_place(&first.path),
+        NetworkMode::Shared,
     );
     proposing.title = format!("The Swift Gates of {}", first.name);
     proposing.summary = "A plan for the start-up path, awaiting your word.".into();
