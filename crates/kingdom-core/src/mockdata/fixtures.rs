@@ -15,7 +15,7 @@
 
 use super::build::*;
 use super::{CitySpec, FixtureSpec};
-use crate::model::Language;
+use crate::model::{CityKind, Language};
 
 /// The fixture the "Enter the Proving Grounds" button opens.
 pub const DEFAULT_FIXTURE: &str = "kingdom-mirror";
@@ -26,10 +26,11 @@ pub const DEFAULT_FIXTURE: &str = "kingdom-mirror";
 const MIRROR_SEED: u64 = 0x_D1FF_0001;
 const CROWDED_SEED: u64 = 0x_C0FF_0002;
 const MONOREPO_SEED: u64 = 0x_BEEF_0003;
+const SHOPFRONT_SEED: u64 = 0x_5EED_0004;
 
 /// Every fixture the seeder can build. **Add yours here.**
 pub fn fixtures() -> Vec<FixtureSpec> {
-    vec![kingdom_mirror(), crowded(), monorepo()]
+    vec![kingdom_mirror(), crowded(), monorepo(), shopfront()]
 }
 
 /// Looks up a fixture by name.
@@ -234,5 +235,198 @@ fn monorepo() -> FixtureSpec {
                 ],
             )
             .dirty(12),
+    )
+}
+
+/// One project, one database, and room for five agents to prove it is shared.
+///
+/// Every other fixture is *shaped* like a project. This one **runs**: the files
+/// are real Node, the manifest is a real manifest, and `npm install && node
+/// server.js` actually serves. That is deliberate and it is the whole point --
+/// the claim being tested is that five agents reach one MongoDB, and a fixture
+/// of sized filler cannot test a claim about the network.
+///
+/// It earns its place by reaching a state no other fixture can:
+///
+/// - a city with a `.kingdom/services.toml`, so the well is exercised at all;
+/// - five plans on one city, each binding `:3000` in its own namespace, which
+///   crosses network isolation with shared services in the one place where they
+///   could plausibly fight;
+/// - **shared mutable state**, so "another agent wrote this" is visible rather
+///   than argued about.
+fn shopfront() -> FixtureSpec {
+    // The manifest. `{host}` and `{port}` are filled in with the container's
+    // real address at the moment a plan runs a command -- see
+    // `kingdom_core::services::ServiceSpec::environment`.
+    let manifest = "\
+# What this project needs standing in order to run.
+#
+# Kingdom starts these once for the whole project, shares them between every
+# agent working on it, and stops them when the last one is done. The address is
+# handed to your commands as the environment variables below.
+
+[[service]]
+name  = \"db\"
+image = \"mongo:7\"
+port  = 27017
+env   = { MONGODB_URI = \"mongodb://{host}:{port}/shopfront\", MONGO_DB = \"shopfront\" }
+# A named volume, so the data outlives the container.
+volume = \"shopfront-db\"
+";
+
+    // One dependency, so `npm install` is quick enough that doing it five times
+    // is not the reason the rehearsal fails.
+    let package = "\
+{
+  \"name\": \"shopfront\",
+  \"version\": \"0.1.0\",
+  \"private\": true,
+  \"type\": \"module\",
+  \"scripts\": {
+    \"start\": \"node server.js\"
+  },
+  \"dependencies\": {
+    \"mongodb\": \"^6.3.0\"
+  }
+}
+";
+
+    // The ledger. Every agent runs this on :3000 -- in its own namespace, so
+    // five of them do not collide -- and all five write to one collection.
+    let server = r#"// The shared ledger.
+//
+// Every agent working on this project runs its own copy of this server, on its
+// own :3000, in its own network namespace. They all write to the SAME MongoDB,
+// which Kingdom started once for the whole project.
+//
+// That is the thing worth seeing: five servers, five ports, one database.
+import { createServer } from "node:http";
+import { MongoClient } from "mongodb";
+
+// Kingdom sets this for every command it runs here. Do NOT use localhost --
+// the database is not on this machine's loopback, and 127.0.0.1 will fail.
+const uri = process.env.MONGODB_URI;
+if (!uri) {
+  console.error(
+    "MONGODB_URI is not set. Kingdom sets it from .kingdom/services.toml;\n" +
+      "if you are running this by hand, set it to the address in the ports badge."
+  );
+  process.exit(1);
+}
+
+// Who is writing. Each agent should set this to something recognisable so the
+// ledger shows whose entry is whose.
+const agent = process.env.AGENT_NAME || `agent-${process.pid}`;
+
+const client = new MongoClient(uri);
+await client.connect();
+const entries = client.db(process.env.MONGO_DB || "shopfront").collection("entries");
+
+const server = createServer(async (request, response) => {
+  const json = (code, body) => {
+    response.writeHead(code, { "content-type": "application/json" });
+    response.end(JSON.stringify(body, null, 2));
+  };
+
+  try {
+    // Write one entry, tagged with whichever agent is serving.
+    if (request.method === "POST" && request.url === "/entry") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString() || "{}";
+      const { note } = JSON.parse(raw);
+
+      const entry = { agent, note: note ?? "(no note)", at: new Date() };
+      await entries.insertOne(entry);
+      return json(201, entry);
+    }
+
+    // Read everything back -- including what the OTHER agents wrote.
+    if (request.method === "GET" && request.url === "/entries") {
+      const all = await entries.find().sort({ at: 1 }).toArray();
+      const authors = [...new Set(all.map((e) => e.agent))];
+      return json(200, { servedBy: agent, authors, count: all.length, entries: all });
+    }
+
+    if (request.method === "GET" && request.url === "/") {
+      return json(200, {
+        servedBy: agent,
+        database: uri.replace(/\/\/.*@/, "//"),
+        try: ["POST /entry {\"note\":\"...\"}", "GET /entries"],
+      });
+    }
+
+    json(404, { error: "not found" });
+  } catch (error) {
+    json(500, { error: String(error) });
+  }
+});
+
+server.listen(3000, () => {
+  console.log(`${agent} serving on :3000, writing to the shared ledger`);
+});
+"#;
+
+    let readme = r#"# shopfront
+
+A **real, runnable** project in the Proving Grounds. Unlike the other fixtures,
+the code here works: it is here to prove that several agents share one database.
+
+## What it is
+
+A tiny HTTP ledger backed by MongoDB. `POST /entry` writes a note tagged with
+whichever agent wrote it; `GET /entries` reads back everything -- including the
+entries the other agents wrote.
+
+## What Kingdom does for you
+
+`.kingdom/services.toml` declares the MongoDB this project needs. Kingdom:
+
+- starts **one** container for the whole project, when the first plan needs it;
+- puts its address in `$MONGODB_URI` for every command any plan runs;
+- shows that address in the ports badge, so you can connect to it yourself;
+- stops it when the **last** plan working on this project is done, keeping the
+  data in a named volume.
+
+You do not run `docker` yourself, and you must not use `localhost` -- the
+database is not on your loopback.
+
+## The five-agent rehearsal
+
+1. Open **five plans** on this project, each with a network of its own.
+2. In each one: `npm install`, then `AGENT_NAME=agent-1 npm start` (numbering
+   each agent differently).
+3. Every plan binds `:3000` and none of them collide -- each is in its own
+   namespace. The ports badge gives each one a different host address.
+4. In each plan: `curl -X POST localhost:3000/entry -d '{"note":"hello"}'`.
+   That `localhost` is the plan's *own* server, which is fine.
+5. Then `curl localhost:3000/entries` in any one of them. It lists entries from
+   **all five agents** -- one database behind five servers.
+6. Open the ports badge: one well, five plans using it.
+7. Close four plans. The database stays up. Close the fifth and it stops, with
+   the data kept.
+"#;
+
+    FixtureSpec::new(
+        "shopfront",
+        "One project, one shared MongoDB, five agents -- and it really runs.",
+        SHOPFRONT_SEED,
+    )
+    .city(
+        // `CitySpec::new` rather than `node_city`, which would write its own
+        // placeholder `package.json` and `README.md` on top of the real ones
+        // below. `CityKind::Node` is still what the scanner will infer from the
+        // `package.json` this fixture does write, so the stack is arrived at
+        // exactly as it is for every other city.
+        CitySpec::new("shopfront", CityKind::Node)
+            .files([
+                text("package.json", package),
+                text("server.js", server),
+                text("README.md", readme),
+            ])
+            // The manifest, in the project's own `.kingdom/`. It is committed --
+            // `worktree::exclude_worktree_dir` re-includes exactly this path,
+            // because a bare `.kingdom/` exclude would hide it from git.
+            .dir(".kingdom", [text("services.toml", manifest)]),
     )
 }

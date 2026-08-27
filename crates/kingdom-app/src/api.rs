@@ -94,6 +94,24 @@ pub fn kingdom_snapshot() -> Option<Kingdom> {
     lock().ok().map(|kingdom| kingdom.clone())
 }
 
+/// Where a plan's *project* lives, as opposed to where the plan works.
+///
+/// The distinction is the whole point. A plan works in its own worktree under
+/// `<city>/.kingdom/`, but its shared services belong to the **city** -- so
+/// five plans on one project must resolve to one path here, or they would each
+/// raise a well of their own and share nothing.
+///
+/// It is also why the services manifest is read from here rather than from the
+/// worktree: a plan that edits `services.toml` does not thereby get a private
+/// database mid-flight. Its change takes effect when the work is merged.
+#[cfg(feature = "ssr")]
+pub fn city_root_of(id: &PlanId) -> Option<std::path::PathBuf> {
+    let kingdom = lock().ok()?;
+    let plan = kingdom.plan(id)?;
+    let city = kingdom.city(&plan.city)?;
+    Some(std::path::Path::new(&kingdom.root).join(&city.path))
+}
+
 /// A plan on its way to a browser and nowhere else.
 ///
 /// Every `#[server]` function below hands back the plan it just changed, and
@@ -2083,6 +2101,18 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // Unconditional, like the draft read above: a plan on the shared network
     // has no namespace and this does nothing at all.
     crate::netns::shutdown(&plan_id);
+
+    // And this plan stops using the city's shared services. The container is
+    // only
+    // stopped if *nobody* is left drawing -- five plans on one project share
+    // one database, and four of them finishing must not take it away from the
+    // fifth. Its named volume is kept regardless: the King's data is the whole
+    // reason the service existed.
+    //
+    // `city_root` rather than a fresh lookup: the plan is about to be settled,
+    // and resolving the city through a record being torn down is a race this
+    // does not need to run.
+    crate::services::release(&plan_id, &city_root).await;
 
     let finish = match how {
         Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,

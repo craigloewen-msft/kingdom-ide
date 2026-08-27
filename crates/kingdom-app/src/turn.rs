@@ -31,7 +31,7 @@
 
 #![cfg(feature = "ssr")]
 
-use crate::api::{lock, next_plan_number, remember, snapshot, update};
+use crate::api::{city_root_of, lock, next_plan_number, remember, snapshot, update};
 use kingdom_core::{Plan, PlanId};
 use leptos::prelude::ServerFnError;
 
@@ -189,6 +189,26 @@ pub(crate) async fn converse(
             return settle(plan_id, Err(crate::llm::ModelError::Refused(e.to_string())));
         }
         crate::netns::watch(&plan_id);
+    }
+
+    // The shared services this city declares. Raised here for the same reason
+    // the namespace is -- once per turn, before the first round -- and after
+    // it, because a service's address is handed to the plan's tools and those
+    // tools must already be in the namespace that can reach it.
+    //
+    // A failure is fatal to the turn on the same reasoning: a plan whose
+    // project declares a database, running with no database and no word said,
+    // fails later in a way that reads as a bug in its own code.
+    //
+    // A city with no manifest costs nothing here -- `ensure` reads one absent
+    // file and returns.
+    if let Some(city_root) = city_root_of(&plan_id) {
+        if let Err(e) = crate::services::ensure(&plan_id, &city_root).await {
+            // `Refused` for the same reason as above: a missing Docker daemon
+            // is a settled answer, and retrying the turn would only be told it
+            // again.
+            return settle(plan_id, Err(crate::llm::ModelError::Refused(e.to_string())));
+        }
     }
 
     // Distinguishes this turn's rounds from every other turn's on the same

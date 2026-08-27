@@ -180,19 +180,38 @@ pub fn publish(plan: &Plan) {
     pulse(plan);
 }
 
-/// A plan as a browser should receive it, with its live ports attached.
+/// A plan as a browser should receive it, with its live ports and shared
+/// services attached.
 ///
-/// [`Plan::for_wire`] trims what the browser does not need; this adds the one
-/// thing it needs that the *record* does not have. Ports belong to a running
-/// slirp4netns rather than to the plan, so they are answered here, at the
-/// moment of sending, rather than stored -- a forward written to disk would
-/// name a host port that stopped answering when the server did.
+/// [`Plan::for_wire`] trims what the browser does not need; this adds the two
+/// things it needs that the *record* does not have. Ports belong to a running
+/// slirp4netns and a shared service to a running Docker daemon rather than to
+/// the plan,
+/// so both are answered here, at the moment of sending, rather than stored -- a
+/// forward or an address written to disk would name something that stopped
+/// answering when the server did.
 fn on_the_wire(plan: &Plan) -> Plan {
     let mut wire = plan.for_wire();
     if plan.network.is_isolated() {
         wire.ports = crate::netns::forwards_of(&plan.id)
             .into_iter()
             .map(|(guest, host)| kingdom_core::PortForward { guest, host })
+            .collect();
+    }
+    // Unconditional, unlike ports: a shared service is used by every plan in the
+    // city
+    // whether or not this one has a network of its own, and the King wants the
+    // address either way. Empty for the overwhelming majority of projects,
+    // which declare no services at all.
+    if let Some(city_root) = crate::api::city_root_of(&plan.id) {
+        wire.shared_services = crate::services::running_in(&city_root)
+            .into_iter()
+            .map(|service| kingdom_core::SharedService {
+                address: service.address(),
+                users: crate::services::users_of(&city_root, &service.name),
+                name: service.name,
+                image: service.image,
+            })
             .collect();
     }
     wire
@@ -303,6 +322,33 @@ mod tests {
             Workspace::in_place("/tmp/city"),
             kingdom_core::NetworkMode::Shared,
         )
+    }
+
+    /// A shared service is never persisted, only attached on the way out.
+    ///
+    /// The same rule `Plan::ports` follows, and it matters for the same reason:
+    /// an address belongs to a running Docker daemon, so one restored from a
+    /// record would name a container that stopped when the server did. This
+    /// pins the *record* side -- a plan as the server holds it carries none --
+    /// which is what `on_the_wire` then fills in.
+    #[test]
+    fn a_plan_record_carries_no_shared_services() {
+        let plan = a_plan("kept");
+        assert!(
+            plan.shared_services.is_empty(),
+            "a plan record must not carry an address that outlives the daemon"
+        );
+
+        // And it survives a round trip through the store's format without
+        // acquiring one, because the field is `#[serde(default)]`.
+        let json = serde_json::to_string(&plan).expect("a plan serialises");
+        let back: Plan = serde_json::from_str(&json).expect("and comes back");
+        assert!(back.shared_services.is_empty());
+
+        // A record written before this field existed still loads.
+        let old = json.replace(",\"shared_services\":[]", "");
+        let ancient: Plan = serde_json::from_str(&old).expect("an older record still loads");
+        assert!(ancient.shared_services.is_empty());
     }
 
     /// The whole point of the module: a change made through the funnel reaches

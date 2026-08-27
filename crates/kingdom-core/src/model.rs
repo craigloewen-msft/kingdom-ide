@@ -540,6 +540,37 @@ pub struct PortForward {
     pub host: u16,
 }
 
+/// A shared service this plan's city has standing, and where to reach it.
+///
+/// The browser-facing view of one container. Distinct from the two types on the
+/// server side because it answers a different question: `ServiceSpec` is what a
+/// project *declared*, `services::RunningService` is what the daemon is
+/// actually running, and this is what the King needs to see -- an address to
+/// copy and a count of who else is using it.
+///
+/// Runtime truth rather than record, exactly like [`PortForward`]: it is filled
+/// in on the way to a browser and is empty everywhere else, because a container
+/// belongs to a running Docker daemon rather than to the plan. One written to
+/// disk would name an address that answers nothing.
+///
+/// The address is an **IP**, not a name, and that is not an oversight: Docker's
+/// DNS resolves service names only between containers on the same network, so
+/// neither the King's machine nor a plan's namespace can look one up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedService {
+    /// The service's name from the city's manifest, e.g. `db`.
+    pub name: String,
+    /// The image it runs, e.g. `mongo:7`.
+    pub image: String,
+    /// Where to reach it, as `host:port`.
+    pub address: String,
+    /// How many plans are using it right now, this one included.
+    ///
+    /// The answer to "who else is in here?", which is the question the King
+    /// actually has when he is about to change something in a shared database.
+    pub users: usize,
+}
+
 /// A prepared place on disk for one plan to work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -647,6 +678,14 @@ pub struct Plan {
     /// needing a second channel and a second thing to keep in step.
     #[serde(default)]
     pub ports: Vec<PortForward>,
+    /// The shared services this plan's city has standing.
+    ///
+    /// Never persisted, for the reason [`Plan::ports`] is not -- see
+    /// [`SharedService`]. It rides on `Plan` for the same reason too: the badge
+    /// gets it through the socket that already carries whole plans, rather than
+    /// needing a second channel and a second thing to keep in step.
+    #[serde(default)]
+    pub shared_services: Vec<SharedService>,
     /// What this plan is busy with right now, in plain language, or `None`
     /// when nothing is in flight.
     ///
@@ -1063,6 +1102,7 @@ impl Plan {
             workspace,
             network,
             ports: Vec::new(),
+            shared_services: Vec::new(),
             working_on: None,
             queued: Vec::new(),
             spawned_by: None,
@@ -1123,6 +1163,7 @@ impl Plan {
             // would be unable to answer most of what it is sent to answer.
             network: parent.network,
             ports: Vec::new(),
+            shared_services: Vec::new(),
             working_on: None,
             // A subagent answers to the model that sent it and renders no
             // composer, so nobody can queue anything against it.

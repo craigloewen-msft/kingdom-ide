@@ -423,29 +423,58 @@ pub async fn branches(city_root: &Path) -> Vec<String> {
     names
 }
 
-/// Adds `.kingdom/` to the repository's local excludes, once.
+/// Excludes Kingdom's scratch folder from the repository, while keeping the
+/// one file in it that belongs to the project.
+///
+/// # Why this is not simply `.kingdom/`
+///
+/// It was, until a city's shared services got a manifest at
+/// `.kingdom/services.toml`. That file is the *project's* -- it says what the
+/// project needs standing in order to run -- so it must be committable, while
+/// the worktrees beside it must stay hidden.
+///
+/// **git cannot re-include a file whose parent directory is excluded.** A
+/// `.kingdom/` rule excludes the directory itself and git never looks inside,
+/// so a later `!.kingdom/services.toml` has nothing to act on. The form that
+/// works is to exclude the directory's *contents* -- `.kingdom/*` -- and then
+/// negate the one path. Measured against a real repository, not inferred:
+/// under the old rule `git status` reported nothing at all.
 ///
 /// Best-effort: a repo whose `info/exclude` cannot be written still works, it
 /// just shows Kingdom's scratch folder as untracked. That is cosmetic, and not a
 /// reason to refuse the user a workspace.
 fn exclude_worktree_dir(city_root: &Path) {
-    let entry = format!("{WORKTREE_DIR}/");
+    let contents = format!("{WORKTREE_DIR}/*");
+    let keep = format!("!{}", kingdom_core::services::MANIFEST_PATH);
     let exclude = city_root.join(".git").join("info").join("exclude");
 
     let previous = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if previous.lines().any(|l| l.trim() == entry) {
+    if previous.lines().any(|l| l.trim() == contents) {
         return;
     }
 
+    // A repository excluded by the *old* rule keeps it forever otherwise, and
+    // its manifest stays invisible. Dropped rather than left in place, because
+    // `.kingdom/` and `.kingdom/*` do not compose -- the first one still hides
+    // the directory and wins.
+    let carried: String = previous
+        .lines()
+        .filter(|line| line.trim() != format!("{WORKTREE_DIR}/"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let _ = std::fs::create_dir_all(exclude.parent().unwrap_or(city_root));
-    let separator = if previous.is_empty() || previous.ends_with('\n') {
+    let separator = if carried.is_empty() || carried.ends_with('\n') {
         ""
     } else {
         "\n"
     };
     let _ = std::fs::write(
         &exclude,
-        format!("{previous}{separator}# Kingdom IDE worktrees\n{entry}\n"),
+        format!(
+            "{carried}{separator}# Kingdom IDE worktrees, but not the project's \
+             own service manifest\n{contents}\n{keep}\n"
+        ),
     );
 }
 
@@ -761,6 +790,82 @@ mod tests {
             body.contains("folly.rs") && body.contains("fn doomed()"),
             "the patch must carry the work, or it recovers nothing"
         );
+    }
+
+    /// A worktree is hidden from the repository; the service manifest is not.
+    ///
+    /// Both halves matter and they pull against each other, which is why this
+    /// is pinned against real `git status` rather than by reading the exclude
+    /// file back. The obvious rule -- `.kingdom/` -- silently fails the second
+    /// half: git excludes the *directory* and never looks inside, so a
+    /// negation for the manifest has nothing to act on and the project cannot
+    /// commit the file that says what it needs to run.
+    #[tokio::test]
+    async fn the_service_manifest_stays_visible_while_worktrees_are_hidden() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        prepare(root, &WorkspaceMode::Fresh, "raise-the-well")
+            .await
+            .unwrap();
+
+        let manifest = root.join(kingdom_core::services::MANIFEST_PATH);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "[[service]]\nname = \"db\"\n").unwrap();
+
+        let status = git(root, &["status", "--porcelain", "--untracked-files=all"])
+            .await
+            .expect("git status");
+
+        assert!(
+            status.contains("services.toml"),
+            "the project must be able to commit its own service manifest; \
+             git said: {status:?}"
+        );
+        assert!(
+            !status.contains("worktree") && !status.contains("draft"),
+            "Kingdom's scratch folder must stay out of the repository; \
+             git said: {status:?}"
+        );
+    }
+
+    /// A repository excluded by the old rule is brought forward.
+    ///
+    /// Every project any previous Kingdom touched carries a bare `.kingdom/`
+    /// line. Left in place it still hides the directory and wins over the new
+    /// rule, so those projects -- the existing ones, the ones that matter --
+    /// would never be able to commit a manifest.
+    #[tokio::test]
+    async fn a_repository_excluded_by_the_old_rule_is_brought_forward() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        // Exactly what a previous version of Kingdom wrote.
+        let exclude = root.join(".git").join("info").join("exclude");
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "# something the user added\n*.tmp\n.kingdom/\n").unwrap();
+
+        prepare(root, &WorkspaceMode::Fresh, "raise-the-well")
+            .await
+            .unwrap();
+
+        let rules = std::fs::read_to_string(&exclude).unwrap();
+        assert!(
+            !rules.lines().any(|l| l.trim() == ".kingdom/"),
+            "the old rule must go, or it still hides the manifest: {rules:?}"
+        );
+        assert!(
+            rules.lines().any(|l| l.trim() == "*.tmp"),
+            "the user's own rules must survive: {rules:?}"
+        );
+
+        let manifest = root.join(kingdom_core::services::MANIFEST_PATH);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "[[service]]\nname = \"db\"\n").unwrap();
+        let status = git(root, &["status", "--porcelain", "--untracked-files=all"])
+            .await
+            .expect("git status");
+        assert!(status.contains("services.toml"), "git said: {status:?}");
     }
 
     /// The draft dies with the checkout, which is why it must be read first.

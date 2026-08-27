@@ -75,6 +75,16 @@ pub struct SystemPrompt {
     /// Every skill the workspace can reach, as a catalogue of names and
     /// descriptions. Bodies are fetched on demand by the `skill` tool.
     pub skills: Vec<Skill>,
+    /// The city's shared services and where to reach them, or empty when it
+    /// declares none.
+    ///
+    /// Said in the prompt as well as put in the environment because the two
+    /// answer different questions. The environment is what a command *uses*;
+    /// this is what stops the model writing `localhost:27017` in the first
+    /// place -- a plan's namespace provably cannot reach its own loopback
+    /// there, and an agent that has never been told will reach for it every
+    /// time.
+    pub services: String,
 }
 
 /// One guidance file, and where it came from.
@@ -103,6 +113,7 @@ impl SystemPrompt {
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
+            services: services_block(Path::new(&city.path)),
         }
     }
 
@@ -157,6 +168,13 @@ impl SystemPrompt {
         if !self.workspace.is_empty() {
             out.push_str("\n\n");
             out.push_str(&self.workspace);
+        }
+
+        // After the workspace block, because it is a fact about where the model
+        // is standing, and before the remit, which must stay last.
+        if !self.services.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&self.services);
         }
 
         out.push_str("\n\n");
@@ -306,6 +324,49 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
              -- you do not need to choose a model in the picker.",
         );
     }
+    out
+}
+
+/// The city's shared services, and the one thing a model must not assume about
+/// them.
+///
+/// Empty for almost every project, which is what keeps this free: a city with
+/// no manifest adds nothing to any prompt.
+///
+/// The warning is the point. Every model's prior for "connect to the database"
+/// is `localhost`, and here that is precisely wrong -- a plan with a network of
+/// its own reaches `127.0.0.1` inside its *own* namespace, where nothing is
+/// listening, and the failure looks like a broken database rather than a wrong
+/// address. Measured before this was written: a namespace can reach the
+/// container's address and provably cannot reach the host's loopback.
+fn services_block(city_root: &Path) -> String {
+    let running = crate::services::running_in(city_root);
+    if running.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "This project has shared services running -- one set, shared by every \
+         agent working on it, not one per agent. Reach them at these addresses:\n",
+    );
+    for service in &running {
+        let _ = writeln!(
+            out,
+            "\n- **{}** ({}) at `{}`",
+            service.name,
+            service.image,
+            service.address()
+        );
+    }
+    out.push_str(
+        "\nUse those addresses, not `localhost` -- the services are not on this \
+         machine's loopback, and a connection to `127.0.0.1` will fail. The \
+         usual environment variables are already set for every command you run, \
+         so prefer reading them (for example `$MONGODB_URI`) over writing an \
+         address by hand.\n\nThey are shared, so treat the data in them as \
+         someone else's too: other agents are reading and writing it at the \
+         same time.",
+    );
     out
 }
 
@@ -500,6 +561,7 @@ mod tests {
             permissions: permissions_block(permissions, approved),
             guidance: Vec::new(),
             skills: Vec::new(),
+            services: String::new(),
         }
     }
 

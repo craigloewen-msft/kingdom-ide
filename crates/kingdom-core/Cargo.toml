@@ -13,3 +13,4 @@ serde_json.workspace = true
 # manifest for why each is safe in a crate that compiles to wasm.
 pulldown-cmark.workspace = true
 similar.workspace = true
+toml.workspace = true
