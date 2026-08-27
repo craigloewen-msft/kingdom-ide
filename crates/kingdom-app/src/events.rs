@@ -165,19 +165,37 @@ pub fn publish(plan: &Plan) {
         let mut for_wire: Option<Plan> = None;
 
         if let Some(tx) = channels.get(&plan.id) {
-            let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
+            let _ = tx.send(for_wire.get_or_insert_with(|| on_the_wire(plan)).clone());
         }
 
         // The second channel is the *sender's*, not a broadcast: only the plan
         // that sent this subagent hears about it.
         if let Some(subagent) = &plan.spawned_by {
             if let Some(tx) = channels.get(&subagent.parent) {
-                let _ = tx.send(for_wire.get_or_insert_with(|| plan.for_wire()).clone());
+                let _ = tx.send(for_wire.get_or_insert_with(|| on_the_wire(plan)).clone());
             }
         }
     }
 
     pulse(plan);
+}
+
+/// A plan as a browser should receive it, with its live ports attached.
+///
+/// [`Plan::for_wire`] trims what the browser does not need; this adds the one
+/// thing it needs that the *record* does not have. Ports belong to a running
+/// slirp4netns rather than to the plan, so they are answered here, at the
+/// moment of sending, rather than stored -- a forward written to disk would
+/// name a host port that stopped answering when the server did.
+fn on_the_wire(plan: &Plan) -> Plan {
+    let mut wire = plan.for_wire();
+    if plan.network.is_isolated() {
+        wire.ports = crate::netns::forwards_of(&plan.id)
+            .into_iter()
+            .map(|(guest, host)| kingdom_core::PortForward { guest, host })
+            .collect();
+    }
+    wire
 }
 
 /// Tells every open rail what this plan is and what it wants, if that changed.
@@ -283,6 +301,7 @@ mod tests {
             "do the thing",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/tmp/city"),
+            kingdom_core::NetworkMode::Shared,
         )
     }
 

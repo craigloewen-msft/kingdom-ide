@@ -26,7 +26,7 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -66,19 +66,79 @@ const DEFAULT_VIEWPORT: (u32, u32) = (1440, 900);
 /// testing a narrow layout, which is the one case the default is wrong for.
 pub const VIEWPORT_VAR: &str = "KINGDOM_BROWSER_VIEWPORT";
 
-/// Gives a plan's browser WebGL back, at the price measured below.
+/// Takes WebGL *away* from a plan's browser, for a machine that wants it back.
 ///
-/// Off by default, and that default is the single largest saving in this crate.
-/// See the comment on `disable-software-rasterizer` in [`BrowserSession::launch`]:
-/// a WebGL page costs seven to eight cores with the software rasteriser and
-/// twelve to eighteen percent of one without it.
+/// **On by default**, which is the opposite of what this variable used to mean,
+/// and the reversal is worth explaining because the old default was chosen from
+/// a measurement that blamed the wrong thing.
 ///
-/// The one case that wants it back is a plan working on `kingdom-citymap`,
-/// which is invited by `kingdom_citymap::mode` to open `?map=on` and look at
-/// what it drew. Without a GL context that plan sees the loading card forever,
-/// so the escape hatch is not a courtesy -- it is what keeps the map
-/// maintainable by the agents most likely to be asked to change it.
+/// # What was actually expensive
+///
+/// Not WebGL. Pace. A headless browser has no GPU, so Chrome rasterises in
+/// SwiftShader on the CPU, where cost is very nearly linear in frames drawn --
+/// measured on one full-viewport WebGL page at 1440x900: 5.46 cores uncapped,
+/// 1.04 at ten frames a second, 0.20 at two.
+///
+/// Kingdom's own map made the point sharply. Forty cities, headless, rasteriser
+/// on: **9.50 cores** on the map's own screen, and **0.00** in the rail beside
+/// a conversation -- the same scene drawn just as completely, differing only in
+/// how often. The engine now holds itself to `engine::AUTOMATED_WAKE` whenever
+/// `navigator.webdriver` is set (see `kingdom_citymap::mode`), so the expensive
+/// case is gone at its source and the rasteriser is affordable to leave on.
+///
+/// # What turning it off still buys
+///
+/// The cap is Kingdom's own, and reaches only Kingdom's own map. A plan sent to
+/// *someone else's* WebGL page -- a globe, a game, a three.js demo -- meets
+/// whatever frame rate that page asks for, and pays the uncapped price for it.
+/// `KINGDOM_BROWSER_WEBGL=off` is the blunt instrument for that, and for any
+/// machine where a plan has no business rendering at all.
+///
+/// [`crate::session::CPUS_VAR`] is the gentler answer to the same worry: it
+/// bounds what any page can take without taking WebGL from all of them.
 pub const WEBGL_VAR: &str = "KINGDOM_BROWSER_WEBGL";
+
+/// How many CPUs a plan's browser may spread itself across.
+///
+/// Defaults to [`DEFAULT_BROWSER_CPUS`]. `0` -- or any of the usual words for
+/// no -- lifts the limit entirely.
+///
+/// # Why a browser is confined at all, measured
+///
+/// Because of how software rendering scales, which is the opposite of the way
+/// one would hope. With no GPU, Chrome rasterises in SwiftShader, and
+/// SwiftShader sizes its thread pool from the machine: on a twenty-core box it
+/// will happily use most of them, whether or not the page needs it.
+///
+/// Kingdom's own map, headless, world already standing and nothing happening:
+///
+/// | CPUs allowed | Cost |
+/// |---|---|
+/// | all twenty | 7.5 cores |
+/// | six | 2.06 cores |
+/// | four | 1.72 cores |
+/// | two | 1.29 cores |
+///
+/// Note what that table is *not*. It is not the frame rate -- the same map at
+/// one frame a second still cost 4.09 cores unconfined. Most of what
+/// SwiftShader spends is spent whether or not there is a frame to draw, which
+/// is why pacing alone could not fix this and why the ceiling is a default
+/// rather than an option.
+///
+/// A count, not a mask: the CPUs chosen are this process's own, so a Kingdom
+/// already confined to some cores hands out a subset of those rather than
+/// escaping onto cores it was denied.
+pub const CPUS_VAR: &str = "KINGDOM_BROWSER_CPUS";
+
+/// How many CPUs a browser gets unless [`CPUS_VAR`] says otherwise.
+///
+/// Four, from the table above: the knee of the curve. Two is cheaper still but
+/// slows the work that is genuinely *bounded* -- a world took eight seconds to
+/// stand on two CPUs against about five on four -- and that is time a plan
+/// spends waiting rather than cost the machine absorbs. Four keeps a browser
+/// under two cores while leaving enough parallelism to get the expensive,
+/// finite things over with.
+const DEFAULT_BROWSER_CPUS: usize = 4;
 
 /// How long a browser may sit untouched before it is closed, as a duration.
 ///
@@ -116,23 +176,56 @@ fn parse_viewport(raw: &str) -> Option<(u32, u32)> {
 }
 
 /// Whether this machine's browsers are to have WebGL, per [`WEBGL_VAR`].
+///
+/// Yes unless explicitly refused. The asymmetry with the old reading is
+/// deliberate: a typo in this variable now leaves a *working* browser rather
+/// than a silently crippled one, which is the right way round for a setting
+/// whose failure mode used to be "the map never appears and nobody knows why".
 fn webgl_wanted() -> bool {
-    std::env::var(WEBGL_VAR).is_ok_and(|raw| reads_as_yes(&raw))
+    !std::env::var(WEBGL_VAR).is_ok_and(|raw| reads_as_no(&raw))
 }
 
-/// Whether a setting's value is an explicit yes.
+/// Whether a setting's value is an explicit no.
 ///
 /// Separated from the environment read so it can be tested without mutating
 /// process-wide state, which two tests running in parallel would race over.
 ///
-/// Only an unambiguous yes counts. Anything else -- empty, misspelt, `"onn"` --
-/// leaves the cheap default in place, because the cost of misreading this one
-/// is seven cores rather than a missing feature.
-fn reads_as_yes(raw: &str) -> bool {
+/// Only an unambiguous no counts, in the same spirit the old yes-reading had:
+/// a value nobody can read as a refusal leaves the default alone.
+fn reads_as_no(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
-        "on" | "1" | "true" | "yes"
+        "off" | "0" | "false" | "no"
     )
+}
+
+/// How many CPUs to confine a browser to, per [`CPUS_VAR`].
+///
+/// `None` means do not confine at all, which the King can ask for with `0` or
+/// with any of the words [`reads_as_no`] accepts. Anything unparsable falls
+/// back to [`DEFAULT_BROWSER_CPUS`] rather than to no limit, because a typo
+/// should not quietly hand a browser the whole machine.
+fn configured_cpus() -> Option<usize> {
+    let Ok(raw) = std::env::var(CPUS_VAR) else {
+        return Some(DEFAULT_BROWSER_CPUS);
+    };
+    parse_cpus(&raw)
+}
+
+/// Reads a CPU ceiling, separated from the environment so it can be tested.
+///
+/// `None` for an explicit refusal; [`DEFAULT_BROWSER_CPUS`] for anything that
+/// does not parse as a number of CPUs.
+fn parse_cpus(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim();
+    if reads_as_no(trimmed) {
+        return None;
+    }
+    match trimmed.parse::<usize>() {
+        Ok(0) => None,
+        Ok(count) => Some(count),
+        Err(_) => Some(DEFAULT_BROWSER_CPUS),
+    }
 }
 
 /// How long a session may go untouched before the reaper closes it.
@@ -221,6 +314,11 @@ struct BrowserSession {
     console_task: JoinHandle<()>,
     /// This session's user-data directory, so closing can take it with it.
     profile: PathBuf,
+    /// The namespace shim this session launched through, if it had one.
+    ///
+    /// Kept only so shutting down can delete it. See
+    /// [`write_namespace_wrapper`].
+    namespace_wrapper: Option<PathBuf>,
     /// When this session was last asked to do anything.
     ///
     /// Read by the reaper, written by every operation that goes through
@@ -327,7 +425,47 @@ impl BrowserSession {
         // The profile is this session's alone -- named from the plan id -- so
         // it goes with it. This is the reclaim that keeps /tmp from filling.
         let _ = std::fs::remove_dir_all(&self.profile);
+        // And the shim that put it in a namespace, for the same reason.
+        if let Some(wrapper) = &self.namespace_wrapper {
+            let _ = std::fs::remove_file(wrapper);
+        }
     }
+}
+
+/// How a plan's Chrome is placed inside that plan's network namespace: given a
+/// plan id, the argv prefix to launch under, or empty for no namespace.
+type EnterNamespace = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+
+/// How a plan's Chrome is placed inside that plan's network namespace.
+///
+/// A hook rather than a direct call because `kingdom-browser` must not know
+/// what a network namespace is: it is the crate that drives a browser, and
+/// `kingdom-app` is the crate that owns namespaces. `kingdom-app` installs this
+/// at startup and this crate simply asks.
+///
+/// **Why Chrome must be in the namespace at all.** A plan with its own network
+/// runs its dev server on *its* `127.0.0.1:3000`. A Chrome on the host asked to
+/// navigate there would reach the host's `:3000` -- which belongs to the King,
+/// or to another plan entirely -- and screenshot the wrong project while
+/// reporting success. That is a silent wrong answer, which is worse than a
+/// failure, so the browser goes where the server is.
+static ENTER_NAMESPACE: OnceLock<EnterNamespace> = OnceLock::new();
+
+/// Teaches this crate how to enter a plan's network namespace.
+///
+/// Called once, by `kingdom-app`, before any browser is launched. A process
+/// that never calls it gets ordinary host-network browsers, which is exactly
+/// what a plan on the shared network should have.
+pub fn on_enter_namespace(hook: impl Fn(&str) -> Vec<String> + Send + Sync + 'static) {
+    let _ = ENTER_NAMESPACE.set(Box::new(hook));
+}
+
+/// The argv prefix that puts this plan's Chrome in its own namespace, if any.
+fn enter_prefix(plan: &str) -> Vec<String> {
+    ENTER_NAMESPACE
+        .get()
+        .map(|hook| hook(plan))
+        .unwrap_or_default()
 }
 
 impl BrowserSession {
@@ -348,11 +486,12 @@ impl BrowserSession {
             // Spelled correctly it turns off *hardware* acceleration, which a
             // headless browser on a server has no use for.
             //
-            // It does NOT stop the software GPU, whatever an earlier note here
-            // claimed. Measured with this flag exactly as passed below, a WebGL
-            // page still starts a `--type=gpu-process` and that process alone
-            // burns 665% of a core -- nearly seven cores of SwiftShader. The
-            // flag further down is the one that stops it.
+            // It does NOT stop the software GPU. Chrome falls back to ANGLE's
+            // SwiftShader and rasterises WebGL on the CPU regardless of this
+            // flag -- so on a machine with no usable GPU, which is every
+            // machine a headless plan browser runs on, this changes nothing
+            // about what WebGL costs. What that costs is decided by how many
+            // frames a page asks for; see [`WEBGL_VAR`].
             .arg("disable-gpu")
             // Caps the disk caches. Chromium's own default is a fraction of
             // free space, which on a developer machine is enormous: six
@@ -373,23 +512,63 @@ impl BrowserSession {
             })
             .user_data_dir(profile.clone());
 
-        // The single largest saving in this crate, and the reason it is a
-        // default rather than an option.
+        // Withheld only when the King has asked for it to be, which is the
+        // reverse of how this once read.
         //
-        // With no GPU, Chrome falls back to ANGLE's SwiftShader and rasterises
-        // WebGL in software, on the CPU of a machine several agents are
-        // sharing. Measured on one WebGL page at 1440x900: 680-840% of a core
-        // with the fallback, 12-18% without it. Ordinary work is untouched --
-        // a page of text with a 2D canvas screenshots to a byte-identical PNG
-        // either way -- because only WebGL is lost.
-        //
-        // [`WEBGL_VAR`] hands it back to the one plan that needs it.
+        // Without the software rasteriser there is no WebGL at all on a
+        // headless browser -- there is no hardware path to fall back to -- so
+        // this flag is the difference between a plan that can look at
+        // Kingdom's own map and one that watches a loading card forever. The
+        // cost that once justified it belonged to *pace*, and is now held down
+        // where it arises, in the engine. See [`WEBGL_VAR`] for the figures.
         if !webgl_wanted() {
             builder = builder.arg("disable-software-rasterizer");
         }
 
-        if let Some(executable) = chrome_executable()? {
-            builder = builder.chrome_executable(executable);
+        // Two features want to be "the executable", and they have to nest
+        // rather than overwrite each other:
+        //
+        //   nsenter --> taskset --> chrome
+        //
+        // The network namespace is entered first, the CPU mask is applied
+        // inside it, and Chrome is what finally execs. Setting
+        // `chrome_executable` twice would silently keep only the last one --
+        // which is exactly what happened when these two were merged, leaving an
+        // isolated plan's browser unconfined and free to take every core.
+        //
+        // `inner` is what a browser would have been launched as with no
+        // namespace: the CPU shim when there is one, the real Chrome otherwise.
+        let confined = cpu_shim(&profile);
+        let namespace_wrapper = match enter_prefix(plan).is_empty() {
+            true => None,
+            false => {
+                let inner = match &confined {
+                    Some(shim) => shim.clone(),
+                    None => match chrome_executable()? {
+                        Some(path) => path,
+                        None => chromiumoxide::detection::default_executable(Default::default())
+                            .map_err(BrowserError::ChromeUnavailable)?,
+                    },
+                };
+                // A wrapper script because chromiumoxide takes an *executable*,
+                // not an argv: there is nowhere to put `nsenter` and its flags
+                // except inside something that looks like a browser binary.
+                // See [`ENTER_NAMESPACE`] for why the browser must move at all
+                // -- in short, a host Chrome told to open `localhost:3000`
+                // would silently screenshot another project.
+                Some(write_namespace_wrapper(plan, &inner)?)
+            }
+        };
+
+        // Most specific wins, and each already contains the one below it.
+        match (&namespace_wrapper, &confined) {
+            (Some(wrapper), _) => builder = builder.chrome_executable(wrapper.clone()),
+            (None, Some(shim)) => builder = builder.chrome_executable(shim.clone()),
+            (None, None) => {
+                if let Some(executable) = chrome_executable()? {
+                    builder = builder.chrome_executable(executable);
+                }
+            }
         }
 
         let config = builder.build().map_err(BrowserError::ChromeUnavailable)?;
@@ -476,6 +655,7 @@ impl BrowserSession {
             handler: handler_task,
             console_task,
             profile,
+            namespace_wrapper,
             last_used: Mutex::new(Instant::now()),
             page,
             console,
@@ -969,6 +1149,82 @@ const CACHED_BROWSERS: &[&str] = &[
     ".local/share/ms-playwright",
 ];
 
+/// Confines a browser to a few CPUs, by launching it behind `taskset`.
+///
+/// Returns the shim to run instead of Chrome, or `None` to launch Chrome
+/// directly -- which is the answer whenever confinement was not asked for, is
+/// not possible, or would need a tool this machine does not have.
+///
+/// # Why a shim script rather than an affinity call
+///
+/// Because the affinity has to be in force *before* Chrome forks, and Chrome
+/// forks its zygote almost immediately. Setting it on the browser process after
+/// launch would race the very children that do the rendering. A wrapper that
+/// `exec`s under `taskset` cannot lose that race: the mask is set before Chrome
+/// exists at all, and Linux passes it down through every fork -- verified, with
+/// the renderer and GPU children all reporting the confined mask.
+///
+/// # Why it may return `None` without complaint
+///
+/// Every failure here is a reason to run an *unconfined* browser rather than no
+/// browser. A missing `taskset`, an unwritable profile, a Chrome that could not
+/// be located: none of them is worth denying a plan its tools over, and the
+/// setting is a precaution rather than a guarantee anyone is relying on.
+#[cfg(unix)]
+fn cpu_shim(profile: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cpus = configured_cpus()?;
+    // `taskset` is what actually applies the mask, and it is not on every
+    // machine. Checked before anything is written, because a shim that cannot
+    // run would turn every launch into a "Chrome missing" -- and this is now
+    // the default path, so that failure would be everyone's.
+    let taskset = which_taskset()?;
+    // The real browser has to be named in the script, so the path is resolved
+    // here rather than left to chromiumoxide to find later.
+    let chrome = match chrome_executable() {
+        Ok(Some(path)) => path,
+        Ok(None) => chromiumoxide::detection::default_executable(Default::default()).ok()?,
+        Err(_) => return None,
+    };
+
+    // Clamped to what this process may actually use, so a Kingdom already
+    // confined hands out a subset of its own CPUs rather than naming ones it
+    // was denied. `taskset -c` takes an inclusive range, hence the minus one.
+    let available = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let last = cpus.min(available).saturating_sub(1);
+
+    std::fs::create_dir_all(profile).ok()?;
+    let shim = profile.join("chrome-confined.sh");
+    let script = format!(
+        "#!/bin/sh\nexec {} -c 0-{last} {} \"$@\"\n",
+        taskset.display(),
+        chrome.display()
+    );
+    std::fs::write(&shim, script).ok()?;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).ok()?;
+    Some(shim)
+}
+
+/// Where `taskset` is, if this machine has one.
+///
+/// Looked up rather than assumed at `/usr/bin/taskset`: it is `util-linux` on
+/// most distributions but not all, and the shim names it absolutely so that
+/// Chrome's own environment cannot change what runs.
+#[cfg(unix)]
+fn which_taskset() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("taskset"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Confinement is a Unix affair; elsewhere a browser runs as it always did.
+#[cfg(not(unix))]
+fn cpu_shim(_profile: &Path) -> Option<PathBuf> {
+    None
+}
+
 /// Which Chrome to launch, or `None` to let chromiumoxide decide.
 ///
 /// Three steps, most explicit first:
@@ -1005,6 +1261,66 @@ fn chrome_executable() -> Result<Option<PathBuf>, BrowserError> {
     }
 
     Ok(cached_chrome())
+}
+
+/// Writes the shim that enters a plan's network namespace.
+///
+/// chromiumoxide is handed an executable path and builds the argument list
+/// itself, so `nsenter` cannot be prepended to the command -- there is no
+/// command to prepend it to yet. A tiny `exec` wrapper is the one place the
+/// prefix fits, and `exec` matters: it replaces the shell rather than forking,
+/// so the pid chromiumoxide waits on is Chrome's own and killing the session
+/// still kills the browser.
+///
+/// `inner` is **not necessarily Chrome**. It is whatever would have been
+/// launched without a namespace, which is [`cpu_shim`] when confinement is on --
+/// so the two nest as `nsenter -> taskset -> chrome` and neither feature is
+/// lost. See the call site.
+///
+/// `"$@"` quoted, because Chrome's flags contain paths that can contain spaces.
+fn write_namespace_wrapper(plan: &str, inner: &Path) -> Result<PathBuf, BrowserError> {
+    use std::io::Write as _;
+
+    let prefix = enter_prefix(plan)
+        .into_iter()
+        .map(|part| shell_quote(&part))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut hasher = DefaultHasher::new();
+    plan.hash(&mut hasher);
+    let path = std::env::temp_dir().join(format!("kingdom-chrome-ns-{:016x}.sh", hasher.finish()));
+
+    let script = format!(
+        "#!/bin/sh\nexec {prefix} {} \"$@\"\n",
+        shell_quote(&inner.to_string_lossy())
+    );
+
+    let mut file = std::fs::File::create(&path).map_err(|e| {
+        BrowserError::ChromeUnavailable(format!("the namespace wrapper could not be written: {e}"))
+    })?;
+    file.write_all(script.as_bytes()).map_err(|e| {
+        BrowserError::ChromeUnavailable(format!("the namespace wrapper could not be written: {e}"))
+    })?;
+    drop(file);
+
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+        BrowserError::ChromeUnavailable(format!("the namespace wrapper is not executable: {e}"))
+    })?;
+
+    Ok(path)
+}
+
+/// Single-quotes a string for `/bin/sh`.
+///
+/// The one escape that matters: a `'` inside is closed, escaped and reopened.
+/// Paths here come from `PATH` lookups and a plan id, so this is belt and
+/// braces rather than a live threat -- but a browser that fails to launch
+/// because someone's home directory has an apostrophe in it is a miserable bug
+/// to track down.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Hunts for a Chromium that some other tool downloaded.
@@ -1371,6 +1687,55 @@ async fn dispatch_key(page: &Page, key: &str, modifiers: &[String]) -> Result<()
 mod tests {
     use super::*;
 
+    /// The namespace wrapper wraps whatever it is given, not Chrome directly.
+    ///
+    /// This is the merge hazard between CPU confinement and network isolation,
+    /// pinned. Both features want to be the executable chromiumoxide launches,
+    /// and `chrome_executable` keeps only the last one set — so composing them
+    /// is the difference between a confined browser and one silently free to
+    /// take every core. It broke exactly this way once, and nothing about it
+    /// fails to compile.
+    ///
+    /// The wrapper's *content* is what is checked, because that is what
+    /// survives: whatever path it is handed is what it `exec`s.
+    #[test]
+    fn the_namespace_wrapper_execs_whatever_it_was_given() {
+        // A stand-in for `cpu_shim`'s output. The test does not need a
+        // namespace to exist -- with no hook installed the prefix is empty,
+        // which is the shared-network case, so the script is asserted on
+        // directly rather than through a launch.
+        let confined = Path::new("/tmp/kingdom-chrome-abc/chrome-confined.sh");
+
+        let wrapper = write_namespace_wrapper("plan-nesting", confined)
+            .expect("the wrapper should be writable");
+        let script = std::fs::read_to_string(&wrapper).expect("the wrapper should be readable");
+
+        assert!(
+            script.contains("chrome-confined.sh"),
+            "the wrapper dropped the CPU shim it was handed:\n{script}"
+        );
+        // `exec`, so the pid chromiumoxide waits on is the browser's own and
+        // killing the session still kills Chrome.
+        assert!(script.starts_with("#!/bin/sh\nexec "), "{script}");
+        // Chrome's own flags are forwarded, quoted, because they carry paths.
+        assert!(script.trim_end().ends_with(r#""$@""#), "{script}");
+
+        let _ = std::fs::remove_file(&wrapper);
+    }
+
+    /// A path with an apostrophe in it does not break out of its quoting.
+    ///
+    /// Belt and braces rather than a live threat — these come from `PATH`
+    /// lookups — but a home directory with an apostrophe is a real thing and
+    /// the resulting launch failure would be baffling.
+    #[test]
+    fn a_quoted_path_survives_an_apostrophe() {
+        assert_eq!(
+            shell_quote("/home/o'brien/chrome"),
+            r"'/home/o'\''brien/chrome'"
+        );
+    }
+
     /// The default viewport must clear Kingdom's own responsive thresholds.
     ///
     /// This is the whole reason the number changed: at 1024 wide the cities
@@ -1494,19 +1859,48 @@ mod tests {
         }
     }
 
-    /// WebGL comes back only when somebody says so, in so many words.
+    /// WebGL goes away only when somebody says so, in so many words.
     ///
-    /// This guards the largest default in the crate. The negative cases are the
-    /// point: a misspelt value must leave the software rasteriser disabled
-    /// rather than quietly restoring the seven-core behaviour this change
-    /// exists to remove.
+    /// The direction of this test is the change: WebGL is now on by default,
+    /// so what must be deliberate is *refusing* it. The negative cases are the
+    /// point, as they were before -- a misspelt value must leave the browser
+    /// able to render rather than silently blind, which is the failure mode
+    /// that made the map untestable in the first place.
     #[test]
-    fn webgl_is_only_ever_switched_on_deliberately() {
-        for yes in ["on", "1", "true", "YES", " On "] {
-            assert!(reads_as_yes(yes), "{yes} should have been read as yes");
+    fn webgl_is_only_ever_switched_off_deliberately() {
+        for no in ["off", "0", "false", "NO", " Off "] {
+            assert!(reads_as_no(no), "{no} should have been read as no");
         }
-        for no in ["", "off", "0", "false", "no", "onn", "yes please"] {
-            assert!(!reads_as_yes(no), "{no} should not have been read as yes");
+        for yes in ["", "on", "1", "true", "yes", "offf", "no thanks"] {
+            assert!(!reads_as_no(yes), "{yes} should not have been read as no");
+        }
+    }
+
+    /// A CPU ceiling is read, and a mistyped one does not lift the limit.
+    ///
+    /// The asymmetry is the point. An explicit `0` or `off` means the King has
+    /// decided to let a browser have the machine, and is obeyed. Nonsense means
+    /// he did not decide anything, and falls back to the default rather than to
+    /// no limit -- because this ceiling is what keeps a software-rendered page
+    /// from taking seven cores, and a typo should not silently surrender it.
+    #[test]
+    fn a_mistyped_cpu_ceiling_falls_back_rather_than_lifting_the_limit() {
+        assert_eq!(parse_cpus("3"), Some(3));
+        assert_eq!(parse_cpus(" 12 "), Some(12));
+        assert_eq!(parse_cpus("1"), Some(1));
+
+        // Deliberate refusals, which are obeyed.
+        for lifted in ["0", "off", "no", "false", " OFF "] {
+            assert_eq!(parse_cpus(lifted), None, "{lifted} should lift the limit");
+        }
+
+        // Nonsense, which must not.
+        for nonsense in ["", "-2", "half", "3.5", "3 cpus", "lots"] {
+            assert_eq!(
+                parse_cpus(nonsense),
+                Some(DEFAULT_BROWSER_CPUS),
+                "{nonsense} should have fallen back to the default"
+            );
         }
     }
 

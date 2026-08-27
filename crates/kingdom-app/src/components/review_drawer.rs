@@ -47,7 +47,7 @@ pub fn ReviewDrawer(
 
     // This plan's own banner, which is what the counts below are painted in.
     //
-    // Taken from the city-wide assignment rather than from `palette::preferred`
+    // Taken from the kingdom-wide assignment rather than from `palette::preferred`
     // so the drawer and the map agree about which colour this agent is even
     // when a collision moved it -- two spellings of one fact is how a rail and
     // a map come to disagree.
@@ -55,7 +55,7 @@ pub fn ReviewDrawer(
         let plan = plan.clone();
         Memo::new(move |_| {
             state.works.with(|working| {
-                let plans: Vec<PlanId> = working.iter().map(|(id, _)| id.clone()).collect();
+                let plans: Vec<PlanId> = working.iter().map(|entry| entry.plan.clone()).collect();
                 kingdom_core::palette::assign_banners(&plans)
                     .into_iter()
                     .find(|(id, _)| id == &plan)
@@ -71,23 +71,38 @@ pub fn ReviewDrawer(
     // goal -- answered where the answer already is. This costs no request: the
     // works are fetched for the map on every pulse, and this is that same value
     // read once more.
+    //
+    // **Narrowed to this plan's own city**, which it did not have to be while
+    // the works were one city's. They are the whole kingdom's now, and a path is
+    // not a file across projects -- every Rust project here has a `src/main.rs`,
+    // so matching on the path alone would report an agent in another repository
+    // as sharing this file and mark the row contended. Contention is two agents
+    // in *one* file or it is nothing.
     let others = {
         let plan = plan.clone();
         Memo::new(move |_| {
+            let home = state
+                .kingdom
+                .with(|k| k.plan(&plan).map(|p| p.city.clone()));
+            let Some(home) = home else {
+                // A plan the browser has not been told about yet. Claiming
+                // nobody shares its files is the honest answer until it has.
+                return Vec::new();
+            };
             state.works.with(|working| {
-                let plans: Vec<PlanId> = working.iter().map(|(id, _)| id.clone()).collect();
+                let plans: Vec<PlanId> = working.iter().map(|entry| entry.plan.clone()).collect();
                 let banners = kingdom_core::palette::assign_banners(&plans);
                 let mut found: Vec<(String, &'static kingdom_core::AgentPalette, String)> =
                     Vec::new();
-                for ((id, changes), (_, banner)) in working.iter().zip(banners.iter()) {
-                    if id == &plan {
+                for (entry, (_, banner)) in working.iter().zip(banners.iter()) {
+                    if entry.plan == plan || entry.city != home {
                         continue;
                     }
                     let title = state
                         .kingdom
-                        .with(|k| k.plan(id).map(|p| p.title.clone()))
-                        .unwrap_or_else(|| id.to_string());
-                    for file in &changes.files {
+                        .with(|k| k.plan(&entry.plan).map(|p| p.title.clone()))
+                        .unwrap_or_else(|| entry.plan.to_string());
+                    for file in &entry.changes.files {
                         found.push((file.path.clone(), banner, title.clone()));
                     }
                 }

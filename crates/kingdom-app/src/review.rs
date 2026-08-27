@@ -36,7 +36,7 @@
 //! reading them, which git will not do for a file it does not know about.
 
 use kingdom_core::{
-    ChangeKind, ChangeSummary, ChangedFile, DiffLine, DiffRow, DiffVerdict, FileDiff, Hunk,
+    ChangeKind, ChangeSummary, ChangedFile, DiffLine, DiffRow, DiffVerdict, FileDiff, Gap, Hunk,
     Language, SourceText, Span, Workspace,
 };
 use std::collections::HashMap;
@@ -65,6 +65,14 @@ pub(crate) const MOST_BYTES: u64 = 1_500_000;
 /// King pays is DOM nodes: a 40,000-line file with one changed line is cheap,
 /// and a 4,000-line file rewritten wholesale is not.
 const MOST_ROWS: usize = 4_000;
+
+/// Lines one expansion may reveal.
+///
+/// [`kingdom_core::MOST_CONTEXT`], not a number of this module's own: the
+/// browser decides whether to offer "show all" against the same cap this
+/// enforces, and two of them would be a button that quietly gives less than it
+/// promises. Named here so the reasoning is one hop from the code that clamps.
+pub(crate) use kingdom_core::MOST_CONTEXT;
 
 /// Untracked files listed before the scan gives up.
 ///
@@ -136,15 +144,148 @@ pub async fn changes(workspace: &Workspace) -> ChangeSummary {
 /// `api.rs`, which is where the boundary is enforced, exactly as it is for
 /// `list_directory`.
 pub async fn diff(workspace: &Workspace, path: &str) -> FileDiff {
+    let refused = |base: String, verdict| FileDiff {
+        path: path.to_string(),
+        base,
+        hunks: Vec::new(),
+        old_lines: 0,
+        new_lines: 0,
+        verdict,
+    };
+
+    let (base, before, after) = match versions(workspace, path).await {
+        Versions::Read {
+            base,
+            before,
+            after,
+        } => (base, before, after),
+        Versions::Refused { base, verdict } => return refused(base, verdict),
+    };
+
+    let paired = pair(&before, &after);
+
+    FileDiff {
+        path: path.to_string(),
+        base,
+        hunks: paired.hunks,
+        old_lines: paired.old_lines,
+        new_lines: paired.new_lines,
+        verdict: paired.verdict,
+    }
+}
+
+/// Lines the diff left out, for the King who wants to see further.
+///
+/// The panel shows a change and three lines either side of it, and that is
+/// often not enough to say *where* a change is -- the function it sits inside
+/// starts above the first line shown. This answers "and what is just above
+/// that?" without re-reading the whole file into the browser, which is what
+/// [`MOST_ROWS`] exists to avoid.
+///
+/// # Why nothing is diffed here
+///
+/// The region between two hunks is **the same text in both versions**, because
+/// a grouped diff only ever breaks inside a run of unchanged lines. So this
+/// takes the two slices and pairs them straight across. It **checks** they
+/// match rather than trusting the caller's arithmetic, and refuses if they do
+/// not: the ordinary way to get there is the court rewriting the file between
+/// the panel fetching the diff and the King pressing the control, and inventing
+/// a pairing for lines that no longer correspond would put two unrelated lines
+/// opposite each other with no sign anything was wrong.
+///
+/// Held to [`diff`]'s own guards, through the same [`versions`] -- the size and
+/// binary questions do not have different answers for part of a file.
+pub async fn context(workspace: &Workspace, path: &str, gap: Gap) -> Result<Vec<DiffRow>, String> {
+    let (before, after) = match versions(workspace, path).await {
+        Versions::Read { before, after, .. } => (before, after),
+        // The verdict's own words: "this file is not text" is the answer here
+        // too, and a second phrasing of it would be a second thing to keep true.
+        Versions::Refused { verdict, .. } => {
+            return Err(verdict
+                .tell()
+                .unwrap_or_else(|| "this file could not be read".into()))
+        }
+    };
+
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+
+    // Clamped rather than refused. The panel computes these from a diff it may
+    // have fetched a moment ago, and a file that has since lost its tail should
+    // give back the lines that *are* there -- the mismatch check below is what
+    // catches a genuinely stale request.
+    let count = gap
+        .count
+        .min(MOST_CONTEXT)
+        .min((old.len() as u32).saturating_sub(gap.old_from.saturating_sub(1)))
+        .min((new.len() as u32).saturating_sub(gap.new_from.saturating_sub(1)));
+
+    if count == 0 || gap.old_from == 0 || gap.new_from == 0 {
+        return Ok(Vec::new());
+    }
+
+    let old_at = gap.old_from as usize - 1;
+    let new_at = gap.new_from as usize - 1;
+    let old_run = &old[old_at..old_at + count as usize];
+    let new_run = &new[new_at..new_at + count as usize];
+
+    if old_run != new_run {
+        return Err("this file has changed since it was compared".into());
+    }
+
+    Ok(old_run
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let i = i as u32;
+            // One span, no emphasis: nothing differs here, which is the whole
+            // reason these lines were not shown in the first place.
+            let spans = vec![Span {
+                text: (*text).to_string(),
+                emphasis: false,
+            }];
+            DiffRow {
+                old: Some(DiffLine {
+                    number: gap.old_from + i,
+                    spans: spans.clone(),
+                    changed: false,
+                }),
+                new: Some(DiffLine {
+                    number: gap.new_from + i,
+                    spans,
+                    changed: false,
+                }),
+            }
+        })
+        .collect())
+}
+
+/// Both versions of one file as text, or the reason there is no comparison.
+///
+/// Shared by [`diff`] and [`context`] so the merge base, the two reads and the
+/// size and binary guards are decided once. Two callers reading a file two ways
+/// is how one of them comes to allow what the other refuses.
+enum Versions {
+    Read {
+        /// What the comparison is against, in the drawer's words.
+        base: String,
+        before: String,
+        after: String,
+    },
+    Refused {
+        base: String,
+        verdict: DiffVerdict,
+    },
+}
+
+async fn versions(workspace: &Workspace, path: &str) -> Versions {
     let root = Path::new(&workspace.path);
 
     let against = match default_branch(root, workspace).await {
         Some(against) => against,
         None => {
-            return FileDiff {
-                path: path.to_string(),
+            return Versions::Refused {
                 base: "—".into(),
-                hunks: Vec::new(),
                 verdict: DiffVerdict::Unreadable(
                     "there is nothing in this repository to compare against".into(),
                 ),
@@ -152,18 +293,16 @@ pub async fn diff(workspace: &Workspace, path: &str) -> FileDiff {
         }
     };
 
+    let refused = |verdict| Versions::Refused {
+        base: against.label.clone(),
+        verdict,
+    };
+
     let before = match blob(root, &against.commit, path).await {
         // A file absent from the base is not an error: it is a new file, and
         // its whole content is the insertion.
         Ok(found) => found.unwrap_or_default(),
-        Err(why) => {
-            return FileDiff {
-                path: path.to_string(),
-                base: against.label,
-                hunks: Vec::new(),
-                verdict: DiffVerdict::Unreadable(why),
-            }
-        }
+        Err(why) => return refused(DiffVerdict::Unreadable(why)),
     };
 
     let full = root.join(path);
@@ -172,42 +311,20 @@ pub async fn diff(workspace: &Workspace, path: &str) -> FileDiff {
     let after = match std::fs::read(&full) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            return FileDiff {
-                path: path.to_string(),
-                base: against.label,
-                hunks: Vec::new(),
-                verdict: DiffVerdict::Unreadable(e.to_string()),
-            }
-        }
+        Err(e) => return refused(DiffVerdict::Unreadable(e.to_string())),
     };
 
     if before.len() as u64 > MOST_BYTES || after.len() as u64 > MOST_BYTES {
-        return FileDiff {
-            path: path.to_string(),
-            base: against.label,
-            hunks: Vec::new(),
-            verdict: DiffVerdict::TooLarge,
-        };
+        return refused(DiffVerdict::TooLarge);
     }
     if looks_binary(&before) || looks_binary(&after) {
-        return FileDiff {
-            path: path.to_string(),
-            base: against.label,
-            hunks: Vec::new(),
-            verdict: DiffVerdict::Binary,
-        };
+        return refused(DiffVerdict::Binary);
     }
 
-    let before = String::from_utf8_lossy(&before).into_owned();
-    let after = String::from_utf8_lossy(&after).into_owned();
-    let (hunks, verdict) = pair(&before, &after);
-
-    FileDiff {
-        path: path.to_string(),
+    Versions::Read {
         base: against.label,
-        hunks,
-        verdict,
+        before: String::from_utf8_lossy(&before).into_owned(),
+        after: String::from_utf8_lossy(&after).into_owned(),
     }
 }
 
@@ -631,6 +748,19 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
 
 // -- The pairing --------------------------------------------------------------
 
+/// What [`pair`] worked out: the rows, where each hunk sits, and how long the
+/// two versions are.
+///
+/// A struct rather than a four-tuple because three of the four are numbers of
+/// the same type, and a caller that swapped `old_lines` for `new_lines` would
+/// compile.
+struct Paired {
+    hunks: Vec<Hunk>,
+    old_lines: u32,
+    new_lines: u32,
+    verdict: DiffVerdict,
+}
+
 /// Turns two texts into side-by-side rows.
 ///
 /// The whole reason this happens on the server: a `Replace` op knows that a run
@@ -638,7 +768,12 @@ pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
 /// zips them into paired rows with inline emphasis. A browser handed a flat
 /// sequence of tagged lines would have to guess at that, and would guess wrong
 /// whenever the two runs are of different lengths.
-fn pair(before: &str, after: &str) -> (Vec<Hunk>, DiffVerdict) {
+///
+/// Each hunk also carries where it sits in both files -- what a unified diff
+/// spells `@@ -a,b +c,d @@`. Taken from the group's own ranges rather than read
+/// back off the rows, because a hunk that is entirely an insertion has no old
+/// line to read the position from and would have to guess.
+fn pair(before: &str, after: &str) -> Paired {
     use similar::{ChangeTag, TextDiff};
 
     let diff = TextDiff::from_lines(before, after);
@@ -648,6 +783,21 @@ fn pair(before: &str, after: &str) -> (Vec<Hunk>, DiffVerdict) {
 
     for group in diff.grouped_ops(CONTEXT) {
         let mut rows: Vec<DiffRow> = Vec::new();
+
+        // The group's own extent, before any of it is capped away below: what
+        // the hunk *covers* is a fact about the two files, and truncating the
+        // rows must not make it read as covering less.
+        let (old_start, old_len, new_start, new_len) = match (group.first(), group.last()) {
+            (Some(first), Some(last)) => (
+                first.old_range().start as u32 + 1,
+                (last.old_range().end - first.old_range().start) as u32,
+                first.new_range().start as u32 + 1,
+                (last.new_range().end - first.new_range().start) as u32,
+            ),
+            // `grouped_ops` yields no empty groups; nothing downstream should
+            // depend on that being true, so an empty one simply covers nothing.
+            _ => (1, 0, 1, 0),
+        };
 
         for op in &group {
             // Held back so a replacement's deletions and insertions can be
@@ -723,7 +873,13 @@ fn pair(before: &str, after: &str) -> (Vec<Hunk>, DiffVerdict) {
 
         rows_drawn += rows.len();
         if !rows.is_empty() {
-            hunks.push(Hunk { rows });
+            hunks.push(Hunk {
+                rows,
+                old_start,
+                old_len,
+                new_start,
+                new_len,
+            });
         }
     }
 
@@ -733,7 +889,14 @@ fn pair(before: &str, after: &str) -> (Vec<Hunk>, DiffVerdict) {
         DiffVerdict::Shown
     };
 
-    (hunks, verdict)
+    Paired {
+        hunks,
+        // Counted the way `lines()` counts, which is how `context` slices the
+        // same two texts and how an editor numbers them.
+        old_lines: before.lines().count() as u32,
+        new_lines: after.lines().count() as u32,
+        verdict,
+    }
 }
 
 // -- git ----------------------------------------------------------------------
@@ -1175,14 +1338,252 @@ mod tests {
         assert_eq!(kinds.get("gone.rs"), Some(&ChangeKind::Deleted));
     }
 
+    // -- Seeing further than the diff shows -----------------------------------
+
+    /// A file long enough to have real gaps: two changes far apart, with plenty
+    /// of untouched lines before, between and after them.
+    ///
+    /// `line {i}` rather than a constant, so a mispaired reveal shows up as the
+    /// wrong number rather than as text that happens to match anyway.
+    async fn long_file(root: &Path) {
+        let before: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(root.join("long.rs"), &before).unwrap();
+        commit(root, "a long file").await;
+
+        // Line 50 rewritten, and two lines inserted after line 120.
+        let after: String = (1..=200)
+            .map(|i| match i {
+                50 => "line 50, rewritten\n".to_string(),
+                120 => "line 120\nfirst inserted\nsecond inserted\n".to_string(),
+                other => format!("line {other}\n"),
+            })
+            .collect();
+        std::fs::write(root.join("long.rs"), &after).unwrap();
+    }
+
+    /// The four numbers a hunk carries are the file's real line numbers, and
+    /// the totals are the whole file -- which together are what say how much is
+    /// *not* being shown.
+    ///
+    /// Against a real repository rather than `pair` alone, because the numbers
+    /// are only worth anything if they agree with what the panel is drawing.
+    #[tokio::test]
+    async fn a_hunk_says_where_in_the_file_it_sits() {
+        let dir = repo().await;
+        let root = dir.path();
+        long_file(root).await;
+
+        let diff = diff(&workspace(root), "long.rs").await;
+        assert_eq!(diff.verdict, DiffVerdict::Shown);
+        assert_eq!(diff.hunks.len(), 2, "two changes, far apart");
+        assert_eq!((diff.old_lines, diff.new_lines), (200, 202));
+
+        // Three lines of context either side of line 50.
+        let first = &diff.hunks[0];
+        assert_eq!((first.old_start, first.old_len), (47, 7));
+        assert_eq!((first.new_start, first.new_len), (47, 7));
+
+        // The insertion sits between old lines 120 and 121, so the hunk covers
+        // three lines of context either side of the join -- and the new side is
+        // two rows longer for the lines that were put in.
+        let second = &diff.hunks[1];
+        assert_eq!((second.old_start, second.old_len), (118, 6));
+        assert_eq!((second.new_start, second.new_len), (118, 8));
+
+        // And the arithmetic the panel does on them, end to end: the first row
+        // drawn is line 47, so 46 lines are hidden above it.
+        let leading = diff.gap_before(0).expect("the lines above the first hunk");
+        assert_eq!(
+            (leading.old_from, leading.new_from, leading.count),
+            (1, 1, 46)
+        );
+
+        let between = diff.gap_before(1).expect("the lines between the hunks");
+        assert_eq!(
+            (between.old_from, between.new_from, between.count),
+            (54, 54, 64)
+        );
+
+        let trailing = diff.gap_after_last().expect("the tail");
+        assert_eq!(
+            (trailing.old_from, trailing.new_from, trailing.count),
+            (124, 126, 77)
+        );
+    }
+
+    /// The reveal itself: the lines asked for, numbered for both columns.
+    ///
+    /// The gap *after* the insertion is the one worth testing, because that is
+    /// where the two columns have drifted apart -- old line 124 and new line
+    /// 126 are the same text, and a reveal that numbered both the same would
+    /// put the King's note on the wrong line.
+    #[tokio::test]
+    async fn the_lines_between_two_hunks_can_be_asked_for() {
+        let dir = repo().await;
+        let root = dir.path();
+        long_file(root).await;
+
+        let space = workspace(root);
+        let diff = diff(&space, "long.rs").await;
+        let gap = diff.gap_after_last().expect("the tail");
+
+        let rows = context(&space, "long.rs", gap.head(20))
+            .await
+            .expect("the twenty lines after the last hunk");
+
+        assert_eq!(rows.len(), 20);
+        assert!(
+            rows.iter().all(|r| r.is_context()),
+            "nothing revealed here differs, which is why it was hidden"
+        );
+
+        let first = &rows[0];
+        assert_eq!(first.old.as_ref().unwrap().number, 124);
+        assert_eq!(
+            first.new.as_ref().unwrap().number,
+            126,
+            "the insertion pushed the new side two lines down"
+        );
+        assert_eq!(
+            first.old.as_ref().unwrap().text(),
+            "line 124",
+            "and both columns are that same line of the file"
+        );
+        assert_eq!(first.new.as_ref().unwrap().text(), "line 124");
+
+        // Taken from the other end, the same gap gives the lines that sit
+        // against what follows -- the direction the King reads to find a
+        // function's name.
+        let up = context(&space, "long.rs", gap.tail(5))
+            .await
+            .expect("the last five hidden lines");
+        assert_eq!(up.len(), 5);
+        assert_eq!(up.last().unwrap().old.as_ref().unwrap().text(), "line 200");
+    }
+
+    /// Asking for more than there is gives what there is, and one enormous
+    /// request is capped rather than served whole.
+    ///
+    /// Both are clamps rather than refusals: the panel computes its request
+    /// from a diff it fetched a moment ago, and an error where a shorter answer
+    /// would do puts a dead button in front of the King.
+    #[tokio::test]
+    async fn a_request_past_the_end_of_the_file_is_clamped() {
+        let dir = repo().await;
+        let root = dir.path();
+        long_file(root).await;
+        let space = workspace(root);
+
+        let over_the_end = context(
+            &space,
+            "long.rs",
+            Gap {
+                old_from: 190,
+                new_from: 192,
+                count: 500,
+            },
+        )
+        .await
+        .expect("the lines that are there");
+        assert_eq!(over_the_end.len(), 11, "190..=200");
+
+        // And the cap, which is what keeps "show me everything" from undoing
+        // the row limit the whole panel is built around.
+        let before: String = (1..=2_000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(root.join("huge.rs"), &before).unwrap();
+        commit(root, "a huge file").await;
+        std::fs::write(
+            root.join("huge.rs"),
+            before.replace("line 1000\n", "changed\n"),
+        )
+        .unwrap();
+
+        let huge = context(
+            &space,
+            "huge.rs",
+            Gap {
+                old_from: 1,
+                new_from: 1,
+                count: 996,
+            },
+        )
+        .await
+        .expect("a bounded answer");
+        assert_eq!(huge.len(), MOST_CONTEXT as usize);
+    }
+
+    /// A region that no longer says the same thing on both sides is refused.
+    ///
+    /// The ordinary way to get here is the court rewriting the file between the
+    /// panel fetching the diff and the King pressing the control. Pairing two
+    /// unrelated lines opposite each other would be silent and wrong, where a
+    /// sentence is neither.
+    #[tokio::test]
+    async fn a_reveal_of_lines_that_have_since_changed_is_refused() {
+        let dir = repo().await;
+        let root = dir.path();
+        long_file(root).await;
+        let space = workspace(root);
+
+        // The court edits line 10 -- inside what was, a moment ago, a gap.
+        let after = std::fs::read_to_string(root.join("long.rs")).unwrap();
+        std::fs::write(
+            root.join("long.rs"),
+            after.replace("line 10\n", "line 10, and now something else\n"),
+        )
+        .unwrap();
+
+        let stale = context(
+            &space,
+            "long.rs",
+            Gap {
+                old_from: 1,
+                new_from: 1,
+                count: 20,
+            },
+        )
+        .await;
+
+        assert!(
+            stale.is_err_and(|why| why.contains("changed since")),
+            "a region that has moved under the King must be reported, not paired anyway"
+        );
+    }
+
+    /// A binary file has no lines to reveal, and says so in the words the panel
+    /// already uses for it rather than in a second phrasing of its own.
+    #[tokio::test]
+    async fn there_is_nothing_to_reveal_in_a_file_that_is_not_text() {
+        let dir = repo().await;
+        let root = dir.path();
+        std::fs::write(root.join("seal.png"), [0x89, 0x50, 0x00, 0x01, 0x02]).unwrap();
+        commit(root, "a picture").await;
+
+        let refused = context(
+            &workspace(root),
+            "seal.png",
+            Gap {
+                old_from: 1,
+                new_from: 1,
+                count: 10,
+            },
+        )
+        .await;
+
+        assert!(
+            refused.is_err_and(|why| why.contains("not text")),
+            "a PNG has no lines"
+        );
+    }
+
     /// An uneven replace is the case a browser-side pairing gets wrong: three
     /// lines becoming one leaves two rows with nothing opposite them.
     #[test]
     fn an_uneven_replacement_leaves_single_sided_rows() {
-        let (hunks, verdict) = pair("one\ntwo\nthree\n", "only\n");
-        assert_eq!(verdict, DiffVerdict::Shown);
+        let paired = pair("one\ntwo\nthree\n", "only\n");
+        assert_eq!(paired.verdict, DiffVerdict::Shown);
 
-        let rows: Vec<&DiffRow> = hunks.iter().flat_map(|h| &h.rows).collect();
+        let rows: Vec<&DiffRow> = paired.hunks.iter().flat_map(|h| &h.rows).collect();
         assert_eq!(rows.len(), 3);
         assert!(rows[0].old.is_some() && rows[0].new.is_some(), "the pair");
         assert!(
@@ -1199,13 +1600,14 @@ mod tests {
         let before: String = (0..MOST_ROWS + 500).map(|i| format!("old {i}\n")).collect();
         let after: String = (0..MOST_ROWS + 500).map(|i| format!("new {i}\n")).collect();
 
-        let (hunks, verdict) = pair(&before, &after);
-        let rows: usize = hunks.iter().map(|h| h.rows.len()).sum();
+        let paired = pair(&before, &after);
+        let rows: usize = paired.hunks.iter().map(|h| h.rows.len()).sum();
 
         assert!(rows <= MOST_ROWS, "{rows} rows drawn");
         assert!(
-            matches!(verdict, DiffVerdict::Truncated(dropped) if dropped > 0),
-            "{verdict:?}"
+            matches!(paired.verdict, DiffVerdict::Truncated(dropped) if dropped > 0),
+            "{:?}",
+            paired.verdict
         );
     }
 

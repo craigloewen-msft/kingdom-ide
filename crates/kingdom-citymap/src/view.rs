@@ -25,7 +25,7 @@
 
 use gloo_net::http::Request;
 use gloo_timers::callback::{Interval, Timeout};
-use kingdom_core::{ChangeSummary, CityActivity, CityId, PlanId};
+use kingdom_core::{CityActivity, CityId, PlanChanges};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -171,7 +171,7 @@ pub fn CityMap(
     /// same building openable twice.
     #[prop(into)]
     picked_file: RwSignal<Option<String>>,
-    /// What every live agent in the focused city is changing.
+    /// What every live agent in the kingdom is changing.
     ///
     /// Resolved against the manifest here and handed to the engine as plain
     /// geometry -- see the effect below, which is the boundary the engine's
@@ -182,14 +182,22 @@ pub fn CityMap(
     /// is *who* is touching a file, and one plan's summary structurally cannot
     /// answer it. Ordered by plan id by the caller, so a banner does not swap
     /// between two agents from one refetch to the next.
+    ///
+    /// **The whole kingdom rather than the focused city**, and each entry
+    /// carries its own city. Scoped to the selection, a project the King had
+    /// not clicked drew nothing at all -- so the map answered "what is every
+    /// agent doing" with one project's worth of work, and with no selection
+    /// with none. See [`crate::map::works`].
     #[prop(into)]
-    works: Signal<Vec<(PlanId, ChangeSummary)>>,
+    works: Signal<Vec<PlanChanges>>,
 ) -> impl IntoView {
     // First, and before anything is created: an engine that is not to run must
     // not be half-started and then told to stop. See the module doc.
     if map_mode().stood_down() {
         return view! { <StoodDown/> }.into_any();
     }
+    // Decided once, here, so the two boot paths below cannot disagree about it.
+    let capped = map_mode().capped();
 
     let manifest = RwSignal::new(None::<MapManifest>);
     let load_error = RwSignal::new(None::<String>);
@@ -229,7 +237,7 @@ pub fn CityMap(
                         // bridge holds it until the first update drains it,
                         // which is exactly what the queue is for.
                         loader.send(ViewerCommand::Load(Box::new(map)));
-                        boot(loader);
+                        boot(loader, capped);
                     })
                     .forget();
                 }
@@ -238,7 +246,7 @@ pub fn CityMap(
                     // read shows the same empty space and stars it always did
                     // behind the error, rather than a black rectangle.
                     load_error.set(Some(error));
-                    Timeout::new(PAINT_PAUSE_MS, move || boot(loader)).forget();
+                    Timeout::new(PAINT_PAUSE_MS, move || boot(loader, capped)).forget();
                 }
             }
         });
@@ -258,6 +266,12 @@ pub fn CityMap(
             }
             seen = revision;
             status.set(watcher.status());
+            // And, for a browser being driven rather than watched, the same
+            // status where a test can read it. Free for the King: `capped` is
+            // only ever true under automation.
+            if capped {
+                publish_status(&watcher.status());
+            }
         })
         .forget();
     });
@@ -319,7 +333,7 @@ pub fn CityMap(
     // waiting for the next time one of them changes.
     let manual = Memo::new(move |_| status.with(|state| state.manual));
 
-    // What the open plan is proposing, resolved into ground and handed over.
+    // What every agent is proposing, resolved into ground and handed over.
     //
     // **This is the boundary.** Everything above it is Kingdom's domain -- a
     // `ChangeSummary` of `ChangedFile`s with paths and line counts -- and
@@ -327,10 +341,17 @@ pub fn CityMap(
     // a plan or a changed file is, exactly as it never learns what a `CityId`
     // is: `SetActivity` above translates for the same reason.
     //
+    // **Deliberately not gated on `focus_city`.** It used to be, and that is
+    // what made an unselected city draw nothing: the works were resolved only
+    // for the town the King had clicked, so with no selection -- the ordinary
+    // state of the map's own screen -- there was nothing to draw anywhere. Each
+    // entry now carries its own city and `resolve` places it in its own town,
+    // so every agent's work stands wherever it belongs.
+    //
     // Tracks the manifest as well as the works, and must: a chamber opened from
     // a cold page has its summary in hand long before the map has arrived, and
     // without the dependency those changes would never be drawn at all. The
-    // same trap the scoping effect below documents.
+    // same trap the follow effect below documents.
     //
     // And it tracks `built` for a second, sharper reason. Raising a world
     // clears the works (`apply_commands`, the `Load` arm) -- scaffolding left
@@ -343,11 +364,10 @@ pub fn CityMap(
     let builder = bridge.clone();
     Effect::new(move |_| {
         let working = works.get();
-        let city = focus_city.get();
         let standing = built.get();
-        let raised = manifest.with(|map| match (map, &city) {
-            (Some(map), Some(city)) if standing && !working.is_empty() => {
-                crate::map::works::resolve(map, city.as_str(), &working)
+        let raised = manifest.with(|map| match map {
+            Some(map) if standing && !working.is_empty() => {
+                crate::map::works::resolve(map, &working)
             }
             // Nobody working, or nothing to draw against yet. An empty list is
             // how the works are torn down, so this is sent rather than skipped.
@@ -875,8 +895,108 @@ fn Survey(
 /// in [`CityMap`]: booting costs seconds of main thread, the fetch's bar is
 /// drawn from that same thread, and there is nothing to draw until the manifest
 /// has arrived anyway.
-fn boot(bridge: Bridge) {
-    engine::run(bridge);
+fn boot(bridge: Bridge, capped: bool) {
+    engine::run(bridge, capped);
+}
+
+/// The property an automated browser finds the map's state under.
+///
+/// Named with the leading underscores by convention for "this is a test seam,
+/// not an API": nothing in Kingdom reads it, and it is only ever defined on a
+/// page that `navigator.webdriver` was true for.
+const STATUS_PROPERTY: &str = "__kingdom_map";
+
+/// Mirrors the engine's status onto `window` for a test to read.
+///
+/// # Why this exists at all
+///
+/// Because the alternative is asserting on pixels. What a map test actually
+/// wants to know -- did the world stand up, what is under the pointer, what did
+/// that click select -- is all in [`ViewerStatus`] already, but none of it was
+/// reachable from outside the wasm module. A test could only infer hovering
+/// from the `over-holding` class, which says *that* something is under the
+/// pointer and never *what*.
+///
+/// So a test can now do:
+///
+/// ```js
+/// __kingdom_map.built            // the world finished going up
+/// __kingdom_map.hovered          // "src/main.rs"
+/// __kingdom_map.clicked.holding  // what the last click actually hit
+/// ```
+///
+/// which is worth more than a screenshot: it is stable against every change to
+/// how the map is *drawn*, and it names the thing that was hit rather than
+/// leaving a human to recognise it in an image.
+///
+/// # Best effort, on purpose
+///
+/// Every failure here is ignored. This is a diagnostic on a page that is
+/// already drawing the real map; a map that cannot publish its status is still
+/// a working map, and taking the interface down over it would be absurd.
+fn publish_status(status: &ViewerStatus) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let object = js_sys::Object::new();
+    let set = |key: &str, value: wasm_bindgen::JsValue| {
+        let _ = js_sys::Reflect::set(&object, &key.into(), &value);
+    };
+
+    set("awake", status.awake.into());
+    set("built", status.built.into());
+    set("manual", status.manual.into());
+    set("zoom", status.zoom.into());
+    set("lod", status.lod.label().into());
+    set("hovered", to_js(status.hovered.as_deref()));
+    set("hoveredWard", to_js(status.hovered_ward.as_deref()));
+    set("selectedWard", to_js(status.selected_ward.as_deref()));
+    set("error", to_js(status.error.as_deref()));
+
+    // The click carries its serial as well as its target, because that is what
+    // makes clicking the same holding twice two events rather than one -- the
+    // same reason `ViewerStatus` keeps it. A test that only compared `holding`
+    // could not tell a second click from a stale read.
+    set(
+        "clicked",
+        match &status.clicked {
+            Some((holding, serial)) => {
+                let click = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&click, &"holding".into(), &holding.as_str().into());
+                let _ = js_sys::Reflect::set(&click, &"serial".into(), &(*serial as f64).into());
+                click.into()
+            }
+            None => wasm_bindgen::JsValue::NULL,
+        },
+    );
+
+    // The raise, so a test can wait for the world rather than sleeping at it.
+    set(
+        "raising",
+        match &status.raising {
+            Some(raising) => {
+                let object = js_sys::Object::new();
+                let _ =
+                    js_sys::Reflect::set(&object, &"stage".into(), &raising.stage.label().into());
+                let _ = js_sys::Reflect::set(&object, &"fraction".into(), &raising.fraction.into());
+                object.into()
+            }
+            None => wasm_bindgen::JsValue::NULL,
+        },
+    );
+
+    let _ = js_sys::Reflect::set(&window, &STATUS_PROPERTY.into(), &object);
+}
+
+/// An optional string as a JavaScript string or `null`.
+///
+/// `null` rather than `undefined` so that a missing value is a value a test can
+/// compare against, rather than a property that reads as absent.
+fn to_js(value: Option<&str>) -> wasm_bindgen::JsValue {
+    match value {
+        Some(value) => value.into(),
+        None => wasm_bindgen::JsValue::NULL,
+    }
 }
 
 /// Fetches the manifest the server built for this kingdom, reporting progress.

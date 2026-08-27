@@ -65,6 +65,15 @@ pub async fn dismiss(plan: &kingdom_core::PlanId) {
 /// say so -- a number the user should see, because it is the size of a problem
 /// that used to be invisible.
 pub fn start_housekeeping() -> usize {
+    // Teach the browser crate how to enter a plan's network namespace, before
+    // any browser can be launched. Without this a plan with its own network
+    // would drive a browser on the *host's* network, and `localhost:3000` in
+    // that browser would be somebody else's server -- see
+    // `kingdom_browser::on_enter_namespace`.
+    kingdom_browser::on_enter_namespace(|plan| {
+        crate::netns::enter_prefix(&kingdom_core::PlanId::new(plan))
+    });
+
     let reclaimed = kingdom_browser::sweep_orphans();
     // The handle is dropped deliberately: the reaper lives as long as the
     // server does, and there is no shutdown path that would want to stop it

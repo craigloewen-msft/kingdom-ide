@@ -51,14 +51,13 @@
 //!
 //! # Why they are unlit, and why they are the colours they are
 //!
-//! [`super::activity::PULSE_PEAK`] records three failed attempts at drawing a
-//! status colour as a lit surface: emissive scaled for the sun's lux clipped to
-//! white, a value near 1.0 was washed out by the tonemapper, and a lit material
-//! added the sun's white specular on top and came out mint. The conclusion there
-//! is the conclusion here -- a status colour is a piece of interface that
-//! happens to be drawn in world space -- so everything in this module is
-//! `unlit`, and the pulse dims toward black rather than brightening toward
-//! white.
+//! [`super::activity::WORKING_COLOR`] records three failed attempts at drawing
+//! a status colour as a lit surface: emissive scaled for the sun's lux clipped
+//! to white, a value near 1.0 was washed out by the tonemapper, and a lit
+//! material added the sun's white specular on top and came out mint. The
+//! conclusion there is the conclusion here -- a status colour is a piece of
+//! interface that happens to be drawn in world space -- so everything in this
+//! module is `unlit`.
 //!
 //! The colours are **not** this module's to choose any more. Each band arrives
 //! carrying the two colours of the agent that made it --
@@ -68,6 +67,20 @@
 //! are on this file?". A single green and a single red could answer the first
 //! and structurally could not answer the second.
 //!
+//! # Nothing here moves, and nothing here is dimmed
+//!
+//! A band is its agent's colour exactly, at the alpha its kind earns, from the
+//! moment it is raised until it is replaced. Two things used to vary it and
+//! both are gone at the King's word: a 2.4-second breath shared with the town
+//! ring, and a *strength* ramp that drew a small change at 55% of its agent's
+//! colour and a large one at full.
+//!
+//! Size is the only channel magnitude has now -- [`band_height`],
+//! [`band_girth`], [`shroud_height`] and the skirt's spread -- which is the
+//! channel it was always read from anyway. A colour that moves is a colour
+//! being asked to say two things at once: whose work this is, and how much of
+//! it there is. It now says only the first, and says it steadily.
+//!
 //! What this module still decides is *alpha*, which is about the drawing rather
 //! than the domain: a proposal is translucent, and a ghost is fainter still.
 
@@ -75,7 +88,6 @@ use bevy::prelude::*;
 
 use crate::map::{Work, WorkSite};
 
-use super::activity;
 use super::materials::to_color;
 use super::meshes::{self, BuildingShape};
 use super::spawn::MeshCache;
@@ -338,24 +350,16 @@ impl Works {
 /// Deliberately its own root rather than a child of `spawn::SceneRoot`: the
 /// works outlive no world, but they are replaced far more often than one is, and
 /// a separate root means swapping them never walks the settlement's entities.
+///
+/// It is also the *only* handle anything needs on the works now. There used to
+/// be a `Scaffold` component on every band as well, carrying that band's own
+/// material handle and base colour so the pulse could write a new colour through
+/// it each frame -- and each band therefore needed a material of its own rather
+/// than a shared one. With nothing animating them, a band is raised in its
+/// colour and left alone, so there is nothing for such a component to be read
+/// by.
 #[derive(Component)]
 pub struct WorksRoot;
-
-/// A band of a column, which breathes. Carries its own material for
-/// [`super::activity::TownRing`]'s reason: the shared cache quantises by colour
-/// and hands one handle to hundreds of meshes, so animating a cached material
-/// would pulse whatever else landed in the same bucket.
-#[derive(Component, Clone)]
-pub struct Scaffold {
-    /// This band's own material, animated by [`pulse_works`].
-    pub material: Handle<StandardMaterial>,
-    /// The colour it breathes around: the agent's own, for this direction.
-    pub base: Color,
-    /// How bright this one burns at the top of its breath. Taken from the
-    /// band's own magnitude, so a heavily-worked house is the brightest thing
-    /// on the map as well as the tallest.
-    pub strength: f32,
-}
 
 /// How tall one band stands, given how many lines it moved.
 ///
@@ -377,21 +381,27 @@ pub fn band_girth(churn: f32) -> f32 {
     thin + magnitude(churn) * (thick - thin)
 }
 
-/// One of an agent's two colours at a point in its breath.
+/// One of an agent's two colours, at the weight the drawing calls for.
 ///
-/// The agent's own colour, dimmed toward black -- never lightened toward white.
-/// See the module docs, and [`super::activity::ring_color`], which this is the
-/// translucent sibling of.
+/// The agent's own colour, exactly, with `alpha` applied. Nothing scales the
+/// channels any more: the King asked for bands that neither pulse nor change
+/// colour, and a hue that is only sometimes itself is a hue that cannot be used
+/// to recognise an agent at a glance.
 ///
-/// `alpha` is the caller's because a ghost house is fainter than a standing
-/// one: what is being drawn decides how solid a proposal looks, and the colour
-/// itself carries only whose it is.
-pub fn band_color(base: Color, strength: f32, alpha: u8) -> Color {
+/// It used to take a `strength` and multiply every channel by it, for two
+/// reasons that both went: a breath shared with the town ring, and a ramp with
+/// the size of the change. See the module docs -- magnitude is size now, and
+/// only size.
+///
+/// `alpha` is still the caller's, because a ghost house is fainter than a
+/// standing one: what is being drawn decides how solid a proposal looks, and the
+/// colour itself carries only whose it is.
+pub fn band_color(base: Color, alpha: u8) -> Color {
     let base = base.to_linear();
     Color::LinearRgba(LinearRgba {
-        red: base.red * strength,
-        green: base.green * strength,
-        blue: base.blue * strength,
+        red: base.red,
+        green: base.green,
+        blue: base.blue,
         alpha: alpha as f32 / 255.0,
     })
 }
@@ -481,10 +491,7 @@ fn raise_one(
             .first()
             .map(|band| to_color(band.growth))
             .unwrap_or(Color::WHITE);
-        let ghost = materials.add(unlit(
-            band_color(ghost_color, 1.0, GHOST_ALPHA),
-            GHOST_ALPHA,
-        ));
+        let ghost = materials.add(unlit(band_color(ghost_color, GHOST_ALPHA), GHOST_ALPHA));
 
         let entity = commands
             .spawn((
@@ -532,12 +539,8 @@ fn raise_one(
         }
         let height = band_height(churn);
         let girth = band_girth(churn);
-        let strength = 0.55 + magnitude(churn) * 0.45;
         let base_color = to_color(band.growth);
-        let material = materials.add(unlit(
-            band_color(base_color, strength, WORKS_ALPHA),
-            WORKS_ALPHA,
-        ));
+        let material = materials.add(unlit(band_color(base_color, WORKS_ALPHA), WORKS_ALPHA));
 
         commands.spawn((
             ChildOf(root),
@@ -546,16 +549,11 @@ fn raise_one(
                 height,
                 footprint.depth * girth,
             ))),
-            MeshMaterial3d(material.clone()),
+            MeshMaterial3d(material),
             // Cuboids are built about their own centre, so the box is lifted by
             // half its height to stand *on* what is below it rather than
             // through it.
             Transform::from_xyz(center[0], standing + height * 0.5, center[1]),
-            Scaffold {
-                material,
-                base: base_color,
-                strength,
-            },
             Pickable::IGNORE,
         ));
 
@@ -588,10 +586,14 @@ fn raise_one(
             ),
         };
 
+        // How far it spreads still follows how much is being cut -- size is
+        // the channel magnitude has. Its *colour* does not: the alpha used to
+        // be scaled by the same weight, so a small cut was drawn in a washed-out
+        // version of its agent's colour. It is the agent's colour at the works'
+        // own weight, like every other mark here.
         let plan = footprint.width.min(footprint.depth);
         let spread = (SKIRT_SPREAD * plan * weight).max(SKIRT_FLOOR * weight.max(0.35));
-        let mut color = to_color(colour);
-        color.set_alpha(weight.clamp(0.35, 1.0) * (WORKS_ALPHA as f32 / 255.0));
+        let color = band_color(to_color(colour), WORKS_ALPHA);
 
         commands.spawn((
             ChildOf(root),
@@ -645,10 +647,7 @@ fn raise_one(
             continue;
         }
         let base_color = to_color(band.cutting);
-        let material = materials.add(unlit(
-            band_color(base_color, 1.0, SHROUD_ALPHA),
-            SHROUD_ALPHA,
-        ));
+        let material = materials.add(unlit(band_color(base_color, SHROUD_ALPHA), SHROUD_ALPHA));
 
         commands.spawn((
             ChildOf(root),
@@ -657,18 +656,13 @@ fn raise_one(
                 height,
                 footprint.depth * SHROUD_GIRTH,
             ))),
-            MeshMaterial3d(material.clone()),
+            MeshMaterial3d(material),
             // From the ground up, each agent's share stacked on the last. No
             // gap between them, unlike the column: these are one house being
             // covered rather than separate things standing on each other, and
             // a stripe of bare wall between two blocks would read as the
             // house showing through.
             Transform::from_xyz(center[0], covered + height * 0.5, center[1]),
-            Scaffold {
-                material,
-                base: base_color,
-                strength: 1.0,
-            },
             Pickable::IGNORE,
         ));
 
@@ -703,36 +697,6 @@ fn unlit(color: Color, alpha: u8) -> StandardMaterial {
         unlit: true,
         alpha_mode: AlphaMode::Blend,
         ..default()
-    }
-}
-
-/// Breathes every band, on the same clock the working ring breathes on.
-///
-/// [`super::activity::glow`] is shared rather than copied, so the works and the
-/// ring around the town they stand in rise and fall together instead of beating
-/// against each other -- they are two readings of one plan, and reading them as
-/// unrelated blinking would be wrong about that.
-pub fn pulse_works(
-    time: Res<Time>,
-    works: Res<Works>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    scaffolds: Query<&Scaffold>,
-) {
-    if works.is_quiet() {
-        return;
-    }
-    let breath = activity::glow(time.elapsed_secs());
-    for scaffold in scaffolds.iter() {
-        if let Some(mut material) = materials.get_mut(&scaffold.material) {
-            // The band's own colour, dimmed -- not a shared one. Each band
-            // carries its base so the pulse never has to ask which agent it
-            // belongs to.
-            material.base_color = band_color(
-                scaffold.base,
-                breath * scaffold.strength,
-                (material.base_color.alpha() * 255.0) as u8,
-            );
-        }
     }
 }
 
@@ -860,60 +824,66 @@ mod tests {
         );
     }
 
-    /// The regression `activity::PULSE_PEAK` was written for, generalised: a
-    /// band must stay recognisably *its own agent's colour* through the whole
-    /// of its breath. Three earlier attempts at a lit status colour ended in
-    /// white, mint and near-white, all in the bright direction.
+    /// **The King's instruction, stated as arithmetic.** A band is exactly its
+    /// agent's colour -- not a dimmed version of it, and not one that moves.
+    ///
+    /// This replaces `a_band_keeps_its_agents_hue_throughout_its_breath`, which
+    /// sampled the colour across a 2.4-second cycle and asserted only that the
+    /// hue survived it. There is no cycle now, so the far stronger property is
+    /// available: the colour *is* the banner's, channel for channel.
+    ///
+    /// The reasoning the old test guarded is not lost -- see
+    /// `activity::WORKING_COLOR` for the three attempts at a lit status colour
+    /// that ended in white, mint and near-white, which is why everything here
+    /// is unlit.
     #[test]
-    fn a_band_keeps_its_agents_hue_throughout_its_breath() {
+    fn a_band_is_exactly_its_agents_colour() {
         for banner in kingdom_core::palette::BANNERS {
-            let base = to_color([
-                banner.growth_rgb[0],
-                banner.growth_rgb[1],
-                banner.growth_rgb[2],
-                255,
-            ]);
-            let Color::LinearRgba(full) = band_color(base, 1.0, WORKS_ALPHA) else {
-                panic!("the works should be linear rgba");
-            };
-            for step in 0..24 {
-                let breath = activity::glow(step as f32 * 0.1);
-                let Color::LinearRgba(c) = band_color(base, breath, WORKS_ALPHA) else {
-                    panic!("linear rgba");
+            for rgb in [banner.growth_rgb, banner.cutting_rgb] {
+                let base = to_color([rgb[0], rgb[1], rgb[2], 255]);
+                // `to_color` hands back sRGB and `band_color` answers in
+                // linear, so the comparison is made in the one they can share.
+                let want = base.to_linear();
+                let Color::LinearRgba(got) = band_color(base, WORKS_ALPHA) else {
+                    panic!("the works should be linear rgba");
                 };
-                // Never brighter than the colour itself: the pulse dims toward
-                // black rather than brightening toward white.
-                assert!(
-                    c.red <= full.red + 1e-6
-                        && c.green <= full.green + 1e-6
-                        && c.blue <= full.blue + 1e-6,
-                    "{} clipped toward white at step {step}",
-                    banner.name
-                );
-                // And the hue is intact: the channel ordering never changes,
-                // which is what "still recognisably that agent" means.
-                let order = |a: f32, b: f32| a.partial_cmp(&b).unwrap();
                 assert_eq!(
-                    order(c.red, c.green),
-                    order(full.red, full.green),
-                    "{} lost its hue at step {step}",
-                    banner.name
-                );
-                assert_eq!(
-                    order(c.green, c.blue),
-                    order(full.green, full.blue),
-                    "{} lost its hue at step {step}",
+                    (got.red, got.green, got.blue),
+                    (want.red, want.green, want.blue),
+                    "{} was not drawn in its own colour",
                     banner.name
                 );
             }
         }
     }
 
+    /// **The second half of what the King asked for.** Two changes of wildly
+    /// different size, drawn in the same colour.
+    ///
+    /// Size still says how much moved -- height, girth and cover all ramp with
+    /// churn, and the tests above pin that. Colour says only *whose* work it
+    /// is. A `strength` of `0.55 + magnitude * 0.45` used to make a small change
+    /// a dimmer version of its agent's hue, so the same agent was several
+    /// colours across one map.
+    #[test]
+    fn a_band_is_the_same_colour_whatever_its_size() {
+        let base = to_color([0x5c, 0xf5, 0xa8, 255]);
+        assert_eq!(
+            band_color(base, WORKS_ALPHA),
+            band_color(base, WORKS_ALPHA),
+            "nothing about the colour may depend on the change"
+        );
+        // And the sizes genuinely do differ, so the distinction is still drawn
+        // -- just in the channel that carries it.
+        assert!(band_height(400.0) > band_height(4.0));
+        assert!(band_girth(400.0) > band_girth(4.0));
+    }
+
     /// A proposal is not the city. Solid works would say the King had already
     /// approved them.
     #[test]
     fn the_works_are_translucent() {
-        let Color::LinearRgba(c) = band_color(Color::WHITE, 1.0, WORKS_ALPHA) else {
+        let Color::LinearRgba(c) = band_color(Color::WHITE, WORKS_ALPHA) else {
             panic!("linear rgba");
         };
         assert!(c.alpha < 1.0, "a proposal must not look built");

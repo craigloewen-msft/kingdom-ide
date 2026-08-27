@@ -4,7 +4,9 @@ use crate::api::{get_kingdom, open_kingdom};
 use crate::components::{Conversation, PromptBar, Sidebar};
 use kingdom_citymap::map::MapPresence;
 use kingdom_citymap::CityMap;
-use kingdom_core::{Attention, CityActivity, CityId, Kingdom, ModelChoice, Plan, WorkspaceMode};
+use kingdom_core::{
+    Attention, CityActivity, CityId, Kingdom, ModelChoice, NetworkMode, Plan, WorkspaceMode,
+};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
@@ -90,6 +92,12 @@ const EFFORT_KEY: &str = "kingdom.effort";
 const WORKSPACE_KEY: &str = "kingdom.workspace";
 #[cfg(feature = "hydrate")]
 const BRANCH_KEY: &str = "kingdom.branch";
+/// Where the last-used network mode is remembered.
+///
+/// Its own key rather than a field of the workspace's, because it is its own
+/// axis -- see [`kingdom_core::NetworkMode`].
+#[cfg(feature = "hydrate")]
+const NETWORK_KEY: &str = "kingdom.network";
 
 /// Shared UI state, provided via context so the three regions stay in sync
 /// without threading props through every layer.
@@ -151,6 +159,9 @@ pub struct KingdomState {
     pub choice: RwSignal<Option<ModelChoice>>,
     /// How the next new plan will be isolated on disk.
     pub workspace: RwSignal<WorkspaceMode>,
+    /// Whether the next plan gets a network of its own. A separate axis from
+    /// `workspace`; see [`kingdom_core::NetworkMode`].
+    pub network: RwSignal<NetworkMode>,
     /// The file the chamber's panel is showing, relative to the plan's city.
     ///
     /// Written by the chamber and read by the map, which is why it is here: the
@@ -174,8 +185,8 @@ pub struct KingdomState {
     /// file and then **clears this**: it is a message rather than a state, and
     /// leaving it set would mean the same building could not be pressed twice.
     pub picked_file: RwSignal<Option<String>>,
-    /// What every live agent in the selected city is changing, published where
-    /// the map can draw it.
+    /// What every live agent in the kingdom is changing, published where the
+    /// map can draw it.
     ///
     /// Here for exactly [`Self::focus_file`]'s reason, and it sits beside it for
     /// that reason: the chamber renders inside the router's outlet, the map is
@@ -190,12 +201,18 @@ pub struct KingdomState {
     /// `kingdom_core::palette` turns that into the colours the works are drawn
     /// in.
     ///
+    /// **The whole kingdom rather than the selected city**, which is the second
+    /// widening of the same question. Scoped to the selection, this was cleared
+    /// outright whenever no city was selected -- so the map's own screen, where
+    /// there is usually no selection at all, drew no agent's work anywhere. Each
+    /// entry carries its city so the map can stand it in the right town.
+    ///
     /// Ordered by plan id, which is load-bearing: a banner collision is
     /// resolved by position, so an unstable order would let two agents swap
-    /// colours between refetches. `api::city_changes` sorts.
+    /// colours between refetches. `api::kingdom_changes` sorts.
     ///
     /// Empty when nothing is live, which is what tears the works down.
-    pub works: RwSignal<Vec<(kingdom_core::PlanId, kingdom_core::ChangeSummary)>>,
+    pub works: RwSignal<Vec<kingdom_core::PlanChanges>>,
     /// What each plan wants of the King, as the server last said.
     ///
     /// A cache beside the kingdom rather than a field on `Plan`, and the reason
@@ -237,6 +254,7 @@ impl KingdomState {
             error: RwSignal::new(None),
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
+            network: RwSignal::new(NetworkMode::default()),
             focus_file: RwSignal::new(None),
             picked_file: RwSignal::new(None),
             works: RwSignal::new(Vec::new()),
@@ -279,6 +297,12 @@ impl KingdomState {
     pub fn choose_workspace(&self, mode: WorkspaceMode) {
         store_workspace(&mode);
         self.workspace.set(mode);
+    }
+
+    /// Records whether the next plan gets a network of its own.
+    pub fn choose_network(&self, mode: NetworkMode) {
+        store_network(&mode);
+        self.network.set(mode);
     }
 
     /// Folds the cities rail away, or brings it back, remembering which.
@@ -387,6 +411,48 @@ fn restore_workspace(mode: RwSignal<WorkspaceMode>) {
         };
         mode.set(restored);
     });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = mode;
+}
+
+/// Restores the remembered network mode, in the same place and for the same
+/// reason as [`restore_workspace`].
+fn restore_network(mode: RwSignal<NetworkMode>) {
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(storage) = local_storage() else {
+            return;
+        };
+        let Some(stored) = storage.get_item(NETWORK_KEY).ok().flatten() else {
+            return;
+        };
+        // Anything unrecognised means shared. The default is deliberately the
+        // *un*isolated one here, the opposite of the workspace's: a network
+        // namespace needs slirp4netns, and a machine that has since lost it
+        // should open on the mode that always works rather than on one the
+        // server would refuse.
+        mode.set(match stored.as_str() {
+            "isolated" => NetworkMode::Isolated,
+            _ => NetworkMode::Shared,
+        });
+    });
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = mode;
+}
+
+fn store_network(mode: &NetworkMode) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(
+            NETWORK_KEY,
+            match mode {
+                NetworkMode::Shared => "shared",
+                NetworkMode::Isolated => "isolated",
+            },
+        );
+    }
 
     #[cfg(not(feature = "hydrate"))]
     let _ = mode;
@@ -550,65 +616,75 @@ fn kingdom_activity(state: KingdomState) -> Memo<Vec<CityActivity>> {
     Memo::new(move |_| state.kingdom.with(Kingdom::activity))
 }
 
-/// Keeps [`KingdomState::works`] current for whichever city is selected.
+/// Keeps [`KingdomState::works`] current for every live agent in the kingdom.
 ///
 /// # Why this is push-driven rather than polled
 ///
 /// The rail's socket already carries a `PlanPulse` for every plan whenever it
 /// moves, and `absorb` writes that onto the kingdom this browser holds. So
-/// "has any agent in this city done anything?" is a question already answered
-/// locally, for free, at exactly the moment it changes -- a timer would be both
-/// slower and more expensive. This is the same argument `kingdom_activity`
-/// above records for the working rings, applied to the works.
+/// "has any agent done anything?" is a question already answered locally, for
+/// free, at exactly the moment it changes -- a timer would be both slower and
+/// more expensive. This is the same argument `kingdom_activity` above records
+/// for the working rings, applied to the works.
+///
+/// # Why it is no longer scoped to the selected city
+///
+/// Because scoping it there is what left an unselected city's work undrawn: the
+/// digest below returned `None` with no selection and the effect then *cleared*
+/// the works, so the map's own screen -- where there is usually no selection at
+/// all -- showed no agent's work anywhere. Which town the King has clicked says
+/// where he is looking, not what his agents are doing.
 ///
 /// # What it is keyed on
 ///
-/// A digest -- the city, and each live plan's id and `working_on` -- rather than
-/// the kingdom itself. The kingdom signal is re-set wholesale on every push,
-/// including pushes about plans in other cities and about transcript entries
-/// that touched no file, and refetching a city's git state for those would be a
-/// request per round of every turn in the kingdom. A `Memo` over a small
-/// `PartialEq` value means the fetch runs when an agent here actually did
-/// something.
+/// A digest -- each live plan's id and `working_on` -- rather than the kingdom
+/// itself. The kingdom signal is re-set wholesale on every push, including
+/// pushes about transcript entries that touched no file, and refetching every
+/// worktree's git state for those would be a request per round of every turn in
+/// the kingdom. A `Memo` over a small `PartialEq` value means the fetch runs
+/// when an agent actually did something.
 ///
 /// The guard is `fetching`, the same shape `review_drawer::fetch_changes` uses
 /// and for its reason: an answer that arrives while one is in flight is dropped
 /// rather than queued, because the next pulse will ask again in a moment and
 /// two overlapping answers could land out of order.
-fn watch_city_works(state: KingdomState) {
+fn watch_kingdom_works(state: KingdomState) {
     // What would make the answer different. `working_on` is in here because it
     // moves on every deed, which is the cheapest honest proxy for "this agent
     // may have just touched a file"; the id list covers a plan opening,
     // settling or being deleted.
+    //
+    // Subagents are excluded to agree with the endpoint, which excludes them
+    // because a subagent shares its parent's worktree and would draw one piece
+    // of work twice.
     let stirring = Memo::new(move |_| {
-        let Some(city) = state.selected.get() else {
-            return None;
-        };
-        let plans = state.kingdom.with(|k| {
-            k.plans_in(&city)
-                .filter(|plan| plan.is_live())
+        state.kingdom.with(|k| {
+            k.plans
+                .iter()
+                .filter(|plan| plan.is_live() && !plan.is_subagent())
                 .map(|plan| (plan.id.clone(), plan.working_on.clone()))
                 .collect::<Vec<_>>()
-        });
-        Some((city, plans))
+        })
     });
 
     let fetching = RwSignal::new(false);
 
     Effect::new(move |_| {
-        let Some((city, _)) = stirring.get() else {
-            // No city selected: nothing to draw, and an empty list is how the
-            // works are torn down.
+        let live = stirring.get();
+        if live.is_empty() {
+            // No agent anywhere: nothing to draw, and an empty list is how the
+            // works are torn down. Answered here rather than by a request that
+            // could only come back empty.
             state.works.set(Vec::new());
             return;
-        };
+        }
         if fetching.get_untracked() {
             return;
         }
         fetching.set(true);
 
         leptos::task::spawn_local(async move {
-            if let Ok(found) = crate::api::city_changes(city.to_string()).await {
+            if let Ok(found) = crate::api::kingdom_changes().await {
                 // A failed fetch deliberately leaves the last good answer
                 // standing, exactly as the review drawer's does: blanking the
                 // map because one request was dropped is a worse answer than a
@@ -641,6 +717,7 @@ pub fn App() -> impl IntoView {
     provide_context(state);
     restore_choice(state.choice);
     restore_workspace(state.workspace);
+    restore_network(state.network);
     restore_rail_collapsed(state.rail_collapsed, state.rail_preference);
     // After the restore, so "enough room again" gives back the King's own
     // preference rather than the default standing in for it.
@@ -655,11 +732,11 @@ pub fn App() -> impl IntoView {
     // looking at the map or at another chamber entirely.
     watch_kingdom(state);
 
-    // What every agent in the selected city is changing, kept current off that
-    // same socket. Mounted here rather than in the chamber because the map
-    // outlives any one conversation -- and because the works are now about a
-    // city rather than about whichever plan happens to be open.
-    watch_city_works(state);
+    // What every agent in the kingdom is changing, kept current off that same
+    // socket. Mounted here rather than in the chamber because the map outlives
+    // any one conversation -- and because the works are now about the kingdom
+    // rather than about whichever plan, or whichever city, happens to be open.
+    watch_kingdom_works(state);
 
     // Load any kingdom the server already has open, so a refresh does not
     // send the user back to the folder picker.
@@ -778,6 +855,38 @@ fn ThroneRoom() -> impl IntoView {
         }
     };
 
+    // What the works on the map add up to, per agent, for the town the rail's
+    // pane is framed on.
+    //
+    // Filtered to that city deliberately. `state.works` is the whole kingdom
+    // now, and the rail's map shows one town -- a key naming agents at work in
+    // projects that are not on screen is a key to nothing. The banners are
+    // assigned over the **whole** kingdom first and only then filtered, so a
+    // chip is the same colour here as the column standing on the map.
+    let city_tallies = Memo::new(move |_| {
+        let Some(city) = state.selected.get() else {
+            return Vec::<AgentTally>::new();
+        };
+        state.works.with(|works| {
+            let plans: Vec<_> = works.iter().map(|entry| entry.plan.clone()).collect();
+            let banners = kingdom_core::palette::assign_banners(&plans);
+            works
+                .iter()
+                .zip(banners)
+                .filter(|(entry, _)| entry.city == city && !entry.changes.files.is_empty())
+                .map(|(entry, (_, banner))| {
+                    (
+                        entry.plan.clone(),
+                        entry.changes.added(),
+                        entry.changes.removed(),
+                        entry.changes.files.len(),
+                        banner,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+
     view! {
         <div
             class="throne-room"
@@ -849,32 +958,10 @@ fn ThroneRoom() -> impl IntoView {
                         // proportion, not a number. One chip per agent, in that
                         // agent's own two colours, so the hues standing on the
                         // map have a key sitting beside them.
-                        <Show when=move || {
-                            state.works.with(|w| w.iter().any(|(_, s)| !s.files.is_empty()))
-                        }>
+                        <Show when=move || !city_tallies.get().is_empty()>
                             <span class="map-rail-works">
                                 <For
-                                    each=move || {
-                                        state.works.with(|w| {
-                                            let plans: Vec<_> =
-                                                w.iter().map(|(id, _)| id.clone()).collect();
-                                            let banners =
-                                                kingdom_core::palette::assign_banners(&plans);
-                                            w.iter()
-                                                .zip(banners)
-                                                .filter(|((_, s), _)| !s.files.is_empty())
-                                                .map(|((id, s), (_, banner))| {
-                                                    (
-                                                        id.clone(),
-                                                        s.added(),
-                                                        s.removed(),
-                                                        s.files.len(),
-                                                        banner,
-                                                    )
-                                                })
-                                                .collect::<Vec<_>>()
-                                        })
-                                    }
+                                    each=move || city_tallies.get()
                                     key=|entry: &AgentTally| {
                                         (entry.0.clone(), entry.1, entry.2, entry.3)
                                     }

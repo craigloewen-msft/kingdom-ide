@@ -16,9 +16,11 @@ use crate::components::resizer::{restore_flag, restore_width, store_flag, Bounds
 use crate::components::BrowserView;
 use crate::components::CityRail;
 use crate::components::DiffView;
+use crate::components::PortsBadge;
 use crate::components::Prose;
 use crate::components::ReviewMargin;
 use crate::components::SourceView;
+use crate::components::TerminalView;
 // `FileTree` is not named here: the files rail is `CityRail`, which stacks the
 // tree over the review drawer and mounts both itself.
 use crate::components::ProposalCard;
@@ -45,6 +47,8 @@ use leptos_router::hooks::use_params_map;
 enum Aside {
     Hidden,
     Browser,
+    /// The King's own shell, in this plan's workspace and network.
+    Terminal,
     /// A file under review, named relative to the plan's workspace: what this
     /// plan changed about it.
     Diff(String),
@@ -56,6 +60,10 @@ enum Aside {
 impl Aside {
     fn is_browser(&self) -> bool {
         matches!(self, Aside::Browser)
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(self, Aside::Terminal)
     }
 
     /// Whether anything is in the slot at all.
@@ -136,6 +144,19 @@ const SOURCE_BOUNDS: Bounds = Bounds {
 };
 
 const SOURCE_WIDTH_KEY: &str = "kingdom.source_width";
+
+/// How wide the terminal may be dragged.
+///
+/// Its own bounds and its own key, for the reason every other panel has one: a
+/// shell wants at least 80 columns to stop `cargo`'s output wrapping, and the
+/// width the King drags for it should survive him looking at a diff.
+const TERMINAL_BOUNDS: Bounds = Bounds {
+    min: 360.0,
+    max: 1200.0,
+    default: 560.0,
+};
+
+const TERMINAL_WIDTH_KEY: &str = "kingdom.terminal_width";
 
 /// Whether the panel takes the conversation's room as well as its own.
 ///
@@ -812,6 +833,8 @@ fn ConversationBody(
     // a screencast and a two-column diff do not want the same room.
     let spyglass_width = RwSignal::new(SPYGLASS_BOUNDS.default);
     restore_width(spyglass_width, SPYGLASS_WIDTH_KEY, SPYGLASS_BOUNDS);
+    let terminal_width = RwSignal::new(TERMINAL_BOUNDS.default);
+    restore_width(terminal_width, TERMINAL_WIDTH_KEY, TERMINAL_BOUNDS);
     let diff_width = RwSignal::new(DIFF_BOUNDS.default);
     restore_width(diff_width, DIFF_WIDTH_KEY, DIFF_BOUNDS);
     let source_width = RwSignal::new(SOURCE_BOUNDS.default);
@@ -1092,6 +1115,15 @@ fn ConversationBody(
     let browser_deed =
         Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| browsing(&p.transcript))));
 
+    // Whether this plan has a network of its own, and what it currently has
+    // open in it. Both read off the *live* plan rather than the snapshot: the
+    // ports arrive over the same watch socket as everything else, pushed by the
+    // namespace's watcher as servers come up and go down.
+    let plan_isolated =
+        Memo::new(move |_| live.with(|p| p.as_ref().is_some_and(|p| p.network.is_isolated())));
+    let plan_ports =
+        Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.ports.clone()).unwrap_or_default()));
+
     view! {
         // A flex row: the city's files, then everything that is read against
         // them. The rail is a sibling of that whole group rather than of the
@@ -1273,6 +1305,25 @@ fn ConversationBody(
                         >
                             "\u{1F50D}"
                         </button>
+                        // A shell where the work is. Beside the spyglass because
+                        // it answers the neighbouring question: the spyglass
+                        // shows what the court saw, this is how the King looks
+                        // for himself. On an isolated plan it is also the only
+                        // way in -- his own terminal is in a different network.
+                        <button
+                            class="terminal-toggle"
+                            class:open=move || aside.get().is_terminal()
+                            title="Open a shell in this plan's workspace"
+                            on:click=move |_| aside.update(|a| {
+                                *a = if a.is_terminal() { Aside::Hidden } else { Aside::Terminal };
+                            })
+                        >
+                            "\u{25B8}_"
+                        </button>
+                        // What this plan has open, and where to reach it. Drawn
+                        // only for a plan with a network of its own; see
+                        // `PortsBadge`.
+                        <PortsBadge ports=plan_ports isolated=plan_isolated/>
                         // What the court was told before it was asked anything. The
                         // transcript carries every word since; this is the one text
                         // that shaped all of them and is otherwise invisible.
@@ -1644,6 +1695,24 @@ fn ConversationBody(
                         width=spyglass_width
                         focused=focused_now
                         on_focus=toggle_focus
+                    />
+                </Show>
+
+                <Show when=move || aside.get().is_terminal()>
+                    <Resizer
+                        width=terminal_width
+                        grows=Grows::Leftwards
+                        bounds=TERMINAL_BOUNDS
+                        storage_key=TERMINAL_WIDTH_KEY
+                        class="spyglass-resizer"
+                    />
+                    <TerminalView
+                        plan=id.get_value()
+                        isolated=plan_isolated.get_untracked()
+                        width=terminal_width
+                        focused=focused_now
+                        on_focus=toggle_focus
+                        on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
                     />
                 </Show>
 
@@ -3271,6 +3340,7 @@ mod tests {
             "Do the thing",
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("forge"),
+            kingdom_core::NetworkMode::Shared,
         )
     }
 

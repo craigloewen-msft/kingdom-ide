@@ -2,8 +2,8 @@
 //!
 //! This is the map's answer to the first of the three questions in `AGENTS.md`
 //! -- *what is every agent doing right now?* -- at the tier where nothing else
-//! about a town is legible. A town with a turn in flight is traced with a slow
-//! green pulse; a quiet one is drawn exactly as it always was.
+//! about a town is legible. A town with a turn in flight is traced in green; a
+//! quiet one is drawn exactly as it always was.
 //!
 //! # Why this does not come through the manifest
 //!
@@ -15,15 +15,18 @@
 //! [`ViewerCommand::SetActivity`](super::bridge::ViewerCommand::SetActivity),
 //! and the manifest is untouched.
 //!
-//! # What is animated, and what is not
+//! # What is animated: nothing
 //!
-//! The ring geometry is built once when a world loads and never rebuilt: a
-//! change in activity costs a visibility flag and a colour, not a respawn. The
-//! pulse itself writes `base_color` on each lit ring's **own** material, which
-//! is why [`super::spawn`] does not take those handles from the
-//! [`MaterialCache`](super::materials::MaterialCache) -- that cache quantises
-//! by colour and shares one handle across hundreds of meshes, so animating a
-//! cached material would pulse whatever else happened to land in its bucket.
+//! The ring used to breathe on a 2.4-second cycle, and the works standing
+//! inside it breathed on the same clock. Both are still at the King's word, so
+//! a working town is simply **traced or not traced** -- one visibility flag and
+//! a colour set once, which is all this ever needed to say. The ring geometry
+//! was already built once with the world and never rebuilt; now its material is
+//! never written either, so it can come from the shared
+//! [`MaterialCache`](super::materials::MaterialCache) like every other unlit
+//! surface on the map. It could not before: the cache quantises by colour and
+//! hands one handle to hundreds of meshes, so animating a cached material would
+//! have pulsed whatever else landed in the same bucket.
 //!
 //! # Why a town is traced twice
 //!
@@ -41,8 +44,8 @@
 //! piece of interface that happens to be drawn in world space, and its colour
 //! carries the whole of its meaning -- it is the same green the rail badge uses
 //! for the same plan. Rendered as a lit material it picked up the sun's white
-//! specular and came out mint; see [`PULSE_PEAK`] for the three attempts that
-//! established this.
+//! specular and came out mint; see [`WORKING_COLOR`] for the three attempts
+//! that established this.
 
 use bevy::prelude::*;
 
@@ -55,34 +58,24 @@ use super::lod::ActiveLod;
 /// badge with. A test below pins it against `kingdom-core` so the two cannot
 /// drift silently -- the rail and the map saying different things about one
 /// plan is exactly the confusion this feature exists to remove.
-pub const WORKING_COLOR: [u8; 4] = [0x22, 0xc5, 0x5e, 255];
-
-/// How long one breath of the pulse takes, in seconds.
 ///
-/// Slow on purpose. This is ambient status the King reads at a glance while
-/// looking at something else, not an alert demanding his eye.
-const PULSE_SECONDS: f32 = 2.4;
-
-/// How far the glow dips at the bottom of a breath, as a fraction of full.
-const PULSE_FLOOR: f32 = 0.45;
-
-/// How bright the ring is at the top of a breath, as a fraction of full colour.
+/// # Why it is drawn unlit, and exactly this colour
 ///
-/// The ring is drawn **unlit**, and that is the whole of what makes it read as
-/// green. Three attempts got here. Emissive is in linear-RGB units and
-/// `StandardMaterial::emissive_exposure_weight` defaults to `0.0`, so a value
-/// scaled for the sun's lux (`REFERENCE_ILLUMINANCE`) clipped every channel and
-/// the ring rendered pure white; pulling it just over 1.0 landed where the
-/// tonemapper desaturates highlights and it rendered pale mint; and even at
-/// 0.8 the measured pixels came back `(168, 231, 167)` -- red and blue almost
-/// equal, because a *lit* surface adds the sun's white specular on top of
-/// whatever the emissive contributes.
+/// Three attempts got here, and all three failed in the bright direction.
+/// Emissive is in linear-RGB units and `StandardMaterial::
+/// emissive_exposure_weight` defaults to `0.0`, so a value scaled for the sun's
+/// lux (`REFERENCE_ILLUMINANCE`) clipped every channel and the ring rendered
+/// pure white; pulling it just over 1.0 landed where the tonemapper desaturates
+/// highlights and it rendered pale mint; and even at 0.8 the measured pixels
+/// came back `(168, 231, 167)` -- red and blue almost equal, because a *lit*
+/// surface adds the sun's white specular on top of whatever the emissive
+/// contributes.
 ///
 /// A status colour is not a material in a scene. It is a piece of interface
 /// that happens to be drawn in world space, so it is `unlit` and its colour is
-/// exactly the colour asked for, and the pulse dims that colour rather than
-/// adding light to it.
-const PULSE_PEAK: f32 = 1.0;
+/// exactly the colour asked for. `engine::works` reaches the same conclusion
+/// for the bands, and cites this.
+pub const WORKING_COLOR: [u8; 4] = [0x22, 0xc5, 0x5e, 255];
 
 /// Which towns are working, as last reported by the interface.
 ///
@@ -144,22 +137,17 @@ pub fn shows(tier: RingTier, lod: LodLevel) -> bool {
 
 /// A ring traced around one town, shown only while that town is working.
 ///
-/// Carries its own material handle rather than reading it back off the entity,
-/// so the pulse never has to ask which of a shared cache's handles is safe to
-/// write to. See the module docs.
+/// Carries no material handle any more. It used to, so the pulse could write a
+/// colour through it each frame without asking which of a shared cache's
+/// handles was safe to touch; with nothing animating a ring, its colour is set
+/// once when it is spawned and this is only a label saying which town it belongs
+/// to and which zoom it is for.
 #[derive(Component, Clone)]
 pub struct TownRing {
     /// The town this ring belongs to, by name.
     pub town: String,
     /// Which weight this one is drawn at, and therefore which zoom it is for.
     pub tier: RingTier,
-    /// This ring's material, animated by [`pulse_rings`].
-    ///
-    /// **Shared with the town's other ring**, deliberately: they are one town
-    /// and one breath, and two handles would be two clocks free to drift apart
-    /// across a tier change. Only one of the pair is ever visible, so only one
-    /// is ever written -- see [`shows`].
-    pub material: Handle<StandardMaterial>,
 }
 
 /// Shows or hides each ring as the reported activity, or the zoom, changes.
@@ -169,13 +157,14 @@ pub struct TownRing {
 /// only on a change of one or the other: an idle map held at a steady zoom
 /// costs two resource reads a frame.
 ///
-/// A ring going dark is faded to its resting colour as well as hidden, so that
-/// a town coming back to life starts its breath from rest rather than resuming
-/// mid-glow.
+/// Visibility is now the whole of it. A ring going dark also used to be faded
+/// back to its resting colour, so that a town coming back to life started its
+/// breath from rest rather than resuming mid-glow -- with no breath to resume,
+/// a hidden ring and a shown one are the same green and there is nothing to put
+/// back.
 pub fn apply_activity(
     activity: Res<Activity>,
     active: Res<ActiveLod>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut rings: Query<(&TownRing, &mut Visibility)>,
 ) {
     if !activity.is_changed() && !active.is_changed() {
@@ -191,71 +180,15 @@ pub fn apply_activity(
         if *visibility != wanted {
             *visibility = wanted;
         }
-        // Faded on the town's activity rather than on this ring's visibility:
-        // a ring hidden merely because the camera moved belongs to a town that
-        // is still working, and dimming it would put the pair's shared material
-        // back to rest underneath the sibling that is currently breathing.
-        //
-        // For a town that has genuinely stopped, both of its rings write
-        // `PULSE_FLOOR` to the one handle they share. The second write is
-        // identical to the first, so the duplicate costs a store and means
-        // nothing.
-        if !working && let Some(mut material) = materials.get_mut(&ring.material) {
-            material.base_color = ring_color(PULSE_FLOOR);
-        }
     }
 }
 
-/// Breathes the colour of every lit ring.
+/// The colour a working town is traced in, as the renderer wants it.
 ///
-/// Every lit ring breathes in step. That is deliberate: staggering them by town
-/// would read as several unrelated things blinking, where the point is one
-/// state shared by several places.
-pub fn pulse_rings(
-    time: Res<Time>,
-    activity: Res<Activity>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    rings: Query<(&TownRing, &Visibility)>,
-) {
-    if activity.is_quiet() {
-        return;
-    }
-    let color = ring_color(glow(time.elapsed_secs()));
-    for (ring, visibility) in rings.iter() {
-        if *visibility == Visibility::Hidden {
-            continue;
-        }
-        if let Some(mut material) = materials.get_mut(&ring.material) {
-            material.base_color = color;
-        }
-    }
-}
-
-/// The ring's colour at a given point in its breath.
-///
-/// Dims [`WORKING_COLOR`] toward black rather than lightening it toward white:
-/// the hue is the message, and the brightness is only what draws the eye.
-pub fn ring_color(strength: f32) -> Color {
-    let base = super::materials::to_color(WORKING_COLOR).to_linear();
-    Color::LinearRgba(LinearRgba {
-        red: base.red * strength,
-        green: base.green * strength,
-        blue: base.blue * strength,
-        alpha: 1.0,
-    })
-}
-
-/// How brightly a working ring burns at a given moment, as a fraction of full
-/// colour.
-///
-/// Pure, and the only place the animation actually lives, so its shape can be
-/// pinned without a window or a render device -- the way the rest of this
-/// engine's maths is tested.
-pub fn glow(seconds: f32) -> f32 {
-    let phase = seconds / PULSE_SECONDS * std::f32::consts::TAU;
-    // sin maps to 0..1 first, so the floor is a floor rather than a midpoint.
-    let wave = (phase.sin() + 1.0) * 0.5;
-    PULSE_PEAK * (PULSE_FLOOR + (1.0 - PULSE_FLOOR) * wave)
+/// One colour, not a curve: see the module docs for what used to vary it and
+/// why nothing does now.
+pub fn ring_color() -> Color {
+    super::materials::to_color(WORKING_COLOR)
 }
 
 #[cfg(test)]
@@ -278,43 +211,22 @@ mod tests {
         assert!(Activity::default().is_quiet());
     }
 
-    /// The glow must never reach zero while a town is working: a ring that goes
-    /// fully dark between breaths reads as the work having stopped.
+    /// **What the King asked for.** The ring does not move.
+    ///
+    /// This replaces `the_pulse_dips_but_never_goes_out` and
+    /// `the_pulse_repeats_on_its_period`, which pinned the breath's floor and
+    /// its period -- both facts about an animation there no longer is. Stated
+    /// as a test rather than left as an absence so that reintroducing a curve
+    /// has to break something that names the instruction.
     #[test]
-    fn the_pulse_dips_but_never_goes_out() {
-        let samples: Vec<f32> = (0..240)
-            .map(|step| glow(step as f32 * PULSE_SECONDS / 60.0))
-            .collect();
-        let lowest = samples.iter().copied().fold(f32::MAX, f32::min);
-        let highest = samples.iter().copied().fold(f32::MIN, f32::max);
-
-        assert!(lowest > 0.0, "the ring went out at {lowest}");
-        // The dip stays well clear of black: the pulse should read as breathing
-        // rather than blinking, and a ring that nearly vanishes between breaths
-        // reads as the work having stopped.
-        assert!(
-            lowest > PULSE_PEAK * 0.3,
-            "the ring dips too far toward black: {lowest}"
+    fn the_ring_does_not_change_colour() {
+        assert_eq!(ring_color(), ring_color());
+        // And it is the colour asked for, undimmed -- the pulse used to leave
+        // it at 45% of full between breaths.
+        assert_eq!(
+            ring_color(),
+            super::super::materials::to_color(WORKING_COLOR)
         );
-        assert!(
-            (highest - PULSE_PEAK).abs() < PULSE_PEAK * 0.02,
-            "the peak should reach full, got {highest}"
-        );
-    }
-
-    /// One breath, and the same brightness one period later. A pulse that drifts
-    /// would beat against nothing in particular and look like a bug.
-    #[test]
-    fn the_pulse_repeats_on_its_period() {
-        for step in 0..8 {
-            let at = step as f32 * PULSE_SECONDS / 8.0;
-            let later = glow(at + PULSE_SECONDS);
-            assert!(
-                (glow(at) - later).abs() < PULSE_PEAK * 0.001,
-                "drifted at {at}: {} vs {later}",
-                glow(at)
-            );
-        }
     }
 
     /// The whole point of the pair: pulled right back, the band the King sees
@@ -349,32 +261,30 @@ mod tests {
         }
     }
 
-    /// The regression that got past three attempts at this. The ring must stay
-    /// **recognisably green** at every point in its breath, and the failures
-    /// were all in the bright direction: emissive scaled for the sun's lux
-    /// clipped to white, a value near 1.0 was washed out by the tonemapper, and
-    /// a lit material added white specular on top. Hence unlit, and hence a
-    /// pulse that dims toward black rather than brightening toward white.
+    /// The regression that got past three attempts at this. The ring must be
+    /// **recognisably green**, and the failures were all in the bright
+    /// direction: emissive scaled for the sun's lux clipped to white, a value
+    /// near 1.0 was washed out by the tonemapper, and a lit material added white
+    /// specular on top. Hence unlit.
     ///
-    /// Sampled across a whole breath, because "green at the peak" was true of
-    /// two of the versions that looked wrong on screen.
+    /// One sample rather than twenty-four across a breath, which is what this
+    /// took while the colour was a function of time. The reasoning it guards is
+    /// unchanged and is recorded on [`WORKING_COLOR`].
     #[test]
-    fn the_ring_is_recognisably_green_throughout_its_breath() {
-        for step in 0..24 {
-            let at = step as f32 * PULSE_SECONDS / 24.0;
-            let Color::LinearRgba(c) = ring_color(glow(at)) else {
-                panic!("the ring's colour should be linear rgba");
-            };
+    fn the_ring_is_recognisably_green() {
+        // `to_color` hands back sRGB, which is what the palettes were authored
+        // in; the channel comparisons below are about light, so they are made
+        // in linear.
+        let c = ring_color().to_linear();
 
-            assert!(
-                c.green > c.red * 2.0 && c.green > c.blue * 1.5,
-                "the ring lost its hue at {at}s: {c:?}"
-            );
-            // Never brighter than the colour itself, which is what keeps the
-            // display from clamping the channels together into white.
-            assert!(c.green <= 1.0, "the ring can clip to white at {at}s: {c:?}");
-            assert!(c.alpha == 1.0, "the ring is drawn opaque");
-        }
+        assert!(
+            c.green > c.red * 2.0 && c.green > c.blue * 1.5,
+            "the ring lost its hue: {c:?}"
+        );
+        // Never brighter than the colour itself, which is what keeps the
+        // display from clamping the channels together into white.
+        assert!(c.green <= 1.0, "the ring can clip to white: {c:?}");
+        assert!(c.alpha == 1.0, "the ring is drawn opaque");
     }
 
     /// The rail badge and the map must say the same green about the same plan.

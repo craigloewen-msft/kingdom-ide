@@ -323,6 +323,7 @@ async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
         cmd,
         shop.root().to_path_buf(),
         super::child_environment(shop),
+        crate::netns::enter_prefix(shop.plan()),
     ) {
         Ok(job) => job,
         // A shell that would not start is not a command that failed -- there is
@@ -425,15 +426,33 @@ impl Job {
     /// inherited -- see [`super::child_environment`]. Applied here rather than
     /// prepended to the command string, so nothing has to be shell-quoted and
     /// a command naming its own value inline still overrides it.
+    ///
+    /// `enter` puts the command inside the plan's own network namespace, and is
+    /// **empty for the ordinary plan** -- see [`crate::netns::enter_prefix`].
+    /// Prepended unconditionally rather than behind a branch here, because a
+    /// call site that has to remember to check is one that will eventually
+    /// forget, and forgetting means an agent binding the King's own port.
     fn spawn(
         cmd: &str,
         cwd: PathBuf,
         environment: Vec<(String, String)>,
+        enter: Vec<String>,
     ) -> std::io::Result<Arc<Self>> {
-        let mut command = std::process::Command::new("bash");
+        // `bash -c <cmd>` either way; the namespace prefix simply wraps it, so
+        // the command the model wrote is unchanged and needs no requoting.
+        let mut command = match enter.split_first() {
+            Some((program, rest)) => {
+                let mut command = std::process::Command::new(program);
+                command.args(rest).arg("bash").arg("-c").arg(cmd);
+                command
+            }
+            None => {
+                let mut command = std::process::Command::new("bash");
+                command.arg("-c").arg(cmd);
+                command
+            }
+        };
         command
-            .arg("-c")
-            .arg(cmd)
             .current_dir(&cwd)
             .envs(environment)
             .stdin(std::process::Stdio::null())

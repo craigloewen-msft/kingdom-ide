@@ -451,6 +451,7 @@ pub async fn begin_plan(
     city: Option<String>,
     choice: Option<ModelChoice>,
     workspace: Option<WorkspaceMode>,
+    network: Option<kingdom_core::NetworkMode>,
 ) -> Result<Plan, ServerFnError> {
     use kingdom_core::{CityId, NoteKind};
 
@@ -490,7 +491,24 @@ pub async fn begin_plan(
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let mut plan = Plan::opened(plan_id, city_id, &prompt, &choice, workspace.clone());
+    let network = network.unwrap_or_default();
+
+    // Refused *before* a plan exists, not when its first command runs. A plan
+    // that took the setting and then quietly ran on the shared network would be
+    // exactly the invisible isolation this feature exists to end -- and the
+    // King would only find out when two agents collided on 3000 anyway.
+    if network.is_isolated() {
+        crate::netns::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
+    }
+
+    let mut plan = Plan::opened(
+        plan_id,
+        city_id,
+        &prompt,
+        &choice,
+        workspace.clone(),
+        network,
+    );
     // Where an agent is fenced in is not something it said, it is something that
     // happened -- and isolation the user cannot see is isolation he cannot
     // trust, so it is recorded in the log rather than only in the header.
@@ -501,6 +519,17 @@ pub async fn begin_plan(
             None => format!("Working directly in {}, with no isolation.", workspace.path),
         },
     );
+    // The same argument, for the other axis. A plan with its own network can
+    // bind whatever port it likes, and the King needs to know that the `:3000`
+    // this plan talks about is not the `:3000` in his own browser.
+    if network.is_isolated() {
+        plan.note(
+            NoteKind::Workspace,
+            "On a network of its own: ports it opens belong to this plan alone, \
+             and are forwarded to the host on ports shown in the chamber."
+                .to_string(),
+        );
+    }
 
     let mut kingdom = lock()?;
     let root = std::path::PathBuf::from(&kingdom.root);
@@ -512,6 +541,17 @@ pub async fn begin_plan(
     crate::events::pulse(&plan);
 
     Ok(plan)
+}
+
+/// Whether this machine can give a plan a network of its own.
+///
+/// `None` when it can; the string is what to tell the King when it cannot, and
+/// it names the package to install. Asked by the prompt bar so the option can
+/// be offered as *disabled with a reason* rather than offered and then refused
+/// after he has typed his prompt.
+#[server(NetworkAvailable, "/api")]
+pub async fn network_available() -> Result<Option<String>, ServerFnError> {
+    Ok(crate::netns::availability().err().map(|e| e.to_string()))
 }
 
 /// Local branches in a city's repository, for the workspace picker.
@@ -703,32 +743,41 @@ pub async fn plan_changes(plan: String) -> Result<kingdom_core::ChangeSummary, S
     Ok(crate::review::changes(&workspace).await)
 }
 
-/// What **every live agent in one city** has changed, as one answer.
+/// What **every live agent in the kingdom** has changed, as one answer.
 ///
 /// The plural of [`plan_changes`], and it exists because the map's question
-/// changed. "What did my agent do?" is answered by one plan's summary; "who is
-/// touching this file?" cannot be, however many times it is asked -- the
-/// browser would have to know which other plans are live and fetch each in
-/// turn, and would still be assembling the picture a request at a time while
-/// the answer moved under it.
+/// changed twice. "What did my agent do?" is answered by one plan's summary;
+/// "who is touching this file?" cannot be, however many times it is asked. And
+/// "what is every agent doing right now?" -- the first of the three questions in
+/// `AGENTS.md` -- cannot be answered by *one city's* agents either, which is
+/// what this used to take.
+///
+/// # Why it is no longer given a city
+///
+/// It was, and a city nobody had selected therefore drew nothing: the browser
+/// blanked the works whenever the selection was empty, so the map answered
+/// "what is every agent doing" with a picture of at most one project. The
+/// selection is a statement about *where the King is looking*, and what his
+/// agents are doing is true whether he is looking or not.
 ///
 /// # Which plans
 ///
-/// Live, non-subagent plans in that city. [`Kingdom::plans_in`] already excludes
-/// subagents, and its doc gives the reason this endpoint would need anyway: a
-/// subagent works inside the worktree of the plan that sent it, so counting it
-/// would draw one piece of work several times over. Settled plans are excluded
-/// because their worktrees are gone -- there is nothing on disk to diff.
+/// Live, non-subagent plans, anywhere in the kingdom. The subagent exclusion is
+/// [`Kingdom::plans_in`]'s and is kept for its reason: a subagent works inside
+/// the worktree of the plan that sent it, so counting it would draw one piece of
+/// work several times over. Settled plans are excluded because their worktrees
+/// are gone -- there is nothing on disk to diff.
 ///
 /// # Why the reads are concurrent
 ///
 /// Each summary is a few `git` invocations against a different worktree, and
-/// they share nothing. Run in sequence, a city with six agents would cost six
+/// they share nothing. Run in sequence, a kingdom with six agents would cost six
 /// times one plan's latency on every refetch; spawned together, it costs the
-/// slowest one. The kingdom lock is released before any of them start, which
-/// matters more than the concurrency: `review::changes` shells out, and holding
-/// the mutex across that would park every other request behind the slowest git
-/// in the city.
+/// slowest one. That bargain is what makes the wider question affordable at all.
+/// The kingdom lock is released before any of them start, which matters more
+/// than the concurrency: `review::changes` shells out, and holding the mutex
+/// across that would park every other request behind the slowest git in the
+/// kingdom.
 ///
 /// # Why one bad plan does not fail the request
 ///
@@ -742,22 +791,31 @@ pub async fn plan_changes(plan: String) -> Result<kingdom_core::ChangeSummary, S
 /// Sorted by plan id, and that is load-bearing rather than tidiness:
 /// `kingdom_core::palette::assign_banners` resolves a colour collision by
 /// position, so an unstable order here would let two agents swap colours
-/// between refetches.
-#[server(CityChanges, "/api")]
-pub async fn city_changes(
-    city: String,
-) -> Result<Vec<(kingdom_core::PlanId, kingdom_core::ChangeSummary)>, ServerFnError> {
-    let city_id = kingdom_core::CityId::new(city);
-
+/// between refetches. It matters more now than it did: the banners are assigned
+/// across the whole kingdom, so the set being ordered is every live plan rather
+/// than one city's.
+#[server(KingdomChanges, "/api")]
+pub async fn kingdom_changes() -> Result<Vec<kingdom_core::PlanChanges>, ServerFnError> {
     // The lock is taken only to decide *what* to read, never across the reads
     // themselves.
-    let workspaces: Vec<(kingdom_core::PlanId, kingdom_core::Workspace)> = {
+    let workspaces: Vec<(
+        kingdom_core::PlanId,
+        kingdom_core::CityId,
+        kingdom_core::Workspace,
+    )> = {
         let kingdom = lock()?;
         let root = &kingdom.root;
-        let mut found: Vec<(kingdom_core::PlanId, kingdom_core::Workspace)> = kingdom
-            .plans_in(&city_id)
-            .filter(|plan| plan.is_live())
-            .map(|plan| (plan.id.clone(), grounded(root, &plan.workspace)))
+        let mut found: Vec<_> = kingdom
+            .plans
+            .iter()
+            .filter(|plan| plan.is_live() && !plan.is_subagent())
+            .map(|plan| {
+                (
+                    plan.id.clone(),
+                    plan.city.clone(),
+                    grounded(root, &plan.workspace),
+                )
+            })
             .collect();
         found.sort_by(|a, b| a.0.cmp(&b.0));
         found
@@ -765,8 +823,14 @@ pub async fn city_changes(
 
     let reads: Vec<_> = workspaces
         .into_iter()
-        .map(|(id, workspace)| {
-            tokio::spawn(async move { (id, crate::review::changes(&workspace).await) })
+        .map(|(plan, city, workspace)| {
+            tokio::spawn(async move {
+                kingdom_core::PlanChanges {
+                    plan,
+                    city,
+                    changes: crate::review::changes(&workspace).await,
+                }
+            })
         })
         .collect();
 
@@ -810,6 +874,60 @@ pub async fn plan_diff(
     let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
 
     Ok(crate::review::diff(&workspace, &inside).await)
+}
+
+/// The lines a diff left out, when the King asks to see further.
+///
+/// The panel keeps a change and three lines either side of it, which is often
+/// not enough to say *where* a change is -- the function it sits inside starts
+/// above the first row shown. This is how the strip between two hunks fills
+/// itself in.
+///
+/// # Why this is a request at all
+///
+/// Sending the whole file with the diff and folding it in the browser would be
+/// simpler and would undo the row cap the panel is built around: a 40,000-line
+/// file with one changed line is cheap today precisely because the unchanged
+/// 39,990 never leave the server. So the King pays for what he asks to see,
+/// when he asks -- and [`crate::review::context`] caps one answer in turn.
+///
+/// # The boundary
+///
+/// The sixth place in Kingdom where an outsider names a path and the server
+/// opens it, held to the rule the other five keep: resolved through
+/// [`within_workspace`] before git or the filesystem sees it.
+#[server(PlanDiffContext, "/api")]
+pub async fn plan_diff_context(
+    plan: String,
+    path: String,
+    /// Where the run begins in each version, 1-based, and how long it is. Three
+    /// numbers rather than a `Gap` because a server function's arguments are a
+    /// wire format, and the browser holds the `Gap` they were taken from either
+    /// way -- see [`kingdom_core::Gap`] for why both files are named.
+    old_from: u32,
+    new_from: u32,
+    count: u32,
+) -> Result<Vec<kingdom_core::DiffRow>, ServerFnError> {
+    let plan_id = PlanId::new(plan);
+    let workspace = {
+        let kingdom = lock()?;
+        let Some(plan) = kingdom.plan(&plan_id) else {
+            return Err(ServerFnError::new("That plan is no longer in the records."));
+        };
+        grounded(&kingdom.root, &plan.workspace)
+    };
+
+    let inside = within_workspace(&workspace, &path).map_err(ServerFnError::new)?;
+
+    let gap = kingdom_core::Gap {
+        old_from,
+        new_from,
+        count,
+    };
+
+    crate::review::context(&workspace, &inside, gap)
+        .await
+        .map_err(ServerFnError::new)
 }
 
 /// One file of a plan's workspace, as it stands, for the King to read and write
@@ -2034,6 +2152,16 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // document.
     let draft = crate::tools::propose_plan::draft_body(&workspace);
 
+    // The plan's network goes before its worktree does. Ordered deliberately:
+    // the namespace holds whatever the agent left running -- a dev server, a
+    // watcher -- and those processes have the worktree as their working
+    // directory. Killing them first means `git worktree remove` is not fighting
+    // a process still writing into the directory it is trying to delete.
+    //
+    // Unconditional, like the draft read above: a plan on the shared network
+    // has no namespace and this does nothing at all.
+    crate::netns::shutdown(&plan_id);
+
     let finish = match how {
         Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
         Disposition::Archive => {
@@ -2206,6 +2334,7 @@ fn expand_home(path: &str) -> String {
 #[cfg(all(test, feature = "ssr"))]
 pub(crate) mod tests {
     use super::*;
+    use kingdom_core::NetworkMode;
     use std::path::PathBuf;
 
     /// Containment must survive traversal, not merely prefix-matching.
@@ -2345,6 +2474,7 @@ pub(crate) mod tests {
 
         for route in [
             "pub async fn plan_diff(",
+            "pub async fn plan_diff_context(",
             "pub async fn plan_source(",
             "pub async fn plan_file_text(",
             "pub async fn plan_write_file(",
@@ -2401,6 +2531,7 @@ pub(crate) mod tests {
             "Read the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place(city_path.to_string_lossy()),
+            NetworkMode::Shared,
         );
         plan.permissions = kingdom_core::Permissions::Propose;
 
@@ -2544,6 +2675,7 @@ pub(crate) mod tests {
                 "A fabricated decree",
                 &ModelChoice::new("mock", None),
                 Workspace::in_place("/dev/testburg"),
+                NetworkMode::Shared,
             )]
         }
 
@@ -2560,6 +2692,7 @@ pub(crate) mod tests {
             "The King's own decree",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )];
         assert_eq!(
             seed_starter_plans(recorded.clone(), &[], starter_plans),
@@ -2590,6 +2723,7 @@ pub(crate) mod tests {
             "A decree whose turn died",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         );
 
         // Exactly what a turn killed mid-flight leaves behind.
@@ -2961,6 +3095,7 @@ pub(crate) mod tests {
                 id: Some("abc".into()),
                 base: Some("main".into()),
             },
+            NetworkMode::Shared,
         );
         let subagent = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
 
@@ -2987,6 +3122,7 @@ pub(crate) mod tests {
             "Fix the parser",
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("/dev/testburg"),
+            NetworkMode::Shared,
         )
     }
 

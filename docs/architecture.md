@@ -68,6 +68,16 @@ crates/
     watch.rs        The chamber's push socket, and the rail's (the route
                     constants cross to wasm; the handlers are ssr only)
     screencast.rs   The King's live view of a plan's browser (ssr only)
+    netns.rs        A network of a plan's own: an unprivileged user+net
+                    namespace per isolated plan, held open by an `unshare`
+                    process, given a way out by `slirp4netns`, and entered by
+                    everything the plan runs. Also watches
+                    /proc/<holder>/net/tcp for ports the agent opened and asks
+                    slirp to forward each to a host port. ssr only, and Linux
+                    only at runtime -- availability() refuses elsewhere
+    terminal.rs     The King's own shell, over a socket, in a plan's workspace
+                    and its network — the door into an isolated plan (route +
+                    URL on both targets via `terminal_route`; the pty ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
@@ -169,12 +179,14 @@ crates/
     map/            The manifest: world-space geometry, plain serialisable
                     data. The one *seam* on both targets — where the two halves
                     meet. `works.rs` is the exception that proves it: what
-                    EVERY live agent in a city is changing, resolved from their
-                    `ChangeSummary`s into ground to build on, and the placer
+                    EVERY live agent in the KINGDOM is changing, resolved from
+                    their `PlanChanges` into ground to build on, and the placer
                     that finds free land inside a folder for a file that has no
-                    house yet. Grouped by PATH rather than by plan, so a file
-                    three agents share is one house wearing three bands rather
-                    than three houses claiming to be the same file. It lives here
+                    house yet. Grouped by (CITY, PATH) rather than by plan, so a
+                    file three agents share is one house wearing three bands
+                    rather than three houses claiming to be the same file — and
+                    so two projects' `src/main.rs` stay two files rather than
+                    fusing into one falsely-contended house. It lives here
                     rather than in `engine` so `cargo test` can pin it without
                     a browser — a ghost house landing on a real one is then a
                     test failure rather than something noticed by eye
@@ -190,11 +202,13 @@ crates/
                     walks `Kingdom::cities` instead
     engine/         Drawing it with Bevy (hydrate, plus native for its tests).
                     `activity.rs` is the one part fed from outside the manifest:
-                    which towns have agents working in them, traced as a pulsing
-                    ring, polled rather than pushed and never cached with the
-                    geometry. `works.rs` is the second, for the same reason and
-                    on the same channel: every agent's changes, raised over the
-                    city. What is being BUILT rises above the roof as stacked
+                    which towns have agents working in them, traced as a steady
+                    green ring, polled rather than pushed and never cached with
+                    the geometry. `works.rs` is the second, for the same reason
+                    and on the same channel: EVERY live agent's changes, raised
+                    over the whole kingdom at once — not the selected city, which
+                    drew nothing for a town nobody had clicked. What is being
+                    BUILT rises above the roof as stacked
                     colour-per-agent columns; what is being TAKEN AWAY covers
                     the house as a shroud, over as much of it as the file is
                     losing (`WorkBand::cover`, a share of the file's own length,
@@ -204,7 +218,11 @@ crates/
                     grew a taller tower. Column height AND girth ramp with
                     ABSOLUTE churn (`FULL_CHURN`) — never a share of a plan's
                     own busiest file, which made two agents incomparable and
-                    flattened a 400-line change against a 4-line one. Ghost
+                    flattened a 400-line change against a 4-line one. NOTHING on
+                    the map animates itself: neither the ring nor the bands
+                    pulse, and a band's colour is its agent's exactly rather than
+                    dimmed by how small the change is. Size is the only channel
+                    magnitude has. Ghost
                     houses stand for files that do not exist yet. `stars.rs` is the
                     one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
@@ -231,7 +249,19 @@ crates/
                     says the camera is his and offers it back. One effect reads
                     `follow::decide` and resolves its answer into geometry;
                     that resolving is here because the engine does not know
-                    what a city is, the same boundary `SetWorks` is written to
+                    what a city is, the same boundary `SetWorks` is written to.
+                    Also `publish_status`: under automation only, the engine's
+                    `ViewerStatus` is mirrored onto `window.__kingdom_map` so a
+                    browser test can assert on *values* — `built`, `hovered`,
+                    `clicked.holding` — rather than on pixels
+    mode.rs         Whether the map draws at all, and at what pace. An
+                    automated browser stands the engine down by default;
+                    `?map=on` overrides that and is now sufficient on its own
+                    (WebGL is on by default), drawing a real, pickable map at a
+                    capped frame rate. The cap exempts *bounded* work — capping
+                    a world going up turned a three-second raise into 157
+                    seconds, the same work spread over fifty times the wall
+                    clock with something waiting on it
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -245,13 +275,24 @@ crates/
                     move in time, which is why nothing could click the map;
                     DEFAULT_VIEWPORT, chosen against Kingdom's own
                     responsive thresholds rather than as a round number
-                    (KINGDOM_BROWSER_VIEWPORT overrides it); and
-                    `disable-software-rasterizer`, which is what actually stops
-                    SwiftShader — NOT `--disable-gpu`, which was long assumed
-                    to and does not. Measured: a WebGL page costs 680–840% of a
-                    core with the software rasteriser and 12–18% without.
-                    KINGDOM_BROWSER_WEBGL=on gives it back, which a plan
-                    working on kingdom-citymap needs.
+                    (KINGDOM_BROWSER_VIEWPORT overrides it); and WebGL, which
+                    a plan's browser now has **by default** — it is what lets
+                    an agent look at Kingdom's own map. Two ceilings keep that
+                    affordable, and both are needed. Measured on the map,
+                    world standing, nothing happening: 9.50 cores uncapped and
+                    unconfined, 4.09 at one frame a second, 2.03 capped and
+                    confined to four CPUs. The frames are the engine's job
+                    (citymap engine::AUTOMATED_WAKE); the floor beneath them is
+                    KINGDOM_BROWSER_CPUS (default 4), because SwiftShader sizes
+                    its thread pool from the machine and spends most of what it
+                    spends whether or not a frame was asked for. Confinement is
+                    a `taskset` shim written into the profile, so the mask is
+                    set before Chrome forks and every rendering child inherits
+                    it. KINGDOM_BROWSER_WEBGL=off is the blunt instrument;
+                    KINGDOM_BROWSER_CPUS=0 lifts the ceiling. `--disable-gpu`
+                    does none of this and never did: it turns off *hardware*
+                    acceleration, which a headless machine did not have to
+                    begin with
 
                     A session also *ends*, which it did not use to: on the
                     plan settling (browser::dismiss, beside tmux::dismiss),
@@ -307,6 +348,81 @@ flowchart TB
   Core -.->|"compiled into both"| Browser
   Core -.-> Server
 ```
+
+## A network of a plan's own
+
+The first real answer to the product's second question -- *what shared resources
+are these agents holding?* -- for one resource: **ports**. Two agents that both
+run `cargo leptos serve` used to collide on 3000 and the second one died.
+
+It is **off by default** and chosen per plan, beside the model and workspace
+chips. `NetworkMode` is its own axis rather than a fourth `WorkspaceMode`,
+because "can this agent trample my folder?" and "can it trample my port?" are
+independent questions with independent answers.
+
+```mermaid
+flowchart LR
+  K["King's browser"] -->|"127.0.0.1:47983"| S["slirp4netns (host)"]
+  S -->|"tap0 to 10.0.2.100:3000"| A["the agent's dev server"]
+  H["Kingdom server"] -->|"add_hostfwd / remove_hostfwd"| S
+  H -.->|"polls /proc/holder/net/tcp"| A
+```
+
+Three unprivileged processes per isolated plan: an `unshare` **holder** that
+owns the namespace and keeps it alive between tool calls, **slirp4netns** giving
+it a way out, and `nsenter` putting everything else in. `bash`, `tmux`, Chrome
+and the King's terminal all prepend `netns::enter_prefix`, which is **empty for
+a shared-network plan** -- that emptiness is what makes the default path
+behave exactly as it did before this existed.
+
+Five things worth knowing, each learned by running it:
+
+- **`nsenter` needs `--preserve-credentials`.** Re-entering a namespace you made
+  yourself otherwise fails with `setgroups failed: Operation not permitted`. A
+  test pins the flag, because its absence is not a compile error -- it is a tool
+  that mysteriously will not run.
+- **Port discovery costs one file read.** `/proc/<holder>/net/tcp` read from the
+  host *is* the namespace's table, so nothing has to enter the namespace to find
+  out what it is serving. Only state `0A` counts; the rest are live connections.
+- **slirp4netns forwards for us.** Its JSON API socket takes `add_hostfwd` and
+  `remove_hostfwd`, so Kingdom ships no bridge process and needs no `socat`.
+- **The namespace lives in a process, not on disk.** A restarted server has an
+  empty registry while plan records still say `Isolated`. Every entry point
+  therefore calls `netns::ensure` before reading the prefix, and
+  `reclaim_previous` kills what the last server left -- identified by namespace
+  and command line, never by pid alone, because pids are reused. Skipping that
+  `ensure` in `terminal.rs` was a real bug: the King got a shell on his *own*
+  network while the header said otherwise, and it took `EADDRINUSE` from his own
+  server. Nothing here may fall back to the host network silently.
+- **The browser's two wrappers nest; they do not compete.** CPU confinement
+  (`cpu_shim`, `taskset`) and namespace entry (`write_namespace_wrapper`,
+  `nsenter`) both want to be the "executable" chromiumoxide launches, and
+  setting `chrome_executable` twice silently keeps only the last. They are
+  composed instead, `nsenter -> taskset -> chrome`, so an isolated plan's
+  browser is confined *and* in its own network. This matters more since WebGL
+  became the default: the CPU ceiling is half of what makes that affordable, and
+  dropping it for isolated plans would have handed exactly those plans an
+  uncapped software rasteriser. Verified with a real Chrome — every child,
+  including the GPU process, in the plan's namespace and masked to `0-3`.
+
+**An isolated plan cannot reach the host's loopback**, by design:
+slirp4netns runs with `--disable-host-loopback`, so the King's own
+`127.0.0.1:3000` answers nothing from inside. That is the collision being
+prevented, but it has one surprising consequence worth knowing before it costs
+somebody an hour — a plan with its own network cannot browse *this* Kingdom's
+map at `?map=on`. See
+[`docs/citymap.md`](citymap.md#a-plan-with-a-network-of-its-own-cannot-reach-your-kingdom).
+
+**It is not a security boundary.** A process in the namespace still has the
+whole filesystem and the King's uid. It cannot take another plan's port; it can
+still delete his home directory. The same admission `Sandbox::root` makes about
+paths, for the same reason: a limit people can see beats a guarantee that does
+not hold.
+
+`slirp4netns` is **required**, not optional. Without it a namespace has only
+`lo` -- no DNS, no crates.io, no git -- so Kingdom refuses to open an isolated
+plan and the picker says which package to install, rather than degrading to
+something that breaks every build.
 
 ## Where state lives
 
