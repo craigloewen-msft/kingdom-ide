@@ -66,19 +66,79 @@ const DEFAULT_VIEWPORT: (u32, u32) = (1440, 900);
 /// testing a narrow layout, which is the one case the default is wrong for.
 pub const VIEWPORT_VAR: &str = "KINGDOM_BROWSER_VIEWPORT";
 
-/// Gives a plan's browser WebGL back, at the price measured below.
+/// Takes WebGL *away* from a plan's browser, for a machine that wants it back.
 ///
-/// Off by default, and that default is the single largest saving in this crate.
-/// See the comment on `disable-software-rasterizer` in [`BrowserSession::launch`]:
-/// a WebGL page costs seven to eight cores with the software rasteriser and
-/// twelve to eighteen percent of one without it.
+/// **On by default**, which is the opposite of what this variable used to mean,
+/// and the reversal is worth explaining because the old default was chosen from
+/// a measurement that blamed the wrong thing.
 ///
-/// The one case that wants it back is a plan working on `kingdom-citymap`,
-/// which is invited by `kingdom_citymap::mode` to open `?map=on` and look at
-/// what it drew. Without a GL context that plan sees the loading card forever,
-/// so the escape hatch is not a courtesy -- it is what keeps the map
-/// maintainable by the agents most likely to be asked to change it.
+/// # What was actually expensive
+///
+/// Not WebGL. Pace. A headless browser has no GPU, so Chrome rasterises in
+/// SwiftShader on the CPU, where cost is very nearly linear in frames drawn --
+/// measured on one full-viewport WebGL page at 1440x900: 5.46 cores uncapped,
+/// 1.04 at ten frames a second, 0.20 at two.
+///
+/// Kingdom's own map made the point sharply. Forty cities, headless, rasteriser
+/// on: **9.50 cores** on the map's own screen, and **0.00** in the rail beside
+/// a conversation -- the same scene drawn just as completely, differing only in
+/// how often. The engine now holds itself to `engine::AUTOMATED_WAKE` whenever
+/// `navigator.webdriver` is set (see `kingdom_citymap::mode`), so the expensive
+/// case is gone at its source and the rasteriser is affordable to leave on.
+///
+/// # What turning it off still buys
+///
+/// The cap is Kingdom's own, and reaches only Kingdom's own map. A plan sent to
+/// *someone else's* WebGL page -- a globe, a game, a three.js demo -- meets
+/// whatever frame rate that page asks for, and pays the uncapped price for it.
+/// `KINGDOM_BROWSER_WEBGL=off` is the blunt instrument for that, and for any
+/// machine where a plan has no business rendering at all.
+///
+/// [`crate::session::CPUS_VAR`] is the gentler answer to the same worry: it
+/// bounds what any page can take without taking WebGL from all of them.
 pub const WEBGL_VAR: &str = "KINGDOM_BROWSER_WEBGL";
+
+/// How many CPUs a plan's browser may spread itself across.
+///
+/// Defaults to [`DEFAULT_BROWSER_CPUS`]. `0` -- or any of the usual words for
+/// no -- lifts the limit entirely.
+///
+/// # Why a browser is confined at all, measured
+///
+/// Because of how software rendering scales, which is the opposite of the way
+/// one would hope. With no GPU, Chrome rasterises in SwiftShader, and
+/// SwiftShader sizes its thread pool from the machine: on a twenty-core box it
+/// will happily use most of them, whether or not the page needs it.
+///
+/// Kingdom's own map, headless, world already standing and nothing happening:
+///
+/// | CPUs allowed | Cost |
+/// |---|---|
+/// | all twenty | 7.5 cores |
+/// | six | 2.06 cores |
+/// | four | 1.72 cores |
+/// | two | 1.29 cores |
+///
+/// Note what that table is *not*. It is not the frame rate -- the same map at
+/// one frame a second still cost 4.09 cores unconfined. Most of what
+/// SwiftShader spends is spent whether or not there is a frame to draw, which
+/// is why pacing alone could not fix this and why the ceiling is a default
+/// rather than an option.
+///
+/// A count, not a mask: the CPUs chosen are this process's own, so a Kingdom
+/// already confined to some cores hands out a subset of those rather than
+/// escaping onto cores it was denied.
+pub const CPUS_VAR: &str = "KINGDOM_BROWSER_CPUS";
+
+/// How many CPUs a browser gets unless [`CPUS_VAR`] says otherwise.
+///
+/// Four, from the table above: the knee of the curve. Two is cheaper still but
+/// slows the work that is genuinely *bounded* -- a world took eight seconds to
+/// stand on two CPUs against about five on four -- and that is time a plan
+/// spends waiting rather than cost the machine absorbs. Four keeps a browser
+/// under two cores while leaving enough parallelism to get the expensive,
+/// finite things over with.
+const DEFAULT_BROWSER_CPUS: usize = 4;
 
 /// How long a browser may sit untouched before it is closed, as a duration.
 ///
@@ -116,23 +176,56 @@ fn parse_viewport(raw: &str) -> Option<(u32, u32)> {
 }
 
 /// Whether this machine's browsers are to have WebGL, per [`WEBGL_VAR`].
+///
+/// Yes unless explicitly refused. The asymmetry with the old reading is
+/// deliberate: a typo in this variable now leaves a *working* browser rather
+/// than a silently crippled one, which is the right way round for a setting
+/// whose failure mode used to be "the map never appears and nobody knows why".
 fn webgl_wanted() -> bool {
-    std::env::var(WEBGL_VAR).is_ok_and(|raw| reads_as_yes(&raw))
+    !std::env::var(WEBGL_VAR).is_ok_and(|raw| reads_as_no(&raw))
 }
 
-/// Whether a setting's value is an explicit yes.
+/// Whether a setting's value is an explicit no.
 ///
 /// Separated from the environment read so it can be tested without mutating
 /// process-wide state, which two tests running in parallel would race over.
 ///
-/// Only an unambiguous yes counts. Anything else -- empty, misspelt, `"onn"` --
-/// leaves the cheap default in place, because the cost of misreading this one
-/// is seven cores rather than a missing feature.
-fn reads_as_yes(raw: &str) -> bool {
+/// Only an unambiguous no counts, in the same spirit the old yes-reading had:
+/// a value nobody can read as a refusal leaves the default alone.
+fn reads_as_no(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
-        "on" | "1" | "true" | "yes"
+        "off" | "0" | "false" | "no"
     )
+}
+
+/// How many CPUs to confine a browser to, per [`CPUS_VAR`].
+///
+/// `None` means do not confine at all, which the King can ask for with `0` or
+/// with any of the words [`reads_as_no`] accepts. Anything unparsable falls
+/// back to [`DEFAULT_BROWSER_CPUS`] rather than to no limit, because a typo
+/// should not quietly hand a browser the whole machine.
+fn configured_cpus() -> Option<usize> {
+    let Ok(raw) = std::env::var(CPUS_VAR) else {
+        return Some(DEFAULT_BROWSER_CPUS);
+    };
+    parse_cpus(&raw)
+}
+
+/// Reads a CPU ceiling, separated from the environment so it can be tested.
+///
+/// `None` for an explicit refusal; [`DEFAULT_BROWSER_CPUS`] for anything that
+/// does not parse as a number of CPUs.
+fn parse_cpus(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim();
+    if reads_as_no(trimmed) {
+        return None;
+    }
+    match trimmed.parse::<usize>() {
+        Ok(0) => None,
+        Ok(count) => Some(count),
+        Err(_) => Some(DEFAULT_BROWSER_CPUS),
+    }
 }
 
 /// How long a session may go untouched before the reaper closes it.
@@ -348,11 +441,12 @@ impl BrowserSession {
             // Spelled correctly it turns off *hardware* acceleration, which a
             // headless browser on a server has no use for.
             //
-            // It does NOT stop the software GPU, whatever an earlier note here
-            // claimed. Measured with this flag exactly as passed below, a WebGL
-            // page still starts a `--type=gpu-process` and that process alone
-            // burns 665% of a core -- nearly seven cores of SwiftShader. The
-            // flag further down is the one that stops it.
+            // It does NOT stop the software GPU. Chrome falls back to ANGLE's
+            // SwiftShader and rasterises WebGL on the CPU regardless of this
+            // flag -- so on a machine with no usable GPU, which is every
+            // machine a headless plan browser runs on, this changes nothing
+            // about what WebGL costs. What that costs is decided by how many
+            // frames a page asks for; see [`WEBGL_VAR`].
             .arg("disable-gpu")
             // Caps the disk caches. Chromium's own default is a fraction of
             // free space, which on a developer machine is enormous: six
@@ -373,23 +467,29 @@ impl BrowserSession {
             })
             .user_data_dir(profile.clone());
 
-        // The single largest saving in this crate, and the reason it is a
-        // default rather than an option.
+        // Withheld only when the King has asked for it to be, which is the
+        // reverse of how this once read.
         //
-        // With no GPU, Chrome falls back to ANGLE's SwiftShader and rasterises
-        // WebGL in software, on the CPU of a machine several agents are
-        // sharing. Measured on one WebGL page at 1440x900: 680-840% of a core
-        // with the fallback, 12-18% without it. Ordinary work is untouched --
-        // a page of text with a 2D canvas screenshots to a byte-identical PNG
-        // either way -- because only WebGL is lost.
-        //
-        // [`WEBGL_VAR`] hands it back to the one plan that needs it.
+        // Without the software rasteriser there is no WebGL at all on a
+        // headless browser -- there is no hardware path to fall back to -- so
+        // this flag is the difference between a plan that can look at
+        // Kingdom's own map and one that watches a loading card forever. The
+        // cost that once justified it belonged to *pace*, and is now held down
+        // where it arises, in the engine. See [`WEBGL_VAR`] for the figures.
         if !webgl_wanted() {
             builder = builder.arg("disable-software-rasterizer");
         }
 
-        if let Some(executable) = chrome_executable()? {
-            builder = builder.chrome_executable(executable);
+        // A confined browser runs behind a shim that sets the CPU mask first;
+        // an unconfined one is found the way it always was. Checked in this
+        // order because the shim *is* the executable when there is one.
+        match cpu_shim(&profile) {
+            Some(shim) => builder = builder.chrome_executable(shim),
+            None => {
+                if let Some(executable) = chrome_executable()? {
+                    builder = builder.chrome_executable(executable);
+                }
+            }
         }
 
         let config = builder.build().map_err(BrowserError::ChromeUnavailable)?;
@@ -969,6 +1069,82 @@ const CACHED_BROWSERS: &[&str] = &[
     ".local/share/ms-playwright",
 ];
 
+/// Confines a browser to a few CPUs, by launching it behind `taskset`.
+///
+/// Returns the shim to run instead of Chrome, or `None` to launch Chrome
+/// directly -- which is the answer whenever confinement was not asked for, is
+/// not possible, or would need a tool this machine does not have.
+///
+/// # Why a shim script rather than an affinity call
+///
+/// Because the affinity has to be in force *before* Chrome forks, and Chrome
+/// forks its zygote almost immediately. Setting it on the browser process after
+/// launch would race the very children that do the rendering. A wrapper that
+/// `exec`s under `taskset` cannot lose that race: the mask is set before Chrome
+/// exists at all, and Linux passes it down through every fork -- verified, with
+/// the renderer and GPU children all reporting the confined mask.
+///
+/// # Why it may return `None` without complaint
+///
+/// Every failure here is a reason to run an *unconfined* browser rather than no
+/// browser. A missing `taskset`, an unwritable profile, a Chrome that could not
+/// be located: none of them is worth denying a plan its tools over, and the
+/// setting is a precaution rather than a guarantee anyone is relying on.
+#[cfg(unix)]
+fn cpu_shim(profile: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cpus = configured_cpus()?;
+    // `taskset` is what actually applies the mask, and it is not on every
+    // machine. Checked before anything is written, because a shim that cannot
+    // run would turn every launch into a "Chrome missing" -- and this is now
+    // the default path, so that failure would be everyone's.
+    let taskset = which_taskset()?;
+    // The real browser has to be named in the script, so the path is resolved
+    // here rather than left to chromiumoxide to find later.
+    let chrome = match chrome_executable() {
+        Ok(Some(path)) => path,
+        Ok(None) => chromiumoxide::detection::default_executable(Default::default()).ok()?,
+        Err(_) => return None,
+    };
+
+    // Clamped to what this process may actually use, so a Kingdom already
+    // confined hands out a subset of its own CPUs rather than naming ones it
+    // was denied. `taskset -c` takes an inclusive range, hence the minus one.
+    let available = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let last = cpus.min(available).saturating_sub(1);
+
+    std::fs::create_dir_all(profile).ok()?;
+    let shim = profile.join("chrome-confined.sh");
+    let script = format!(
+        "#!/bin/sh\nexec {} -c 0-{last} {} \"$@\"\n",
+        taskset.display(),
+        chrome.display()
+    );
+    std::fs::write(&shim, script).ok()?;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).ok()?;
+    Some(shim)
+}
+
+/// Where `taskset` is, if this machine has one.
+///
+/// Looked up rather than assumed at `/usr/bin/taskset`: it is `util-linux` on
+/// most distributions but not all, and the shim names it absolutely so that
+/// Chrome's own environment cannot change what runs.
+#[cfg(unix)]
+fn which_taskset() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("taskset"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Confinement is a Unix affair; elsewhere a browser runs as it always did.
+#[cfg(not(unix))]
+fn cpu_shim(_profile: &Path) -> Option<PathBuf> {
+    None
+}
+
 /// Which Chrome to launch, or `None` to let chromiumoxide decide.
 ///
 /// Three steps, most explicit first:
@@ -1494,19 +1670,48 @@ mod tests {
         }
     }
 
-    /// WebGL comes back only when somebody says so, in so many words.
+    /// WebGL goes away only when somebody says so, in so many words.
     ///
-    /// This guards the largest default in the crate. The negative cases are the
-    /// point: a misspelt value must leave the software rasteriser disabled
-    /// rather than quietly restoring the seven-core behaviour this change
-    /// exists to remove.
+    /// The direction of this test is the change: WebGL is now on by default,
+    /// so what must be deliberate is *refusing* it. The negative cases are the
+    /// point, as they were before -- a misspelt value must leave the browser
+    /// able to render rather than silently blind, which is the failure mode
+    /// that made the map untestable in the first place.
     #[test]
-    fn webgl_is_only_ever_switched_on_deliberately() {
-        for yes in ["on", "1", "true", "YES", " On "] {
-            assert!(reads_as_yes(yes), "{yes} should have been read as yes");
+    fn webgl_is_only_ever_switched_off_deliberately() {
+        for no in ["off", "0", "false", "NO", " Off "] {
+            assert!(reads_as_no(no), "{no} should have been read as no");
         }
-        for no in ["", "off", "0", "false", "no", "onn", "yes please"] {
-            assert!(!reads_as_yes(no), "{no} should not have been read as yes");
+        for yes in ["", "on", "1", "true", "yes", "offf", "no thanks"] {
+            assert!(!reads_as_no(yes), "{yes} should not have been read as no");
+        }
+    }
+
+    /// A CPU ceiling is read, and a mistyped one does not lift the limit.
+    ///
+    /// The asymmetry is the point. An explicit `0` or `off` means the King has
+    /// decided to let a browser have the machine, and is obeyed. Nonsense means
+    /// he did not decide anything, and falls back to the default rather than to
+    /// no limit -- because this ceiling is what keeps a software-rendered page
+    /// from taking seven cores, and a typo should not silently surrender it.
+    #[test]
+    fn a_mistyped_cpu_ceiling_falls_back_rather_than_lifting_the_limit() {
+        assert_eq!(parse_cpus("3"), Some(3));
+        assert_eq!(parse_cpus(" 12 "), Some(12));
+        assert_eq!(parse_cpus("1"), Some(1));
+
+        // Deliberate refusals, which are obeyed.
+        for lifted in ["0", "off", "no", "false", " OFF "] {
+            assert_eq!(parse_cpus(lifted), None, "{lifted} should lift the limit");
+        }
+
+        // Nonsense, which must not.
+        for nonsense in ["", "-2", "half", "3.5", "3 cpus", "lots"] {
+            assert_eq!(
+                parse_cpus(nonsense),
+                Some(DEFAULT_BROWSER_CPUS),
+                "{nonsense} should have fallen back to the default"
+            );
         }
     }
 

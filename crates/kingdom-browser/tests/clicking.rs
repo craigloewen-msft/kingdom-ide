@@ -196,6 +196,97 @@ async fn closing_a_session_ends_its_processes_and_deletes_its_profile() {
     );
 }
 
+/// A browser's *rendering children* inherit the CPU ceiling, not just its
+/// parent.
+///
+/// This is the claim the whole confinement turns on and the one that is easy to
+/// get wrong. Kingdom launches Chrome behind a `taskset` shim, but the process
+/// that actually burns the CPU is the GPU process, several forks down -- so a
+/// mask that reached only the top process would look right in `ps` and save
+/// nothing at all.
+///
+/// The cost being defended against, measured on Kingdom's own map with the
+/// world already standing and nothing happening: 7.5 cores unconfined against
+/// 1.7 on four CPUs. Most of that is SwiftShader's thread pool, which sizes
+/// itself from the machine and spends its time whether or not a frame was
+/// asked for -- which is why this, rather than the frame rate, is the ceiling
+/// that matters.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches a real browser"]
+#[cfg(target_os = "linux")]
+async fn a_browsers_rendering_children_inherit_its_cpu_ceiling() {
+    let browsers = BrowserSessionManager::new();
+    let plan = "confined";
+
+    browsers
+        .navigate(plan, "about:blank", PATIENCE)
+        .await
+        .expect("a blank page loads");
+
+    let profile = profile_of(plan);
+    let processes = chrome_processes_using(&profile);
+    assert!(
+        !processes.is_empty(),
+        "a launched browser should have processes"
+    );
+
+    // How many CPUs this machine would have given an unconfined browser. If
+    // the box is already smaller than the ceiling there is nothing to prove.
+    let available = std::thread::available_parallelism().map_or(1, |count| count.get());
+    if available <= 4 {
+        browsers.close(plan).await;
+        return;
+    }
+
+    let masks: Vec<(u32, usize)> = processes
+        .iter()
+        .filter_map(|pid| Some((*pid, allowed_cpus(*pid)?)))
+        .collect();
+    assert!(
+        !masks.is_empty(),
+        "no process reported a CPU mask; /proc/*/status may have changed shape"
+    );
+
+    for (pid, allowed) in &masks {
+        assert!(
+            *allowed <= 4,
+            "process {pid} may use {allowed} CPUs, so the ceiling did not reach it"
+        );
+    }
+
+    browsers.close(plan).await;
+}
+
+/// How many CPUs a process is allowed, from `Cpus_allowed_list` in `/proc`.
+///
+/// The list is the kernel's own view of the affinity mask -- the thing
+/// `taskset` sets -- so this reads what actually happened rather than what was
+/// asked for. Ranges (`0-3`) and single CPUs (`5`) both appear, sometimes mixed
+/// and comma-separated.
+#[cfg(target_os = "linux")]
+fn allowed_cpus(pid: u32) -> Option<usize> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let list = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))?
+        .trim();
+    let mut total = 0;
+    for part in list.split(',') {
+        match part.split_once('-') {
+            Some((first, last)) => {
+                let first: usize = first.trim().parse().ok()?;
+                let last: usize = last.trim().parse().ok()?;
+                total += last.saturating_sub(first) + 1;
+            }
+            None => {
+                part.trim().parse::<usize>().ok()?;
+                total += 1;
+            }
+        }
+    }
+    Some(total)
+}
+
 /// The reaper closes a browser that has gone cold, and only that one.
 ///
 /// The everyday mechanism: most plans neither settle promptly nor are watched,

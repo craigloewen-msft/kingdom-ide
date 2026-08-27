@@ -229,6 +229,8 @@ is invisible until a plan is halfway through a job:
 
 - **A browser**, for the `browser_*` tools. Any Chrome or Chromium on `PATH`.
   On arm64, Google Chrome has no Linux build — Chromium is the native one.
+- **`taskset`**, to hold that browser to its CPU ceiling. Almost always present
+  (`util-linux`); without it a browser still runs, simply unconfined.
 - **Whatever the city itself needs to run.** That is the *project's*
   prerequisite, not Kingdom's, and Kingdom cannot install it.
 
