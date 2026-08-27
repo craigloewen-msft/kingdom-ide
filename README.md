@@ -60,6 +60,57 @@ crates/kingdom-browser  headless Chrome over CDP (native only)
 style/main.scss         styling
 ```
 
+## How a holding is sized
+
+Every file on the map is a building, and its dimensions are measured from the
+file itself. The two axes carry two different facts.
+
+**The base is how much code there is.** A folder's ground is divided among its
+contents by weight — `20 + √bytes` for a file — so a big file gets a visibly
+bigger plot than its neighbours: 64 KB buys about five times the lot area of
+1 KB. What stays fixed is the *average* plot per file (`LAND_PER_FILE`), which
+is why a 2,000-file repository grows a larger island rather than cramming the
+same ground into smaller houses. One consequence worth knowing: a plot is a
+*share of its folder*, so the same file looks bigger among small siblings than
+among large ones.
+
+**The height is how tangled it is** — branches per line of code, not length.
+Length is already the base, and measured across this repository lines and total
+branch count correlate at 0.94, so putting both on the map would draw one fact
+twice; branch *density* is independent of size (0.06). A long plain file is
+therefore a broad low hall, and a short knotty one stands up. The result is
+clamped to 11–54 units, then capped at ~1.9× the footprint's shorter side so
+nothing towers over the neighbours it would hide under the fixed camera angle.
+
+**Everything else is category.** What a file is *for* fixes its archetype and
+colour, identically in every repository — a test is a watchtower, docs are a
+scriptorium, config is a council hall. Branch density also adds chimneys,
+crates and forge stacks, so a complex file looks busy as well as tall.
+
+### What "complexity" actually means
+
+It is a **crude branch count**, not a claim about code quality. The scanner
+counts occurrences of ten tokens — `if`, `for`, `while`, `match`, `switch`,
+`catch`, `case`, `else`, `&&`, `||` — and divides by the lines of code. Its
+limits are worth stating plainly:
+
+- It is **substring matching, not parsing**. A `&&` inside a string literal
+  counts. Tokens are space-padded, so `else` will not match inside an
+  identifier, but that is the extent of the cleverness.
+- **Comments and blank lines are excluded** from both the count and the
+  divisor. They have to be: this crate's own `lib.rs` is 155 lines of which 98
+  are prose, and phrases like "for exactly this reason" would otherwise score
+  as branches and make the most heavily documented file look like the most
+  tangled one.
+- **Only code is scored.** Documentation, configuration, data and assets always
+  score zero and sit at the minimum height by construction.
+- Files over 2 MB and non-text files are never opened, so they also come out at
+  the floor.
+
+Treat a tall building as "this file has a lot of decisions per line, take a
+look", not as a metric to optimise. The real rules live in
+`crates/kingdom-citymap/src/build/layout.rs`.
+
 ## Status
 
 Early. Project scanning, the map, and the client/server round trip are real.
