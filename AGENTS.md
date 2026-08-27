@@ -299,12 +299,18 @@ crates/
                     ring, polled rather than pushed and never cached with the
                     geometry. `works.rs` is the second, for the same reason and
                     on the same channel: every agent's changes, raised over the
-                    city as stacked colour-per-agent columns, skirts of cleared
-                    ground, razed lots for deleted files, and ghost houses for
-                    files that do not exist yet. Height AND girth both ramp with
+                    city. What is being BUILT rises above the roof as stacked
+                    colour-per-agent columns; what is being TAKEN AWAY covers
+                    the house as a shroud, over as much of it as the file is
+                    losing (`WorkBand::cover`, a share of the file's own length,
+                    so a deletion simply covers all of it). Nothing crosses that
+                    line in either direction — removals used to stack into the
+                    same upward column as additions, so a file losing 300 lines
+                    grew a taller tower. Column height AND girth ramp with
                     ABSOLUTE churn (`FULL_CHURN`) — never a share of a plan's
                     own busiest file, which made two agents incomparable and
-                    flattened a 400-line change against a 4-line one. `stars.rs` is the
+                    flattened a 400-line change against a 4-line one. Ghost
+                    houses stand for files that do not exist yet. `stars.rs` is the
                     one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
                     would have no parallax and would *zoom* with the kingdom —
