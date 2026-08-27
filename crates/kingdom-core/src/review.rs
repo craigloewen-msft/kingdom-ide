@@ -17,7 +17,7 @@
 //! uneven replace. The browser renders two columns and re-decides nothing.
 
 use crate::ids::{CityId, PlanId};
-use crate::model::Language;
+use crate::model::{Language, NetworkMode, PortForward, SharedService};
 use serde::{Deserialize, Serialize};
 
 /// One agent's changes, and enough about the agent to draw them.
@@ -47,6 +47,86 @@ pub struct PlanChanges {
     pub city: CityId,
     /// What moved.
     pub changes: ChangeSummary,
+}
+
+/// What every agent in the kingdom is plugged into, and what its city shares.
+///
+/// What `kingdom_app::api::kingdom_network` answers with, and what the map
+/// draws its wells, its host ring and its agent markers from. The sibling of
+/// [`PlanChanges`]: that one says *what* each agent is changing, this one says
+/// *what each agent is connected to*.
+///
+/// # Why it is one answer rather than two
+///
+/// The wells and the agents are drawn against each other -- a channel is only
+/// drawn from an agent to a well that is actually standing -- so fetching them
+/// separately would let the map hold a marker that refers to a well it has not
+/// heard about yet, and draw a channel to nowhere. One request, one consistent
+/// picture.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KingdomNetwork {
+    /// The cities with something standing, in a stable order. A city that
+    /// declares no services is left out entirely rather than carried empty --
+    /// the overwhelming majority of projects, and the same judgement
+    /// [`Kingdom::activity`](crate::Kingdom::activity) makes about quiet towns.
+    pub wells: Vec<CityWells>,
+    /// Every live agent, in `PlanId` order.
+    ///
+    /// Ordered for the reason `kingdom_changes` is: banners are assigned by
+    /// position, so an unstable order would let two agents swap colours between
+    /// refetches.
+    pub agents: Vec<AgentNetwork>,
+}
+
+/// One city's wells: the containers Kingdom has standing for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CityWells {
+    /// The project these belong to. A well is the *city's*, not a plan's --
+    /// that is the whole point of it.
+    pub city: CityId,
+    /// What is up, sorted by name. Never empty; see [`KingdomNetwork::wells`].
+    pub wells: Vec<SharedService>,
+}
+
+/// One agent, and what it is connected to.
+///
+/// Runtime truth throughout, exactly like [`SharedService`] and
+/// [`PortForward`]: a namespace belongs to a running `slirp4netns` and a well to
+/// a running Docker daemon, so none of this is ever persisted. It is answered at
+/// the moment of asking or not at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNetwork {
+    /// Whose this is. Also what its banner colour is assigned from, so the
+    /// marker on the map is the colour of the columns that agent is raising.
+    pub plan: PlanId,
+    /// The town its marker stands in.
+    pub city: CityId,
+    /// Whether it has a network of its own, or shares the King's.
+    pub network: NetworkMode,
+    /// What it has forwarded to the host right now. Empty for a plan on the
+    /// shared network, which forwards nothing because it needs to forward
+    /// nothing.
+    pub ports: Vec<PortForward>,
+    /// The wells of its city that this plan is actually registered as using,
+    /// by name.
+    ///
+    /// **Not simply its city's well list.** A well is started when the first
+    /// plan wants it and `services::users_of` holds the set of plans drawing
+    /// from it, so this distinguishes an agent that has actually reached for
+    /// the database from one that merely could. Drawing a channel from every
+    /// agent in the city would claim the former where only the latter is true.
+    pub drawing_from: Vec<String>,
+}
+
+impl AgentNetwork {
+    /// Whether this agent reaches the King's own machine directly.
+    ///
+    /// The question the conduit to the rim is drawn from, named here rather
+    /// than matched at the drawing site so that the map and any future reader
+    /// answer it the same way.
+    pub fn on_host_network(&self) -> bool {
+        !self.network.is_isolated()
+    }
 }
 
 /// Everything a plan has changed against its city's default branch.

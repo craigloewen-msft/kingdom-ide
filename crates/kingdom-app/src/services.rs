@@ -411,6 +411,31 @@ pub fn users_of_key(key: &str, service: &str) -> usize {
     registry().users.get(&id).map_or(0, HashSet::len)
 }
 
+/// Whether one particular plan is drawing from a given service.
+///
+/// [`users_of_key`] counts the drawers; this asks whether a named one is among
+/// them. The map needs the distinction: a channel is drawn from an agent to a
+/// well it has actually reached for, and every plan in the city *could* reach
+/// the database without any of them having done so. Drawing from the count
+/// alone would claim five connections where there is one.
+///
+/// By registry **key** rather than by city root, which matters now that a well
+/// can belong to the King's machine rather than to a project: a host well is
+/// filed under `host`, so asking for it by city would answer "nobody is drawing
+/// from this" for every agent actually connected to it. The caller holds a
+/// [`RunningService`], which carries its own key.
+///
+/// Reads the same reference set [`ensure`] registers into and [`release`]
+/// removes from, so it is true at the moment it is asked and makes no record of
+/// its own.
+pub fn draws_from(key: &str, service: &str, plan: &PlanId) -> bool {
+    let id = (key.to_string(), service.to_string());
+    registry()
+        .users
+        .get(&id)
+        .is_some_and(|users| users.contains(plan))
+}
+
 /// The address of one named service in this city's scope, or `None` if it is
 /// not up.
 pub fn address_of(city_root: &Path, service: &str) -> Option<String> {
@@ -1455,6 +1480,80 @@ mod tests {
         kingdom.cities = vec![a_city("quiet")];
 
         assert!(inventory(&kingdom).await.is_empty());
+    }
+
+    /// `running_in` answers with both scopes, and every caller that places a
+    /// well *somewhere* has to know which is which.
+    ///
+    /// The map is the one that bites. `api::kingdom_network` puts a wellhead on
+    /// a **town's square**, and a host well belongs to no town -- so passed
+    /// through unfiltered, one Redis is drawn once in every city that has an
+    /// agent in it: the same container claimed by three projects that do not
+    /// own it. The feed filters on `scope`, and this pins the fact that makes
+    /// the filter necessary rather than decorative.
+    #[tokio::test]
+    async fn running_in_answers_with_both_scopes_and_says_which_is_which() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+        let city = tempfile::tempdir().expect("a temporary city");
+        let key = city_key(city.path());
+
+        // Two wells standing: one the King's, one the project's. Registered
+        // directly rather than started, so this needs no daemon -- the claim
+        // under test is about which scope each is filed under.
+        {
+            let mut registry = registry();
+            for (scope, filed_under, name) in [
+                (ServiceScope::Host, HOST_KEY.to_string(), "cache"),
+                (ServiceScope::City, key.clone(), "db"),
+            ] {
+                registry.running.insert(
+                    (filed_under.clone(), name.to_string()),
+                    RunningService {
+                        name: name.to_string(),
+                        image: "mongo:7".to_string(),
+                        host: "172.31.9.10".to_string(),
+                        port: 27017,
+                        container: container_name(&filed_under, name),
+                        scope,
+                        key: filed_under,
+                    },
+                );
+            }
+        }
+
+        let standing = running_in(city.path());
+        let named: Vec<(&str, ServiceScope)> = standing
+            .iter()
+            .map(|s| (s.name.as_str(), s.scope))
+            .collect();
+        assert_eq!(
+            named,
+            vec![("cache", ServiceScope::Host), ("db", ServiceScope::City)],
+            "a plan here can reach both, and the machine's comes first"
+        );
+
+        // What the map keeps: the city's own, and only that one.
+        let on_the_square: Vec<&str> = standing
+            .iter()
+            .filter(|s| s.scope == ServiceScope::City)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(on_the_square, vec!["db"]);
+
+        // And each carries the key it is filed under, which is the only way to
+        // count its drawers: asking for the host well by city root finds
+        // nothing at all.
+        let cache = &standing[0];
+        assert_eq!(cache.key, HOST_KEY);
+        assert_ne!(cache.key, key);
+
+        // Left as found, since the registry is process-global.
+        let mut registry = registry();
+        registry
+            .running
+            .remove(&(HOST_KEY.to_string(), "cache".to_string()));
+        registry.running.remove(&(key, "db".to_string()));
     }
 
     fn a_city(name: &str) -> kingdom_core::City {

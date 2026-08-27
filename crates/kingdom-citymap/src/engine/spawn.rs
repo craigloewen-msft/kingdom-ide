@@ -171,12 +171,16 @@ impl MeshCache {
 /// Vertical offsets that keep coplanar surfaces from fighting for the same
 /// depth. The camera looks down at a shallow angle, so a few hundredths of a
 /// world unit is enough to settle the order without being visible.
-mod layer {
+pub mod layer {
     /// The rim's own ground. Everything else stacks on it.
     pub const LAND: f32 = 0.0;
+    /// A town's ground, over the land it stands on.
     pub const TOWN: f32 = 0.02;
+    /// A folder's ground, over the town it belongs to.
     pub const WARD: f32 = 0.06;
+    /// The paved square at a settlement's heart.
     pub const PLAZA: f32 = 0.12;
+    /// Roads and paths, over every ground surface they cross.
     pub const ROAD: f32 = 0.16;
     /// Folder names sit above every ground surface, including the roads that
     /// cross their ward, so a name is never half-swallowed by a path.
@@ -187,6 +191,21 @@ mod layer {
     /// an agent is here is never half-hidden by the folder tree it is working
     /// in. Below the ground labels, which are what a name is for.
     pub const TOWN_GLOW: f32 = 0.205;
+    /// The band standing for the King's own machine, at the realm's rim.
+    ///
+    /// Above the working ring so a conduit crossing a town's edge is not
+    /// swallowed by it, and below the ground labels for [`GROUND_LABEL`]'s
+    /// reason: a folder's name must never be half-covered by a line drawn over
+    /// it.
+    pub const HOST_RING: f32 = 0.207;
+    /// Conduits, channels and moats -- the lines joining agents to what they
+    /// reach.
+    ///
+    /// Just above the host band they run to, so a conduit reads as arriving at
+    /// the ring rather than disappearing under it.
+    pub const NETWORK_LINK: f32 = 0.209;
+    /// A folder's name, painted flat on its ground and above everything that
+    /// crosses it -- a name half-swallowed by a road is worse than no name.
     pub const GROUND_LABEL: f32 = 0.22;
 }
 
