@@ -773,8 +773,11 @@ fn spawn_roads(
         }
         let points = to_points(&road.points);
         // The edge is a slightly wider ribbon slipped underneath, which reads
-        // as a kerb without needing a second material pass.
-        let edge = meshes::ribbon(&points, road.width + 1.6);
+        // as a kerb without needing a second material pass. Its width is
+        // `MapRoad`'s own business rather than a constant here: the verge is
+        // part of how wide a road *looks*, so it belongs beside the width it is
+        // measured from. See `MapRoad::ribbon_width`.
+        let edge = meshes::ribbon(&points, road.ribbon_width());
         commands.spawn((
             ChildOf(root),
             Mesh3d(meshes.add(edge)),
