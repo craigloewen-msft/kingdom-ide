@@ -28,6 +28,7 @@ mod lod;
 use bevy::app::PluginGroup;
 use bevy::asset::AssetPlugin;
 use bevy::camera::Exposure;
+use bevy::ecs::system::SystemParam;
 use bevy::picking::mesh_picking::MeshPickingPlugin;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
@@ -75,6 +76,136 @@ const IDLE_WAKE: Duration = Duration::from_millis(250);
 /// ever reads as janky or still costs too much.
 const RAIL_WAKE: Duration = Duration::from_millis(125);
 
+/// The fastest an engine drawing for *automation* is ever allowed to run.
+///
+/// A browser driven by `browser_*` tools has no eye behind it. Nobody is
+/// watching a tween; something is about to read a pixel, a class or a status
+/// and move on. So the frames between those reads are pure cost, and this is
+/// the ceiling that stops the engine spending them.
+///
+/// # Why a ceiling at all, measured
+///
+/// Because such a browser has no GPU either. Chrome falls back to ANGLE's
+/// SwiftShader and rasterises on the CPU, where drawing is expensive and the
+/// engine's own default is to draw as fast as the machine allows.
+///
+/// Kingdom's own kingdom, forty cities, headless, world standing and nothing
+/// happening: **9.50 cores** uncapped and unconfined, **2.03** with this cap
+/// and a four-CPU browser.
+///
+/// # What this fixes, and what it does not
+///
+/// This cap removes the *frames*. It does not remove the floor beneath them:
+/// the same map at one frame a second still cost 4.09 cores, because
+/// SwiftShader's thread pool sizes itself from the machine and spends most of
+/// what it spends whether or not a frame was asked for. That floor is
+/// `kingdom_browser::session::CPUS_VAR`'s job, and neither mechanism is
+/// sufficient alone.
+///
+/// What was never the cause, despite a long-standing note saying so, is
+/// `--disable-gpu`. It turns off *hardware* acceleration, which a machine with
+/// no usable GPU did not have to begin with.
+///
+/// Deliberately a little faster than [`RAIL_WAKE`], because unlike the rail
+/// this one is *interacted* with: `session::HOVER_SETTLE` rests the pointer for
+/// 120 ms before pressing, so a hover must be picked up and drawn inside that
+/// for a synthetic click to land on what it aimed at.
+const AUTOMATED_WAKE: Duration = Duration::from_millis(100);
+
+/// Whether this engine is drawing for automation, and so may never run flat out.
+///
+/// Set once at boot from `navigator.webdriver` (see `view::boot`) and read by
+/// [`winit_for`]. A resource rather than a constant because it is a fact about
+/// *this page load*, and the same build serves the King's browser and a plan's.
+///
+/// # Why it is not simply the stand-down
+///
+/// `mode::decide` already stands the engine down for an automated browser, and
+/// that remains the default. This is for the case that overrides it: `?map=on`,
+/// which exists so the agents who maintain the map can look at what they drew.
+/// Before this, taking that invitation cost nine and a half cores.
+///
+/// # What it does not reach
+///
+/// Work that is *bounded* and being waited on -- raising a world. Slowing that
+/// saves nothing and costs everything; see [`Pace::set_for_work`].
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaceCap(pub bool);
+
+impl PaceCap {
+    /// Holds one update mode to the ceiling, if there is one.
+    ///
+    /// Only [`UpdateMode::Continuous`] is ever changed. Every other mode this
+    /// engine uses is already a `reactive_low_power` slower than
+    /// [`AUTOMATED_WAKE`], so "capped" and "never continuous" are the same
+    /// rule -- and saying it this way means a future gear faster than the cap
+    /// is caught too, rather than silently exempt.
+    fn hold(self, mode: UpdateMode) -> UpdateMode {
+        match mode {
+            UpdateMode::Continuous if self.0 => UpdateMode::reactive_low_power(AUTOMATED_WAKE),
+            other => other,
+        }
+    }
+
+    /// Holds both of a settings' modes at once.
+    fn hold_both(self, settings: WinitSettings) -> WinitSettings {
+        WinitSettings {
+            focused_mode: self.hold(settings.focused_mode),
+            unfocused_mode: self.hold(settings.unfocused_mode),
+        }
+    }
+}
+
+/// Everything needed to set the engine's pace, in one parameter.
+///
+/// Grouped because they are only ever used together -- the ceiling, and the
+/// destination the ceiling is applied to -- and because three systems need the
+/// same trio. Bevy also caps a system at sixteen parameters, and
+/// [`apply_commands`] was at the limit; bundling these is what keeps the pacing
+/// change from costing an unrelated refactor there.
+#[derive(SystemParam)]
+pub struct Pace<'w> {
+    /// The ceiling an automated browser is held to, if any.
+    cap: Res<'w, PaceCap>,
+    /// The setting the pace is written to.
+    winit: ResMut<'w, WinitSettings>,
+}
+
+impl Pace<'_> {
+    /// Sets the pace for a presence, holding it to the cap.
+    ///
+    /// The only way any of this module's systems set a *standing* pace, so the
+    /// cap cannot be forgotten at one of the call sites that matter.
+    pub(super) fn set(&mut self, presence: MapPresence) {
+        *self.winit = winit_for(presence, *self.cap);
+    }
+
+    /// Runs flat out for work that is bounded and being waited on.
+    ///
+    /// The cap deliberately does **not** apply here, and that exception is the
+    /// reason this is a separate method rather than another call to [`set`].
+    ///
+    /// # Why capping bounded work is worse than useless
+    ///
+    /// [`PaceCap`] exists to stop an engine rendering *forever* at a rate
+    /// nobody is watching. Raising a world is the opposite kind of cost: a
+    /// fixed amount of work, sliced across frames by `raise::FRAME_BUDGET`,
+    /// which something is actively waiting to finish. Drawing fewer frames does
+    /// not make it cheaper -- it is the same work either way -- it only spreads
+    /// it over more wall clock.
+    ///
+    /// Measured, with the cap wrongly applied here: a world that stands in
+    /// about three seconds took **157**. The machine did no less work; a test
+    /// simply waited two and a half minutes for it. So bounded work is exempt,
+    /// and the standing pace the cap *does* govern is put back the moment it
+    /// finishes.
+    ///
+    /// [`set`]: Self::set
+    pub(super) fn set_for_work(&mut self) {
+        *self.winit = winit_for(MapPresence::Full, PaceCap(false));
+    }
+}
+
 /// Where the map is currently standing, as the interface last said.
 ///
 /// Remembered rather than inferred, because the only thing the engine could
@@ -88,9 +219,14 @@ pub struct Standing(pub MapPresence);
 
 /// Boots the engine into the page.
 ///
+/// `capped` says this page is being driven by automation, and so may never run
+/// flat out -- see [`PaceCap`]. It is decided in the browser, by `view::boot`,
+/// because `navigator.webdriver` is the one fact that settles it and only the
+/// client can read it.
+///
 /// On the web `App::run` never returns — it hands control to the browser's
 /// animation loop — so this must be the last thing the caller does.
-pub fn run(bridge: Bridge) {
+pub fn run(bridge: Bridge, capped: bool) {
     let mut app = App::new();
 
     app.add_plugins(
@@ -125,7 +261,10 @@ pub fn run(bridge: Bridge) {
             }),
     )
     .add_plugins(MeshPickingPlugin)
-    .add_plugins(RepoCityPlugin { bridge })
+    .add_plugins(RepoCityPlugin {
+        bridge,
+        cap: PaceCap(capped),
+    })
     .run();
 }
 
@@ -133,11 +272,14 @@ pub fn run(bridge: Bridge) {
 pub struct RepoCityPlugin {
     /// The channel the interface talks to the engine through.
     pub bridge: Bridge,
+    /// Whether this engine draws for automation, and so is held to a ceiling.
+    pub cap: PaceCap,
 }
 
 impl Plugin for RepoCityPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.bridge.clone())
+            .insert_resource(self.cap)
             .init_resource::<CameraRig>()
             .init_resource::<CameraGlide>()
             .init_resource::<MeshCache>()
@@ -246,7 +388,7 @@ fn apply_commands(
     existing: Query<Entity, With<SceneRoot>>,
     windows: Query<&Window>,
     mut cameras: Query<(&mut Camera, &mut Exposure, &mut AmbientLight), With<MapCamera>>,
-    mut winit: ResMut<WinitSettings>,
+    mut pace: Pace,
     mut standing: ResMut<Standing>,
     mut steering: ResMut<input::Steering>,
 ) {
@@ -430,7 +572,7 @@ fn apply_commands(
                 // pace flickering between the two systems for the length of a
                 // raise.
                 if !raise.in_flight() {
-                    *winit = winit_for(presence);
+                    pace.set(presence);
                 }
             }
         }
@@ -457,12 +599,12 @@ fn pace_for_glide(
     glide: Res<CameraGlide>,
     raise: Res<Raise>,
     standing: Res<Standing>,
-    mut winit: ResMut<WinitSettings>,
+    mut pace: Pace,
     mut forcing: Local<bool>,
 ) {
     if glide.in_flight() {
         if !*forcing {
-            *winit = winit_for(MapPresence::Full);
+            pace.set(MapPresence::Full);
             *forcing = true;
         }
         return;
@@ -477,7 +619,7 @@ fn pace_for_glide(
     // flickering between settings for the length of the raise -- the same
     // guard, and the same reason, as the `Show` arm above.
     if !raise.in_flight() {
-        *winit = winit_for(standing.0);
+        pace.set(standing.0);
     }
 }
 
@@ -486,8 +628,14 @@ fn pace_for_glide(
 /// Shared with [`raise::raise_world`], which forces the watching pace while a
 /// world goes up and restores this on the frame it finishes -- one definition,
 /// so the two cannot disagree about what "idle" means.
-fn winit_for(presence: MapPresence) -> WinitSettings {
-    match presence {
+///
+/// The [`PaceCap`] is taken rather than read from a resource so that *every*
+/// caller has to have one in hand. There are three places that set the pace and
+/// the two beyond this one both force the fastest gear; making the cap an
+/// argument is what stops one of them quietly running flat out under
+/// automation, which is exactly the bug this mechanism exists to prevent.
+fn winit_for(presence: MapPresence, cap: PaceCap) -> WinitSettings {
+    cap.hold_both(match presence {
         MapPresence::Full => WinitSettings {
             focused_mode: UpdateMode::Continuous,
             unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
@@ -513,7 +661,7 @@ fn winit_for(presence: MapPresence) -> WinitSettings {
             focused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
             unfocused_mode: UpdateMode::reactive_low_power(IDLE_WAKE),
         },
-    }
+    })
 }
 
 /// Frames the whole world: the disk, and the spire hanging under it.

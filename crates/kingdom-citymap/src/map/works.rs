@@ -1,9 +1,10 @@
 //! What a plan proposes, as ground on the map.
 //!
 //! The King opens a chamber and the map shows him what his agent is building:
-//! a house that gained lines wears a scaffold, one that lost them wears a
-//! skirt, and a file that did not exist an hour ago stands as a ghost on free
-//! land inside the folder it belongs to.
+//! a house that gained lines wears a scaffold above its roof, one that lost them
+//! is covered by a shroud rising from the ground over as much of the house as
+//! the file is losing, and a file that did not exist an hour ago stands as a
+//! ghost on free land inside the folder it belongs to.
 //!
 //! # Why this is in `map` and not in `engine`
 //!
@@ -85,11 +86,28 @@ pub struct WorkBand {
     /// Lines removed, as an absolute count. Absolute for [`Self::added`]'s
     /// reason.
     pub removed: f32,
+    /// How much of the house this agent's cutting covers, as `0.0..=1.0`.
+    ///
+    /// **A share, unlike every other number here, and deliberately so.** The
+    /// counts above are absolute because two agents' columns have to be
+    /// comparable across the whole map; this one answers a different question --
+    /// *how much of this file is going away* -- and that is a ratio or it is
+    /// nothing. Three hundred lines cut is most of a four-hundred-line file and
+    /// a rounding error in a twenty-thousand-line one, and the King asked for
+    /// exactly that distinction: half the file removed covers half the house.
+    ///
+    /// Computed in [`resolve`] rather than by the renderer, because the
+    /// denominator is [`MapFeature::lines`](super::MapFeature::lines) and the
+    /// engine is deliberately ignorant of anything but rectangles and heights.
+    /// See the module docs on where that seam is.
+    pub cover: f32,
     /// Whether this agent deleted the file outright.
     ///
-    /// Drawn as a razed lot rather than as a column: a deletion is a house
-    /// coming down, and anything rising above the roofline would say the
-    /// opposite. See `engine::works`.
+    /// Drawn as a shroud over the whole house rather than as a column: a
+    /// deletion is a house being covered over entirely, and anything rising
+    /// above the roofline would say the opposite. It is simply [`Self::cover`]
+    /// at `1.0` -- kept as its own flag because "the file is gone" is a fact
+    /// about the change rather than a measurement of it. See `engine::works`.
     pub razing: bool,
 }
 
@@ -314,9 +332,10 @@ mod resolve {
     /// standing, so a scaffold on it would say the opposite of what happened --
     /// but the conclusion was wrong: the answer is to draw the *opposite of a
     /// scaffold*, not nothing at all. A razing band is carried here and
-    /// `engine::works` draws it as a lot being cleared. A deletion-only plan
-    /// used to resolve to an empty list and leave the map blank while an agent
-    /// was working hard.
+    /// `engine::works` draws it as a house covered over entirely, which is
+    /// [`WorkBand::cover`] at 1.0 rather than a mark of its own. A
+    /// deletion-only plan used to resolve to an empty list and leave the map
+    /// blank while an agent was working hard.
     ///
     /// Ghost houses are placed once per **path**, not once per plan, so two
     /// agents creating the same file get one house with two bands rather than
@@ -375,6 +394,10 @@ mod resolve {
                         cutting: with_alpha(banner.cutting_rgb),
                         added: file.added as f32,
                         removed: file.removed as f32,
+                        // Filled in below, once the site is known: the
+                        // denominator is the file's own length, and that
+                        // arrives with the holding rather than with the change.
+                        cover: 0.0,
                         razing,
                     });
             }
@@ -384,13 +407,21 @@ mod resolve {
         // Ground claimed by ghost houses as this pass places them.
         let mut claimed: HashMap<String, Vec<MapRect>> = HashMap::new();
 
-        for (path, bands) in by_path {
+        for (path, mut bands) in by_path {
+            // The house's own length as the map last scanned it, which is the
+            // denominator `WorkBand::cover` is a share of. Zero stands for "not
+            // known" -- a `Fresh` site has no prior file at all, and the scanner
+            // leaves `lines` at zero for anything it could not read.
+            let mut lines = 0;
             let site = match map.holding_at(city, path) {
                 // The house is on the map: the work happens on top of it.
-                Some(feature) => WorkSite::Standing {
-                    footprint: feature.footprint,
-                    height: feature.height,
-                },
+                Some(feature) => {
+                    lines = feature.lines;
+                    WorkSite::Standing {
+                        footprint: feature.footprint,
+                        height: feature.height,
+                    }
+                }
                 // No house. Either an agent created this file or the map is
                 // stale about it, and the two are indistinguishable from here --
                 // which is fine, because both mean "there is no building for
@@ -432,11 +463,78 @@ mod resolve {
                 }
             };
 
+            // How much of the house each agent's cutting covers. Done here
+            // rather than where the band was built because the denominator is
+            // the file's own length, which only the holding knows.
+            for band in &mut bands {
+                band.cover = cover_of(band, site, lines);
+            }
+
             raised.push(Work { site, bands });
         }
 
         raised
     }
+
+    /// How much of a house one agent's cutting covers, as `0.0..=1.0`.
+    ///
+    /// `lines` is the file's own length as the map last scanned it, or zero for
+    /// "not known". The whole point of the number is stated on
+    /// [`WorkBand::cover`]: half the file removed covers half the house.
+    ///
+    /// # The three cases, and why each is what it is
+    ///
+    /// - **A deletion covers everything.** Not a matter of degree, and not a
+    ///   matter of what git managed to count: a file reported as `-0` because it
+    ///   was empty is still entirely gone.
+    /// - **A known length is the honest denominator.** Clamped, because `removed`
+    ///   can genuinely exceed it -- the manifest is memoised on the shape of the
+    ///   kingdom and is allowed to be stale about a file's contents, and a house
+    ///   cannot be more than covered.
+    /// - **An unknown length falls back to an absolute ramp.** A holding the
+    ///   scanner never read (too large, or not text) has no share to be taken
+    ///   of, and drawing nothing would be the invisible-removal fault all over
+    ///   again. [`FALLBACK_LINES`] is the length this pretends such a file has:
+    ///   a few hundred lines, so a substantial cut still covers a substantial
+    ///   part of the house without ever reaching the top -- the shroud stays
+    ///   visibly short of a real deletion's.
+    /// - **A house with no prior file is a share of its own churn.** A
+    ///   [`WorkSite::Fresh`] is either a file an agent created or one the
+    ///   manifest is stale about, and neither has a scanned length to divide
+    ///   by. What both do have is how much of the work on them is cutting, and
+    ///   that is the only honest denominator available. It matters most in the
+    ///   stale case, which is a real house being genuinely gutted: against a
+    ///   nominal length that would draw as a sliver, and against its own churn
+    ///   it draws as most of the house, which is what happened.
+    ///
+    /// Guarded against a zero denominator throughout, because a NaN here becomes
+    /// a degenerate mesh in Bevy -- the trap this module already records twice.
+    fn cover_of(band: &WorkBand, site: WorkSite, lines: usize) -> f32 {
+        if band.razing {
+            return 1.0;
+        }
+        if band.removed <= 0.0 || !band.removed.is_finite() {
+            return 0.0;
+        }
+        let whole = match site {
+            // A house that stands: a share of the file it is, or of a nominal
+            // file if the scanner never managed to count it.
+            WorkSite::Standing { .. } if lines > 0 => lines as f32,
+            WorkSite::Standing { .. } => FALLBACK_LINES,
+            // Nothing on disk to be a share of. `churn` is never zero here --
+            // `removed` alone is already positive.
+            WorkSite::Fresh { .. } => band.churn(),
+        };
+        (band.removed / whole.max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// The file length a holding of unknown size is measured against.
+    ///
+    /// Only reached for a house the scanner never counted -- too large for
+    /// `MAX_ANALYZED_BYTES`, or not text. A few hundred lines is a large-ish
+    /// source file, which keeps such a shroud honestly short of the full-height
+    /// one a real deletion earns.
+    const FALLBACK_LINES: f32 = 400.0;
 
     /// How big a new house should be, so it looks like it belongs.
     ///
@@ -660,7 +758,17 @@ mod resolve_tests {
     }
 
     /// A map of one town with one `src` ward, and whatever houses are asked for.
+    ///
+    /// The houses have no scanned length, which is the ordinary state for a
+    /// file the scanner could not read. Use [`world_of`] where the length
+    /// matters -- it is the denominator of `WorkBand::cover`.
     fn world(city: &str, houses: &[(&str, MapRect)]) -> MapManifest {
+        let sized: Vec<_> = houses.iter().map(|(path, lot)| (*path, *lot, 0)).collect();
+        world_of(city, &sized)
+    }
+
+    /// The same, with each house's file length -- what a removal is a share of.
+    fn world_of(city: &str, houses: &[(&str, MapRect, usize)]) -> MapManifest {
         let ward = MapWard {
             id: "ward-0".to_owned(),
             name: "src".to_owned(),
@@ -681,7 +789,7 @@ mod resolve_tests {
 
         let features = houses
             .iter()
-            .map(|(path, lot)| MapFeature {
+            .map(|(path, lot, lines)| MapFeature {
                 id: (*path).to_owned(),
                 name: path.rsplit('/').next().unwrap_or(path).to_owned(),
                 path: (*path).to_owned(),
@@ -692,7 +800,7 @@ mod resolve_tests {
                 meaning: String::new(),
                 category: String::new(),
                 bytes: 0,
-                lines: 0,
+                lines: *lines,
                 complexity: 0,
                 references: 0,
                 footprint: *lot,
@@ -702,7 +810,7 @@ mod resolve_tests {
             .collect();
         let buildings = houses
             .iter()
-            .map(|(path, lot)| MapBuilding {
+            .map(|(path, lot, _)| MapBuilding {
                 feature_id: (*path).to_owned(),
                 ward_id: Some("ward-0".to_owned()),
                 kind: BuildingKind::Guildhall,
@@ -1084,8 +1192,151 @@ mod resolve_tests {
         assert!(resolve(&map, "alpha", &[]).is_empty(), "no agents at all");
     }
 
+    /// **The King's own rule, at the seam that computes it.** Two hundred lines
+    /// cut from a four-hundred-line file is half the file, so half the house is
+    /// covered.
+    ///
+    /// This is the number the whole feature turns on, and it is computed here
+    /// rather than in the renderer because the denominator is the file's
+    /// scanned length -- a fact about a codebase, which the engine is
+    /// deliberately ignorant of.
+    #[test]
+    fn half_a_file_removed_covers_half_the_house() {
+        let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 400)]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/main.rs", ChangeKind::Modified, 0, 200)]),
+        );
+
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].bands[0].cover, 0.5);
+    }
+
+    /// The same cut in a file five times the size covers a fifth as much. That
+    /// difference is the entire reason `cover` is a share rather than reusing
+    /// the column's absolute churn ramp.
+    #[test]
+    fn the_same_cut_covers_less_of_a_bigger_file() {
+        let cut = |lines: usize| {
+            let map = world_of(
+                "alpha",
+                &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), lines)],
+            );
+            resolve(
+                &map,
+                "alpha",
+                &alone(vec![file("src/main.rs", ChangeKind::Modified, 0, 100)]),
+            )[0]
+            .bands[0]
+                .cover
+        };
+        assert_eq!(cut(200), 0.5);
+        assert_eq!(cut(1_000), 0.1);
+        assert!(cut(200) > cut(1_000));
+    }
+
+    /// A deletion covers the whole house, whatever git managed to count. "This
+    /// file is going" is not a matter of degree -- and a deletion reported as
+    /// `-0` because the file was empty is still total.
+    #[test]
+    fn a_deletion_covers_the_whole_house() {
+        let map = world_of("alpha", &[("src/gone.rs", rect(10.0, 10.0, 8.0, 8.0), 900)]);
+        for counted in [0, 3, 900] {
+            let raised = resolve(
+                &map,
+                "alpha",
+                &alone(vec![file("src/gone.rs", ChangeKind::Deleted, 0, counted)]),
+            );
+            assert_eq!(
+                raised[0].bands[0].cover, 1.0,
+                "a deletion git counted as {counted} covered less than the house"
+            );
+        }
+    }
+
+    /// A file the scanner never counted still shows something. Its `lines` is
+    /// zero -- too large to analyse, or not text -- and dividing by it would be
+    /// either a NaN or an invisible removal, which is the exact fault the
+    /// shroud replaced.
+    #[test]
+    fn a_file_of_unknown_length_still_covers_something() {
+        let map = world("alpha", &[("src/huge.rs", rect(10.0, 10.0, 8.0, 8.0))]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/huge.rs", ChangeKind::Modified, 0, 100)]),
+        );
+
+        let cover = raised[0].bands[0].cover;
+        assert!(cover.is_finite(), "an unknown length gave {cover}");
+        assert!(
+            cover > 0.0 && cover < 1.0,
+            "an unmeasurable file covered {cover}, which reads as either nothing or a deletion"
+        );
+    }
+
+    /// A stale manifest is allowed to report fewer lines than were removed --
+    /// it is memoised on the shape of the kingdom, not on any file's contents.
+    /// A house cannot be more than covered.
+    #[test]
+    fn a_cut_bigger_than_the_file_covers_no_more_than_all_of_it() {
+        let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 10)]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/main.rs", ChangeKind::Modified, 0, 4_000)]),
+        );
+
+        assert_eq!(raised[0].bands[0].cover, 1.0);
+    }
+
+    /// Two agents cutting one file each cover their own share, so the stack
+    /// adds up to what the file is actually losing rather than to twice it.
+    /// Whose deletion is whose is question two of `AGENTS.md`.
+    #[test]
+    fn two_agents_cutting_one_file_cover_their_own_shares() {
+        let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 400)]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &between(
+                vec![file("src/main.rs", ChangeKind::Modified, 0, 100)],
+                vec![file("src/main.rs", ChangeKind::Modified, 0, 100)],
+            ),
+        );
+
+        assert_eq!(raised.len(), 1, "one file is one house");
+        assert_eq!(raised[0].bands.len(), 2, "two agents, two bands");
+        let total: f32 = raised[0].bands.iter().map(|band| band.cover).sum();
+        assert_eq!(
+            total, 0.5,
+            "200 of 400 lines is half the house between them"
+        );
+    }
+
+    /// Growth alone covers nothing. A file that only gained lines wears a
+    /// column and no shroud at all -- the two directions are now drawn in two
+    /// places, and nothing about an addition may appear below the roof.
+    #[test]
+    fn a_file_that_only_grew_covers_nothing() {
+        let map = world_of("alpha", &[("src/main.rs", rect(10.0, 10.0, 8.0, 8.0), 400)]);
+        let raised = resolve(
+            &map,
+            "alpha",
+            &alone(vec![file("src/main.rs", ChangeKind::Modified, 120, 0)]),
+        );
+
+        assert_eq!(raised[0].bands[0].cover, 0.0);
+        assert_eq!(raised[0].bands[0].added, 120.0);
+    }
+
     /// Every band's counts must be finite and non-negative: they become mesh
     /// dimensions, and a NaN reaches Bevy as a degenerate mesh.
+    ///
+    /// `cover` is in here for a sharper version of the same reason: it is a
+    /// *ratio*, so it has a denominator that can be zero, and `f32::clamp`
+    /// propagates NaN rather than trapping it.
     #[test]
     fn every_band_carries_a_drawable_number() {
         let map = world(
@@ -1108,6 +1359,11 @@ mod resolve_tests {
             for band in &work.bands {
                 assert!(band.added.is_finite() && band.added >= 0.0);
                 assert!(band.removed.is_finite() && band.removed >= 0.0);
+                assert!(
+                    band.cover.is_finite() && (0.0..=1.0).contains(&band.cover),
+                    "a cover of {} is not a share of a house",
+                    band.cover
+                );
             }
         }
     }

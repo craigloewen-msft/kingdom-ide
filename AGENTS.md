@@ -234,6 +234,8 @@ is invisible until a plan is halfway through a job:
 
 - **A browser**, for the `browser_*` tools. Any Chrome or Chromium on `PATH`.
   On arm64, Google Chrome has no Linux build — Chromium is the native one.
+- **`taskset`**, to hold that browser to its CPU ceiling. Almost always present
+  (`util-linux`); without it a browser still runs, simply unconfined.
 - **`slirp4netns`**, but only for a plan the King opens with a network of its
   own. Without it such a plan has no DNS, no crates.io and no git, so Kingdom
   refuses to open one and names the package instead of degrading. Nothing else
@@ -241,7 +243,7 @@ is invisible until a plan is halfway through a job:
 - **Whatever the city itself needs to run.** That is the *project's*
   prerequisite, not Kingdom's, and Kingdom cannot install it.
 
-None is checked up front on purpose — except the middle one, which *is* checked
+None is checked up front on purpose — except `slirp4netns`, which *is* checked
 before the plan opens, because "you asked for isolation and silently did not get
 it" is a worse answer than a refusal. A plan that only reads and proposes needs
 none of them, and refusing to start without them would be worse than the

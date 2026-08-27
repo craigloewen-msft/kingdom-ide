@@ -138,3 +138,58 @@ fetch from 3.3 s to ~60 ms), and the reveal, the single most expensive frame in
 the app at 2,835 ms, waits behind a bar the King has already seen reach the end.
 
 25 painted readings, against three. `tasks/00250` has the tables.
+
+## Looking at the map from a plan's browser
+
+A plan's browser stands the map down by default (`mode.rs`) — most plans never
+want it, and booting Bevy is not free. Ask for it with `?map=on`:
+
+```
+browser_navigate  http://127.0.0.1:3000/?map=on
+```
+
+That is now sufficient on its own; there is no environment variable to set
+first. The world takes a few seconds to stand, so **wait on a value rather than
+sleeping** — and assert on values afterwards too, rather than on pixels:
+
+```js
+__kingdom_map.built             // false until the world is up
+__kingdom_map.hovered           // "src/main.rs", after a mouse move
+__kingdom_map.clicked.holding   // what the last click actually hit
+```
+
+`window.__kingdom_map` is defined only under automation (`view::publish_status`)
+and carries the whole of `ViewerStatus`. Prefer it to a screenshot: it is stable
+against every change to how the map is *drawn*, and it names what was hit rather
+than leaving a reader to recognise it in an image.
+
+One caveat before you aim: at the default zoom the whole kingdom is in frame, so
+a single holding is a few pixels. Move the pointer and read `hovered` back
+rather than trusting a coordinate to have landed.
+
+### Why it costs what it does
+
+A headless browser has no GPU — on WSL2, and on most CI, every hardware path
+(`--use-angle=vulkan`, `=gl`, `--use-gl=egl`) yields **no WebGL context at
+all**. SwiftShader on the CPU is the only renderer there is, and `--disable-gpu`
+never had anything to do with that: it turns off *hardware* acceleration, which
+such a machine did not have to begin with.
+
+Measured on this map, world standing, nothing happening:
+
+| | Cost |
+|---|---|
+| uncapped, unconfined | 9.50 cores |
+| one frame a second, unconfined | 4.09 cores |
+| capped and confined to four CPUs | 2.03 cores |
+
+The middle row is the one that matters, and it is why pacing alone was not the
+answer: SwiftShader sizes its thread pool from the machine and spends most of
+what it spends whether or not a frame was asked for. So the engine cuts the
+frames (`engine::AUTOMATED_WAKE`) and the browser cuts the floor beneath them
+(`session::CPUS_VAR`, default 4). Both are needed.
+
+Bounded work is exempt from the frame cap, and that exception is load-bearing:
+capping a world going up turned a three-second raise into **157 seconds**. The
+machine did no less work — it simply spread it over fifty times the wall clock,
+with something waiting on it. See `engine::Pace::set_for_work`.

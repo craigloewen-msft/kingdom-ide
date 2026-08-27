@@ -204,12 +204,18 @@ crates/
                     ring, polled rather than pushed and never cached with the
                     geometry. `works.rs` is the second, for the same reason and
                     on the same channel: every agent's changes, raised over the
-                    city as stacked colour-per-agent columns, skirts of cleared
-                    ground, razed lots for deleted files, and ghost houses for
-                    files that do not exist yet. Height AND girth both ramp with
+                    city. What is being BUILT rises above the roof as stacked
+                    colour-per-agent columns; what is being TAKEN AWAY covers
+                    the house as a shroud, over as much of it as the file is
+                    losing (`WorkBand::cover`, a share of the file's own length,
+                    so a deletion simply covers all of it). Nothing crosses that
+                    line in either direction — removals used to stack into the
+                    same upward column as additions, so a file losing 300 lines
+                    grew a taller tower. Column height AND girth ramp with
                     ABSOLUTE churn (`FULL_CHURN`) — never a share of a plan's
                     own busiest file, which made two agents incomparable and
-                    flattened a 400-line change against a 4-line one. `stars.rs` is the
+                    flattened a 400-line change against a 4-line one. Ghost
+                    houses stand for files that do not exist yet. `stars.rs` is the
                     one part not in the world at all:
                     the projection is orthographic, so a star out in the scene
                     would have no parallax and would *zoom* with the kingdom —
@@ -222,7 +228,19 @@ crates/
                     back or leaves it still for `RELEASE_AFTER`
     view.rs         `CityMap` — the canvas, the click that selects a city, the
                     loading card with the bar on it, and the free-look chip that
-                    says the camera is his and offers it back
+                    says the camera is his and offers it back. Also
+                    `publish_status`: under automation only, the engine's
+                    `ViewerStatus` is mirrored onto `window.__kingdom_map` so a
+                    browser test can assert on *values* — `built`, `hovered`,
+                    `clicked.holding` — rather than on pixels
+    mode.rs         Whether the map draws at all, and at what pace. An
+                    automated browser stands the engine down by default;
+                    `?map=on` overrides that and is now sufficient on its own
+                    (WebGL is on by default), drawing a real, pickable map at a
+                    capped frame rate. The cap exempts *bounded* work — capping
+                    a world going up turned a three-second raise into 157
+                    seconds, the same work spread over fifty times the wall
+                    clock with something waiting on it
 
   kingdom-browser/  The headless browser: chromiumoxide/CDP driver and the
                     per-plan session manager. Native only — never in the wasm
@@ -236,13 +254,24 @@ crates/
                     move in time, which is why nothing could click the map;
                     DEFAULT_VIEWPORT, chosen against Kingdom's own
                     responsive thresholds rather than as a round number
-                    (KINGDOM_BROWSER_VIEWPORT overrides it); and
-                    `disable-software-rasterizer`, which is what actually stops
-                    SwiftShader — NOT `--disable-gpu`, which was long assumed
-                    to and does not. Measured: a WebGL page costs 680–840% of a
-                    core with the software rasteriser and 12–18% without.
-                    KINGDOM_BROWSER_WEBGL=on gives it back, which a plan
-                    working on kingdom-citymap needs.
+                    (KINGDOM_BROWSER_VIEWPORT overrides it); and WebGL, which
+                    a plan's browser now has **by default** — it is what lets
+                    an agent look at Kingdom's own map. Two ceilings keep that
+                    affordable, and both are needed. Measured on the map,
+                    world standing, nothing happening: 9.50 cores uncapped and
+                    unconfined, 4.09 at one frame a second, 2.03 capped and
+                    confined to four CPUs. The frames are the engine's job
+                    (citymap engine::AUTOMATED_WAKE); the floor beneath them is
+                    KINGDOM_BROWSER_CPUS (default 4), because SwiftShader sizes
+                    its thread pool from the machine and spends most of what it
+                    spends whether or not a frame was asked for. Confinement is
+                    a `taskset` shim written into the profile, so the mask is
+                    set before Chrome forks and every rendering child inherits
+                    it. KINGDOM_BROWSER_WEBGL=off is the blunt instrument;
+                    KINGDOM_BROWSER_CPUS=0 lifts the ceiling. `--disable-gpu`
+                    does none of this and never did: it turns off *hardware*
+                    acceleration, which a headless machine did not have to
+                    begin with
 
                     A session also *ends*, which it did not use to: on the
                     plan settling (browser::dismiss, beside tmux::dismiss),

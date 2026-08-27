@@ -189,6 +189,8 @@ pub fn CityMap(
     if map_mode().stood_down() {
         return view! { <StoodDown/> }.into_any();
     }
+    // Decided once, here, so the two boot paths below cannot disagree about it.
+    let capped = map_mode().capped();
 
     let manifest = RwSignal::new(None::<MapManifest>);
     let load_error = RwSignal::new(None::<String>);
@@ -228,7 +230,7 @@ pub fn CityMap(
                         // bridge holds it until the first update drains it,
                         // which is exactly what the queue is for.
                         loader.send(ViewerCommand::Load(Box::new(map)));
-                        boot(loader);
+                        boot(loader, capped);
                     })
                     .forget();
                 }
@@ -237,7 +239,7 @@ pub fn CityMap(
                     // read shows the same empty space and stars it always did
                     // behind the error, rather than a black rectangle.
                     load_error.set(Some(error));
-                    Timeout::new(PAINT_PAUSE_MS, move || boot(loader)).forget();
+                    Timeout::new(PAINT_PAUSE_MS, move || boot(loader, capped)).forget();
                 }
             }
         });
@@ -257,6 +259,12 @@ pub fn CityMap(
             }
             seen = revision;
             status.set(watcher.status());
+            // And, for a browser being driven rather than watched, the same
+            // status where a test can read it. Free for the King: `capped` is
+            // only ever true under automation.
+            if capped {
+                publish_status(&watcher.status());
+            }
         })
         .forget();
     });
@@ -870,8 +878,108 @@ fn Survey(
 /// in [`CityMap`]: booting costs seconds of main thread, the fetch's bar is
 /// drawn from that same thread, and there is nothing to draw until the manifest
 /// has arrived anyway.
-fn boot(bridge: Bridge) {
-    engine::run(bridge);
+fn boot(bridge: Bridge, capped: bool) {
+    engine::run(bridge, capped);
+}
+
+/// The property an automated browser finds the map's state under.
+///
+/// Named with the leading underscores by convention for "this is a test seam,
+/// not an API": nothing in Kingdom reads it, and it is only ever defined on a
+/// page that `navigator.webdriver` was true for.
+const STATUS_PROPERTY: &str = "__kingdom_map";
+
+/// Mirrors the engine's status onto `window` for a test to read.
+///
+/// # Why this exists at all
+///
+/// Because the alternative is asserting on pixels. What a map test actually
+/// wants to know -- did the world stand up, what is under the pointer, what did
+/// that click select -- is all in [`ViewerStatus`] already, but none of it was
+/// reachable from outside the wasm module. A test could only infer hovering
+/// from the `over-holding` class, which says *that* something is under the
+/// pointer and never *what*.
+///
+/// So a test can now do:
+///
+/// ```js
+/// __kingdom_map.built            // the world finished going up
+/// __kingdom_map.hovered          // "src/main.rs"
+/// __kingdom_map.clicked.holding  // what the last click actually hit
+/// ```
+///
+/// which is worth more than a screenshot: it is stable against every change to
+/// how the map is *drawn*, and it names the thing that was hit rather than
+/// leaving a human to recognise it in an image.
+///
+/// # Best effort, on purpose
+///
+/// Every failure here is ignored. This is a diagnostic on a page that is
+/// already drawing the real map; a map that cannot publish its status is still
+/// a working map, and taking the interface down over it would be absurd.
+fn publish_status(status: &ViewerStatus) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let object = js_sys::Object::new();
+    let set = |key: &str, value: wasm_bindgen::JsValue| {
+        let _ = js_sys::Reflect::set(&object, &key.into(), &value);
+    };
+
+    set("awake", status.awake.into());
+    set("built", status.built.into());
+    set("manual", status.manual.into());
+    set("zoom", status.zoom.into());
+    set("lod", status.lod.label().into());
+    set("hovered", to_js(status.hovered.as_deref()));
+    set("hoveredWard", to_js(status.hovered_ward.as_deref()));
+    set("selectedWard", to_js(status.selected_ward.as_deref()));
+    set("error", to_js(status.error.as_deref()));
+
+    // The click carries its serial as well as its target, because that is what
+    // makes clicking the same holding twice two events rather than one -- the
+    // same reason `ViewerStatus` keeps it. A test that only compared `holding`
+    // could not tell a second click from a stale read.
+    set(
+        "clicked",
+        match &status.clicked {
+            Some((holding, serial)) => {
+                let click = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&click, &"holding".into(), &holding.as_str().into());
+                let _ = js_sys::Reflect::set(&click, &"serial".into(), &(*serial as f64).into());
+                click.into()
+            }
+            None => wasm_bindgen::JsValue::NULL,
+        },
+    );
+
+    // The raise, so a test can wait for the world rather than sleeping at it.
+    set(
+        "raising",
+        match &status.raising {
+            Some(raising) => {
+                let object = js_sys::Object::new();
+                let _ =
+                    js_sys::Reflect::set(&object, &"stage".into(), &raising.stage.label().into());
+                let _ = js_sys::Reflect::set(&object, &"fraction".into(), &raising.fraction.into());
+                object.into()
+            }
+            None => wasm_bindgen::JsValue::NULL,
+        },
+    );
+
+    let _ = js_sys::Reflect::set(&window, &STATUS_PROPERTY.into(), &object);
+}
+
+/// An optional string as a JavaScript string or `null`.
+///
+/// `null` rather than `undefined` so that a missing value is a value a test can
+/// compare against, rather than a property that reads as absent.
+fn to_js(value: Option<&str>) -> wasm_bindgen::JsValue {
+    match value {
+        Some(value) => value.into(),
+        None => wasm_bindgen::JsValue::NULL,
+    }
 }
 
 /// Fetches the manifest the server built for this kingdom, reporting progress.

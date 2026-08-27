@@ -13,24 +13,44 @@
 //! does not -- so the engine boots -- cost 790%. Nearly eight cores, on a
 //! machine several agents are sharing.
 //!
+//! Most of that is now recoverable rather than merely avoidable -- see the
+//! table below -- but avoiding it entirely is still free, and still right for
+//! the great majority of plans, which never look at the map at all.
+//!
 //! # It is now a belt beside a brace
 //!
-//! `kingdom_browser` disables Chrome's software rasteriser outright
-//! (`disable-software-rasterizer`), so a plan's browser has no WebGL context to
-//! give the engine even if this decided otherwise. Note that this is *not*
-//! achieved by `--disable-gpu`, which was long assumed to do it and does not:
-//! measured, a WebGL page under `--disable-gpu` alone still ran a GPU process
-//! burning 665% of a core in SwiftShader.
+//! `kingdom_browser` gives a plan's browser WebGL by default, and bounds what
+//! it can cost two ways: the engine holds itself to `engine::AUTOMATED_WAKE`
+//! when this decides [`MapMode::Draw`] with `capped`, and the browser is
+//! confined to a few CPUs (`session::CPUS_VAR`).
 //!
-//! The stand-down still earns its keep and is still the primary mechanism. It
-//! is what lets the map say something useful instead of failing to acquire a
-//! context, and it is decided in the browser, where the one fact that settles
-//! it can actually be read.
+//! Both are needed, and the reason is worth knowing before anyone simplifies
+//! either away. Measured on this map, world standing, nothing happening:
 //!
-//! `KINGDOM_BROWSER_WEBGL=on` gives the rasteriser back, for exactly the case
-//! `OVERRIDE` below exists to serve: an agent working on this crate needs both
-//! -- the query parameter to make the engine boot, and the environment variable
-//! to give it something to boot onto.
+//! | | Cost |
+//! |---|---|
+//! | uncapped, unconfined | 9.50 cores |
+//! | one frame a second, unconfined | 4.09 cores |
+//! | capped and confined to four CPUs | 2.03 cores |
+//!
+//! The middle row is the surprising one and it is why pacing alone was not the
+//! answer. Chrome has no GPU here, so it rasterises in SwiftShader, whose
+//! thread pool sizes itself from the machine and spends most of what it spends
+//! whether or not a frame was asked for. Slowing the engine cuts the frames;
+//! only the CPU ceiling cuts the floor underneath them.
+//!
+//! Note also what `--disable-gpu` does *not* do: it does not stop any of this.
+//! It turns off hardware acceleration, and on a machine with no usable GPU --
+//! which is every machine a headless browser runs on -- that changes nothing.
+//!
+//! The stand-down remains the primary mechanism and the default. It is what
+//! lets the map say something useful instead of costing anything at all, and
+//! it is decided in the browser, where the one fact that settles it can
+//! actually be read.
+//!
+//! `?map=on` is now enough on its own. The engine boots, the rasteriser is
+//! there to boot onto, and the pace and the ceiling keep the bill in sight --
+//! so an agent working on this crate can simply open the map and look at it.
 //!
 //! # Why the decision is made here and not on the server
 //!
@@ -49,7 +69,14 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapMode {
     /// Boot the engine, fetch the manifest, draw the world.
-    Draw,
+    Draw {
+        /// Whether to hold the engine to a frame ceiling while it does.
+        ///
+        /// Carried on the variant rather than answered separately because the
+        /// two facts have one source: a browser is told to draw *and* held to a
+        /// ceiling for the same reason, that it is automation which asked.
+        capped: bool,
+    },
     /// Draw a notice and nothing else. No canvas, no manifest, no Bevy.
     StandDown,
 }
@@ -59,6 +86,20 @@ impl MapMode {
     #[must_use]
     pub fn stood_down(self) -> bool {
         matches!(self, MapMode::StandDown)
+    }
+
+    /// Whether an engine that does boot must be held to a frame ceiling.
+    ///
+    /// True only for [`MapMode::Draw`] reached *against* the automated default
+    /// -- which is to say `?map=on` in a driven browser. That page is drawn for
+    /// something that will read it and move on, so the frames between reads are
+    /// pure cost, and on such a browser they are software-rasterised ones.
+    ///
+    /// Measured, the difference this decides is 9.50 cores against 0.00. See
+    /// `engine::AUTOMATED_WAKE`, which is the ceiling itself.
+    #[must_use]
+    pub fn capped(self) -> bool {
+        matches!(self, MapMode::Draw { capped: true })
     }
 }
 
@@ -70,10 +111,10 @@ impl MapMode {
 /// `?map=off` is its cheap mirror, for anyone working on Kingdom in an ordinary
 /// browser who would rather their fans were quiet.
 ///
-/// Since the software rasteriser is off by default, a plan that wants to *see*
-/// the map needs `KINGDOM_BROWSER_WEBGL=on` in the server's environment as well
-/// as this parameter. With only this one the engine boots, finds no WebGL
-/// context, and the loading card stays up.
+/// It is now sufficient on its own: a plan's browser has WebGL by default, so
+/// this parameter both boots the engine and gives it something to boot onto.
+/// The engine paces itself and the browser is confined, so taking the
+/// invitation costs about two cores rather than nine and a half.
 pub const OVERRIDE: &str = "map";
 
 /// Decides from the two facts the browser can report.
@@ -86,10 +127,13 @@ pub const OVERRIDE: &str = "map";
 #[must_use]
 pub fn decide(automated: bool, forced: Option<&str>) -> MapMode {
     match forced {
-        Some("on") => MapMode::Draw,
+        // The one case that is drawn *and* paced: automation took the
+        // invitation to look at the map. It gets a real engine, a real world
+        // and real picking -- at a frame rate nobody is watching for.
+        Some("on") => MapMode::Draw { capped: automated },
         Some("off") => MapMode::StandDown,
         _ if automated => MapMode::StandDown,
-        _ => MapMode::Draw,
+        _ => MapMode::Draw { capped: false },
     }
 }
 
@@ -99,7 +143,7 @@ mod tests {
 
     #[test]
     fn an_ordinary_browser_draws_the_map() {
-        assert_eq!(decide(false, None), MapMode::Draw);
+        assert_eq!(decide(false, None), MapMode::Draw { capped: false });
     }
 
     #[test]
@@ -110,7 +154,32 @@ mod tests {
     #[test]
     fn automation_can_ask_for_the_map_anyway() {
         // The case that keeps the map workable by the agents who maintain it.
-        assert_eq!(decide(true, Some("on")), MapMode::Draw);
+        assert_eq!(decide(true, Some("on")), MapMode::Draw { capped: true });
+    }
+
+    #[test]
+    fn the_map_automation_asked_for_is_paced() {
+        // The whole point of the cap: a driven browser that takes the
+        // invitation gets the map, but never at a frame rate nobody is
+        // watching. Measured, this one bool is 9.50 cores against 0.00.
+        assert!(decide(true, Some("on")).capped());
+    }
+
+    #[test]
+    fn the_kings_own_map_is_never_paced() {
+        // The other half, and the one that must not regress: a person at a
+        // real browser flies through this map, and capping it would be felt.
+        assert!(!decide(false, None).capped());
+        assert!(!decide(false, Some("on")).capped());
+    }
+
+    #[test]
+    fn a_stood_down_map_is_not_described_as_paced() {
+        // `capped` answers for an engine that boots. One that does not is not
+        // "capped", it is absent -- and a caller reading it the other way would
+        // be asking the wrong question entirely.
+        assert!(!decide(true, None).capped());
+        assert!(!decide(false, Some("off")).capped());
     }
 
     #[test]
@@ -122,7 +191,7 @@ mod tests {
     fn a_value_that_is_neither_is_ignored() {
         // Ignored, not guessed at -- and ignoring it leaves each browser with
         // the default it would have had.
-        assert_eq!(decide(false, Some("yes")), MapMode::Draw);
+        assert_eq!(decide(false, Some("yes")), MapMode::Draw { capped: false });
         assert_eq!(decide(true, Some("yes")), MapMode::StandDown);
         assert_eq!(decide(true, Some("")), MapMode::StandDown);
     }

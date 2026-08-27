@@ -28,11 +28,10 @@
 
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
-use bevy::winit::WinitSettings;
 use core::ops::Range;
 use core::time::Duration;
 
-use crate::map::{MapManifest, MapPresence, MapWorld};
+use crate::map::{MapManifest, MapWorld};
 
 use super::activity::Activity;
 use super::bridge::{Bridge, RaiseStage, Raising};
@@ -404,7 +403,7 @@ pub fn raise_world(
     mut rig: ResMut<CameraRig>,
     mut lod: ResMut<ActiveLod>,
     mut working: ResMut<Activity>,
-    mut winit: ResMut<WinitSettings>,
+    mut pace: super::Pace,
     standing: Res<super::Standing>,
     mut cameras: Query<&mut Camera, With<MapCamera>>,
     windows: Query<&Window>,
@@ -436,7 +435,11 @@ pub fn raise_world(
     // A world under construction is worth every frame the machine will give:
     // moving to a chamber mid-raise drops the engine to a few ticks a second
     // and would turn three seconds of building into a minute of it.
-    *winit = super::winit_for(MapPresence::Full);
+    //
+    // The same reasoning is why an automated browser's frame cap does not
+    // reach this line -- see `Pace::set_for_work`, where the minute in question
+    // was measured at two and a half.
+    pace.set_for_work();
 
     let deadline = Instant::now() + FRAME_BUDGET;
 
@@ -560,7 +563,7 @@ pub fn raise_world(
     // and there are three places the map can be, so inferring from it would
     // bring a map that now lives in the rail back running continuously behind
     // a conversation.
-    *winit = super::winit_for(standing.0);
+    pace.set(standing.0);
 }
 
 #[cfg(test)]
