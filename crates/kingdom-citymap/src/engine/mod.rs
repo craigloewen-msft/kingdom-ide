@@ -181,11 +181,15 @@ impl Plugin for RepoCityPlugin {
                     pace_for_glide,
                     lod::track_lod,
                     lod::apply_lod,
-                    // After `apply_lod`, which walks every entity with a
-                    // `VisibleFrom` and would otherwise be free to hide a ring
-                    // in the same frame this has just shown it. A ring carries
-                    // no `VisibleFrom` precisely so that cannot happen, and the
-                    // ordering is the second half of that guarantee.
+                    // After `apply_lod`, and now for a stronger reason than
+                    // when this ordering was merely defensive: a town carries
+                    // one ring per detail tier and `apply_activity` reads
+                    // `ActiveLod` to decide which of them shows, so it must run
+                    // after `track_lod` has settled the tier for this frame or
+                    // a zoom would be answered one frame late. The rings still
+                    // carry no `VisibleFrom`, so `apply_lod` cannot touch them
+                    // -- which is what keeps the two mechanisms from both
+                    // claiming the same visibility flag.
                     activity::apply_activity,
                     activity::pulse_rings,
                     // Beside the activity systems and after `apply_lod` for the

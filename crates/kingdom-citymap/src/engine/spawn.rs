@@ -27,13 +27,73 @@ pub struct SceneRoot;
 /// Line weight of a top-level folder's boundary, in world units.
 const WARD_EDGE_WIDTH: f32 = 2.6;
 
-/// Line weight of a working town's ring, in world units.
+/// Line weight of a working town's ring at the tiers where its own detail is
+/// legible, in world units.
 ///
-/// Much heavier than the heaviest ward kerb, and that is the point: at the
-/// Districts tier a whole town is a couple of hundred pixels across and every
-/// folder boundary inside it has collapsed into noise. Measured on screen at
-/// the fitted view -- 4.2 was a hairline indistinguishable from a ward kerb.
+/// Much heavier than the heaviest ward kerb, which is what keeps it from being
+/// read as one more folder boundary. Measured on screen -- 4.2 was a hairline
+/// indistinguishable from a kerb.
+///
+/// This is the *close* weight. Pulled back to the [`LodLevel::Districts`] tier
+/// it collapses to a couple of pixels, which is what
+/// [`BOLD_TOWN_RING_WIDTH`] exists to answer.
 const TOWN_RING_WIDTH: f32 = 9.0;
+
+/// The lane the realm's packing leaves between neighbouring settlements.
+///
+/// `build::layout::pack_towns`'s own `TOWN_GAP`, restated rather than imported:
+/// `build` compiles only for `ssr` and `engine` only for `hydrate`, so the two
+/// genuinely cannot see each other -- see the crate docs on that split. It is
+/// here so the ring widths below can be checked against it.
+const TOWN_GAP: f32 = 24.0;
+
+/// Line weight of a working town's ring at the [`LodLevel::Districts`] tier.
+///
+/// A width in world units is not a width on screen. The camera is fixed at the
+/// isometric angle, so a ground span is foreshortened by 0.8165 whichever way
+/// it runs (`camera::screen_axes`), and the tiers are cut by how many pixels a
+/// ~30-unit holding covers (`LodLevel::for_holding_pixels`). Putting those
+/// together, [`TOWN_RING_WIDTH`] comes out around 20 px when the map is pointed
+/// at one file, ~7 px at the Districts boundary, and **~2.4 px** at the
+/// zoom-out limit -- a hairline, at exactly the tier where every building has
+/// lost its trim and the ring is the only thing left that can say an agent is
+/// working here.
+///
+/// So this is what a working town is traced with once the camera is that far
+/// back: ~5.9 px at the limit and ~18 px at the boundary, a band rather than a
+/// line.
+///
+/// # Why it stops here
+///
+/// [`meshes::ribbon`] centres a band on its path, so half of this -- 11 units
+/// -- hangs *outside* the town it traces, into [`TOWN_GAP`]. Two working
+/// neighbours each spend half of that lane and keep a seam between them instead
+/// of merging into one green mass. That is the ceiling on this number, and the
+/// `const` assertion below is what holds it.
+pub const BOLD_TOWN_RING_WIDTH: f32 = 22.0;
+
+// Checked when this compiles rather than when the suite runs, the same way
+// `works::SCAFFOLD_FLOOR`'s roofline clearance is: both of these are arithmetic
+// on literals rather than facts about behaviour, so a `#[test]` asserting them
+// could only ever fail on a build that had already been made. Widening a ring
+// into its neighbour's half of the lane is now a compile error.
+const _: () = assert!(
+    BOLD_TOWN_RING_WIDTH * 0.5 < TOWN_GAP * 0.5,
+    "a bold ring this wide meets its neighbour's across the lane between two towns"
+);
+const _: () = assert!(
+    BOLD_TOWN_RING_WIDTH > TOWN_RING_WIDTH,
+    "the bold ring is no heavier than the fine one, so the pair says nothing"
+);
+
+/// Each weight a town is traced at, and the zoom that weight is for.
+///
+/// A table rather than two spawn calls so the pair can be read -- and checked
+/// for covering every tier exactly once -- without standing up a Bevy `World`.
+const TOWN_RINGS: [(f32, activity::RingTier); 2] = [
+    (TOWN_RING_WIDTH, activity::RingTier::Fine),
+    (BOLD_TOWN_RING_WIDTH, activity::RingTier::Bold),
+];
 
 /// A holding the pointer can interact with.
 #[derive(Component, Clone)]
@@ -602,18 +662,26 @@ fn spawn_plazas(
     }
 }
 
-/// Traces a town with the ring that lights up while an agent works there.
+/// Traces a town with the rings that light up while an agent works there.
 ///
 /// Spawned hidden with the world and never rebuilt: activity changes every few
 /// seconds and a respawn per change would rebuild geometry for a fact that is
-/// only a visibility flag. [`activity::apply_activity`] is what shows it.
+/// only a visibility flag. [`activity::apply_activity`] is what shows them.
+///
+/// **Two** rings, one per [`activity::RingTier`], because a fixed width in world
+/// units is a different width on screen at every zoom -- see
+/// [`BOLD_TOWN_RING_WIDTH`] for the measurements. They share one material: a
+/// town is one plan breathing, and two handles would be two clocks.
 ///
 /// Two departures from the ward kerb this is otherwise modelled on, both
 /// deliberate. The material is **its own** rather than the shared cache's,
 /// because the pulse writes to it and the cache hands one handle to every mesh
 /// of a similar colour. And there is **no** [`VisibleFrom`], so `apply_lod`
-/// leaves it alone: the ring answers "who is working here" at every zoom, not
-/// only at the tier it was drawn to be legible from.
+/// leaves both rings alone: which of them shows is decided by
+/// [`activity::shows`] against the same tier, so that a ring is hidden for want
+/// of *activity* rather than for want of zoom, and the town's answer to "who is
+/// working here" survives at every zoom rather than only at the tier one of
+/// them was drawn to be legible from.
 fn spawn_town_ring(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -634,23 +702,26 @@ fn spawn_town_ring(
         ..default()
     });
 
-    commands.spawn((
-        ChildOf(root),
-        Mesh3d(meshes.add(meshes::ribbon(&points, TOWN_RING_WIDTH))),
-        MeshMaterial3d(material.clone()),
-        Transform::from_xyz(0.0, layer::TOWN_GLOW, 0.0),
-        activity::TownRing {
-            town: town.name.clone(),
-            material,
-        },
-        // Nothing is running when a world loads, and a ring shown around a
-        // quiet town would be a lie for as long as it took the first poll to
-        // land.
-        Visibility::Hidden,
-        // The ring is a hairline drawn over its own town; a click on it is meant
-        // for whatever it is drawn around.
-        Pickable::IGNORE,
-    ));
+    for (width, tier) in TOWN_RINGS {
+        commands.spawn((
+            ChildOf(root),
+            Mesh3d(meshes.add(meshes::ribbon(&points, width))),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(0.0, layer::TOWN_GLOW, 0.0),
+            activity::TownRing {
+                town: town.name.clone(),
+                tier,
+                material: material.clone(),
+            },
+            // Nothing is running when a world loads, and a ring shown around a
+            // quiet town would be a lie for as long as it took the first poll
+            // to land.
+            Visibility::Hidden,
+            // A ring is drawn over its own town; a click on it is meant for
+            // whatever it is drawn around.
+            Pickable::IGNORE,
+        ));
+    }
 }
 
 /// Draws a folder's boundary as a kerb around its ground.
@@ -1016,5 +1087,29 @@ mod tests {
         assert_eq!(cache.building_shapes(), 1);
         cache.clear();
         assert_eq!(cache.building_shapes(), 0);
+    }
+
+    /// Every zoom has to have a ring drawn for it, and only one. The pair is
+    /// what `activity::shows` chooses between, and a table missing a weight --
+    /// or carrying the same one twice -- would leave a working town bare at one
+    /// zoom or double-banded at another.
+    #[test]
+    fn a_town_is_ringed_once_for_every_tier() {
+        for lod in [
+            LodLevel::Districts,
+            LodLevel::Architecture,
+            LodLevel::FileDetail,
+        ] {
+            let drawn: Vec<f32> = TOWN_RINGS
+                .into_iter()
+                .filter(|(_, tier)| activity::shows(*tier, lod))
+                .map(|(width, _)| width)
+                .collect();
+            assert_eq!(drawn.len(), 1, "{lod:?} is traced {} times", drawn.len());
+            assert!(
+                drawn[0] > WARD_EDGE_WIDTH,
+                "{lod:?} is traced no heavier than a ward kerb"
+            );
+        }
     }
 }
