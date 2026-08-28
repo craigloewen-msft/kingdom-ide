@@ -419,10 +419,26 @@ each of which is a silent wrong answer rather than an error:
   PID namespace is that namespace's numbering and named an unrelated host
   process. The old check returned "this daemon is fine" on every failure path.
 - **The tmux socket directory crosses the private `/tmp`**, or the daemon is
-  invisible to the 14 host-side calls that drive it.
-- **A resolver of our own**: `/etc/resolv.conf` is a symlink to somewhere
-  unmounted on both WSL and systemd-resolved machines, so DNS fails while the
-  network is perfectly up.
+  invisible to the 14 host-side calls that drive it. **The browser profile
+  crosses it too**, for exactly the same reason and found much later: the CPU
+  shim is written into the profile on the host and executed *inside* by the
+  `nsenter` wrapper, so a private `/tmp` left every `browser_*` tool failing
+  with `nsenter: failed to execute ...: No such file or directory`. It is also
+  the one bind whose source may not exist yet -- a profile is created when a
+  browser first launches, long after the holder has built its root -- so it is
+  created before it is mounted rather than assumed.
+- **A resolver of our own, installed *after* the pivot**: `/etc/resolv.conf` is
+  an **absolute** symlink to somewhere unmounted on both WSL
+  (`/mnt/wsl/resolv.conf`) and systemd-resolved machines. Done before
+  `pivot_root`, the kernel resolves that symlink against the *host's* root, so
+  the bind lands outside the new root and does nothing; `/etc` is bound
+  read-only besides, so there is no binding over the link at all. What works is
+  filling in the file the link already points at, after the pivot. This was
+  live for some time because the test only asserted that the script *contained*
+  the strings `10.0.2.3` and `/etc/resolv.conf` -- true of a script whose bind
+  never worked. The ordering is now what is asserted, and the failure is
+  reported rather than swallowed by `|| true`, because a plan that routes
+  packets but resolves no names looks exactly like a plan with no network.
 - **`/bin` is a symlink, and must not be mounted.** Every current distribution
   is merged-usr; the symlinks are recreated, and only a genuinely split-usr host
   gets binds.

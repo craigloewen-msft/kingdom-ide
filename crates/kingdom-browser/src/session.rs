@@ -1419,7 +1419,17 @@ fn cached_chrome() -> Option<PathBuf> {
 /// reasoning as tmux's `socket_for`: the answer has to survive a restart of
 /// this process, so that a directory left behind yesterday is recognisable
 /// today. [`sweep_orphans`] depends on exactly that.
-fn profile_dir(plan: &str) -> PathBuf {
+///
+/// **Public because a sealed plan has to mount it.** The profile holds the
+/// `chrome-confined.sh` shim, which is written out here on the host and then
+/// executed *inside* the namespace by the `nsenter` wrapper. A sealed plan's
+/// `/tmp` is a private tmpfs, so unless `kingdom-app` binds this exact
+/// directory through, the shim is written to one filesystem and looked for on
+/// another -- and every `browser_*` tool fails with `nsenter: failed to
+/// execute ...: No such file or directory`. Measured from inside a sealed
+/// plan. Exported rather than re-derived there because the hash has to agree
+/// between the two crates, and two copies of a hash drift.
+pub fn profile_dir(plan: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     plan.hash(&mut hasher);
     Path::new("/tmp").join(format!("{PROFILE_PREFIX}{:016x}", hasher.finish()))
