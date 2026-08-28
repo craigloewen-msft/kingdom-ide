@@ -1128,8 +1128,8 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
                 //
                 // So the map does not show host wells yet. Its rim already
                 // draws the King's machine as a ring, which is where one
-                // belongs; putting it there is its own piece of work, noted in
-                // docs/roadmap.md rather than approximated here.
+                // belongs; putting it there is its own piece of work rather
+                // than something to approximate here.
                 .filter(|service| service.scope == kingdom_core::ServiceScope::City)
                 .map(|service| kingdom_core::SharedService {
                     address: service.address(),
@@ -2785,7 +2785,6 @@ pub async fn declare_shared_resource(
         // An empty box is "no volume", which is a different declaration from a
         // volume named "" -- and the one the parser would refuse.
         volume: Some(volume.trim().to_string()).filter(|v| !v.is_empty()),
-        retired_env: None,
     };
 
     let path =

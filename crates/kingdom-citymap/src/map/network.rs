@@ -11,11 +11,11 @@
 //!   own machine -- his `localhost` -- drawn as the edge of his world.
 //! - **a wellhead**, standing on a town's square, one per service that city has
 //!   running. The well is the *city's*, not any plan's, which is why it stands
-//!   on the square rather than beside an agent.
-//! - **an agent marker**, in that agent's own banner colour, joined by a
-//!   conduit to the host ring if it is on the shared network, ringed by a moat
-//!   if it has a network of its own, and joined to a wellhead by a channel if
-//!   it is actually drawing from that well.
+//!   on the square: the one piece of ground that belongs to the whole town.
+//! - **an agent marker**, standing on that same square, in that agent's own
+//!   banner colour, joined by a conduit to the host ring if it is on the shared
+//!   network, ringed by a moat if it has a network of its own, and joined to a
+//!   wellhead by a channel if it is actually drawing from that well.
 //!
 //! # The one thing this exists to show
 //!
@@ -227,12 +227,28 @@ mod measures {
 
     /// How far beyond a town's own edge its agents stand, in world units.
     ///
-    /// A margin *outside* the settlement rather than a radius within it -- see
-    /// [`agent_stand`](super::resolve::agent_stand). Large enough to clear the
-    /// outermost holdings and the kerb around them, small enough that a marker
-    /// still plainly belongs to the town it rings rather than floating in the
-    /// space between two.
+    /// **The exception now, not the rule.** Agents stand on their town's square
+    /// -- see [`agent_stand_on_square`](super::resolve::agent_stand_on_square).
+    /// A settlement too small to have been given one
+    /// (`build::streets::settlement_roads` returns `None`) still has agents in
+    /// it, and dropping them would leave the map silent about the first of the
+    /// three questions in `AGENTS.md`. So those fall back to the ring this
+    /// margin sizes -- see [`agent_stand`](super::resolve::agent_stand).
+    ///
+    /// A margin *outside* the settlement rather than a radius within it. Large
+    /// enough to clear the outermost holdings and the kerb around them, small
+    /// enough that a marker still plainly belongs to the town it rings rather
+    /// than floating in the space between two.
     pub(super) const AGENT_ORBIT: f32 = 34.0;
+
+    /// The share of its slot on the paving an agent's marker takes as radius.
+    ///
+    /// Smaller than the well's 0.42, and not by taste: an isolated agent is
+    /// ringed by a moat at `engine::network::MOAT_SPREAD` (1.9) times its own
+    /// radius, so what has to fit in a slot is a disc 3.8 radii across rather
+    /// than 2. At `1.0 / 3.8` two neighbouring moats meet and no closer, which
+    /// is what keeps a rank of isolated agents from merging into one band.
+    pub(super) const AGENT_SLOT_SHARE: f32 = 0.263;
 }
 
 #[cfg(any(feature = "hydrate", test))]
@@ -293,11 +309,22 @@ mod resolve {
         let mut agents = Vec::new();
         let mut links = Vec::new();
 
-        // Grouped by town so several agents in one city can be spaced around
-        // its square without standing in each other. Walked in the order the
-        // feed gave, which is sorted by plan id -- so a marker keeps its place
-        // between refetches rather than hopping, the guarantee
+        // Grouped by town, and counted before anything is placed: a rank on a
+        // square is shared out by how many stand in it, so the count has to be
+        // known up front rather than accumulated as the walk goes. Within a
+        // town the feed's own order is kept -- sorted by plan id -- so a marker
+        // holds its place between refetches rather than hopping, the guarantee
         // `works::place_fresh` gives a ghost house.
+        let mut ranks: Vec<(&str, usize)> = Vec::new();
+        for agent in &network.agents {
+            let town = agent.city.as_str();
+            match ranks.iter_mut().find(|(name, _)| *name == town) {
+                Some((_, total)) => *total += 1,
+                None => ranks.push((town, 1)),
+            }
+        }
+
+        let mut placed: Vec<(&str, usize)> = Vec::new();
         for (agent, (_, banner)) in network.agents.iter().zip(banners.iter()) {
             let town_name = agent.city.as_str();
             let Some(town) = map.town_named(town_name) else {
@@ -305,11 +332,28 @@ mod resolve {
                 continue;
             };
 
-            let placed_here = agents
+            let index = match placed.iter_mut().find(|(name, _)| *name == town_name) {
+                Some((_, seen)) => {
+                    *seen += 1;
+                    *seen - 1
+                }
+                None => {
+                    placed.push((town_name, 1));
+                    0
+                }
+            };
+            let total = ranks
                 .iter()
-                .filter(|mark: &&AgentMark| mark.town == town_name)
-                .count();
-            let center = agent_stand(town.center, town.extent, placed_here);
+                .find(|(name, _)| *name == town_name)
+                .map(|(_, total)| *total)
+                .unwrap_or(1);
+
+            // On the paving where there is paving, and ringing the settlement
+            // where a town was too small to be given any.
+            let (center, radius) = match map.square_of(town_name) {
+                Some(square) => agent_stand_on_square(square, index, total),
+                None => (agent_stand(town.center, town.extent, index), AGENT_RADIUS),
+            };
             let color = growth_of(banner);
 
             if agent.on_host_network() {
@@ -335,7 +379,7 @@ mod resolve {
             agents.push(AgentMark {
                 town: town_name.to_owned(),
                 center,
-                radius: AGENT_RADIUS,
+                radius,
                 label: agent.title.clone(),
                 color,
                 isolated: !agent.on_host_network(),
@@ -456,18 +500,20 @@ mod resolve {
         best
     }
 
-    /// Where the `index`-th agent in a town stands.
+    /// Where the `index`-th agent in a town stands when there is no square.
     ///
-    /// **Outside the settlement, not inside it.** The first version orbited a
-    /// fixed 34 units from the town's centre, and on screen that put the markers
-    /// down among the houses -- one stood on the keep in the middle of the
-    /// square. An agent is not a building and must not look like it has been
-    /// built there.
+    /// **The fallback, not the ordinary case.** Agents stand on the paving --
+    /// see [`agent_stand_on_square`]. A settlement with no wards and no loose
+    /// files is given no square at all (`build::streets::settlement_roads`
+    /// returns `None`), and a well in that town is simply not drawn; an agent
+    /// must be, because *what is every agent doing right now?* is the first
+    /// question this map exists to answer, and a silent town answers it wrongly.
     ///
-    /// So the orbit is derived from the town's own [`MapLocation::extent`]: the
-    /// marks ring the settlement, clear of its outermost holdings, where the
-    /// realm's packing already leaves a lane. They are what stands *around* a
-    /// town, in the same fringe the roads between towns run through.
+    /// So such an agent rings the settlement instead. The orbit is derived from
+    /// the town's own [`MapLocation::extent`]: the marks stand clear of its
+    /// outermost holdings, where the realm's packing already leaves a lane, in
+    /// the same fringe the roads between towns run through. An agent is not a
+    /// building and must never look like it has been built here.
     ///
     /// Spaced by the golden angle rather than evenly, so a town with two agents
     /// and a town with seven both read without the ring falling into spokes --
@@ -482,6 +528,56 @@ mod resolve {
             town_center[0] + angle.cos() * reach,
             town_center[1] + angle.sin() * reach,
         ]
+    }
+
+    /// Where the `index`-th of `total` agents on a town's square stands, and
+    /// how far across its marker is.
+    ///
+    /// **On the paving, at the front of it.** The markers used to ring the
+    /// settlement from outside, in the lane between towns, and that put the
+    /// answer to *who is working here* on ground that belongs to no one. The
+    /// square is the one piece of a town that belongs to the whole of it, and
+    /// it is where the King asked for them.
+    ///
+    /// The square is already spoken for twice over, so this takes the third
+    /// strip and nothing else:
+    ///
+    /// - its **middle** carries the town's name, painted across up to
+    ///   [`SQUARE_LABEL_SHARE`] of its depth by `wayfinding::square_label`;
+    /// - its **rear** carries the wellheads ([`well_stand`]), which is the far
+    ///   edge on screen -- the camera looks down `(-1, -1, -1)`, so low `y`
+    ///   projects up-screen;
+    /// - its **front** was empty, and is where the people go. The reading is
+    ///   then the plain one: the city's wells behind, its name on the stone,
+    ///   its agents standing in front of them.
+    ///
+    /// The radius shrinks as more agents share the square, exactly as a well's
+    /// does, and by a smaller share of the slot -- see [`AGENT_SLOT_SHARE`] for
+    /// why the moat around an isolated agent sets that number rather than the
+    /// disc itself.
+    fn agent_stand_on_square(square: MapRect, index: usize, total: usize) -> ([f32; 2], f32) {
+        let total = total.max(1);
+        // Room enough that a marker never overhangs the kerb, taken off both
+        // ends before the span is shared out.
+        let usable = (square.width - KERB_INSET * 2.0).max(1.0);
+        let slot = usable / total as f32;
+
+        // The strip between the front kerb and the lettering, kerb-width clear
+        // of both: the same arithmetic `well_stand` does at the other end.
+        let band = square.depth * (1.0 - SQUARE_LABEL_SHARE) * 0.5;
+        let depth_allows = (band - KERB_INSET * 2.0) * 0.5;
+
+        let radius = AGENT_RADIUS
+            .min(slot * AGENT_SLOT_SHARE)
+            .min(depth_allows)
+            .max(0.5);
+
+        let left = square.x + KERB_INSET;
+        let x = left + slot * (index as f32 + 0.5);
+        // Its own radius in from the front kerb, so the whole disc is on the
+        // paving whatever size it ended up.
+        let y = square.max_y() - KERB_INSET - radius;
+        ([x, y], radius)
     }
 
     /// Where the `index`-th of `total` wellheads on a square stands, and how
@@ -1073,22 +1169,21 @@ mod tests {
         }
     }
 
-    /// An agent must stand *outside* the settlement it belongs to.
+    /// An agent must stand on the paving of its town's square.
     ///
-    /// The regression the first render caught. Markers orbited a fixed radius
-    /// from the town's centre, which put them down among the buildings -- one
-    /// stood on the keep in the middle of the square. An agent is not a
-    /// building, and a mark inside the skyline reads as one more thing that was
-    /// built there.
+    /// Where the King asked for them, and the same bar
+    /// `a_wellhead_stands_on_the_paving_of_its_towns_square` sets: the whole
+    /// *footprint* on the stone, not merely a centre. A centre on the paving
+    /// with the disc overhanging the kerb is the old picture -- a mark standing
+    /// among the houses -- only smaller.
     ///
-    /// Checked against the town's own extent rather than a constant, because
-    /// that is what the placement is now derived from: a big project and a tiny
-    /// one must both push their agents clear.
+    /// The fixture's square is deliberately offset from the town's centre (see
+    /// `SQUARE_OFFSET`), so a placement that quietly used `town.center` fails
+    /// here rather than passing by coincidence.
     #[test]
-    fn an_agents_mark_stands_clear_of_the_town_it_belongs_to() {
+    fn an_agents_mark_stands_on_the_paving_of_its_towns_square() {
         let map = a_map(&[("shopfront", [0.0, 0.0])]);
-        let town = map.town_named("shopfront").unwrap();
-        let half = town.extent[0].max(town.extent[1]) * 0.5;
+        let square = map.square_of("shopfront").expect("the town has a square");
 
         let network = KingdomNetwork {
             wells: Vec::new(),
@@ -1098,6 +1193,99 @@ mod tests {
         };
 
         for mark in resolve(&map, &network).agents {
+            let ground = footprint(mark.center, mark.radius);
+            assert!(
+                square.contains([ground.x, ground.y])
+                    && square.contains([ground.max_x(), ground.max_y()]),
+                "`{}` covers {ground:?}, off a square of {square:?} -- it is \
+                 standing in the settlement rather than on its paving",
+                mark.label
+            );
+        }
+    }
+
+    /// The agents keep off the name painted across the square, and off the
+    /// wells standing at the back of it.
+    ///
+    /// The square carries three things now and they must not fight for one
+    /// patch of stone. The camera looks down `(-1, -1, -1)`, so low `y` is
+    /// up-screen: the wells are at the rear, the lettering across the middle,
+    /// and the agents in front of both.
+    #[test]
+    fn agents_stand_in_front_of_the_name_and_the_wells() {
+        let map = a_map(&[("shopfront", [0.0, 0.0])]);
+        let square = map.square_of("shopfront").expect("the town has a square");
+        let picture = resolve(
+            &map,
+            &KingdomNetwork {
+                wells: vec![a_well("shopfront", &["db", "cache"])],
+                agents: (1..=3)
+                    .map(|n| an_agent(&format!("p{n}"), "shopfront", Isolation::Shared, &[]))
+                    .collect(),
+            },
+        );
+
+        // The band the lettering occupies: centred, as tall as the largest cap
+        // `square_label` will paint. The placement's own rule read back.
+        let band = square.depth * SQUARE_LABEL_SHARE;
+        let name_ends = square.y + (square.depth + band) * 0.5;
+
+        assert_eq!(picture.agents.len(), 3);
+        for mark in &picture.agents {
+            let ground = footprint(mark.center, mark.radius);
+            assert!(
+                ground.y >= name_ends,
+                "`{}` reaches back to {:.1}, into the lettering, which ends at \
+                 {name_ends:.1}",
+                mark.label,
+                ground.y
+            );
+            for well in &picture.wells {
+                let dx = mark.center[0] - well.center[0];
+                let dy = mark.center[1] - well.center[1];
+                let apart = (dx * dx + dy * dy).sqrt();
+                assert!(
+                    apart >= mark.radius + well.radius,
+                    "`{}` and the well `{}` stand {apart:.1} apart but need {:.1}",
+                    mark.label,
+                    well.name,
+                    mark.radius + well.radius
+                );
+            }
+        }
+    }
+
+    /// A town with no square still shows its agents, standing around it.
+    ///
+    /// A settlement with no wards and no loose files is given no square
+    /// (`build::streets::settlement_roads` returns `None`). A *well* is dropped
+    /// in that case -- there is nowhere for it that would not be somebody's
+    /// front garden -- but an agent must not be: *what is every agent doing
+    /// right now?* is the first of the three questions in `AGENTS.md`, and a
+    /// town that quietly hid its agents would answer it wrongly.
+    ///
+    /// So the old orbit survives as the fallback, and this pins it.
+    #[test]
+    fn an_agent_in_a_town_with_no_square_still_stands_outside_it() {
+        let mut map = a_map(&[("shopfront", [0.0, 0.0])]);
+        map.world.plazas.clear();
+        let town = map.town_named("shopfront").unwrap();
+        let half = town.extent[0].max(town.extent[1]) * 0.5;
+
+        let network = KingdomNetwork {
+            wells: Vec::new(),
+            agents: (1..=3)
+                .map(|n| an_agent(&format!("p{n}"), "shopfront", Isolation::Shared, &[]))
+                .collect(),
+        };
+
+        let picture = resolve(&map, &network);
+        assert_eq!(
+            picture.agents.len(),
+            3,
+            "no square is not a reason to vanish"
+        );
+        for mark in picture.agents {
             let dx = mark.center[0] - town.center[0];
             let dy = mark.center[1] - town.center[1];
             let out = (dx * dx + dy * dy).sqrt();

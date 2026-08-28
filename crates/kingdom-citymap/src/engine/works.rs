@@ -35,7 +35,7 @@
 //!
 //! - it was **relative** -- a share of the busiest file in the same plan -- so
 //!   two agents were measured with two rulers and a one-file plan drew at full
-//!   height. Fixed by `tasks/00250`, and that fix stands.
+//!   height. That fix stands.
 //! - it was then **logarithmic**, which spent a third of the range on changes
 //!   below ten lines and left almost none for the range real work lives in: a
 //!   `+8` and a `+100` came out 1.9x apart, and anything past 600 lines drew
@@ -147,7 +147,7 @@ use super::spawn::MeshCache;
 /// band the map has to resolve -- and the flattening happens out among the
 /// rewrites, where "very large" is a good enough answer.
 ///
-/// **What is deliberately kept from the work this replaced** (`tasks/00250`) is
+/// **What is deliberately kept from the work this replaced** is
 /// that the ruler is *absolute*. Height used to be a share of the busiest file
 /// in the same plan, which made two agents' columns incomparable and drew a
 /// one-file plan at full height. That was right and is untouched: churn in
