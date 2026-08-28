@@ -190,29 +190,61 @@ const DRIVE_MAX_WIDTH: f32 = 20.0;
 /// path to a door.
 const DRIVE_FRONTAGE_SHARE: f32 = 0.8;
 
-/// How steeply a drive widens with the references arriving at its door.
+/// How steeply a drive widens with each reference arriving at its door.
 ///
-/// **Not** the exponent a street uses, and the difference is the point. A
-/// street's traffic is a whole subtree's worth of journeys and spans thousands,
-/// so [`corridor_width`] compresses hard — what wants reading there is the
-/// order of things rather than the ratio. References do not span thousands:
-/// measured across a real dev folder the median file has 0, the 99th percentile
-/// has 16, and the busiest file in five repositories has 44. Borrowing the
-/// street's compression spent nearly all of the curve's slope on a range the
-/// data never enters, which is why a much-referenced holding and a quiet one
-/// arrived at nearly the same width.
-const DRIVE_CURVE: f32 = 0.80;
+/// **Linear, at the King's word, and this is the slope of that line**: one world
+/// unit of paving per file that imports this one, up to
+/// [`DRIVE_LINEAR_REFERENCES`]. So a file imported four times draws a door four
+/// units wider than one imported none, and one imported eight, eight — the same
+/// rule a holding's own footprint follows.
+///
+/// It replaced `DRIVE_CURVE = 0.80`, an exponent, which was sub-linear
+/// everywhere: a file imported sixteen times drew about nine times the paving of
+/// a lone one rather than sixteen. That curve was itself a fix — it replaced the
+/// street's own harder compression, which spent nearly all its slope on a range
+/// references never enter — and the lesson survives it: what a mark is fitted to
+/// is the distribution of the thing being drawn.
+///
+/// **One unit is what the geometry will actually carry, and that was measured
+/// rather than assumed.** A drive is capped by the wall it leaves
+/// ([`DRIVE_FRONTAGE_SHARE`]) and by the street it joins, and a slope the
+/// geometry immediately overrides is not linear on screen — it is a linear rule
+/// with a flat top. Scanning this repository, 155 holdings: at this slope the
+/// frontage binds on 2% of them, and the median holding has an 18-unit wall in
+/// front of a 2-unit drive. The caps stay as the backstop they are.
+const DRIVE_SLOPE: f32 = 1.0;
+
+/// How many references a drive is drawn exactly to scale for.
+///
+/// The knee: proportional up to here, compressed above it, out to
+/// [`DRIVE_MAX_WIDTH`]. Fitted to the distribution rather than chosen — across
+/// this repository the median holding has 1 inbound reference, p90 has 5, p99
+/// has 10 and the busiest has 51; across a wider dev folder the busiest file in
+/// five repositories had 44. A knee here leaves everything but a handful of hubs
+/// in the strictly proportional part, and a hub is precisely where "very heavily
+/// used" is a good enough answer.
+const DRIVE_LINEAR_REFERENCES: f32 = 16.0;
 
 /// How wide a drive serving a file with `references` inbound imports is,
 /// given the wall it comes out of is `frontage` across.
 ///
-/// Still sub-linear — a file imported forty times is not forty times the door
-/// of one imported once — but spread across the range references actually
-/// occupy. See [`DRIVE_CURVE`]. The wall is a hard limit: a drive broader than
-/// the house it serves stops looking like a drive.
+/// **Linear** to [`DRIVE_LINEAR_REFERENCES`] — twice the references, twice the
+/// paving above the floor — then a tail, so a runaway hub cannot swallow its own
+/// house. [`crate::scale`] holds the shape and why the top of the range is
+/// compressed at all.
+///
+/// The floor is exact: a file nothing imports gets [`DRIVE_WIDTH`] precisely,
+/// which matters because most files are imported by nothing and that mark is
+/// what every other drive is read against. The wall is a hard limit on top: a
+/// drive broader than the house it serves stops looking like a drive.
 fn drive_width(references: usize, frontage: f32) -> f32 {
-    let arrivals = (references + 1) as f32;
-    let width = DRIVE_WIDTH * arrivals.powf(DRIVE_CURVE);
+    let span = DRIVE_MAX_WIDTH - DRIVE_WIDTH;
+    // What the linear part spends, derived so its slope is exactly
+    // `DRIVE_SLOPE` of paving per reference: the line climbs
+    // `span * share / knee` per reference.
+    let share = (DRIVE_SLOPE * DRIVE_LINEAR_REFERENCES / span).clamp(0.0, 1.0);
+    let earned = crate::scale::linear_then_tail(references as f32, DRIVE_LINEAR_REFERENCES, share);
+    let width = DRIVE_WIDTH + span * earned;
     let widest = DRIVE_MAX_WIDTH
         .min(frontage * DRIVE_FRONTAGE_SHARE)
         .max(DRIVE_WIDTH);
@@ -1852,6 +1884,57 @@ mod tests {
             "a file referenced 60 times got a {hub} wide drive against {quiet} for one \
              referenced not at all, which is not a difference anyone would read"
         );
+    }
+
+    /// **The King's own rule, for the second of the two marks.** Twice the
+    /// references is twice the driveway.
+    ///
+    /// Measured above `DRIVE_WIDTH`, because the floor is what a file nothing
+    /// imports gets and every other drive is read against it: what has to be
+    /// proportional is the paving a file *earned*. The exponent this replaced
+    /// drew a sixteen-times-imported file about nine times a lone one.
+    ///
+    /// A frontage wide enough that the wall is not what is being measured here;
+    /// the cap has its own assertion in the test above.
+    #[test]
+    fn twice_the_references_buys_twice_the_driveway() {
+        let frontage = 200.0;
+        let earned = |references: usize| drive_width(references, frontage) - DRIVE_WIDTH;
+        for (few, many) in [(1, 2), (2, 4), (4, 8), (8, 16)] {
+            let step = earned(many) / earned(few);
+            assert!(
+                (step - 2.0).abs() < 0.01,
+                "a file imported {many} times drew {step:.3}x the paving of one \
+                 imported {few} times, which is not proportional"
+            );
+        }
+        // And at any ratio, not only at doubling.
+        let step = earned(12) / earned(3);
+        assert!(
+            (step - 4.0).abs() < 0.02,
+            "four times the references drew {step:.3}x the paving"
+        );
+    }
+
+    /// The knee is where proportionality stops, and above it a hub still grows
+    /// rather than flattening onto the cap -- the plateau that a ceiling alone
+    /// would produce. `DRIVE_MAX_WIDTH` is approached, never reached.
+    #[test]
+    fn a_much_referenced_hub_keeps_growing_without_reaching_the_cap() {
+        let frontage = 200.0;
+        let mut last = drive_width(DRIVE_LINEAR_REFERENCES as usize, frontage);
+        for references in [20, 44, 51, 64, 256, 4_096] {
+            let now = drive_width(references, frontage);
+            assert!(
+                now > last,
+                "{references} references drew no more than the count below it"
+            );
+            assert!(
+                now < DRIVE_MAX_WIDTH,
+                "{references} references reached the cap, which is a plateau"
+            );
+            last = now;
+        }
     }
 
     /// The curve has to stay readable at both ends: flat enough that a hub

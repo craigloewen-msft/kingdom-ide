@@ -27,11 +27,11 @@
 //! length is a fact about a codebase that this module is deliberately ignorant
 //! of. All the drawing does is multiply it by a height it already has.
 //!
-//! # How big a change is drawn, and why the ruler was replaced twice
+//! # How big a change is drawn, and why the ruler was replaced three times
 //!
 //! A column's height and girth both come from [`magnitude`], which turns a
-//! count of lines into `0.0..=1.0`. It has been wrong twice, in opposite ways,
-//! and [`HALF_CHURN`] holds the full record:
+//! count of lines into `0.0..=1.0`. It has been wrong three times, and
+//! [`LINEAR_CHURN`] holds the full record:
 //!
 //! - it was **relative** -- a share of the busiest file in the same plan -- so
 //!   two agents were measured with two rulers and a one-file plan drew at full
@@ -39,11 +39,19 @@
 //! - it was then **logarithmic**, which spent a third of the range on changes
 //!   below ten lines and left almost none for the range real work lives in: a
 //!   `+8` and a `+100` came out 1.9x apart, and anything past 600 lines drew
-//!   identically. That is what the saturating ratio there replaced.
+//!   identically.
+//! - it was then a **saturating ratio**, which fixed both of those and was
+//!   still nowhere proportional: it bends from the origin, so a `+27` and a
+//!   `+115` were 4.3x apart in work and 2.6x apart on screen.
+//!
+//! It is now **linear** up to a knee and compressed only above it, which is the
+//! rule a holding's own footprint already follows -- twice the lines, twice the
+//! mark. [`crate::scale`] holds the shape and why a column, unlike a footprint,
+//! cannot be proportional all the way up.
 //!
 //! The lesson worth carrying: the curve is not a matter of taste, it is a claim
 //! about the distribution of the thing being drawn, and the distribution is
-//! measurable. `HALF_CHURN` names the one this is fitted to.
+//! measurable. `LINEAR_CHURN` names the one this is fitted to.
 //!
 //! # Why these do not come through the manifest
 //!
@@ -94,7 +102,7 @@
 //! colour and a large one at full.
 //!
 //! Size is the only channel magnitude has now -- [`band_height`],
-//! [`band_girth`], [`shroud_height`] and the skirt's spread -- which is the
+//! [`band_girth`] and [`shroud_height`] -- which is the
 //! channel it was always read from anyway. A colour that moves is a colour
 //! being asked to say two things at once: whose work this is, and how much of
 //! it there is. It now says only the first, and says it steadily.
@@ -107,96 +115,63 @@ use bevy::prelude::*;
 use crate::map::{Work, WorkSite};
 
 use super::materials::to_color;
-use super::meshes::{self, BuildingShape};
+use super::meshes::BuildingShape;
 use super::spawn::MeshCache;
 
-/// The churn at which a band stands half as tall as it ever will, in lines.
+/// The churn up to which a column is drawn exactly to scale, in lines.
 ///
-/// **This is the knee of the curve, and it replaced a ceiling.** What came
-/// before was `FULL_CHURN = 600.0` with `magnitude = ln_1p(churn) /
-/// ln_1p(FULL_CHURN)`, and the King reported the result exactly: a `+8` looked
-/// about the same size as a `+100`.
+/// **This is the knee of the curve, and it is the third ruler this mark has
+/// had.** The record matters, because each replacement was made for a fault the
+/// King reported by eye and each one is a way of getting this wrong:
 ///
-/// The logarithm was the fault, in four ways at once:
+/// 1. **Relative.** Height was a share of the busiest file in the *same plan*,
+///    so two agents were measured with two rulers and a one-file plan drew at
+///    full height. Replaced, and the fix stands: the ruler is absolute, churn in
+///    lines goes in, and nothing local to a plan is consulted.
+/// 2. **Logarithmic.** `FULL_CHURN = 600.0` with `magnitude = ln_1p(churn) /
+///    ln_1p(FULL_CHURN)`, and the King reported it exactly: a `+8` looked about
+///    the same size as a `+100`. `ln1p` rises fastest near zero, so a *one-line*
+///    edit already took 11% of the range; there was no resolution left where
+///    changes actually live; and the clamp drew everything past 600 lines
+///    identically.
+/// 3. **A saturating ratio,** `churn / (churn + 110)`. It fixed the plateau and
+///    the wasted bottom end, and it is what this replaces -- because it is
+///    *nowhere* proportional. It bends immediately: at its knee it has already
+///    spent half its range, so a +27 and a +115 are 4.3x apart in work and were
+///    2.6x apart on screen.
 ///
-/// 1. **It spent the range before any real change started.** `ln1p` rises
-///    fastest near zero, so a *one-line* edit already took 11% of the range --
-///    8.8 units of 52 -- before the floor was considered, and eight lines took
-///    34%. The bottom third of the scale went to changes that had barely
-///    happened.
-/// 2. **It had no resolution where changes actually live.** Measured over 400
-///    commits of this repository, per-file added lines run p25 = 6, median =
-///    27, p75 = 115, p90 = 246, p99 = 935. Across the middle of that -- 27
-///    against 115 -- the old curve moved 1.37x, which nothing on screen reads.
-///    The King's own case, +8 against +100, is 12.5x the work and was 1.9x the
-///    height.
-/// 3. **The clamp was a plateau on real work.** Everything past 600 lines drew
-///    identically, and p99 here is 935.
-/// 4. **The second channel was not one.** [`band_girth`] exists to widen the
-///    dynamic range, and it multiplied the same compressed number: at +8 a
-///    column was already 58% of full width.
+/// **Linear, now, and for the reason the footprint is.** The King asked for one
+/// rule across the map: twice the lines, twice the mark. Under this knee that is
+/// exact -- see [`crate::scale::linear_then_tail`], which also explains why a
+/// column cannot be linear all the way up when a footprint can.
 ///
-/// A *saturating ratio* -- `churn / (churn + HALF_CHURN)` -- fixes all four.
-/// Near zero it is very nearly linear, so small changes differ in proportion to
-/// their size rather than all being lifted to one stub; it never plateaus, so a
-/// nine-hundred-line change and a four-thousand-line one stay different marks;
-/// and its knee can be put where the data is.
+/// 300 lines is that knee, fitted to this repository's own distribution: over
+/// 400 commits, per-file added lines run p25 = 6, median = 26, p75 = 117,
+/// p90 = 263, p95 = 425, p99 = 935, with the largest single file at 2,137. A
+/// knee here puts everything up to p95 in the strictly proportional part and
+/// leaves the tail to the rewrites, where "very large" is a good enough answer.
+pub const LINEAR_CHURN: f32 = 300.0;
+
+/// How much of a column's range the proportional part spends.
 ///
-/// 110 lines is that knee, chosen against the distribution above: close to this
-/// repository's p75, so the steep part of the curve covers p25 to p90 -- the
-/// band the map has to resolve -- and the flattening happens out among the
-/// rewrites, where "very large" is a good enough answer.
-///
-/// **What is deliberately kept from the work this replaced** is
-/// that the ruler is *absolute*. Height used to be a share of the busiest file
-/// in the same plan, which made two agents' columns incomparable and drew a
-/// one-file plan at full height. That was right and is untouched: churn in
-/// lines goes in, and nothing local to a plan is consulted.
-pub const HALF_CHURN: f32 = 110.0;
+/// The other half of [`LINEAR_CHURN`]'s decision, and a direct trade: three
+/// quarters of the height is given to changes up to the knee, and the last
+/// quarter carries everything above it out to infinity. More would draw the
+/// common range more faithfully and leave a 935-line change and a 4,000-line one
+/// harder to tell apart; less would buy resolution among rewrites that nobody
+/// needs at the cost of the range the map is actually read in.
+const TAIL_SHARE: f32 = 0.75;
 
 /// How much of a change's size shows, given how many lines moved.
 ///
-/// A saturating ratio rather than a logarithm -- [`HALF_CHURN`] records the
-/// fault that cost, and why this shape and not a steeper log.
+/// Linear to [`LINEAR_CHURN`], then a tail -- that constant records the two
+/// rulers this replaced and why the shape is what it is.
 ///
 /// Returns `0.0..=1.0`, approaching 1.0 without ever reaching it. Pure, so the
-/// shape is pinned by the tests below without a renderer.
-///
-/// # Why NaN is handled rather than assumed away
-///
-/// The counts arrive as `f32` over a wire. `f32::clamp` propagates NaN rather
-/// than trapping it, so an unguarded version yields a NaN height, which reaches
-/// Bevy as a degenerate mesh. The predecessor of this function was found doing
-/// exactly that by a test rather than in a browser, and the guard is kept.
-///
-/// `f32::INFINITY` and NaN both come out as 0.0, because the guard returns
-/// before any arithmetic is reached. Neither is a line count, so neither gets a
-/// column; a change so large it saturates in *finite* arithmetic still does,
-/// which is the case that matters.
+/// shape is pinned by the tests below without a renderer, and NaN-guarded in
+/// [`crate::scale::linear_then_tail`] for the reason recorded there.
 pub fn magnitude(churn: f32) -> f32 {
-    if !churn.is_finite() || churn <= 0.0 {
-        return 0.0;
-    }
-    (churn / (churn + HALF_CHURN)).clamp(0.0, 1.0)
-}
-
-/// The same size, on a gentler curve: the square root of [`magnitude`].
-///
-/// Used where a mark has to stay *visible* at small churn rather than
-/// proportional to it -- the column's girth and the removal skirt's spread.
-/// Shared rather than written twice, because the two say the same thing about
-/// the same change and drifting apart would be invisible until seen.
-///
-/// # Why girth is not simply `magnitude`
-///
-/// That is fault 4 in [`HALF_CHURN`]'s list. Girth exists to be a *second*
-/// channel, and multiplying the same number twice does not make one: it only
-/// squares whatever the first channel already did. The square root makes the
-/// two genuinely different shapes, so a small change is drawn short-and-slender
-/// rather than short-and-threadlike, and the face the King reads -- height
-/// times girth -- spreads further than either channel alone.
-fn presence(churn: f32) -> f32 {
-    magnitude(churn).sqrt()
+    crate::scale::linear_then_tail(churn, LINEAR_CHURN, TAIL_SHARE)
 }
 
 /// How far above a roof a column of the largest changes reaches, in world
@@ -228,66 +203,39 @@ const COLUMN_REACH: f32 = 58.0;
 /// a floor, a file that moved three lines beside one that moved four hundred
 /// would be drawn as nothing at all.
 ///
-/// **Cut from 9 to 3.5**, and that is half of the "every bar looks the same"
-/// fix. Against a reach of 52 the old floor spent the bottom 17% of the range
-/// before any measurement happened, which flattened everything below a hundred
-/// lines into the same stub. It can be this much smaller now because girth
-/// carries magnitude too (see [`band_girth`]): a small change is drawn as a
-/// *thin* column as well as a short one, so it no longer has to be tall to be
-/// distinguishable from a large one.
+/// **Cut twice: 9, then 3.5, now 2.5.** A floor is a flat tax on the bottom of
+/// the range, and the more honest the curve above it becomes the more that tax
+/// is the only thing left distorting a small change. At 9 it flattened
+/// everything under a hundred lines into one stub. At 3.5 it was affordable
+/// because a saturating curve was itself lifting the low end.
 ///
-/// It matters more than it did. With the logarithm gone from [`magnitude`], the
-/// bottom of the range is no longer propped up by a curve that lifted a
-/// one-line edit to a fifth of full height -- so this is now the only thing
-/// holding the smallest change above nothing, which is what a floor is for.
-const BAND_FLOOR: f32 = 3.5;
+/// With [`magnitude`] strictly proportional under its knee, nothing lifts the
+/// low end any more, and 3.5 was measurably too much: it left the step from this
+/// repository's p25 to its median at 1.66x, under the 1.82x
+/// `every_step_through_a_real_distribution_is_visible` requires. At 2.5 the same
+/// step draws 1.87x. Lower still would be honester arithmetic and a worse map --
+/// this is the point where a one-line change stops being a mark at all.
+const BAND_FLOOR: f32 = 2.5;
 
 /// How wide a column is as a share of the house it stands on, from the smallest
 /// change to the largest.
 ///
-/// The second half of the "every bar looks the same" fix. Girth used to be a
-/// constant `footprint * 0.82`, so the *only* thing that varied a column's
-/// width was the size of the house under it -- a fact about the file, not about
-/// the change. Ramping it with the change's size means a big change reads as a
-/// heavy column and a small one as a slender mark.
+/// Girth used to be a constant `footprint * 0.82`, so the *only* thing that
+/// varied a column's width was the size of the house under it -- a fact about
+/// the file, not about the change. Ramping it with the change's size means a big
+/// change reads as a heavy column and a small one as a slender mark.
 ///
-/// **It ramps with [`presence`] rather than [`magnitude`]**, which is the
-/// difference between a second channel and the first one restated -- fault 4 in
-/// [`HALF_CHURN`]'s list. On the gentler curve a small change keeps enough
-/// width to be resolved in the rail's pane while height carries the
-/// proportionality, and the face the King reads -- height times girth -- spreads
-/// a +8 against a +100 by 6.3x where the two together used to manage 2.7x.
+/// **It ramps with [`magnitude`] itself, linearly, at the King's word.** It used
+/// to ramp with the square root of it, deliberately: a gentler second channel
+/// that kept a small change wide enough to resolve in the rail's small pane
+/// while height carried the proportion. That is a real property and it is what
+/// was given up here -- the King asked for every size on the map to be linear,
+/// and a width that is the square root of the size is not.
+///
+/// The floor is what keeps the loss bearable: at 0.30 the narrowest column is
+/// still nearly a third of its house, so a small change is slender rather than
+/// invisible, and the two channels now agree instead of disagreeing by design.
 const GIRTH_RANGE: (f32, f32) = (0.30, 0.85);
-
-/// How far a skirt of cleared ground spreads past the lot it surrounds, as a
-/// share of the footprint's shorter side.
-///
-/// # Why this survives the shroud
-///
-/// The skirt and the shroud say the same thing at two zooms, and neither can do
-/// the other's job. The map's most common home is a pane at the foot of the
-/// rail where a house is a couple of pixels across -- at that size a shroud
-/// over the house is a *fraction* of those pixels and cannot be resolved at
-/// all, while a stain spreading across the lot around it can. Close in, the
-/// shroud is the precise reading and the skirt is the halo that draws the eye
-/// to it.
-///
-/// **Was an absolute 1.9 world units, and that is why removals did not show.**
-/// The world's own `REFERENCE_WORLD` is 1,000 units and a typical holding
-/// stands ~32 units tall, so 1.9 units at maximum -- and a file that was 80%
-/// additions got `1.9 * 0.2 = 0.38` of a unit. In the rail's pane that is
-/// sub-pixel: the skirt was being drawn correctly and was simply too small for
-/// any display to resolve.
-///
-/// A share of the footprint scales with whatever house it surrounds, in a world
-/// whose buildings differ in size by an order of magnitude.
-const SKIRT_SPREAD: f32 = 0.45;
-
-/// The least ground a skirt covers, in world units, however small the lot.
-///
-/// A share alone leaves the smallest houses back where they started, and the
-/// smallest houses are exactly where a deletion is easiest to miss.
-const SKIRT_FLOOR: f32 = 1.2;
 
 /// The hairline of clear air between two stacked bands.
 ///
@@ -364,8 +312,15 @@ const _: () = assert!(
 // would be the largest change there is, which is the flat map this replaced
 // wearing the opposite sign.
 const _: () = assert!(
-    HALF_CHURN > 1.0,
+    LINEAR_CHURN > 1.0,
     "a knee at or below one line draws every change as a full column"
+);
+// The linear part must leave the tail something to work with. At a share of 1.0
+// the curve is a clamp again -- every change past the knee drawn identically --
+// which is the plateau `LINEAR_CHURN` records as the second fault.
+const _: () = assert!(
+    TAIL_SHARE > 0.0 && TAIL_SHARE < 1.0,
+    "a linear part that spends the whole range is a clamp, which is a plateau"
 );
 // `super::TALLEST` is the roof height the camera's fit assumes, and it is
 // private to that module -- so the number is repeated here with the reason
@@ -393,13 +348,6 @@ const _: () = assert!(
     "the least of a house a removal covers is a share of it, and not all of it"
 );
 
-/// How high the skirt stands off the ground.
-///
-/// Barely anything: this is a stain on the ground rather than a wall, and the
-/// shroud is what stands *on* the lot. Above `spawn::layer::GROUND_LABEL` so it
-/// is not swallowed by a folder name painted across the same ward.
-const SKIRT_LIFT: f32 = 0.24;
-
 /// How transparent the works are.
 ///
 /// Translucent on purpose, and not only for looks: this is a *proposal*, not
@@ -420,7 +368,7 @@ const GHOST_ALPHA: u8 = 0x78;
 /// The shortest a ghost house stands, in world units.
 ///
 /// A new file's house is half the column its churn would earn, and with an
-/// honest curve under that (see [`HALF_CHURN`]) a small new file would be a
+/// honest curve under that (see [`LINEAR_CHURN`]) a small new file would be a
 /// slab a few units high -- which reads as a mark on the ground rather than as
 /// a building, and a ghost exists precisely so that a new file looks like a
 /// house.
@@ -485,7 +433,7 @@ pub struct WorksRoot;
 
 /// How tall one band stands, given how many lines it moved.
 ///
-/// Absolute rather than relative -- see [`HALF_CHURN`], which records both the
+/// Absolute rather than relative -- see [`LINEAR_CHURN`], which records both the
 /// fault this replaced and the curve fault that came after it.
 ///
 /// Pure, so the shape can be pinned without a renderer.
@@ -495,12 +443,12 @@ pub fn band_height(churn: f32) -> f32 {
 
 /// How wide a column stands, as a share of the house under it.
 ///
-/// The second channel the change's size is carried in, on [`presence`]'s
-/// gentler curve rather than height's. See [`GIRTH_RANGE`] for why one channel
-/// was not enough, and why two copies of the same curve are not two channels.
+/// Linear in the change's size, like its height -- see [`GIRTH_RANGE`] for what
+/// that gave up and why. The two channels now say the same thing at the same
+/// rate, so a column's whole silhouette is proportional to the work in it.
 pub fn band_girth(churn: f32) -> f32 {
     let (thin, thick) = GIRTH_RANGE;
-    thin + presence(churn) * (thick - thin)
+    thin + magnitude(churn) * (thick - thin)
 }
 
 /// One of an agent's two colours, at the weight the drawing calls for.
@@ -701,64 +649,6 @@ fn raise_one(
         // between them: two saturated colours meeting exactly would read as one
         // column with a gradient rather than as two agents.
         standing += height + BAND_GAP;
-    }
-
-    // The ground: what is being cleared here, and by whom.
-    //
-    // Sized from the footprint rather than as an absolute (see `SKIRT_SPREAD`),
-    // which is the whole of why removals were invisible before. A razing takes
-    // the whole lot and the deepest colour -- the house is going, not shrinking.
-    let razing = work.bands.iter().find(|band| band.razing);
-    let cutting: f32 = work.bands.iter().map(|band| band.removed).sum();
-    if razing.is_some() || cutting > 0.0 {
-        let (colour, weight) = match razing {
-            // A deletion is total, so it is drawn at full weight whatever the
-            // line count: "this file is going" is not a matter of degree.
-            Some(band) => (band.cutting, 1.0),
-            None => (
-                work.bands
-                    .iter()
-                    .filter(|band| band.removed > 0.0)
-                    .max_by(|a, b| a.removed.total_cmp(&b.removed))
-                    .map(|band| band.cutting)
-                    .unwrap_or(work.bands[0].cutting),
-                // `presence` rather than `magnitude`, and for the skirt's own
-                // reason: this is a stain on the ground that has to be *seen*
-                // at the zoom a house is two pixels across, not a measurement
-                // read off. Making the low end of `magnitude` honest would
-                // otherwise have quietly undone the fix that made removals
-                // visible at all -- a 20-line cut would spread a third of what
-                // it used to. The gentler curve keeps it where it was.
-                presence(cutting),
-            ),
-        };
-
-        // How far it spreads still follows how much is being cut -- size is
-        // the channel magnitude has. Its *colour* does not: the alpha used to
-        // be scaled by the same weight, so a small cut was drawn in a washed-out
-        // version of its agent's colour. It is the agent's colour at the works'
-        // own weight, like every other mark here.
-        let plan = footprint.width.min(footprint.depth);
-        let spread = (SKIRT_SPREAD * plan * weight).max(SKIRT_FLOOR * weight.max(0.35));
-        let color = band_color(to_color(colour), WORKS_ALPHA);
-
-        commands.spawn((
-            ChildOf(root),
-            Mesh3d(meshes.add(meshes::ground_polygon(&[
-                Vec2::new(footprint.x - spread, footprint.y - spread),
-                Vec2::new(footprint.max_x() + spread, footprint.y - spread),
-                Vec2::new(footprint.max_x() + spread, footprint.max_y() + spread),
-                Vec2::new(footprint.x - spread, footprint.max_y() + spread),
-            ]))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: color,
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            })),
-            Transform::from_xyz(0.0, SKIRT_LIFT, 0.0),
-            Pickable::IGNORE,
-        ));
     }
 
     // The shroud: what is being taken away, covering the house it is taken from.
@@ -988,24 +878,67 @@ mod tests {
         assert!(band_height(f32::MAX) <= COLUMN_REACH);
     }
 
-    /// Small changes are told apart in *proportion*, which is what the
-    /// logarithm could not do: near zero the curve is very nearly linear, so
-    /// twice the lines is close to twice the column above the floor.
+    /// **The King's own rule, and the reason this ruler was replaced a third
+    /// time.** Twice the lines is twice the column -- exactly, not nearly.
+    ///
+    /// Measured above the floor, because the floor is a fixed offset that every
+    /// column carries: what has to be proportional is the part that says how
+    /// much moved. `BAND_FLOOR`'s own docs record how far it can be cut before
+    /// a one-line change stops being a mark at all.
+    ///
+    /// The tolerance is float slop, not slack in the rule. The saturating curve
+    /// this replaced managed 1.24x here, and the logarithm before it 1.24x from
+    /// a base already a fifth of the way up.
     #[test]
-    fn doubling_a_small_change_nearly_doubles_it() {
+    fn doubling_a_change_doubles_the_column() {
         let above_floor = |churn: f32| band_height(churn) - BAND_FLOOR;
-        let step = above_floor(16.0) / above_floor(8.0);
-        assert!(
-            (1.6..=2.0).contains(&step),
-            "doubling 8 lines to 16 moved the column {step:.2}x; \
-             the logarithm managed 1.24x from a base already a fifth of the way up"
-        );
+        for (small, large) in [(4.0, 8.0), (8.0, 16.0), (50.0, 100.0), (75.0, 150.0)] {
+            let step = above_floor(large) / above_floor(small);
+            assert!(
+                (step - 2.0).abs() < 0.01,
+                "doubling {small} lines to {large} moved the column {step:.3}x, \
+                 which is not the proportional rule the footprint already follows"
+            );
+        }
+    }
+
+    /// The same rule at any ratio, not only at doubling, and through the
+    /// quartiles of a real distribution: the column is the work, to scale.
+    #[test]
+    fn a_column_is_proportional_to_the_lines_it_stands_for() {
+        let above_floor = |churn: f32| band_height(churn) - BAND_FLOOR;
+        for (small, large) in [(6.0, 27.0), (27.0, 115.0), (115.0, 246.0), (10.0, 250.0)] {
+            let drawn = above_floor(large) / above_floor(small);
+            let want = large / small;
+            assert!(
+                (drawn / want - 1.0).abs() < 0.01,
+                "+{large} against +{small} is {want:.2}x the work and drew {drawn:.2}x"
+            );
+        }
+    }
+
+    /// Girth is linear too, at the King's word -- so the whole silhouette of a
+    /// column, not merely its height, is proportional to the change in it.
+    ///
+    /// Measured above `GIRTH_RANGE.0` for `band_height`'s reason: the floor is
+    /// the part that exists to keep a small mark visible, and the ramp above it
+    /// is the part that carries the size.
+    #[test]
+    fn doubling_a_change_doubles_the_columns_width_too() {
+        let above_floor = |churn: f32| band_girth(churn) - GIRTH_RANGE.0;
+        for (small, large) in [(8.0, 16.0), (50.0, 100.0), (100.0, 200.0)] {
+            let step = above_floor(large) / above_floor(small);
+            assert!(
+                (step - 2.0).abs() < 0.01,
+                "doubling {small} lines to {large} widened the column {step:.3}x"
+            );
+        }
     }
 
     /// A ghost house stands like a house: never a slab, never a spike.
     ///
     /// The floor and the cap are one decision and have to be tested together.
-    /// The floor exists because an honest low end (see [`HALF_CHURN`]) would
+    /// The floor exists because an honest low end (see [`LINEAR_CHURN`]) would
     /// otherwise draw a small new file a few units high; the cap exists because
     /// a ward with no room shrinks a ghost's footprint
     /// (`map::works::SHRINK`, three times over) and an absolute floor over a
@@ -1079,25 +1012,36 @@ mod tests {
         assert!(band_girth(f32::MAX) <= GIRTH_RANGE.1);
     }
 
-    /// **The second reported bug.** The skirt was an absolute 1.9 world units at
-    /// maximum, in a world 1,000 units across -- sub-pixel in the rail's pane,
-    /// which is why removals looked like they were not drawn at all. It is a
-    /// share of the footprint now, so it scales with whatever house it wraps.
+    /// **The second reported bug, and the mark that answers it now.** A removal
+    /// used to be drawn twice -- this shroud, and a stain spreading across the
+    /// ground around the house. The King reported seeing only the shroud, so the
+    /// stain is gone and this is the one mark a removal makes.
+    ///
+    /// What the stain was for is not forgotten: it was the mark that survived at
+    /// the zoom where a house is two pixels across. The shroud has to carry that
+    /// now, which is what `SHROUD_FLOOR` and `SHROUD_GIRTH` are between them
+    /// for -- a cut always covers a visible share of a house, and the block is
+    /// wider than any roof on the map.
     #[test]
     fn a_removal_is_drawn_at_a_size_that_can_be_seen() {
-        // A typical holding, and the spread a full removal earns on it.
-        let plan = 12.0_f32;
-        let spread = (SKIRT_SPREAD * plan * 1.0).max(SKIRT_FLOOR);
+        // A typical holding, and the least a cut of any size covers of it.
+        let house = 32.0_f32;
+        let smallest = shroud_height(1.0 / 4_000.0, house);
         assert!(
-            spread > 4.0,
-            "a removal spreads only {spread} units, which is what made it invisible"
+            smallest > 1.0,
+            "the smallest cut covers only {smallest} units of a {house} house, \
+             which is what being invisible looked like"
         );
         // And a big house gets proportionally more, which an absolute could not.
-        let big = SKIRT_SPREAD * 40.0;
+        let big = shroud_height(0.5, 80.0);
         assert!(
-            big > spread * 2.0,
-            "the skirt must follow the house it wraps"
+            big > shroud_height(0.5, house) * 2.0,
+            "the shroud must follow the house it covers"
         );
+        // That the block is also wider than every roof on the map is a fact
+        // about literals, so it is a `const` assertion at `SHROUD_GIRTH`
+        // itself rather than a check that could only fail on a build already
+        // made.
     }
 
     /// **The King's instruction, stated as arithmetic.** A band is exactly its
