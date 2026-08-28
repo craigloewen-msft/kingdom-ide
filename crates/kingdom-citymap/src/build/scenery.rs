@@ -943,6 +943,7 @@ mod tests {
             edge: [0, 0, 0, 255],
         }];
         let plazas = vec![MapPlaza {
+            town: "paving".to_owned(),
             rect: MapRect {
                 x: 300.0,
                 y: 500.0,

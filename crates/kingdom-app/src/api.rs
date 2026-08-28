@@ -346,6 +346,15 @@ pub async fn leave_kingdom() -> Result<(), ServerFnError> {
     // kingdom's answers into the next one, so plans that had not changed since
     // would open silently and their badges never arrive.
     crate::events::forget_pulses();
+    // Every agent in that kingdom has just gone away, so its wells are stopped.
+    // Without this they stayed up for the life of the server, claimed by plans
+    // nobody had open -- the one gap where "stopped when the last plan is done"
+    // was not true.
+    //
+    // Reconciled against an explicitly empty population rather than against the
+    // unopened kingdom above. The two are the same answer, and this one says so
+    // without taking the lock a second time.
+    reconcile_wells(&Kingdom::unopened());
     Ok(())
 }
 
@@ -422,7 +431,76 @@ pub(crate) fn assemble(
     // actually opened, so a typo is never remembered and reopened at boot.
     crate::profile::remember_kingdom(root);
 
+    // And the kingdom's wells are brought into line with the agents that are
+    // actually alive in it, which is what makes a restart invisible: a
+    // namespace lives in a process and a container does not, so five agents
+    // that had a database before the server stopped must find it again without
+    // any of them having to take a turn first.
+    //
+    // Here rather than in each caller for exactly the reason above -- every
+    // path into a kingdom crosses this function.
+    reconcile_wells(&kingdom);
+
     Ok(kingdom)
+}
+
+/// Brings the shared resources into line with this kingdom's live agents.
+///
+/// The one call every moment that changes the population makes: a kingdom
+/// opened, a plan opened, a plan finished, a kingdom closed. It both raises and
+/// stops, because `services::reconcile` computes the two from one input -- see
+/// the invariant in that module.
+///
+/// # Why this is spawned rather than awaited
+///
+/// Raising a well can legitimately take minutes -- `services::READY_TIMEOUT` is
+/// three of them, because the first run of an image includes pulling it. The
+/// King must not sit on a folder picker for that, nor wait on `docker stop`
+/// after pressing Merge: the screen moves at once and the wells follow, which
+/// is also why `/resources` polls.
+///
+/// # Why the agents are collected here and not inside `services`
+///
+/// Because resolving a plan's city means reading the kingdom, and callers of
+/// [`assemble`] hold its **non-reentrant** [`std::sync::Mutex`]. Going through
+/// `city_root_of` would take that lock a second time on the same thread, which
+/// is the deadlock [`city_root_in`] and [`kingdom_to_browser`] already exist to
+/// avoid. So the population is read from the `Kingdom` value already in hand,
+/// and only plain paths cross into the spawned task.
+#[cfg(feature = "ssr")]
+pub(crate) fn reconcile_wells(kingdom: &Kingdom) {
+    let agents = agents_drawing(kingdom);
+
+    // A test assembling a kingdom has no runtime, and panicking there would
+    // make an unrelated test fail for a reason that has nothing to do with it.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(crate::services::reconcile(agents));
+    }
+}
+
+/// Every agent that should be holding a well, with the city it works in.
+///
+/// Pure, and separate from [`reconcile_wells`], so the rule can be tested
+/// without a Docker daemon, a tokio runtime or the process-global kingdom.
+///
+/// Two filters, both load-bearing:
+///
+/// - **`is_live`** -- a settled plan's worktree is gone and it is history. A
+///   merged plan left holding a database would pin it open for the life of the
+///   process. `Failed` still counts, agreeing with [`kingdom_network`] and
+///   [`kingdom_changes`]: it can be retried and its workspace is still there.
+/// - **`!is_subagent`** -- this one is not tidiness. A subagent works in its
+///   parent's worktree and reaches the well through the parent's claim, and
+///   [`finish_plan`] *refuses* to finish one. So a subagent recorded as a drawer
+///   could never be released, and would hold its well open forever.
+#[cfg(feature = "ssr")]
+pub(crate) fn agents_drawing(kingdom: &Kingdom) -> Vec<(PlanId, std::path::PathBuf)> {
+    kingdom
+        .plans
+        .iter()
+        .filter(|plan| plan.is_live() && !plan.is_subagent())
+        .filter_map(|plan| Some((plan.id.clone(), city_root_in(kingdom, &plan.id)?)))
+        .collect()
 }
 
 /// The plans a freshly opened kingdom starts with.
@@ -618,6 +696,10 @@ pub async fn begin_plan(
     // Without this a plan opened in one tab is invisible in another's rail
     // until something refetches the kingdom.
     crate::events::pulse(&plan);
+    // A plan opened after the kingdom was has never crossed `assemble`, so this
+    // is what enrols it as a drawer -- and raises the city's wells if it is the
+    // first agent there. Taking its first turn no longer does this.
+    reconcile_wells(&kingdom);
 
     Ok(plan)
 }
@@ -2421,6 +2503,13 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // document.
     let draft = crate::tools::propose_plan::draft_body(&workspace);
 
+    // The King's own shell in this plan goes first of all. It has the worktree
+    // as its working directory, so `git worktree remove` below would be
+    // fighting a live process; and a shell in a namespace about to be torn down
+    // is a shell into nowhere. Nothing happens for a plan he never opened one
+    // in.
+    crate::terminal::shutdown(&plan_id);
+
     // The plan's network goes before its worktree does. Ordered deliberately:
     // the namespace holds whatever the agent left running -- a dev server, a
     // watcher -- and those processes have the worktree as their working
@@ -2431,17 +2520,11 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // has no namespace and this does nothing at all.
     crate::netns::shutdown(&plan_id);
 
-    // And this plan stops using the city's shared services. The container is
-    // only
-    // stopped if *nobody* is left drawing -- five plans on one project share
-    // one database, and four of them finishing must not take it away from the
-    // fifth. Its named volume is kept regardless: the King's data is the whole
-    // reason the service existed.
-    //
-    // `city_root` rather than a fresh lookup: the plan is about to be settled,
-    // and resolving the city through a record being torn down is a race this
-    // does not need to run.
-    crate::services::release(&plan_id, &city_root).await;
+    // The city's shared services are **not** touched here. They are reconciled
+    // once the plan has actually been settled below -- see the call after
+    // `update`. Letting go here would be wrong twice over: the plan is still
+    // live at this point, so a reconcile would immediately re-enrol it; and a
+    // merge git refuses leaves the plan in play, still needing its database.
 
     let finish = match how {
         Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
@@ -2502,6 +2585,10 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         // Nothing about the plan has changed, so nothing about its status
         // does either: it is still awaiting review, because it is.
         Finish::Refused(why) => p.note(NoteKind::Merge, why),
+        // The same on disk, and a different kind on purpose. This is the one
+        // refusal an agent can clear, and the chamber finds it by matching on
+        // the kind -- see `NoteKind::MergeConflict`.
+        Finish::Diverged(why) => p.note(NoteKind::MergeConflict, why),
     })
     .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))?;
 
@@ -2517,6 +2604,17 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     if filed {
         crate::tools::propose_plan::discard_draft(&workspace);
     }
+
+    // Now that the plan is settled -- and only now -- the wells are reconciled
+    // against who is left. A container is stopped only if *nobody* is drawing
+    // from it: five plans on one project share one database, and four of them
+    // finishing must not take it away from the fifth. Its named volume is kept
+    // regardless, because the King's data is the whole reason it existed.
+    //
+    // After `update` rather than before, because that is what makes this plan
+    // absent from the population. A merge git *refused* leaves the plan live
+    // and its database standing, which is right: he is going to try again.
+    reconcile_wells(&kingdom);
 
     Ok(to_browser_in(&kingdom, plan))
 }
@@ -2614,6 +2712,21 @@ pub async fn declare_shared_resource(
 #[server(ListModels, "/api")]
 pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
     Ok(crate::llm::catalogue::catalogue().await)
+}
+
+/// Ends the King's shell in a plan, deliberately.
+///
+/// The panel's close button, and nothing else. A shell now outlives its socket
+/// (see [`crate::terminal`]), so the browser can no longer end one by
+/// disconnecting -- which is the whole point, since navigating to a diff
+/// disconnects too. Closing has to be said out loud.
+///
+/// Takes no lock and answers `()`: it neither reads nor changes the records,
+/// and a plan that has no shell is not an error, it is the ordinary case.
+#[server(EndTerminal, "/api")]
+pub async fn end_terminal(plan: String) -> Result<(), ServerFnError> {
+    crate::terminal::shutdown(&PlanId::new(plan));
+    Ok(())
 }
 
 /// The system prompt a plan's model is given, rendered exactly as a turn would
@@ -2750,6 +2863,131 @@ pub(crate) mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Only live, non-subagent plans are counted as holding a well.
+    ///
+    /// Both filters guard a real leak. A **settled** plan's worktree is gone,
+    /// so a merged plan left in the count would pin a database open forever. A
+    /// **subagent** is worse: `finish_plan` refuses to finish one, so nothing
+    /// would ever take it back out of the count -- and it needs no claim of its
+    /// own, because it works in its parent's worktree and reaches the well
+    /// through the parent's.
+    ///
+    /// `Failed` deliberately counts as live, agreeing with `kingdom_network`
+    /// and `kingdom_changes`: it can be retried and its workspace is still
+    /// there.
+    #[test]
+    fn only_live_agents_are_counted_as_drawing_from_a_well() {
+        use kingdom_core::{
+            City, CityId, CityKind, ModelChoice, Outcome, PlanId, PlanStatus, SpawnedBy, Workspace,
+        };
+
+        let mut kingdom = Kingdom::unopened();
+        kingdom.root = "/dev".to_string();
+        kingdom.cities = vec![City {
+            id: CityId::new("c1"),
+            name: "testburg".into(),
+            path: "testburg".into(),
+            kind: CityKind::Rust,
+            file_count: 1,
+            has_git: true,
+            dirty_files: 0,
+            structure: None,
+        }];
+
+        let of = |id: &str| {
+            Plan::opened(
+                PlanId::new(id),
+                CityId::new("c1"),
+                "A decree",
+                &ModelChoice::new("mock", None),
+                Workspace::in_place("/dev/testburg"),
+                NetworkMode::Shared,
+            )
+        };
+
+        let working = of("plan-working");
+
+        let mut failed = of("plan-failed");
+        failed.status = PlanStatus::Failed;
+
+        let mut merged = of("plan-merged");
+        merged.settle(Outcome::Merged {
+            commit: "0000000".into(),
+            into: "main".into(),
+        });
+
+        let mut errand = of("plan-errand");
+        errand.spawned_by = Some(SpawnedBy {
+            parent: working.id.clone(),
+            tool_call: "call-1".to_string(),
+        });
+
+        kingdom.plans = vec![working, failed, merged, errand];
+
+        let drawing: Vec<String> = agents_drawing(&kingdom)
+            .into_iter()
+            .map(|(plan, _)| plan.to_string())
+            .collect();
+
+        assert_eq!(
+            drawing,
+            vec!["plan-working".to_string(), "plan-failed".to_string()],
+            "a settled plan and a subagent must not hold a well open"
+        );
+    }
+
+    /// Two agents in one city are two drawers of one well.
+    ///
+    /// The reference count has to be restored at its true depth, or the first
+    /// plan to finish would stop a database the other four are still using.
+    /// Both entries name the same city root, which is what `services::reconcile`
+    /// groups on to raise the well exactly **once**.
+    #[test]
+    fn two_agents_in_one_city_both_hold_its_well() {
+        use kingdom_core::{City, CityId, CityKind, ModelChoice, PlanId, Workspace};
+
+        let mut kingdom = Kingdom::unopened();
+        kingdom.root = "/dev".to_string();
+        kingdom.cities = vec![City {
+            id: CityId::new("c1"),
+            name: "shopfront".into(),
+            path: "shopfront".into(),
+            kind: CityKind::Node,
+            file_count: 1,
+            has_git: true,
+            dirty_files: 0,
+            structure: None,
+        }];
+        kingdom.plans = ["plan-1", "plan-2"]
+            .into_iter()
+            .map(|id| {
+                Plan::opened(
+                    PlanId::new(id),
+                    CityId::new("c1"),
+                    "A decree",
+                    &ModelChoice::new("mock", None),
+                    Workspace::in_place("/dev/shopfront"),
+                    NetworkMode::Shared,
+                )
+            })
+            .collect();
+
+        let drawing = agents_drawing(&kingdom);
+        assert_eq!(drawing.len(), 2, "both agents are counted");
+
+        let roots: std::collections::HashSet<_> =
+            drawing.iter().map(|(_, root)| root.clone()).collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "one city, so one scope to raise however many agents are in it"
+        );
+        assert_eq!(
+            roots.into_iter().next().unwrap(),
+            PathBuf::from("/dev/shopfront")
+        );
     }
 
     /// A starter plan's workspace is relative to the kingdom root, and

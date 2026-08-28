@@ -11,6 +11,15 @@
 //! at `public/vendor/xterm.js` and loaded lazily on first open, exactly as
 //! `markdown.rs` treats mermaid -- 289 KB nobody pays for unless they open a
 //! terminal.
+//!
+//! # Closing the panel is not closing the shell
+//!
+//! This component is disposed by far more than the close button: it sits in one
+//! aside slot, so opening a diff, the spyglass or another plan tears it down.
+//! Tearing it down therefore only *detaches* -- the socket closes, the shell on
+//! the other end keeps running, and coming back replays what was missed. Ending
+//! the shell is a separate, deliberate act: the × button, which calls
+//! `end_terminal`.
 
 use leptos::prelude::*;
 
@@ -55,7 +64,7 @@ pub fn TerminalView(
                 </button>
                 <button
                     class="terminal-close"
-                    title="Close this terminal"
+                    title="End this shell and close the panel"
                     on:click=move |_| on_close.run(())
                 >
                     "\u{00d7}"
@@ -123,6 +132,7 @@ const load = () => {
   }
   if (stage.dataset.kingdomOpened) return;
   stage.dataset.kingdomOpened = '1';
+  stage.__kingdomLeaving = false;
 
   const term = new window.Terminal({
     fontSize: 13,
@@ -159,21 +169,40 @@ const load = () => {
 
   socket.onopen = () => { term.focus(); resize(); };
   socket.onmessage = (event) => {
-    if (typeof event.data === 'string') { term.write(event.data); return; }
+    if (typeof event.data === 'string') {
+      // A text frame is the server's final word -- the shell exited, or it
+      // could not be started, in the King's own English. Nothing follows it, so
+      // the close that follows needs no "[disconnected]" underneath.
+      stage.__kingdomLeaving = true;
+      term.write(event.data);
+      return;
+    }
     term.write(new Uint8Array(event.data));
   };
-  socket.onclose = () => term.write('\r\n[disconnected]\r\n');
+  socket.onclose = () => {
+    // Silent when the panel is going away, or when the server has already said
+    // why: the shell usually outlives this socket, and "[disconnected]" would
+    // say the opposite of what happened. Only an unexplained drop earns a line.
+    if (!stage.__kingdomLeaving) term.write('\r\n[disconnected]\r\n');
+  };
 
   const observer = new ResizeObserver(() => resize());
   observer.observe(stage);
 
-  // The panel is being torn down: close the socket, which is what kills the
-  // shell at the other end. Without this a closed panel would leave a shell
-  // running until the server noticed the socket was dead.
+  // The panel is being torn down -- which happens whenever the King opens a
+  // diff, the spyglass or another plan, not only when he closes it. So this
+  // detaches and nothing more: the socket closing no longer kills the shell,
+  // and the next open reattaches to it with its scrollback replayed.
+  //
+  // `kingdomOpened` is cleared with it, so a panel opened again in the same
+  // element builds a fresh xterm rather than finding the flag and doing
+  // nothing.
   stage.__kingdomCleanup = () => {
+    stage.__kingdomLeaving = true;
     observer.disconnect();
     socket.close();
     term.dispose();
+    delete stage.dataset.kingdomOpened;
   };
 })();
 "#;

@@ -204,12 +204,26 @@ mod measures {
     /// How far across an agent's marker is, in world units.
     pub(super) const AGENT_RADIUS: f32 = 9.0;
 
-    /// How far across a wellhead is.
+    /// How far across a wellhead is, at most.
     ///
-    /// Larger than an agent: a well is a thing several agents gather at, and the
-    /// channels running into it have to arrive somewhere that reads as a
-    /// destination.
-    pub(super) const WELL_RADIUS: f32 = 13.0;
+    /// Down from 13, which was chosen while a well floated on open ground at a
+    /// town's centre. It stands on the square now, and a square is 52 units
+    /// across: at 13 the drum was a quarter of the whole paving. A well no
+    /// longer has to be the biggest disc on the map to read as a destination --
+    /// it is built, lit, and standing on stone, which the marks around it are
+    /// not.
+    ///
+    /// A ceiling rather than a fixed size: see
+    /// [`well_stand`](super::resolve::well_stand), which shrinks it when
+    /// several wells share one square.
+    pub(super) const WELL_RADIUS: f32 = 8.5;
+
+    /// How far a wellhead keeps off the kerb, in world units.
+    ///
+    /// Small enough that two wells still fit a 52-unit square side by side,
+    /// large enough that a drum reads as standing *on* the paving rather than
+    /// straddling its edge.
+    pub(super) const KERB_INSET: f32 = 3.0;
 
     /// How far beyond a town's own edge its agents stand, in world units.
     ///
@@ -351,18 +365,27 @@ mod resolve {
         let mut out = Vec::new();
         for city in wells {
             let town_name = city.city.as_str();
-            let Some(town) = map.town_named(town_name) else {
+            if map.town_named(town_name).is_none() {
+                // A city the map never drew. See the doc above.
+                continue;
+            }
+            let Some(square) = map.square_of(town_name) else {
+                // A town too small to have been given a square. The rule this
+                // module has always documented, and until now did not keep:
+                // there is nowhere for a well to stand that would not be
+                // somebody's front garden.
                 continue;
             };
             // Several services in one city are laid out along the square rather
             // than stacked, so a city with a database and a cache shows two
             // wellheads and not one.
             for (index, service) in city.wells.iter().enumerate() {
+                let (center, radius) = well_stand(square, index, city.wells.len());
                 out.push(Wellhead {
                     town: town_name.to_owned(),
                     name: service.name.clone(),
-                    center: well_stand(town.center, index, city.wells.len()),
-                    radius: WELL_RADIUS,
+                    center,
+                    radius,
                     users: service.users,
                     color: WELL_COLOR,
                 });
@@ -461,18 +484,50 @@ mod resolve {
         ]
     }
 
-    /// Where the `index`-th of `total` wellheads in a town stands.
+    /// Where the `index`-th of `total` wellheads on a square stands, and how
+    /// far across it is.
     ///
-    /// On the square itself, laid out along its `x` axis and centred, so one
-    /// well sits exactly in the middle of the settlement and several share it
-    /// evenly.
-    fn well_stand(town_center: [f32; 2], index: usize, total: usize) -> [f32; 2] {
-        if total <= 1 {
-            return town_center;
-        }
-        let spread = WELL_RADIUS * 2.4;
-        let offset = (index as f32 - (total as f32 - 1.0) * 0.5) * spread;
-        [town_center[0] + offset, town_center[1]]
+    /// **On the paving, at the back of it.** The first version stood a well at
+    /// the town's centre point, which is not the square at all: a square is
+    /// walked *outward* from the settlement's middle until it finds ground no
+    /// ward has claimed (`build::streets::square_site`), because the middle is
+    /// the one place the largest folder has already taken. Measured across a
+    /// real kingdom of seven towns, that walk landed between 94 and 1,622 units
+    /// out -- against a square 52 units across. So every well on the map stood
+    /// among the houses, the same fault the agent marks were fixed for.
+    ///
+    /// The **rear** edge, and that is not arbitrary. The square already carries
+    /// the town's name painted across its middle (`wayfinding::square_label`,
+    /// a cap height of up to 0.26 of the square), and the camera looks down
+    /// `(-1, -1, -1)`, so low `y` projects up-screen. A well at the back stands
+    /// above the lettering rather than on it.
+    ///
+    /// The radius shrinks when several wells share one square: each takes an
+    /// equal slot of the usable span, so a city with three services shows three
+    /// smaller wells on the paving rather than a row spilling onto the grass.
+    /// It is capped by the depth of that rear strip too, which is what keeps a
+    /// lone well off the lettering on a square of any size.
+    fn well_stand(square: MapRect, index: usize, total: usize) -> ([f32; 2], f32) {
+        let total = total.max(1);
+        // Room enough that a drum never overhangs the kerb, taken off both
+        // ends before the span is shared out.
+        let usable = (square.width - KERB_INSET * 2.0).max(1.0);
+        let slot = usable / total as f32;
+
+        // The strip between the rear kerb and the lettering, which is all the
+        // depth there is: a kerb's width is kept clear at both ends of it, so a
+        // drum neither hangs off the paving nor touches the name.
+        let band = square.depth * (1.0 - SQUARE_LABEL_SHARE) * 0.5;
+        let depth_allows = (band - KERB_INSET * 2.0) * 0.5;
+
+        let radius = WELL_RADIUS.min(slot * 0.42).min(depth_allows).max(1.0);
+
+        let left = square.x + KERB_INSET;
+        let x = left + slot * (index as f32 + 0.5);
+        // A well's own radius back from the rear kerb, so the drum sits fully
+        // on the paving whatever size it ended up.
+        let y = square.y + KERB_INSET + radius;
+        ([x, y], radius)
     }
 }
 
@@ -487,20 +542,54 @@ mod resolve {
 /// established why a lit status colour comes out wrong.
 pub const HOST_COLOR: MapColor = [0x7d, 0x9c, 0xc4, 255];
 
-/// The colour of a wellhead.
+/// The colour of a wellhead's stonework.
 ///
-/// A pale, desaturated water rather than the obvious bright cyan, and the
-/// difference was measured rather than judged. The first attempt was `#38bdf8`,
-/// which sits **110.5** from the `azure` banner on the same weighted-RGB ruler
-/// `palette`'s own hue search used -- closer than the nearest two *banners* are
-/// to each other (126.1). On screen an azure agent's conduit and the well it ran
-/// to were the same colour, which is precisely the confusion a distinct well
-/// colour exists to prevent.
+/// A weathered grey stone. It replaced a pale near-white (`#cfd8dd`) that was
+/// drawn **unlit** among lit earth tones and read, correctly, as a light
+/// source: nothing else in a settlement glows, so the one thing that did looked
+/// like it was switched on. The well is lit now (`engine::network`), and this is
+/// a base colour the sun shades rather than a final pixel.
 ///
-/// This is 193 from its nearest banner: further apart than any two agents ever
-/// are, so a well cannot be mistaken for one. The test below pins that margin
-/// rather than mere inequality, which is what let the first attempt pass.
-pub const WELL_COLOR: MapColor = [0xcf, 0xd8, 0xdd, 255];
+/// Two distances are asked of it, on the weighted-RGB ruler `palette`'s own hue
+/// search used, where the two nearest *banners* are 126.1 apart:
+///
+/// - **165.5 from its nearest banner.** Further than any two agents ever are, so
+///   a well cannot be mistaken for one. The test below pins that margin rather
+///   than mere inequality, which is what let an earlier `#38bdf8` pass while
+///   being visibly the same cyan as the `azure` agent beside it.
+/// - **141.3 from the paving it stands on** (`streets::PLAZA`, `#816941`). A
+///   test in `build::streets` pins that one, because a well the colour of its
+///   own square is a well nobody can see. The old near-white was 349.9 from the
+///   paving -- legible, and that is the only thing it had going for it.
+pub const WELL_COLOR: MapColor = [0x9a, 0x91, 0x87, 255];
+
+/// The water at the bottom of a well's shaft.
+///
+/// A deep, dark teal. It is what makes the mark read as a *well* rather than as
+/// a drum or a tower: a dark disc recessed inside the stone says there is a
+/// hole here, and a hole with water in it is the whole picture. Kept far from
+/// every banner for [`WELL_COLOR`]'s reason -- 306.9 from its nearest, the
+/// furthest of anything drawn here.
+pub const WELL_WATER_COLOR: MapColor = [0x24, 0x42, 0x4a, 255];
+
+/// The timber of a well's canopy: two posts and the beam across them.
+///
+/// Dark enough to read against the stone below it at a glance, and the same
+/// family of browns the settlement's own trim and tree trunks are painted in --
+/// this is a thing that was *built*, by the same hands as the houses around it.
+pub const WELL_TIMBER_COLOR: MapColor = [0x6b, 0x4a, 0x32, 255];
+
+/// The share of a square's depth the town's name is painted across.
+///
+/// `build::wayfinding::square_label` sizes the lettering at up to this fraction
+/// of the square, centred on it. A wellhead is placed clear of that band, so the
+/// number has to be known on both sides -- and `build` is server-only while this
+/// module compiles to both targets, so it cannot simply be imported.
+///
+/// The duplication is pinned rather than trusted: a test in `build::wayfinding`
+/// asserts that a real label fits inside this share, so raising it there fails
+/// here instead of quietly painting a name under a well.
+pub const SQUARE_LABEL_SHARE: f32 = 0.26;
 
 /// The ground a mark covers, for a renderer that wants a rectangle.
 ///
@@ -520,10 +609,28 @@ pub fn footprint(center: [f32; 2], radius: f32) -> MapRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::{MapLocation, MapManifest, MapSun, MapUnderside, MapWorld};
+    use crate::map::{MapLocation, MapManifest, MapPlaza, MapSun, MapUnderside, MapWorld};
     use kingdom_core::{
         AgentNetwork, CityId, CityWells, KingdomNetwork, NetworkMode, PlanId, SharedService,
     };
+
+    /// How far across a square is, matching `build::scene::PLAZA_SIZE`.
+    ///
+    /// The real number rather than a round one, because most of what is checked
+    /// below is whether a well fits on the paving -- and a test run against a
+    /// roomier square than the map actually builds would pass while the picture
+    /// spilled onto the grass.
+    const SQUARE: f32 = 52.0;
+
+    /// How far a test square stands from the middle of its town.
+    ///
+    /// **Deliberately not zero.** A square is walked outward from the
+    /// settlement's centre until it finds unclaimed ground
+    /// (`build::streets::square_site`), and on a real kingdom of seven towns it
+    /// landed between 94 and 1,622 units out. A fixture that put the square at
+    /// the town's centre would let the old bug -- a well standing at
+    /// `town.center` -- pass every test here.
+    const SQUARE_OFFSET: f32 = 140.0;
 
     /// A disk with a square rim, big enough that the inset band is clear of the
     /// towns standing inside it.
@@ -564,7 +671,16 @@ mod tests {
                 },
                 towns: Vec::new(),
                 wards: Vec::new(),
-                plazas: Vec::new(),
+                // Every town gets a square, offset from its centre the way a
+                // real one is -- see `SQUARE_OFFSET`.
+                plazas: towns
+                    .iter()
+                    .map(|(name, center)| MapPlaza {
+                        town: (*name).to_owned(),
+                        rect: a_square(*center),
+                        color: [0, 0, 0, 255],
+                    })
+                    .collect(),
                 roads: Vec::new(),
                 buildings: Vec::new(),
                 scenery: Vec::new(),
@@ -583,6 +699,16 @@ mod tests {
                 })
                 .collect(),
             features: Vec::new(),
+        }
+    }
+
+    /// Where a town's square stands, given the town's centre.
+    fn a_square(town_center: [f32; 2]) -> MapRect {
+        MapRect {
+            x: town_center[0] + SQUARE_OFFSET,
+            y: town_center[1] + SQUARE_OFFSET,
+            width: SQUARE,
+            depth: SQUARE,
         }
     }
 
@@ -743,6 +869,159 @@ mod tests {
                 .iter()
                 .any(|link| link.kind == LinkKind::ToWell),
             "a channel to a well that is not up would point at bare ground"
+        );
+    }
+
+    /// **A wellhead stands on its town's square.**
+    ///
+    /// The fault the King saw and the reason for this work. `well_stand` put
+    /// the drum at `town.center`, which is not the square at all: a square is
+    /// walked outward until it finds ground no ward has claimed, so on the
+    /// live map of seven towns it stood between 94 and 1,622 units from the
+    /// centre -- against a square 52 across. Every well was therefore standing
+    /// among the houses, hundreds of units from the paving.
+    ///
+    /// Checked as a *footprint inside a rectangle* rather than as a distance
+    /// between two centres, because the whole drum has to be on the stone: a
+    /// centre on the paving with the rim overhanging the kerb is the same
+    /// picture, only smaller.
+    #[test]
+    fn a_wellhead_stands_on_the_paving_of_its_towns_square() {
+        let map = a_map(&[("shopfront", [0.0, 0.0])]);
+        let square = map.square_of("shopfront").expect("the town has a square");
+        let picture = resolve(
+            &map,
+            &KingdomNetwork {
+                wells: vec![a_well("shopfront", &["db"])],
+                agents: Vec::new(),
+            },
+        );
+
+        let well = &picture.wells[0];
+        let ground = footprint(well.center, well.radius);
+        assert!(
+            square.contains([ground.x, ground.y])
+                && square.contains([ground.max_x(), ground.max_y()]),
+            "a well covering {ground:?} hangs off a square of {square:?} -- it is \
+             standing in the settlement rather than on its paving"
+        );
+    }
+
+    /// The well keeps clear of the name painted across the square.
+    ///
+    /// `wayfinding::square_label` paints the town's name across the middle of
+    /// the paving at a cap height of up to 0.26 of the square. A well dropped
+    /// on the centre would sit on the lettering, and the map would have two
+    /// things fighting for one patch of stone.
+    ///
+    /// The *rear* edge is where it goes, which is the half this checks: the
+    /// camera looks down `(-1, -1, -1)`, so low `y` projects up-screen and a
+    /// well at the back stands above the name rather than in front of it.
+    #[test]
+    fn a_wellhead_keeps_off_the_name_painted_on_the_square() {
+        let map = a_map(&[("shopfront", [0.0, 0.0])]);
+        let square = map.square_of("shopfront").expect("the town has a square");
+        let picture = resolve(
+            &map,
+            &KingdomNetwork {
+                wells: vec![a_well("shopfront", &["db"])],
+                agents: Vec::new(),
+            },
+        );
+
+        // The band the lettering occupies: centred, and as tall as the largest
+        // cap `square_label` will paint. `SQUARE_LABEL_SHARE` is the number
+        // both sides work from, so this is the placement's own rule read back
+        // rather than a second guess at it.
+        let band = square.depth * SQUARE_LABEL_SHARE;
+        let name_starts = square.y + (square.depth - band) * 0.5;
+
+        let well = &picture.wells[0];
+        let ground = footprint(well.center, well.radius);
+        assert!(
+            ground.max_y() <= name_starts,
+            "a well reaching {:.1} runs into the lettering, which starts at \
+             {name_starts:.1}",
+            ground.max_y()
+        );
+    }
+
+    /// Three services in one city stay on the paving and out of each other.
+    ///
+    /// The case that decides whether the radius has to give: a 52-unit square
+    /// cannot hold three wells at the full 8.5, so `well_stand` shrinks them to
+    /// a share of the span. The alternative -- a fixed size and a row that
+    /// spills onto the grass -- is the fault this whole change is fixing,
+    /// reintroduced by the back door.
+    #[test]
+    fn several_wells_share_one_square_without_leaving_it() {
+        let map = a_map(&[("shopfront", [0.0, 0.0])]);
+        let square = map.square_of("shopfront").expect("the town has a square");
+        let picture = resolve(
+            &map,
+            &KingdomNetwork {
+                wells: vec![a_well("shopfront", &["db", "cache", "queue"])],
+                agents: Vec::new(),
+            },
+        );
+
+        assert_eq!(picture.wells.len(), 3);
+        for well in &picture.wells {
+            let ground = footprint(well.center, well.radius);
+            assert!(
+                square.contains([ground.x, ground.y])
+                    && square.contains([ground.max_x(), ground.max_y()]),
+                "`{}` covers {ground:?}, off a square of {square:?}",
+                well.name
+            );
+        }
+
+        for (index, a) in picture.wells.iter().enumerate() {
+            for b in picture.wells.iter().skip(index + 1) {
+                let dx = a.center[0] - b.center[0];
+                let dy = a.center[1] - b.center[1];
+                let apart = (dx * dx + dy * dy).sqrt();
+                assert!(
+                    apart >= a.radius + b.radius,
+                    "`{}` and `{}` stand {apart:.1} apart but need {:.1}",
+                    a.name,
+                    b.name,
+                    a.radius + b.radius
+                );
+            }
+        }
+    }
+
+    /// A town the map gave no square gets no wellhead.
+    ///
+    /// The rule this module has documented since it was written and did not
+    /// keep: a settlement with no wards and no loose files is given no square
+    /// (`build::streets::settlement_roads` returns `None`), and there is
+    /// nowhere for a well to stand that would not be somebody's front garden.
+    /// The old code never looked at the squares at all, so it drew one anyway.
+    #[test]
+    fn a_town_with_no_square_gets_no_wellhead() {
+        let mut map = a_map(&[("shopfront", [0.0, 0.0])]);
+        map.world.plazas.clear();
+
+        let picture = resolve(
+            &map,
+            &KingdomNetwork {
+                wells: vec![a_well("shopfront", &["db"])],
+                agents: vec![an_agent("p1", "shopfront", NetworkMode::Shared, &["db"])],
+            },
+        );
+
+        assert!(
+            picture.wells.is_empty(),
+            "no square, no wellhead -- the rule this module states"
+        );
+        assert!(
+            !picture
+                .links
+                .iter()
+                .any(|link| link.kind == LinkKind::ToWell),
+            "and no channel to a well that is not drawn"
         );
     }
 

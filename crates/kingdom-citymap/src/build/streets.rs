@@ -383,6 +383,10 @@ pub fn settlement_roads(
         .collect();
     let square = square_site(settlement_center, square_size, &occupied, lane);
     let plaza = MapPlaza {
+        // Tagged by whoever built it: `settlement_roads` lays out one
+        // settlement and is not told whose. `build::scene` knows the name at
+        // both call sites and fills it in.
+        town: String::new(),
         rect: MapRect {
             x: square.x,
             y: square.y,
@@ -2472,6 +2476,63 @@ mod tests {
             .map(|segment| root(&mut group, segment))
             .collect::<std::collections::BTreeSet<usize>>()
             .len()
+    }
+
+    /// A well must be legible against the paving it stands on.
+    ///
+    /// The sibling of `map::network`'s test that a well is not the colour of an
+    /// *agent*, and the question that one cannot ask: it compares the well
+    /// against the banners, which say nothing about the stone under it. A well
+    /// now stands on a town's square rather than on open ground, so a colour
+    /// close to [`PLAZA`] would be camouflage -- the mark would be exactly
+    /// where the King was told to look and invisible when he looked.
+    ///
+    /// This test lives here because this module owns the paving colour and
+    /// `map::network` owns the well's, and nothing else can see both. The bar
+    /// is the palette's own: the two nearest agent banners, 126.1 apart on the
+    /// weighted-RGB ruler `palette`'s hue search used. Stone `#9a9187` sits
+    /// 141.3 from the paving.
+    #[test]
+    fn a_well_is_legible_against_the_paving_it_stands_on() {
+        /// The same weighted-RGB approximation `kingdom_core::palette` and
+        /// `map::network` measure with. Not a colour-science claim -- one
+        /// consistent ruler, which is what a regression test needs.
+        fn distance(a: [u8; 3], b: [u8; 3]) -> f64 {
+            let mean = (a[0] as f64 + b[0] as f64) / 2.0 / 255.0;
+            let (dr, dg, db) = (
+                a[0] as f64 - b[0] as f64,
+                a[1] as f64 - b[1] as f64,
+                a[2] as f64 - b[2] as f64,
+            );
+            ((2.0 + mean) * dr * dr + 4.0 * dg * dg + (3.0 - mean) * db * db).sqrt()
+        }
+
+        let banners = kingdom_core::palette::BANNERS;
+        let closest_pair = banners
+            .iter()
+            .enumerate()
+            .flat_map(|(index, a)| {
+                banners[index + 1..]
+                    .iter()
+                    .map(move |b| distance(a.growth_rgb, b.growth_rgb))
+            })
+            .fold(f64::MAX, f64::min);
+
+        let paving = [PLAZA[0], PLAZA[1], PLAZA[2]];
+        for (part, color) in [
+            ("stonework", crate::map::network::WELL_COLOR),
+            ("water", crate::map::network::WELL_WATER_COLOR),
+            ("timber", crate::map::network::WELL_TIMBER_COLOR),
+        ] {
+            let apart = distance([color[0], color[1], color[2]], paving);
+            assert!(
+                apart >= closest_pair,
+                "a well's {part} is {apart:.1} from the paving it stands on, \
+                 closer than the two nearest agents are to each other \
+                 ({closest_pair:.1}) -- the well would be camouflage on its own \
+                 square"
+            );
+        }
     }
 
     fn distance_to_segment(point: (f32, f32), start: [f32; 2], end: [f32; 2]) -> f32 {

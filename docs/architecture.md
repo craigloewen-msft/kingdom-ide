@@ -76,8 +76,10 @@ crates/
                     slirp to forward each to a host port. ssr only, and Linux
                     only at runtime -- availability() refuses elsewhere
     terminal.rs     The King's own shell, over a socket, in a plan's workspace
-                    and its network — the door into an isolated plan (route +
-                    URL on both targets via `terminal_route`; the pty ssr only)
+                    and its network — the door into an isolated plan. One shell
+                    per plan, outliving any socket: panels attach and detach,
+                    and closing one only detaches (route + URL on both targets
+                    via `terminal_route`; the pty ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
@@ -452,6 +454,19 @@ The other half of the second question. Network isolation stops agents colliding
 over a port; this is for the resources that are meant to be **shared**. A
 project's database is not a collision to prevent — it is a common good every
 agent must reach, started once and stopped once.
+
+`services::reconcile` is the only thing that starts or stops one, and it is
+driven by the **live agent population** rather than by any single plan: it is
+handed every live, non-subagent plan and raises what they can reach (once per
+scope) and stops what nobody is left drawing from. `api::reconcile_wells` calls
+it at the four moments that population changes — a kingdom opened, a plan
+opened, a plan finished, a kingdom closed — which is what makes a server restart
+invisible to five agents that had a database. Taking a turn and opening a shell
+call `services::require`, which waits for a raise in flight and refuses if a
+promised well is missing; it raises no container, but it *is* where
+`netns::open_wells` stands the relay onto an isolated plan's own loopback — that
+relay belongs to one plan's namespace, so it cannot be done by the per-scope
+pass that runs when a kingdom opens.
 
 Shown to the King as **the well**; called a shared service in code
 (`ServiceSpec`, `RunningService`, `SharedService`). There is a screen for seeing

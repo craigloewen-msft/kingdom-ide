@@ -191,25 +191,28 @@ pub(crate) async fn converse(
         crate::netns::watch(&plan_id);
     }
 
-    // The shared services this city declares. Raised here for the same reason
-    // the namespace is -- once per turn, before the first round -- and after
-    // it, because a service's address is handed to the plan's tools and those
-    // tools must already be in the namespace that can reach it.
+    // The shared services this city declares. **Not raised here** -- a well is
+    // raised when a kingdom or a plan opens, which is the only place that knows
+    // the whole live population. This waits for any such pass already in flight
+    // and then checks, so a turn beginning a second after boot does not refuse
+    // over a database that was seconds from being up.
     //
-    // A failure is fatal to the turn on the same reasoning: a plan whose
-    // project declares a database, running with no database and no word said,
-    // fails later in a way that reads as a bug in its own code.
+    // A failure is still fatal to the turn, on the reasoning that has not
+    // changed: a plan whose project declares a database, running with no
+    // database and no word said, fails later in a way that reads as a bug in
+    // its own code.
     //
-    // A city with no manifest costs nothing here -- `ensure` reads one absent
-    // file and returns.
-    // The *project's* root, as distinct from this plan's workspace. Read once
-    // here because two things below need it and they must agree: the services
-    // are raised for the city, and the prompt is told where they are. A
-    // `CityBrief`'s own path is the plan's worktree, so it cannot answer this.
+    // A city with no manifest costs nothing here -- `require` reads one absent
+    // file and returns before waiting on anything.
+    //
+    // The *project's* root is read once, into a binding, because two things
+    // below need it and they must agree: the services are required for the
+    // city, and the prompt is told where they are. A `CityBrief`'s own path is
+    // the plan's worktree, so it cannot answer this.
     let city_root = city_root_of(&plan_id);
 
     if let Some(city_root) = &city_root {
-        if let Err(e) = crate::services::ensure(&plan_id, city_root).await {
+        if let Err(e) = crate::services::require(&plan_id, city_root).await {
             // `Refused` for the same reason as above: a missing Docker daemon
             // is a settled answer, and retrying the turn would only be told it
             // again.
