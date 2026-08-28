@@ -110,6 +110,9 @@ pub struct Namespace {
     /// only "sealed" would have to go and ask somebody else where to stand.
     /// See [`Namespace::enter_prefix`].
     workdir: Option<PathBuf>,
+    /// Where a sealed plan's root was assembled, so it can be swept away with
+    /// the plan. `None` for a plan that has no filesystem of its own.
+    scratch: Option<PathBuf>,
 }
 
 /// Every namespace this server is holding.
@@ -411,6 +414,7 @@ mod tests {
             cdp_port: None,
             wells: HashMap::new(),
             workdir: None,
+            scratch: None,
         };
         let prefix = namespace.enter_prefix();
 

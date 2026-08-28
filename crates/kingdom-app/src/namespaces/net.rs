@@ -632,6 +632,7 @@ impl Namespace {
             // Recorded only for a sealed plan, and it is what every later
             // `enter_prefix` reads to know this namespace has a filesystem of
             // its own -- and where to stand in it.
+            scratch: mount_plan.as_ref().map(|plan| plan.root.clone()),
             workdir: mount_plan.map(|plan| plan.workdir),
         })
     }
@@ -657,6 +658,21 @@ impl Namespace {
         kill(self.holder);
         let _ = std::fs::remove_file(&self.api_socket);
         let _ = std::fs::remove_file(pid_path(&self.api_socket));
+
+        // The scratch root a sealed plan was assembled in. Empty by now: every
+        // mount in it belonged to the holder's own mount namespace and went
+        // with the holder, and `pivot_root` left the directories themselves
+        // behind. Found by looking after a live test rather than by reasoning
+        // -- four skeleton roots were sitting under `$XDG_RUNTIME_DIR`, one per
+        // plan ever sealed, for the life of the machine.
+        //
+        // `remove_dir_all` is safe here precisely because it is empty: if a
+        // mount somehow survived, the directory would be non-empty and busy,
+        // and the removal fails rather than reaching through a live bind into
+        // the King's own files. Best effort, like everything else here.
+        if let Some(root) = &self.scratch {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }
 
@@ -1028,6 +1044,7 @@ pub(crate) fn pretend_wells_are_open(plan: &PlanId, targets: &[&str]) {
         cdp_port: None,
         wells: HashMap::new(),
         workdir: None,
+        scratch: None,
     });
     for (index, target) in targets.iter().enumerate() {
         let port = target
@@ -1232,6 +1249,7 @@ mod tests {
                 cdp_port: Some(9222),
                 wells: HashMap::new(),
                 workdir: None,
+                scratch: None,
             },
         );
         *namespaces().lock().unwrap() = registry;

@@ -706,6 +706,11 @@ mod tests {
 mod live {
     use kingdom_core::{Isolation, PlanId};
 
+    /// Where a plan's root is assembled, as the module itself decides it.
+    fn plan_scratch_root(plan: &str) -> std::path::PathBuf {
+        super::MountPlan::built_in(plan, std::path::Path::new("/tmp/unused"), None).root
+    }
+
     /// Builds a sealed namespace and asks it questions from the outside.
     ///
     /// One test rather than six, deliberately: a namespace costs two processes
@@ -775,6 +780,16 @@ mod live {
         );
 
         crate::namespaces::shutdown(&plan);
+
+        // Shutting a sealed plan down takes its scratch root with it. Left
+        // behind, one skeleton root accumulates under `$XDG_RUNTIME_DIR` per
+        // plan ever sealed -- found by looking after a live run rather than by
+        // reasoning about it.
+        assert!(
+            !plan_scratch_root("plan-sealed-live-test").exists(),
+            "a settled plan must leave nothing of its root behind"
+        );
+
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("kingdom-sealed-live"));
     }
 
