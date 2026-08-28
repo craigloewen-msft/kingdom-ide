@@ -223,35 +223,6 @@ pub struct ServiceSpec {
     /// assumed either way.
     #[serde(default)]
     pub volume: Option<String>,
-    /// `env`, kept only so that a manifest still carrying it can be **refused**
-    /// by name rather than silently ignored.
-    ///
-    /// Serde drops an unknown key without a word. Kingdom used to hand these
-    /// variables to every command a plan ran, so a project that still declares
-    /// them would otherwise believe its agents get `$DATABASE_URL` while
-    /// nothing sets it. Never read for its contents -- only for whether it is
-    /// there. See [`ManifestError::Retired`].
-    ///
-    /// Skipped when serialising, so nothing Kingdom writes can ever contain it.
-    #[serde(default, rename = "env", skip_serializing)]
-    pub retired_env: Option<RetiredField>,
-}
-
-/// A field that is accepted by the parser only so it can be rejected by name.
-///
-/// Deserialises from **any** TOML value and keeps none of it: the only question
-/// asked of it is whether the key was present. A marker rather than a
-/// `toml::Value` for two reasons -- a `Value` holds floats and so is not `Eq`,
-/// which every type in this module is, and keeping the contents would invite
-/// somebody to start honouring them again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
-pub struct RetiredField;
-
-impl<'de> Deserialize<'de> for RetiredField {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(RetiredField)
-    }
 }
 
 /// What Kingdom knows about a well-known image without being told.
@@ -277,8 +248,7 @@ pub struct KnownImage {
     pub data_dir: &'static str,
     /// What it needs in its **own** environment in order to start at all.
     ///
-    /// Container-facing, and the opposite direction of travel from the `env`
-    /// this change deletes: nothing here is ever shown to an agent. `postgres`
+    /// Container-facing: nothing here is ever shown to an agent. `postgres`
     /// exits 1 without a password -- measured, not assumed -- so a King who
     /// typed `postgres:16` and nothing else would otherwise get a resource that
     /// never comes up.
@@ -498,17 +468,6 @@ pub enum ManifestError {
     /// namespace that half-built and a `pivot_root` failure naming nothing the
     /// King ever wrote.
     BadMount { path: String, why: &'static str },
-    /// A field Kingdom used to honour and no longer does.
-    ///
-    /// Refused rather than ignored, which is the whole reason this variant
-    /// exists. Serde drops an unknown key without a word, so a manifest still
-    /// carrying `env` would leave a project believing it sets `$DATABASE_URL`
-    /// for its agents while nothing does -- a silence that reads as a broken
-    /// database an hour later. One line to delete, said once, is cheaper.
-    Retired {
-        service: String,
-        field: &'static str,
-    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -538,13 +497,6 @@ impl std::fmt::Display for ManifestError {
             ManifestError::BadMount { path, why } => {
                 write!(f, "`{path}` cannot be shared with a plan: {why}")
             }
-            ManifestError::Retired { service, field } => write!(
-                f,
-                "service `{service}` sets `{field}`, which Kingdom no longer \
-                 uses -- an agent reaches a shared resource at `localhost` on \
-                 the service's own port, with nothing to configure. Remove \
-                 that line."
-            ),
         }
     }
 }
@@ -641,15 +593,6 @@ impl ServiceManifest {
                 return Err(ManifestError::DuplicateName(service.name.clone()));
             }
             seen.push(&service.name);
-
-            // Retired fields, refused by name. See [`ManifestError::Retired`]:
-            // ignoring one would be a silent promise nothing keeps.
-            if service.retired_env.is_some() {
-                return Err(ManifestError::Retired {
-                    service: service.name.clone(),
-                    field: "env",
-                });
-            }
         }
 
         for mount in &self.mounts {
@@ -896,41 +839,6 @@ mod tests {
         assert!(parse("# nothing here\n").expect("comments only").is_empty());
     }
 
-    /// A manifest still setting `env` is refused **by name**, not ignored.
-    ///
-    /// The failure this prevents is the quiet one. Serde drops an unknown key
-    /// without a word, so a project that still declares `MONGODB_URI` would go
-    /// on believing its agents are handed it while nothing sets it -- and the
-    /// agent's connection failure would read as a bug in the project's own
-    /// code. The message names the service and says what to do instead.
-    #[test]
-    fn a_manifest_still_setting_env_is_refused_by_name() {
-        let error = parse(
-            r#"
-            [[service]]
-            name = "db"
-            image = "mongo:7"
-            port = 27017
-            env = { MONGODB_URI = "mongodb://{host}:{port}/shop" }
-            "#,
-        )
-        .expect_err("a retired field must be refused rather than dropped");
-
-        assert_eq!(
-            error,
-            ManifestError::Retired {
-                service: "db".to_string(),
-                field: "env",
-            }
-        );
-        // The King has to find the line and delete it, so both the service and
-        // the field are named, and the replacement is stated.
-        let said = error.to_string();
-        assert!(said.contains("db"), "{said}");
-        assert!(said.contains("env"), "{said}");
-        assert!(said.contains("localhost"), "{said}");
-    }
-
     /// What Kingdom knows about an image so the King does not have to.
     ///
     /// The port is what the form fills in, the data directory is where a volume
@@ -1077,7 +985,6 @@ mod tests {
             image: "mongo:7".to_string(),
             port: 27017,
             volume: Some("shopfront-db".to_string()),
-            retired_env: None,
         };
 
         let manifest = parse(&spec.render()).expect("what the form renders must parse");
@@ -1088,9 +995,7 @@ mod tests {
     /// minimum still parses.
     ///
     /// The `volume` line is omitted rather than written empty: `volume = ""`
-    /// would be a *different* declaration from "no volume". `env` must never
-    /// appear at all -- a rendered block that carried one would be refused by
-    /// the parser it was written for.
+    /// would be a *different* declaration from "no volume".
     #[test]
     fn a_bare_service_renders_without_empty_lines() {
         let spec = ServiceSpec {
@@ -1098,11 +1003,9 @@ mod tests {
             image: "redis:7".to_string(),
             port: 6379,
             volume: None,
-            retired_env: None,
         };
 
         let rendered = spec.render();
-        assert!(!rendered.contains("env"), "rendered: {rendered:?}");
         assert!(!rendered.contains("volume"), "rendered: {rendered:?}");
         assert_eq!(
             parse(&rendered).expect("a bare service parses").services,
@@ -1123,7 +1026,6 @@ mod tests {
             image: "postgres:16".to_string(),
             port: 5432,
             volume: Some("a\"b\\c".to_string()),
-            retired_env: None,
         };
 
         let manifest = parse(&spec.render()).expect("an escaped value still parses");
@@ -1145,7 +1047,6 @@ mod tests {
             image: "redis:7".to_string(),
             port: 6379,
             volume: None,
-            retired_env: None,
         };
 
         let combined = format!("{existing}\n{}", addition.render());
@@ -1183,7 +1084,6 @@ mod tests {
                 image: "mongo:7".to_string(),
                 port: 1,
                 volume: None,
-                retired_env: None,
             };
             assert!(parse(&spec.render()).is_ok(), "`{name}` should be usable");
         }
@@ -1201,7 +1101,6 @@ mod tests {
             image: "mongo:7".to_string(),
             port: 27017,
             volume: None,
-            retired_env: None,
         };
         let resource = |scope, city_name: Option<&str>| SharedResource {
             spec: spec.clone(),
