@@ -894,15 +894,34 @@ fn ward_crossings(places: &[Place], edges: &[(usize, usize)], traffic: &[usize])
     crossing
 }
 
-/// The gap between two axis-aligned boxes, zero if they touch or overlap.
-fn box_gap(left: Rect, right: Rect) -> f32 {
-    let horizontal = (right.x - (left.x + left.width))
-        .max(left.x - (right.x + right.width))
+/// How far a road along `run` may be widened before it touches `house`.
+///
+/// **Not the distance between the two boxes, and the difference is the whole
+/// point.** A road is widened along both axes at once — half its width is
+/// added to every side of its run — so what a house sitting diagonally off the
+/// end of a segment permits is the *larger* of the two gaps, not the diagonal
+/// between them. Straight-line distance, which is what this returned, is up to
+/// √2 too generous, and the road spends the difference growing sideways into
+/// the house.
+///
+/// It survived for as long as it did because it only bites when a holding
+/// stands within half a road's width of a route in *both* axes at once. Lots
+/// used to be sized by `√bytes`, which left even the smallest of them fat
+/// enough that nothing came that close; sizing them by content puts genuinely
+/// small houses beside the avenues, and the old sum stopped being safe.
+fn widening_room(run: Rect, house: Rect) -> f32 {
+    let horizontal = (house.x - (run.x + run.width))
+        .max(run.x - (house.x + house.width))
         .max(0.0);
-    let vertical = (right.y - (left.y + left.height))
-        .max(left.y - (right.y + right.height))
+    let vertical = (house.y - (run.y + run.height))
+        .max(run.y - (house.y + house.height))
         .max(0.0);
-    horizontal.hypot(vertical)
+    // Zero when they overlap in both axes -- a house standing *on* the route.
+    // Taking the larger of the two would otherwise read an overlap as room.
+    if horizontal <= 0.0 && vertical <= 0.0 {
+        return 0.0;
+    }
+    horizontal.max(vertical)
 }
 
 /// How much room a route has before it reaches the nearest holding.
@@ -923,7 +942,7 @@ fn route_clearance(points: &[[f32; 2]], houses: &[Rect]) -> f32 {
             height: (start[1] - end[1]).abs(),
         };
         for house in houses {
-            clearance = clearance.min(box_gap(run, *house));
+            clearance = clearance.min(widening_room(run, *house));
         }
     }
     clearance
@@ -1124,7 +1143,16 @@ impl Ground {
         let mut points = Vec::new();
         loop {
             let cell = state / 4;
-            points.push(self.center_of(cell % self.columns, cell / self.columns));
+            // The two end cells are allowed to be blocked ground -- a gate
+            // lies on its own ward's boundary -- but the *centre* of a blocked
+            // cell is then inside that ground, and steering the route through
+            // it dog-legs the road into the very holding it is arriving at.
+            // `from` and `to` are inserted below and say exactly where the road
+            // meets each end, so the cell centre adds nothing but the detour.
+            let end = cell == start || cell == goal;
+            if !(end && self.blocked[cell]) {
+                points.push(self.center_of(cell % self.columns, cell / self.columns));
+            }
             if cell == start {
                 break;
             }
@@ -1268,7 +1296,13 @@ impl Ground {
         let mut points = Vec::new();
         loop {
             let cell = state / 4;
-            points.push(self.center_of(cell % self.columns, cell / self.columns));
+            // Reconstructed exactly as `Ground::route` does, so what this
+            // settles stays a question about the *search* rather than about
+            // the walk back from it.
+            let end = cell == start || cell == goal;
+            if !(end && self.blocked[cell]) {
+                points.push(self.center_of(cell % self.columns, cell / self.columns));
+            }
             if cell == start {
                 break;
             }
@@ -2172,6 +2206,60 @@ mod tests {
         root
     }
 
+    /// A road may only widen by what it has room for in the *worse* axis.
+    ///
+    /// The unit case behind `a_road_is_never_laid_across_a_holding`. A house
+    /// sitting diagonally off the end of a run is 8.9 units clear one way and
+    /// 13.7 the other; the straight line between them is 16.3, and a road
+    /// granted 16.3 of half-width puts 2.1 units of paving through the wall.
+    /// Only the larger of the two gaps is ever safe, because a road widens on
+    /// both axes at once.
+    #[test]
+    fn a_road_widens_by_the_worse_gap_and_not_the_diagonal() {
+        let run = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        };
+        let house = Rect {
+            x: 108.9,
+            y: 13.7,
+            width: 20.0,
+            height: 10.0,
+        };
+
+        let room = widening_room(run, house);
+        assert!(
+            (room - 13.7).abs() < 1e-3,
+            "a road was offered {room:.2} of room where only 13.70 is safe"
+        );
+        assert!(
+            room < 8.9_f32.hypot(13.7),
+            "the diagonal is still what is being handed out"
+        );
+    }
+
+    /// A house standing on the route has no room at all, rather than the
+    /// overlap being handed back as though it were clearance.
+    #[test]
+    fn a_house_on_the_route_offers_no_room() {
+        let run = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        };
+        let across = Rect {
+            x: 40.0,
+            y: -5.0,
+            width: 10.0,
+            height: 10.0,
+        };
+
+        assert_eq!(widening_room(run, across), 0.0);
+    }
+
     /// Everything under a single top-level folder, which is the commonest
     /// shape a repository takes and the one that used to strand the square.
     ///
@@ -2491,7 +2579,14 @@ mod tests {
     /// `map::network` owns the well's, and nothing else can see both. The bar
     /// is the palette's own: the two nearest agent banners, 126.1 apart on the
     /// weighted-RGB ruler `palette`'s hue search used. Stone `#9a9187` sits
-    /// 141.3 from the paving.
+    /// 141.3 from the paving, and the water 162.5.
+    ///
+    /// Each part is measured against **what it is actually drawn on**, which is
+    /// not the same surface for all three. The stonework and the shaft of water
+    /// meet the paving; the timber of the canopy is painted over the stonework
+    /// and never touches the square, so holding it to the paving asked it to
+    /// contrast with something it is nowhere adjacent to. It is a dark brown on
+    /// pale stone -- 209.0 apart -- and reads at a glance.
     #[test]
     fn a_well_is_legible_against_the_paving_it_stands_on() {
         /// The same weighted-RGB approximation `kingdom_core::palette` and
@@ -2519,18 +2614,36 @@ mod tests {
             .fold(f64::MAX, f64::min);
 
         let paving = [PLAZA[0], PLAZA[1], PLAZA[2]];
-        for (part, color) in [
-            ("stonework", crate::map::network::WELL_COLOR),
-            ("water", crate::map::network::WELL_WATER_COLOR),
-            ("timber", crate::map::network::WELL_TIMBER_COLOR),
+        let stone = {
+            let c = crate::map::network::WELL_COLOR;
+            [c[0], c[1], c[2]]
+        };
+        for (part, color, ground, ground_name) in [
+            (
+                "stonework",
+                crate::map::network::WELL_COLOR,
+                paving,
+                "the paving it stands on",
+            ),
+            (
+                "water",
+                crate::map::network::WELL_WATER_COLOR,
+                paving,
+                "the paving it stands on",
+            ),
+            (
+                "timber",
+                crate::map::network::WELL_TIMBER_COLOR,
+                stone,
+                "the stonework it is built on",
+            ),
         ] {
-            let apart = distance([color[0], color[1], color[2]], paving);
+            let apart = distance([color[0], color[1], color[2]], ground);
             assert!(
                 apart >= closest_pair,
-                "a well's {part} is {apart:.1} from the paving it stands on, \
-                 closer than the two nearest agents are to each other \
-                 ({closest_pair:.1}) -- the well would be camouflage on its own \
-                 square"
+                "a well's {part} is {apart:.1} from {ground_name}, closer than \
+                 the two nearest agents are to each other ({closest_pair:.1}) \
+                 -- the well would be camouflage on its own square"
             );
         }
     }

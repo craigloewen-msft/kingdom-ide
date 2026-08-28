@@ -1128,8 +1128,8 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
                 //
                 // So the map does not show host wells yet. Its rim already
                 // draws the King's machine as a ring, which is where one
-                // belongs; putting it there is its own piece of work, noted in
-                // docs/roadmap.md rather than approximated here.
+                // belongs; putting it there is its own piece of work rather
+                // than something to approximate here.
                 .filter(|service| service.scope == kingdom_core::ServiceScope::City)
                 .map(|service| kingdom_core::SharedService {
                     address: service.address(),
@@ -2716,6 +2716,59 @@ pub async fn declare_mount(
     for spec in &folders {
         written = Some(
             crate::services::declare_mount(&scope, spec)
+                .map_err(|e| ServerFnError::new(e.to_string()))?,
+        );
+    }
+
+    written
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| ServerFnError::new("That offer named no folders."))
+}
+
+/// Stops sharing folders with sealed plans, by removing them from a manifest.
+///
+/// The inverse of [`declare_mount`], and it takes the same shape for the same
+/// reason: an offer is a *set* of folders, and clearing half of a toolchain
+/// would leave a `cargo` with no `~/.rustup` -- worse than either sharing it or
+/// not.
+///
+/// Withdrawing a folder that is not there succeeds, doing nothing. A checkbox
+/// pressed twice, or one drawn from an answer that has since gone stale, should
+/// not earn the King an error about a state he already wanted.
+#[server(WithdrawMount, "/api")]
+pub async fn withdraw_mount(
+    scope: String,
+    city: Option<String>,
+    folders: Vec<kingdom_core::services::MountSpec>,
+) -> Result<String, ServerFnError> {
+    use kingdom_core::services::ServiceScope;
+
+    let Some(kind) = ServiceScope::from_wire(&scope) else {
+        return Err(ServerFnError::new(format!(
+            "`{scope}` is not a level a shared folder can be kept at."
+        )));
+    };
+
+    let scope = match kind {
+        ServiceScope::Host => crate::services::Scope::Host,
+        ServiceScope::City => {
+            let kingdom = lock()?;
+            let Some(city) = city
+                .map(kingdom_core::CityId::new)
+                .and_then(|id| kingdom.city(&id).cloned())
+            else {
+                return Err(ServerFnError::new(
+                    "A folder that belongs to one project needs a project.",
+                ));
+            };
+            crate::services::Scope::City(std::path::Path::new(&kingdom.root).join(&city.path))
+        }
+    };
+
+    let mut written = None;
+    for spec in &folders {
+        written = Some(
+            crate::services::withdraw_mount(&scope, spec)
                 .map_err(|e| ServerFnError::new(e.to_string()))?,
         );
     }

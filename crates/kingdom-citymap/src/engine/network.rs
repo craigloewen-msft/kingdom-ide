@@ -221,7 +221,11 @@ pub fn apply_network(
             ChildOf(root),
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(cache.get(&mut materials, agent.color, Surface::Unlit)),
-            Transform::default(),
+            // Lifted onto the paving it stands on. The marker is built at
+            // ground level and an agent now stands on a town's square, which is
+            // itself raised to `layer::PLAZA` -- left at zero the disc would
+            // z-fight with the stone under it, exactly as a wellhead would.
+            Transform::from_xyz(0.0, layer::PLAZA, 0.0),
             VisibleFrom(super::bridge::LodLevel::Architecture),
             Pickable::IGNORE,
         ));

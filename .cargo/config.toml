@@ -1,0 +1,13 @@
+# One command for the whole native suite.
+#
+# `kingdom-app/ssr` forwards to `kingdom-citymap/ssr`, and workspace feature
+# unification then gives every crate in the workspace the features its tests
+# need -- so this single invocation compiles and runs `kingdom-core`,
+# `kingdom-app`, `kingdom-citymap` and `kingdom-browser` together. Running the
+# crates separately, as this repository used to ask for, silently skipped the
+# `ssr`-gated half of `kingdom-citymap`.
+#
+# `--no-default-features` is what stops `kingdom-app`'s default `ssr` and the
+# wasm-only `hydrate` from being resolved together.
+[alias]
+test-all = "test --workspace --no-default-features --features kingdom-app/ssr"

@@ -999,7 +999,6 @@ mod host_scope {
                     image: "redis:7-alpine".to_string(),
                     volume: None,
                 }),
-                retired_env: None,
             },
         )
         .expect("the King's own manifest must be writable");

@@ -176,15 +176,6 @@ pub struct ServiceSpec {
     pub port: u16,
     /// What kind of thing this is, and what that kind needs.
     pub kind: ResourceKind,
-    /// `env`, kept only so that a manifest still carrying it can be **refused**
-    /// by name rather than silently ignored.
-    ///
-    /// Serde drops an unknown key without a word. Kingdom used to hand these
-    /// variables to every command a plan ran, so a project that still declares
-    /// them would otherwise believe its agents get `$DATABASE_URL` while
-    /// nothing sets it. Never read for its contents -- only for whether it is
-    /// there. See [`ManifestError::Retired`].
-    pub retired_env: Option<RetiredField>,
 }
 
 /// What kind of thing a shared resource is, with what that kind needs.
@@ -284,23 +275,6 @@ impl ResourceKind {
     }
 }
 
-/// A field that is accepted by the parser only so it can be rejected by name.
-///
-/// Deserialises from **any** TOML value and keeps none of it: the only question
-/// asked of it is whether the key was present. A marker rather than a
-/// `toml::Value` for two reasons -- a `Value` holds floats and so is not `Eq`,
-/// which every type in this module is, and keeping the contents would invite
-/// somebody to start honouring them again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
-pub struct RetiredField;
-
-impl<'de> Deserialize<'de> for RetiredField {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(RetiredField)
-    }
-}
-
 /// One `[[service]]` block exactly as it appears in the file.
 ///
 /// # Why parsing goes through a flat shape and then converts
@@ -336,8 +310,6 @@ struct RawService {
     /// Docker's, and read only for that kind.
     #[serde(default)]
     volume: Option<String>,
-    #[serde(default, rename = "env")]
-    retired_env: Option<RetiredField>,
 }
 
 impl RawService {
@@ -365,11 +337,10 @@ impl RawService {
                 image: self.image.clone().unwrap_or_default(),
                 volume: self.volume.clone(),
             }),
-            // Refused by name rather than ignored, for the reason
-            // `ManifestError::Retired` exists: serde would drop an unknown
-            // `type` without a word, and a project that asked for a kind
-            // Kingdom does not have would get a container instead and never be
-            // told.
+            // Refused by name rather than ignored: serde would drop an
+            // unknown `type` without a word, and a project that asked for a
+            // kind Kingdom does not have would get a container instead and
+            // never be told.
             other => {
                 return Err(ManifestError::UnknownKind {
                     service: named(),
@@ -382,7 +353,6 @@ impl RawService {
             name: self.name,
             port: self.port,
             kind,
-            retired_env: self.retired_env,
         })
     }
 }
@@ -413,23 +383,12 @@ pub enum ManifestError {
     /// namespace that half-built and a `pivot_root` failure naming nothing the
     /// King ever wrote.
     BadMount { path: String, why: &'static str },
-    /// A field Kingdom used to honour and no longer does.
-    ///
-    /// Refused rather than ignored, which is the whole reason this variant
-    /// exists. Serde drops an unknown key without a word, so a manifest still
-    /// carrying `env` would leave a project believing it sets `$DATABASE_URL`
-    /// for its agents while nothing does -- a silence that reads as a broken
-    /// database an hour later. One line to delete, said once, is cheaper.
-    Retired {
-        service: String,
-        field: &'static str,
-    },
     /// A `type` naming a kind of resource Kingdom does not have.
     ///
-    /// Refused rather than defaulted to `docker`, for the reason [`Self::Retired`]
-    /// exists: a project that asked for something Kingdom cannot run and was
-    /// quietly given a container instead would find out from the container's
-    /// behaviour, which reads as a bug in the project.
+    /// Refused rather than defaulted to `docker`: a project that asked for
+    /// something Kingdom cannot run and was quietly given a container instead
+    /// would find out from the container's behaviour, an hour later, and read
+    /// it as a bug in its own code.
     UnknownKind { service: String, kind: String },
 }
 
@@ -460,13 +419,6 @@ impl std::fmt::Display for ManifestError {
             ManifestError::BadMount { path, why } => {
                 write!(f, "`{path}` cannot be shared with a plan: {why}")
             }
-            ManifestError::Retired { service, field } => write!(
-                f,
-                "service `{service}` sets `{field}`, which Kingdom no longer \
-                 uses -- an agent reaches a shared resource at `localhost` on \
-                 the service's own port, with nothing to configure. Remove \
-                 that line."
-            ),
             // Names the kinds there are, because the King's next move is to
             // pick one of them -- and today the list is one word long.
             ManifestError::UnknownKind { service, kind } => write!(
@@ -581,15 +533,6 @@ impl ServiceManifest {
                 return Err(ManifestError::DuplicateName(service.name.clone()));
             }
             seen.push(&service.name);
-
-            // Retired fields, refused by name. See [`ManifestError::Retired`]:
-            // ignoring one would be a silent promise nothing keeps.
-            if service.retired_env.is_some() {
-                return Err(ManifestError::Retired {
-                    service: service.name.clone(),
-                    field: "env",
-                });
-            }
         }
 
         for mount in &self.mounts {
@@ -843,7 +786,6 @@ mod tests {
                 image: image.to_string(),
                 volume: volume.map(str::to_string),
             }),
-            retired_env: None,
         }
     }
 
@@ -1010,41 +952,6 @@ mod tests {
         assert!(parse("# nothing here\n").expect("comments only").is_empty());
     }
 
-    /// A manifest still setting `env` is refused **by name**, not ignored.
-    ///
-    /// The failure this prevents is the quiet one. Serde drops an unknown key
-    /// without a word, so a project that still declares `MONGODB_URI` would go
-    /// on believing its agents are handed it while nothing sets it -- and the
-    /// agent's connection failure would read as a bug in the project's own
-    /// code. The message names the service and says what to do instead.
-    #[test]
-    fn a_manifest_still_setting_env_is_refused_by_name() {
-        let error = parse(
-            r#"
-            [[service]]
-            name = "db"
-            image = "mongo:7"
-            port = 27017
-            env = { MONGODB_URI = "mongodb://{host}:{port}/shop" }
-            "#,
-        )
-        .expect_err("a retired field must be refused rather than dropped");
-
-        assert_eq!(
-            error,
-            ManifestError::Retired {
-                service: "db".to_string(),
-                field: "env",
-            }
-        );
-        // The King has to find the line and delete it, so both the service and
-        // the field are named, and the replacement is stated.
-        let said = error.to_string();
-        assert!(said.contains("db"), "{said}");
-        assert!(said.contains("env"), "{said}");
-        assert!(said.contains("localhost"), "{said}");
-    }
-
     /// Two services with one name would mean two containers with one name, and
     /// the second `docker run` failing for a reason that reads as unrelated.
     #[test]
@@ -1148,15 +1055,12 @@ mod tests {
     /// minimum still parses.
     ///
     /// The `volume` line is omitted rather than written empty: `volume = ""`
-    /// would be a *different* declaration from "no volume". `env` must never
-    /// appear at all -- a rendered block that carried one would be refused by
-    /// the parser it was written for.
+    /// would be a *different* declaration from "no volume".
     #[test]
     fn a_bare_service_renders_without_empty_lines() {
         let spec = container("cache", "redis:7", 6379, None);
 
         let rendered = spec.render();
-        assert!(!rendered.contains("env"), "rendered: {rendered:?}");
         assert!(!rendered.contains("volume"), "rendered: {rendered:?}");
         assert_eq!(
             parse(&rendered).expect("a bare service parses").services,

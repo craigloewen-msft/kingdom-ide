@@ -37,7 +37,7 @@
 
 use crate::api::{declare_shared_resource, shared_resources};
 use crate::app::KingdomState;
-use kingdom_core::{ServiceScope, ServiceSpec, ServiceState, SharedResource};
+use kingdom_core::{ResourceInventory, ServiceScope, ServiceSpec, ServiceState, SharedResource};
 use leptos::prelude::*;
 
 /// How often the ledger re-reads itself while the screen is open, in
@@ -67,6 +67,28 @@ pub fn SharedResourcesView() -> impl IntoView {
     // And bumped on a timer too, so a well that comes up *after* this screen
     // was opened appears on it. See `watch_wells`.
     watch_wells(revision);
+
+    // The last answer we actually believe, republished *only* when it differs.
+    //
+    // Why this exists: the poll changes the resource's source every five
+    // seconds, which returns it to pending -- so rendering straight from
+    // `ledger` inside a `Suspense` tore the whole ledger out of the DOM and put
+    // the loading sentence back in its place on every tick, then rebuilt every
+    // row from scratch. The screen flashed, and a click could land on nothing.
+    //
+    // `ResourceInventory` is `PartialEq`, so a tick that finds nothing new
+    // touches no signal and therefore no DOM. The screen is still while the
+    // machine is still, and repaints once when a well really starts or stops.
+    // Holding the last good answer also means a failed tick keeps showing the
+    // previous truth rather than flipping to a fallback.
+    let latest = RwSignal::new(Option::<ResourceInventory>::None);
+    Effect::new(move |_| {
+        if let Some(fresh) = ledger.get().flatten() {
+            if latest.with(|held| held.as_ref() != Some(&fresh)) {
+                latest.set(Some(fresh));
+            }
+        }
+    });
 
     // Which row's detail is open, as `scope name` -- unique across the whole
     // ledger, where a bare name is not: two projects may both declare `db`.
@@ -107,9 +129,23 @@ pub fn SharedResourcesView() -> impl IntoView {
                 />
             </Show>
 
-            <Suspense fallback=|| view! { <p class="wells-loading">"Reading the manifests\u{2026}"</p> }>
+            // First load only: once there is an inventory it is never taken
+            // away again, so nothing here blanks on a refetch.
+            //
+            // The view reads `latest` and never the resource, so it never
+            // subscribes to the resource's pending state and therefore never
+            // returns to the fallback. The one cost is that the server, where
+            // no effect runs, renders the loading line and the browser fills it
+            // in on arrival -- paid once, on entry, instead of every five
+            // seconds for as long as the screen is open.
+            <Show
+                when=move || latest.with(|held| held.is_some())
+                fallback=|| view! {
+                    <p class="wells-loading">"Reading the manifests\u{2026}"</p>
+                }
+            >
                 {move || {
-                    let inventory = ledger.get().flatten().unwrap_or_default();
+                    let inventory = latest.get().unwrap_or_default();
 
                     // One banner for the whole screen rather than a confusing
                     // "not started" on every row. See `services::docker_trouble`.
@@ -271,7 +307,7 @@ pub fn SharedResourcesView() -> impl IntoView {
                         </div>
                     }
                 }}
-            </Suspense>
+            </Show>
         </div>
     }
 }
@@ -564,7 +600,6 @@ fn NewResource(
                 (!v.is_empty()).then_some(v)
             },
         }),
-        retired_env: None,
     });
 
     // Said while he types rather than after the write, and asked of
@@ -819,7 +854,6 @@ mod tests {
                 image: "mongo:7".to_string(),
                 volume: None,
             }),
-            retired_env: None,
         };
         let row = |city: Option<&str>, scope| SharedResource {
             spec: spec.clone(),

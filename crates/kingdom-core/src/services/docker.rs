@@ -103,8 +103,7 @@ pub struct KnownImage {
     pub data_dir: &'static str,
     /// What it needs in its **own** environment in order to start at all.
     ///
-    /// Container-facing, and the opposite direction of travel from the `env`
-    /// this change deletes: nothing here is ever shown to an agent. `postgres`
+    /// Container-facing: nothing here is ever shown to an agent. `postgres`
     /// exits 1 without a password -- measured, not assumed -- so a King who
     /// typed `postgres:16` and nothing else would otherwise get a resource that
     /// never comes up.
