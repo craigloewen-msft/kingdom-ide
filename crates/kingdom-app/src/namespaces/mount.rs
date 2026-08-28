@@ -142,12 +142,22 @@ pub struct Bind {
     /// Read-only is the default everywhere it can be: a toolchain a plan can
     /// rewrite is a toolchain every *later* plan inherits the damage from.
     pub writable: bool,
+    /// Whether the source must be created before it is mounted.
+    ///
+    /// For the scratch directories Kingdom owns under `/tmp` and talks through
+    /// from outside. The browser profile is the case that forced this: it is
+    /// created lazily when a browser first launches, which is *after* the
+    /// holder has built its root -- so at bind time it usually does not exist
+    /// yet, and `mount --rbind` of a missing source fails under `set -e` and
+    /// takes the whole holder with it.
+    pub ensure_source: bool,
 }
 
 impl Bind {
     pub fn read_only(source: impl Into<PathBuf>) -> Self {
         Self {
             source: source.into(),
+            ensure_source: false,
             writable: false,
         }
     }
@@ -155,6 +165,17 @@ impl Bind {
     pub fn writable(source: impl Into<PathBuf>) -> Self {
         Self {
             source: source.into(),
+            ensure_source: false,
+            writable: true,
+        }
+    }
+
+    /// A directory Kingdom owns on the host and both sides must see, created
+    /// if it is not there yet. See [`ensure_source`](Bind::ensure_source).
+    pub fn scratch(source: impl Into<PathBuf>) -> Self {
+        Self {
+            source: source.into(),
+            ensure_source: true,
             writable: true,
         }
     }
@@ -227,9 +248,10 @@ impl MountPlan {
 
         // The directories Kingdom itself keeps under /tmp and talks to from
         // *outside* the namespace. See the module docs: a tmux socket the host
-        // cannot see is a tmux that does not work.
-        for shared in host_shared_temp_dirs() {
-            binds.push(Bind::writable(shared));
+        // cannot see is a tmux that does not work, and a browser profile the
+        // namespace cannot see is a browser that will not launch.
+        for shared in host_shared_temp_dirs(plan) {
+            binds.push(Bind::scratch(shared));
         }
 
         // What the King allows in, expanded against his own home. A folder
@@ -248,6 +270,10 @@ impl MountPlan {
             binds.push(Bind {
                 source,
                 writable: mount.mode.is_writable(),
+                // The King's own folder, which must be there already: creating
+                // it would turn a typo in a manifest into an empty directory
+                // silently mounted over nothing.
+                ensure_source: false,
             });
         }
 
@@ -280,13 +306,26 @@ fn home_directory() -> String {
 /// plans colliding over a scratch file. These are the deliberate exceptions:
 /// Kingdom creates them on the host and then talks through them to a process
 /// inside, so a private copy would silently break the thing they exist for.
-fn host_shared_temp_dirs() -> Vec<PathBuf> {
+///
+/// Keyed by the plan, because the browser profile is -- unlike the tmux socket
+/// directory, which is one per uid.
+fn host_shared_temp_dirs(plan: &str) -> Vec<PathBuf> {
     let temp = std::env::temp_dir();
     let uid = unsafe { libc::getuid() };
     vec![
         // `tools::tmux::socket_for` -- the daemon is inside, every one of the
         // 14 `cli()` calls is outside.
         temp.join(format!("kingdom-tmux-{uid}")),
+        // The browser profile, which has exactly the same shape of problem and
+        // was missed. `cpu_shim` writes `chrome-confined.sh` in here from the
+        // host; the `nsenter` wrapper then executes it *inside*. With a private
+        // /tmp the two are different filesystems, and every `browser_*` tool
+        // fails with `nsenter: failed to execute ...: No such file or
+        // directory`. Measured from inside a sealed plan.
+        //
+        // Asked of `kingdom-browser` rather than rebuilt here: the path is a
+        // hash of the plan id, and two copies of a hash drift apart.
+        kingdom_browser::profile_dir(plan),
     ]
 }
 
@@ -336,6 +375,14 @@ pub fn holder_script(plan: &MountPlan) -> String {
             plan.root.to_string_lossy(),
             bind.source.to_string_lossy()
         ));
+        // A scratch directory Kingdom owns may legitimately not exist yet --
+        // the browser profile is made when a browser first launches, long
+        // after this script has run. Created here so the bind has something to
+        // work with, because `mount --rbind` of a missing source is fatal
+        // under `set -e`.
+        if bind.ensure_source {
+            out.push_str(&format!("mkdir -p {source}\n"));
+        }
         out.push_str(&format!("mkdir -p {target}\n"));
         // `--rbind` rather than `--bind`: /usr and /dev have submounts, and a
         // plain bind silently leaves them out.
@@ -361,17 +408,6 @@ pub fn holder_script(plan: &MountPlan) -> String {
         ));
     }
 
-    // DNS. slirp4netns answers on 10.0.2.3; without this the namespace has a
-    // dangling /etc/resolv.conf and no name resolution at all.
-    out.push_str(&format!(
-        "printf 'nameserver %s\\n' {} > {}/run/resolv.conf\n",
-        SLIRP_RESOLVER, root
-    ));
-    out.push_str(&format!(
-        "mount --bind {}/run/resolv.conf {}/etc/resolv.conf || true\n",
-        root, root
-    ));
-
     // Into the new root, and drop the old one so there is no way back to it.
     out.push_str(&format!("cd {root}\n"));
     out.push_str("pivot_root . oldroot\n");
@@ -381,6 +417,45 @@ pub fn holder_script(plan: &MountPlan) -> String {
     out.push_str("mount -t proc proc /proc\n");
     out.push_str("umount -l /oldroot\n");
     out.push_str("rmdir /oldroot || true\n");
+
+    // DNS, and it has to be **here** -- after the pivot, not before it.
+    //
+    // slirp4netns answers on 10.0.2.3, but naming the resolver was never the
+    // hard part. `/etc/resolv.conf` is an *absolute* symlink on both the hosts
+    // that matter: `/mnt/wsl/resolv.conf` under WSL, `/run/systemd/resolve/...`
+    // under systemd-resolved. Done before `pivot_root`, the kernel resolves
+    // that symlink against the **host's** root, so a bind aimed at
+    // `{root}/etc/resolv.conf` lands outside the new root entirely -- and the
+    // old `|| true` then swallowed the failure, leaving a plan that routes
+    // packets perfectly and cannot resolve a single name. Measured from inside
+    // a sealed plan: `curl https://1.1.1.1` returned 301 while `getent hosts
+    // crates.io` returned nothing at all.
+    //
+    // After the pivot the symlink means what it says inside the new root, so
+    // there are two cases and both are handled rather than guessed at:
+    // materialise what a symlink points at, and bind over a real file.
+    out.push_str(&format!(
+        "printf 'nameserver %s\\n' {SLIRP_RESOLVER} > /run/resolv.conf\n"
+    ));
+    out.push_str("if [ -L /etc/resolv.conf ]; then\n");
+    // `-m` rather than `-f`: the target does not exist yet, which is the whole
+    // problem, and `-f` fails on a dangling link while `-m` reports where it
+    // would be.
+    out.push_str("    target=$(readlink -m /etc/resolv.conf)\n");
+    out.push_str("    mkdir -p \"$(dirname \"$target\")\"\n");
+    out.push_str("    cp /run/resolv.conf \"$target\"\n");
+    out.push_str("else\n");
+    out.push_str("    mount --bind /run/resolv.conf /etc/resolv.conf\n");
+    out.push_str("fi\n");
+    // Checked rather than assumed. A plan that cannot resolve a hostname can
+    // reach neither crates.io nor git, and finding that out ten minutes into a
+    // build is far worse than being told here. `-s` follows the symlink, so
+    // this is exactly the question "can something read a resolver from it".
+    out.push_str("if [ ! -s /etc/resolv.conf ]; then\n");
+    out.push_str("    echo 'kingdom: no resolver could be installed in the namespace' >&2\n");
+    out.push_str("    exit 1\n");
+    out.push_str("fi\n");
+
     // `lo` up, for the same reason the network-only holder does it: a plan's
     // own server on 127.0.0.1 is the entire point, and a fresh namespace's
     // loopback is DOWN.
@@ -641,19 +716,73 @@ mod tests {
         );
     }
 
-    /// DNS is given a resolver that exists.
+    /// DNS is given a resolver that exists, *after* the pivot.
     ///
-    /// `/etc/resolv.conf` is a symlink to somewhere unmounted on both WSL and
-    /// systemd-resolved machines, so binding `/etc` alone leaves a dangling
-    /// link -- and a plan that cannot resolve `crates.io` looks like a plan
+    /// `/etc/resolv.conf` is an absolute symlink to somewhere unmounted on both
+    /// WSL and systemd-resolved machines. Done before `pivot_root` the kernel
+    /// resolves it against the host's root, so the bind lands outside the new
+    /// root and the plan gets no resolver at all -- which looks like a plan
     /// with no network rather than one with no resolver.
+    ///
+    /// The ordering is the whole fix, so the ordering is what is asserted. The
+    /// previous version of this test only looked for the two strings anywhere
+    /// in the script, and passed throughout the entire time DNS was broken.
     #[test]
     fn the_namespace_is_given_a_resolver() {
         let plan = MountPlan::built_in("plan-4", Path::new("/tmp/work"), None);
         let script = holder_script(&plan);
 
         assert!(script.contains("10.0.2.3"), "slirp's own resolver");
-        assert!(script.contains("/etc/resolv.conf"));
+
+        let pivot = script.find("pivot_root").expect("the script must pivot");
+        let resolver = script
+            .find("/etc/resolv.conf")
+            .expect("the script must install a resolver");
+        assert!(
+            resolver > pivot,
+            "the resolver must be installed after pivot_root, or an absolute \
+             symlink resolves against the host's root and the bind misses"
+        );
+    }
+
+    /// A dangling resolv.conf symlink is materialised rather than bound over.
+    ///
+    /// The WSL case, and the one that was actually broken: `/etc` is bound
+    /// read-only, so there is no binding *over* the link -- what works is
+    /// creating the file it already points at.
+    #[test]
+    fn a_symlinked_resolv_conf_is_followed() {
+        let plan = MountPlan::built_in("plan-4a", Path::new("/tmp/work"), None);
+        let script = holder_script(&plan);
+
+        assert!(
+            script.contains("readlink -m /etc/resolv.conf"),
+            "a symlink's target has to be found before it can be filled in"
+        );
+        assert!(
+            script.contains("[ -L /etc/resolv.conf ]"),
+            "the two cases -- symlink and real file -- must be told apart"
+        );
+    }
+
+    /// A namespace with no resolver refuses to start.
+    ///
+    /// The old script ended its bind with `|| true`, so the failure that left
+    /// this plan unable to reach crates.io was silent. "You have no DNS" is
+    /// worth refusing over.
+    #[test]
+    fn a_missing_resolver_is_not_swallowed() {
+        let plan = MountPlan::built_in("plan-4b", Path::new("/tmp/work"), None);
+        let script = holder_script(&plan);
+
+        assert!(
+            !script.contains("/etc/resolv.conf || true"),
+            "the resolver's failure must not be swallowed"
+        );
+        assert!(
+            script.contains("[ ! -s /etc/resolv.conf ]") && script.contains("exit 1"),
+            "a namespace with no resolver has to say so"
+        );
     }
 
     /// The tmux socket directory crosses the boundary.
@@ -673,6 +802,50 @@ mod tests {
                 .any(|b| b.source == expected && b.writable),
             "a tmux socket the host cannot see is a tmux that does not work"
         );
+    }
+
+    /// The browser profile crosses the boundary too.
+    ///
+    /// The same shape of problem as the tmux socket, and missed when the sealed
+    /// path was built. `cpu_shim` writes `chrome-confined.sh` into the profile
+    /// from the host and the `nsenter` wrapper executes it inside; with a
+    /// private `/tmp` those are two different filesystems and every `browser_*`
+    /// tool dies with `nsenter: failed to execute ...: No such file or
+    /// directory`. Measured from inside a sealed plan.
+    #[test]
+    fn the_browser_profile_is_shared_with_the_host() {
+        let plan = MountPlan::built_in("plan-5a", Path::new("/tmp/work"), None);
+        let expected = kingdom_browser::profile_dir("plan-5a");
+
+        assert!(
+            plan.binds
+                .iter()
+                .any(|b| b.source == expected && b.writable),
+            "a browser profile the namespace cannot see is a browser that will \
+             not launch"
+        );
+    }
+
+    /// The profile is created before it is mounted.
+    ///
+    /// It is made lazily when a browser first launches, which is *after* the
+    /// holder builds its root -- so without this the bind source is missing and
+    /// `set -e` takes the whole holder down, which surfaces much later and much
+    /// more confusingly as a namespace that will not open.
+    #[test]
+    fn a_scratch_directory_is_created_before_it_is_bound() {
+        let plan = MountPlan::built_in("plan-5b", Path::new("/tmp/work"), None);
+        let profile = kingdom_browser::profile_dir("plan-5b");
+        let script = holder_script(&plan);
+
+        let quoted = format!("'{}'", profile.display());
+        let made = script
+            .find(&format!("mkdir -p {quoted}\n"))
+            .expect("the profile directory must be created");
+        let bound = script
+            .find(&format!("mount --rbind {quoted}"))
+            .expect("the profile directory must be bound");
+        assert!(made < bound, "the source must exist before it is bound");
     }
 
     /// A path with a space or a quote in it does not break the script.
@@ -770,7 +943,29 @@ mod live {
 
         // Its own process table: pid 1 is the holder's sleep, not the King's
         // init, and the count is a handful rather than several hundred.
-        assert_eq!(run("cat /proc/1/comm"), "sleep");
+        //
+        // This doubles as the readiness assertion. `ensure` must not return
+        // until the holder has finished building its root, and pid 1 reading
+        // `sleep` rather than `sh` is precisely that: the script `exec`s sleep
+        // as its last act. This failed intermittently -- about one run in four
+        // under parallel load -- when `ensure` returned as soon as slirp's
+        // socket appeared, leaving callers to enter a namespace that was still
+        // mounting.
+        assert_eq!(
+            run("cat /proc/1/comm"),
+            "sleep",
+            "ensure() returned before the holder finished building its root"
+        );
+
+        // A resolver that something can actually read. The bind used to be
+        // attempted before `pivot_root`, where `/etc/resolv.conf`'s absolute
+        // symlink resolves against the *host's* root -- so it silently did
+        // nothing and the plan had no DNS at all.
+        assert_eq!(
+            run("test -s /etc/resolv.conf && echo yes"),
+            "yes",
+            "a sealed plan must be able to resolve a name"
+        );
         let processes: usize = run("ls -d /proc/[0-9]* | wc -l")
             .parse()
             .unwrap_or(usize::MAX);
