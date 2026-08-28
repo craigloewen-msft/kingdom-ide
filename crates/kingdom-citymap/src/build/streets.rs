@@ -2579,7 +2579,14 @@ mod tests {
     /// `map::network` owns the well's, and nothing else can see both. The bar
     /// is the palette's own: the two nearest agent banners, 126.1 apart on the
     /// weighted-RGB ruler `palette`'s hue search used. Stone `#9a9187` sits
-    /// 141.3 from the paving.
+    /// 141.3 from the paving, and the water 162.5.
+    ///
+    /// Each part is measured against **what it is actually drawn on**, which is
+    /// not the same surface for all three. The stonework and the shaft of water
+    /// meet the paving; the timber of the canopy is painted over the stonework
+    /// and never touches the square, so holding it to the paving asked it to
+    /// contrast with something it is nowhere adjacent to. It is a dark brown on
+    /// pale stone -- 209.0 apart -- and reads at a glance.
     #[test]
     fn a_well_is_legible_against_the_paving_it_stands_on() {
         /// The same weighted-RGB approximation `kingdom_core::palette` and
@@ -2607,18 +2614,36 @@ mod tests {
             .fold(f64::MAX, f64::min);
 
         let paving = [PLAZA[0], PLAZA[1], PLAZA[2]];
-        for (part, color) in [
-            ("stonework", crate::map::network::WELL_COLOR),
-            ("water", crate::map::network::WELL_WATER_COLOR),
-            ("timber", crate::map::network::WELL_TIMBER_COLOR),
+        let stone = {
+            let c = crate::map::network::WELL_COLOR;
+            [c[0], c[1], c[2]]
+        };
+        for (part, color, ground, ground_name) in [
+            (
+                "stonework",
+                crate::map::network::WELL_COLOR,
+                paving,
+                "the paving it stands on",
+            ),
+            (
+                "water",
+                crate::map::network::WELL_WATER_COLOR,
+                paving,
+                "the paving it stands on",
+            ),
+            (
+                "timber",
+                crate::map::network::WELL_TIMBER_COLOR,
+                stone,
+                "the stonework it is built on",
+            ),
         ] {
-            let apart = distance([color[0], color[1], color[2]], paving);
+            let apart = distance([color[0], color[1], color[2]], ground);
             assert!(
                 apart >= closest_pair,
-                "a well's {part} is {apart:.1} from the paving it stands on, \
-                 closer than the two nearest agents are to each other \
-                 ({closest_pair:.1}) -- the well would be camouflage on its own \
-                 square"
+                "a well's {part} is {apart:.1} from {ground_name}, closer than \
+                 the two nearest agents are to each other ({closest_pair:.1}) \
+                 -- the well would be camouflage on its own square"
             );
         }
     }

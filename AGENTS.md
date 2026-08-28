@@ -175,18 +175,30 @@ time.
 
 ### The full check before you hand work back
 
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --features ssr --no-default-features
-cargo test -p kingdom-core
-cargo test -p kingdom-app --features ssr --no-default-features
-cargo test -p kingdom-citymap
-cargo test -p kingdom-browser
+Test it all with one command:
 
-# `kingdom-app` compiles TWICE and the suites above only build the native half.
-# The wasm half is proven by building it, and nothing else does:
-cargo check -p kingdom-app --target wasm32-unknown-unknown \
-    --features hydrate --no-default-features
+```bash
+cargo test-all
+```
+
+That alias (`.cargo/config.toml`) is
+`cargo test --workspace --no-default-features --features kingdom-app/ssr`, and
+it is the *whole* native suite in one invocation: `kingdom-app/ssr` forwards to
+`kingdom-citymap/ssr`, and workspace feature unification then gives every crate
+the features its tests need. Do not go back to running the crates one at a
+time — that is what this repository used to ask for, and because
+`kingdom-citymap`'s `build/` module is `ssr`-gated, a bare
+`cargo test -p kingdom-citymap` compiled 254 of its 343 tests and silently
+skipped the rest.
+
+Three more lines round out the check, and each is the plain cargo command it
+looks like:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets --no-default-features --features kingdom-app/ssr
+# `kingdom-app` compiles TWICE and no test builds the browser target:
+cargo check -p kingdom-app --target wasm32-unknown-unknown --features hydrate --no-default-features
 ```
 
 No test launches a browser by default, so the suite needs nothing installed. The
