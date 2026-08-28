@@ -32,6 +32,29 @@ async fn main() {
             kingdom_app::namespaces::net::run_relay(bind, target).await;
             return;
         }
+
+        // The second hidden mode, and the same idea: this binary re-entered
+        // inside a sealed plan -- this time through its *mount* namespace -- to
+        // run one tool call on the plan's own filesystem and print the outcome
+        // as JSON. It is what makes `read_file` and friends confined by the
+        // kernel rather than by a path comparison; see `tools::inside`.
+        //
+        // Short-circuited here for the same reason as `--relay`: none of Axum,
+        // Leptos or the model catalogue belongs in a process whose whole job is
+        // to read one file.
+        if args.get(1).map(String::as_str) == Some(kingdom_app::tools::inside::FLAG) {
+            let Some(request) = args.get(2) else {
+                eprintln!(
+                    "{} needs one JSON request",
+                    kingdom_app::tools::inside::FLAG
+                );
+                std::process::exit(2);
+            };
+            // Printed, not logged: stdout *is* the return channel, and the
+            // server reads exactly this line back.
+            println!("{}", kingdom_app::tools::inside::serve_one(request).await);
+            return;
+        }
     }
 
     // Model configuration lives in an optional, gitignored `.kingdom.env` so a

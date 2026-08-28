@@ -182,6 +182,16 @@ pub(crate) async fn converse(
     // workspace, and a sealed plan without it has no working `git` at all.
     let city_root = city_root_of(&plan_id);
 
+    // How far this plan is walled off, read once for the same reason as
+    // `city_root` and with a stronger guarantee behind it: `Plan::isolation` is
+    // settled when the plan opens and never changes -- the processes it started
+    // are already in those namespaces, and moving them is not a thing a
+    // namespace lets you do. Three things below must agree about it: the
+    // namespaces raised for the plan, the sandbox every tool is handed, and the
+    // prompt that tells the model what it can see. They used to read it
+    // separately, which is how the sandbox came to be the one that did not.
+    let isolation = snapshot(&plan_id).map(|p| p.isolation).unwrap_or_default();
+
     // The namespaces this plan was opened with, if any. Raised here -- once per
     // turn, before the first round -- rather than inside each tool, because all
     // of them must land in the *same* namespace and a per-call check would be
@@ -192,10 +202,7 @@ pub(crate) async fn converse(
     // filesystem, after he asked for isolation -- the one outcome this feature
     // must never produce silently: he would find out when it took the port he
     // was using, or deleted something he needed.
-    if let Some(isolation) = snapshot(&plan_id)
-        .map(|p| p.isolation)
-        .filter(|i| i.is_isolated())
-    {
+    if isolation.is_isolated() {
         let request = crate::namespaces::Request {
             isolation,
             workspace: std::path::PathBuf::from(&workspace.path),
@@ -313,6 +320,11 @@ pub(crate) async fn converse(
         let shop = Sandbox::new(workspace.clone())
             .for_plan(plan_id.clone())
             .under(permissions)
+            // A sealed plan's workspace has a second name inside its namespace,
+            // and the model is told to use it. Without this every tool that
+            // takes a path refuses the plan's own files. See
+            // `Sandbox::resolve`.
+            .walled_off_by(isolation)
             // The fourth narrowing, and the one that could not live in
             // `for_model`: `browser_take_screenshot` is offered to every model
             // -- the King sees the picture either way -- but only a sighted one
@@ -337,7 +349,7 @@ pub(crate) async fn converse(
                 // What the model is allowed to see. A sealed plan is told so,
                 // because a filesystem that is not the user's reads as a broken
                 // machine to a model that was not told.
-                snapshot(&plan_id).map(|p| p.isolation).unwrap_or_default(),
+                isolation,
                 // And which folders, so a sealed plan knows where its fence is
                 // rather than only that it has one. The plan's own choice, so
                 // what it is told matches what it was actually given.
