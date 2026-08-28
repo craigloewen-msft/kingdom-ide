@@ -261,39 +261,64 @@
   color: t.$gold;
 }
 
-// Why the isolated option is refused, and what to install to have it. Sits
-// under the disabled row it explains.
-.network-unavailable {
+// --- The two tabs, in the isolation panel ------------------------------------
+
+// Network and Files. They sit in the panel's head rather than above the list,
+// because each one carries the answer it holds -- so both settings are readable
+// with only one of them open.
+.iso-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  margin-right: 10px;
+}
+
+.iso-tab {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover { background: t.$deep; color: t.$ink; }
+  &.chosen { background: t.$deep; border-color: t.$gold-dim; color: t.$ink; }
+}
+
+// What that tab currently says, inside the tab itself.
+.iso-tab-value {
+  font-family: t.$font-mono;
+  font-size: 10px;
+  color: t.$gold-dim;
+}
+
+// One box for whichever tab is showing.
+//
+// A **fixed** ceiling with the scroll inside it: this panel sits directly above
+// the composer, so a body that grew as an answer landed -- or simply as the
+// King switched tabs -- moved the Start button out from under his cursor.
+.iso-body {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+// Why the row above it cannot be pressed: a plan with a file system of its own
+// always has its own network too. Said, rather than left to be discovered by
+// clicking something that does nothing.
+.iso-note {
   margin: 6px 10px 2px;
   color: t.$ink-faint;
   font-size: 11px;
   line-height: 1.5;
 }
 
-// What a network of its own buys on *this* project: the shared resources the
-// plan would reach at `localhost`. Sits under the option it is an argument for.
-.network-wells {
-  margin: 8px 10px 0;
-  padding: 0 0 0 14px;
-  list-style: none;
-
-  li {
-    position: relative;
-    color: t.$gold-dim;
-    font-family: t.$font-mono;
-    font-size: 11px;
-    line-height: 1.7;
-
-    &::before {
-      content: "\2022";
-      position: absolute;
-      left: -10px;
-      color: t.$ink-faint;
-    }
-  }
-}
-
-.network-wells-note {
+// Why the isolated option is refused, and what to install to have it. Sits
+// under the disabled row it explains.
+.network-unavailable {
   margin: 6px 10px 2px;
   color: t.$ink-faint;
   font-size: 11px;

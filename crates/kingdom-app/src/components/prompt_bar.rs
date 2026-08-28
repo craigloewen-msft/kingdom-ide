@@ -8,7 +8,7 @@
 
 use crate::api::{
     begin_plan, declare_mount, list_branches, list_models, mount_offers, network_available,
-    shared_resources,
+    withdraw_mount,
 };
 use crate::app::KingdomState;
 use kingdom_core::{
@@ -607,37 +607,149 @@ fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
     }
 }
 
+/// Which half of the isolation panel is showing.
+///
+/// Two tabs rather than one list, because the King asks two questions --
+/// "whose ports?" and "whose files?" -- and the old panel made him read three
+/// paragraphs to find the row that answered both at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IsolationTab {
+    Network,
+    Files,
+}
+
 /// How far the next plan is walled off from the machine and from its siblings.
 ///
-/// Shaped like [`WorkspacePicker`] deliberately: they are the same kind of
-/// decision and should not present two different chromes for it.
+/// # Two tabs over a three-rung ladder
 ///
-/// # Why three rows and not a tab strip
+/// [`kingdom_core::Isolation`] is unchanged and still a ladder: `Shared`,
+/// `Isolated`, `Sealed`. This panel is a **projection** of it onto the two axes
+/// the King actually thinks in, and the mapping is total in one direction:
 ///
-/// This was a strip with one tab in it, built so a second kind of isolation
-/// would be a new tab. The second kind arrived and turned out not to be a
-/// second *setting* at all: a filesystem of a plan's own is a further rung on
-/// the ladder that a network of its own is the first rung of, and a plan that
-/// asked for its own mounts while sharing the King's network is a combination
-/// nothing wants. So the panel asks its one question once, and the three
-/// answers are exclusive -- exactly what [`kingdom_core::Isolation`] says.
+/// | Network | Files | is |
+/// |---|---|---|
+/// | host | host | `Shared` |
+/// | its own | host | `Isolated` |
+/// | its own | its own | `Sealed` |
+///
+/// The fourth square -- a filesystem of its own on the King's network -- does
+/// not exist, and not by omission: the holder is one `unshare`, and `--mount`
+/// is added to `--net` rather than used instead of it (see `namespaces::net`).
+/// So while the Files tab says "its own", the Network tab shows "Host network"
+/// **disabled, with the reason** -- the same shape this panel already uses for
+/// a missing `slirp4netns`, and for the same argument: an option quietly
+/// missing teaches nothing.
+///
+/// # What this panel deliberately no longer does
+///
+/// It does not list the project's shared services. That footnote cost a
+/// `shared_resources()` call on every open, which reaches `docker version` with
+/// no timeout -- so on a machine where Docker is slow or absent the panel sat
+/// waiting on a daemon in order to print a sentence about databases, and then
+/// changed height when it landed. `/resources` is where a well is reviewed.
 #[component]
 fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let (tab, set_tab) = signal(IsolationTab::Network);
+
+    // Asked once per opening rather than cached: slirp4netns can be installed
+    // while Kingdom runs, and the King who just installed it on our own advice
+    // should not have to restart the server to be believed.
+    let available = Resource::new(|| (), |_| network_available());
+
+    // `None` -> still asking; `Some(None)` -> available; `Some(Some(why))` -> not.
+    let refusal = Signal::derive(move || match available.get() {
+        Some(Ok(reason)) => reason,
+        // A server that could not answer is treated as "cannot", with its own
+        // words: the alternative is offering an option that then fails.
+        Some(Err(e)) => Some(e.to_string()),
+        None => None,
+    });
+    // Disabled while the answer is still coming, so a fast click cannot choose
+    // an option that turns out to be unavailable.
+    let barred = Signal::derive(move || match available.get() {
+        Some(_) => refusal.get().is_some(),
+        None => true,
+    });
+
+    // Fetched when the **panel** opens rather than when the Files tab is
+    // reached, so switching tabs shows a list instead of a spinner. It is a
+    // `PATH` walk and a handful of `stat`s -- cheap enough to pay for eagerly,
+    // unlike the Docker call this panel used to make.
+    let city = Memo::new(move |_| state.selected.get());
+    let revision = RwSignal::new(0_u32);
+    let offers = Resource::new(
+        move || (city.get(), revision.get()),
+        |(city, _)| async move { mount_offers(city.map(|c| c.to_string())).await.ok() },
+    );
+
+    let is_network = Memo::new(move |_| tab.get() == IsolationTab::Network);
+
     view! {
         <div class="workspace-picker isolation-picker">
             <div class="picker-head">
                 <span class="picker-title">"Isolation"</span>
+
+                <div class="iso-tabs">
+                    // Each tab carries the answer it currently holds, so both
+                    // settings can be read without opening both.
+                    <button
+                        class="iso-tab"
+                        class:chosen={move || is_network.get()}
+                        on:click=move |_| set_tab.set(IsolationTab::Network)
+                    >
+                        "Network"
+                        <span class="iso-tab-value">
+                            {move || match state.isolation.get().is_isolated() {
+                                true => "its own",
+                                false => "host",
+                            }}
+                        </span>
+                    </button>
+                    <button
+                        class="iso-tab"
+                        class:chosen={move || !is_network.get()}
+                        on:click=move |_| set_tab.set(IsolationTab::Files)
+                    >
+                        "Files"
+                        <span class="iso-tab-value">
+                            {move || match state.isolation.get().is_sealed() {
+                                true => "its own",
+                                false => "host",
+                            }}
+                        </span>
+                    </button>
+                </div>
+
                 <button class="picker-close" on:click=move |_| on_close()>"\u{2715}"</button>
             </div>
 
-            <IsolationChoices on_close=on_close/>
+            // One box of a fixed height for both tabs. The panel sits directly
+            // above the composer, and a body that grew as an answer landed --
+            // or as a tab was switched -- moved the Start button out from under
+            // the King's cursor. It scrolls inside instead.
+            <div class="iso-body">
+                <Show
+                    when=move || is_network.get()
+                    fallback=move || view! {
+                        <FileChoices
+                            offers=offers
+                            revision=revision
+                            refusal=refusal
+                            barred=barred
+                        />
+                    }
+                >
+                    <NetworkChoices refusal=refusal barred=barred/>
+                </Show>
+            </div>
         </div>
     }
 }
 
-/// The three answers, as one exclusive list.
+/// Whose ports the next plan takes.
 ///
-/// # Why the unavailable cases are disabled rows and not hidden ones
+/// # Why the unavailable case is a disabled row and not a hidden one
 ///
 /// Without `slirp4netns` an isolated plan cannot reach DNS, crates.io or git,
 /// so Kingdom refuses to open one at all. The option is therefore shown
@@ -646,76 +758,28 @@ fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
 /// it, and one whose prompt is refused after he has typed it learns the same
 /// thing at a worse moment.
 #[component]
-fn IsolationChoices(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+fn NetworkChoices(refusal: Signal<Option<String>>, barred: Signal<bool>) -> impl IntoView {
     let state = expect_context::<KingdomState>();
-
-    // Asked once per opening rather than cached: slirp4netns can be installed
-    // while Kingdom runs, and the King who just installed it on our own advice
-    // should not have to restart the server to be believed.
-    let available = Resource::new(|| (), |_| network_available());
-
-    // What the selected project shares, so the isolated options can say what
-    // they actually buy here. Read from the ledger the resources screen already
-    // uses rather than through a new endpoint, and only the resources this
-    // project's plans can reach: its own and the machine's.
-    let selected = Memo::new(move |_| state.selected.get());
-    let ledger = Resource::new(
-        move || selected.get(),
-        |_| async move { shared_resources().await.ok() },
-    );
-    let reachable = Memo::new(move |_| {
-        let Some(inventory) = ledger.get().flatten() else {
-            return Vec::new();
-        };
-        let city = selected.get();
-        inventory
-            .resources
-            .into_iter()
-            .filter(|resource| match resource.scope {
-                kingdom_core::ServiceScope::Host => true,
-                kingdom_core::ServiceScope::City => resource.city == city,
-            })
-            .map(|resource| {
-                format!(
-                    "{} ({}) at localhost:{}",
-                    resource.spec.name, resource.spec.image, resource.spec.port,
-                )
-            })
-            .collect::<Vec<_>>()
-    });
-
     let current = Memo::new(move |_| state.isolation.get());
-    let choose = move |mode: Isolation| {
-        state.choose_isolation(mode);
-        on_close();
-    };
 
-    // `None` -> still asking; `Some(None)` -> available; `Some(Some(why))` -> not.
-    let refusal = Memo::new(move |_| match available.get() {
-        Some(Ok(reason)) => reason,
-        // A server that could not answer is treated as "cannot", with its own
-        // words: the alternative is offering an option that then fails.
-        Some(Err(e)) => Some(e.to_string()),
-        None => None,
-    });
-    let settled = Memo::new(move |_| available.get().is_some());
-    // Both isolated rungs need a namespace, so both are refused for the same
-    // reason and at the same moment.
-    let barred = Memo::new(move |_| !settled.get() || refusal.get().is_some());
+    // A filesystem of its own always brings a network of its own with it, so
+    // this row is not the King's to press while the Files tab says "its own".
+    // Said on the row rather than by removing it.
+    let held_by_files = Memo::new(move |_| current.get().is_sealed());
 
     view! {
         <ul class="workspace-list">
             <li>
                 <button
                     class="workspace-row"
-                    class:chosen={move || current.get() == Isolation::Shared}
-                    on:click=move |_| choose(Isolation::Shared)
+                    class:chosen={move || !current.get().is_isolated()}
+                    disabled={move || held_by_files.get()}
+                    on:click=move |_| state.choose_isolation(Isolation::Shared)
                 >
-                    <span class="workspace-name">"On this machine"</span>
+                    <span class="workspace-name">"Host network"</span>
                     <span class="workspace-detail">
-                        "No isolation. Ports and files are shared with \
-                         everything else: two plans that both want :3000 will \
-                         collide, and either can change anything you have."
+                        "Your ports, shared with everything else on this \
+                         machine: two plans that both want :3000 will collide."
                     </span>
                 </button>
             </li>
@@ -723,130 +787,175 @@ fn IsolationChoices(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl 
             <li>
                 <button
                     class="workspace-row"
-                    class:chosen={move || current.get() == Isolation::Isolated}
-                    // Disabled while the answer is still coming, so a fast
-                    // click cannot choose an option that turns out to be
-                    // unavailable.
+                    class:chosen={move || current.get().is_isolated()}
                     disabled={move || barred.get()}
-                    on:click=move |_| choose(Isolation::Isolated)
+                    on:click=move |_| {
+                        // Sealed is already a network of its own; pressing this
+                        // must not quietly give the plan the King's files back.
+                        if !current.get_untracked().is_sealed() {
+                            state.choose_isolation(Isolation::Isolated);
+                        }
+                    }
                 >
-                    <span class="workspace-name">"A network of its own"</span>
+                    <span class="workspace-name">"Its own network"</span>
                     <span class="workspace-detail">
                         "Its own loopback: it can take :3000 without touching \
-                         yours. Ports it opens are forwarded back to you. Your \
-                         files are still its files."
+                         yours, and the ports it opens are forwarded back to you."
                     </span>
                 </button>
             </li>
 
-            <li>
-                <button
-                    class="workspace-row"
-                    class:chosen={move || current.get() == Isolation::Sealed}
-                    disabled={move || barred.get()}
-                    on:click=move |_| choose(Isolation::Sealed)
-                >
-                    <span class="workspace-name">"A machine of its own"</span>
-                    <span class="workspace-detail">
-                        "Its own network, and its own filesystem and processes. \
-                         It sees its workspace, a read-only system and the \
-                         tools you allow in -- and nothing else of yours."
-                    </span>
-                </button>
-
-                // Only under the row it belongs to: what a sealed plan may see
-                // is a question the other two modes do not raise, and showing
-                // it always would be three lists where one is wanted.
-                <Show when=move || current.get() == Isolation::Sealed>
-                    <QuickAdd/>
-                </Show>
-            </li>
-
-            // What isolation buys on *this* project, when it shares anything.
-            // The friendly `localhost` address for a shared resource exists
-            // only inside a plan's own network -- a plan on the machine's
-            // network is given the container's IP instead -- so this is the
-            // moment that choice is actually being made. True of both isolated
-            // rungs, so it sits under the list rather than under one row.
-            <Show when=move || !reachable.get().is_empty()>
-                <ul class="network-wells">
-                    <For
-                        each=move || reachable.get()
-                        key=|line: &String| line.clone()
-                        let:line
-                    >
-                        <li>{line}</li>
-                    </For>
-                </ul>
-                <p class="network-wells-note">
-                    "This project shares the above. With isolation of its own \
-                     the plan reaches each at `localhost`, as if it were \
-                     running there; on this machine it is given the \
-                     container's address instead."
+            <Show when=move || held_by_files.get()>
+                <p class="iso-note">
+                    "A plan with a file system of its own always has its own \
+                     network too. Set Files back to the host machine to share \
+                     yours."
                 </p>
             </Show>
 
             // The reason, and the command that fixes it. Kingdom does not
             // install anything on the King's machine; it says what to install.
             <Show when=move || refusal.get().is_some()>
-                <p class="network-unavailable">
-                    {move || refusal.get().unwrap_or_default()}
-                </p>
+                <p class="network-unavailable">{move || refusal.get().unwrap_or_default()}</p>
             </Show>
         </ul>
     }
 }
 
-/// The folders a sealed plan may see, and one press to allow another.
+/// Whose files the next plan sees, and which of the King's it is lent.
+///
+/// The checkboxes sit under the second row only, because what a plan may see is
+/// a question the first row does not raise: a plan on the host machine has
+/// everything already.
+///
+/// It takes the same refusal the Network tab does, and for a reason that is not
+/// obvious from this side: a filesystem of its own is built by the *same*
+/// holder as a network of its own, so a machine without `slirp4netns` cannot
+/// give a plan either. Offering it here and refusing it at Start would move the
+/// bad news to the worst possible moment.
+#[component]
+fn FileChoices(
+    offers: Resource<Option<Vec<kingdom_core::services::MountCandidate>>>,
+    revision: RwSignal<u32>,
+    refusal: Signal<Option<String>>,
+    barred: Signal<bool>,
+) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let current = Memo::new(move |_| state.isolation.get());
+    let sealed = Memo::new(move |_| current.get().is_sealed());
+
+    view! {
+        <ul class="workspace-list">
+            <li>
+                <button
+                    class="workspace-row"
+                    class:chosen={move || !sealed.get()}
+                    on:click=move |_| {
+                        // Down one rung, not two: the network is a separate
+                        // question, answered on the tab beside this one.
+                        // Dropping it here would undo a choice this control
+                        // does not name.
+                        if current.get_untracked().is_sealed() {
+                            state.choose_isolation(Isolation::Isolated);
+                        }
+                    }
+                >
+                    <span class="workspace-name">"Host machine"</span>
+                    <span class="workspace-detail">
+                        "Your files are its files, writable: it can change \
+                         anything you have."
+                    </span>
+                </button>
+            </li>
+
+            <li>
+                <button
+                    class="workspace-row"
+                    class:chosen={move || sealed.get()}
+                    disabled={move || barred.get()}
+                    on:click=move |_| state.choose_isolation(Isolation::Sealed)
+                >
+                    <span class="workspace-name">"Own file system"</span>
+                    <span class="workspace-detail">
+                        "Its workspace, its own processes and a read-only \
+                         system \u{2014} and nothing else of yours but what you \
+                         tick below."
+                    </span>
+                </button>
+
+                <Show when=move || sealed.get()>
+                    <MountChecklist offers=offers revision=revision/>
+                </Show>
+            </li>
+
+            // The same refusal the Network tab prints, under the row it refuses.
+            <Show when=move || refusal.get().is_some()>
+                <p class="network-unavailable">{move || refusal.get().unwrap_or_default()}</p>
+            </Show>
+        </ul>
+    }
+}
+
+/// The folders a sealed plan may see, as boxes that tick and untick.
 ///
 /// # Why this is here and not only on the resources screen
 ///
 /// A mount *is* a shared resource and `/resources` is where they live -- but
 /// this is the one moment the King is actually deciding what a plan may see,
 /// and sending him to another screen to make the decision he is already making
-/// is how a feature goes unused. The screen remains the place to review and
-/// remove; this is the place to say yes.
+/// is how a feature goes unused. The screen remains the place to review every
+/// project's at once; this is the place to say yes and no.
 ///
-/// # Why it writes to his profile
+/// # Why a box writes to his profile
 ///
-/// Quick-add always declares at the **host** scope. A toolchain is a fact about
-/// his machine, not about one project: `~/.cargo` is where cargo lives whatever
-/// he is working on, and writing that into a project's committed manifest would
-/// put his home directory's layout into somebody else's repository. A folder
-/// genuinely belonging to one project is declared on `/resources`, where the
-/// scope is his to choose.
+/// A box ticked here always declares at the **host** scope. A toolchain is a
+/// fact about his machine, not about one project: `~/.cargo` is where cargo
+/// lives whatever he is working on, and writing that into a project's committed
+/// manifest would put his home directory's layout into somebody else's
+/// repository.
+///
+/// The converse is why a folder the *project* declared is shown ticked and
+/// **fixed**: it lives in a file belonging to whoever else works on that
+/// repository, and Kingdom will not edit that because a box was clicked. It is
+/// shown all the same, because it is part of what the plan will see.
 #[component]
-fn QuickAdd() -> impl IntoView {
-    let state = expect_context::<KingdomState>();
-    let city = Memo::new(move |_| state.selected.get());
-
-    // Bumped after a successful declaration, which re-runs the fetch: an offer
-    // just taken must come back marked as taken.
-    let revision = RwSignal::new(0_u32);
-    let offers = Resource::new(
-        move || (city.get(), revision.get()),
-        |(city, _)| async move { mount_offers(city.map(|c| c.to_string())).await.ok() },
-    );
-
+fn MountChecklist(
+    offers: Resource<Option<Vec<kingdom_core::services::MountCandidate>>>,
+    revision: RwSignal<u32>,
+) -> impl IntoView {
     let failure = RwSignal::new(Option::<String>::None);
-    let allow = move |folders: Vec<kingdom_core::services::MountSpec>| {
+    // One flag for the whole list rather than one per row: these are writes to
+    // a single file, and two in flight at once is a manifest whose contents
+    // depend on which landed first.
+    let writing = RwSignal::new(false);
+
+    let toggle = move |folders: Vec<kingdom_core::services::MountSpec>, on: bool| {
+        if writing.get_untracked() {
+            return;
+        }
+        writing.set(true);
         failure.set(None);
         leptos::task::spawn_local(async move {
-            match declare_mount("host".to_string(), None, folders).await {
-                Ok(_) => revision.update(|r| *r += 1),
-                Err(e) => failure.set(Some(e.to_string())),
+            let done = match on {
+                true => declare_mount("host".to_string(), None, folders).await,
+                false => withdraw_mount("host".to_string(), None, folders).await,
+            };
+            if let Err(e) = done {
+                failure.set(Some(e.to_string()));
             }
+            writing.set(false);
+            // Bumped either way, which is what puts a box that failed back
+            // where it was: what the list draws is the manifest, never the
+            // click.
+            revision.update(|r| *r += 1);
         });
     };
 
     view! {
         <div class="quick-add">
-            <p class="quick-add-head">
-                "A sealed plan sees its workspace and a read-only system. Allow \
-                 the tools it needs to build:"
-            </p>
+            <p class="quick-add-head">"Also let it see:"</p>
 
-            <Suspense fallback=|| view! { <p class="quick-add-empty">"Looking…"</p> }>
+            <Suspense fallback=|| view! { <p class="quick-add-empty">"Looking\u{2026}"</p> }>
                 {move || {
                     let found = offers.get().flatten().unwrap_or_default();
                     if found.is_empty() {
@@ -860,53 +969,51 @@ fn QuickAdd() -> impl IntoView {
                     }
                     view! {
                         <ul class="quick-add-list">
-                            <For
-                                each=move || found.clone()
-                                key=|offer: &kingdom_core::services::MountCandidate| {
-                                    (
-                                        offer.folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
-                                        offer.already,
-                                    )
-                                }
-                                let:offer
-                            >
-                                {
+                            {found
+                                .into_iter()
+                                .map(|offer| {
                                     let folders = offer.folders.clone();
                                     let shown = folders
                                         .iter()
                                         .map(|f| f.path.clone())
                                         .collect::<Vec<_>>()
                                         .join("  ");
-                                    // Said per folder, because "it can write
+                                    // Said per offer, because "it can write
                                     // there" is the part worth being sure of.
                                     let writable = folders.iter().any(|f| f.mode.is_writable());
+                                    let on = offer.already();
+                                    // Declared by the project rather than by
+                                    // him: shown, and not this panel's to undo.
+                                    let fixed = on && !offer.removable();
                                     view! {
                                         <li>
-                                            <button
-                                                class="quick-add-row"
-                                                class:already=offer.already
-                                                disabled=offer.already
-                                                on:click={
-                                                    let folders = folders.clone();
-                                                    move |_| allow(folders.clone())
-                                                }
-                                            >
+                                            <label class="mount-row" class:fixed=fixed>
+                                                <input
+                                                    class="mount-box"
+                                                    type="checkbox"
+                                                    prop:checked=on
+                                                    disabled={move || fixed || writing.get()}
+                                                    on:change={
+                                                        let folders = folders.clone();
+                                                        move |_| toggle(folders.clone(), !on)
+                                                    }
+                                                />
                                                 <span class="quick-add-why">{offer.why.clone()}</span>
                                                 <span class="quick-add-paths">{shown}</span>
                                                 <span class="quick-add-mark">
-                                                    {if offer.already {
-                                                        "shared".to_string()
+                                                    {if fixed {
+                                                        "this project".to_string()
                                                     } else if writable {
-                                                        "allow (writable)".to_string()
+                                                        "writable".to_string()
                                                     } else {
-                                                        "allow".to_string()
+                                                        String::new()
                                                     }}
                                                 </span>
-                                            </button>
+                                            </label>
                                         </li>
                                     }
-                                }
-                            </For>
+                                })
+                                .collect_view()}
                         </ul>
                     }
                         .into_any()

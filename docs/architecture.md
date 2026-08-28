@@ -231,9 +231,17 @@ are these agents holding?* — for two of them: **ports** and **the disk**.
 
 | Shown as | In code | What it gets |
 |---|---|---|
-| On this machine | `Isolation::Shared` | Nothing of its own. The default. |
-| A network of its own | `Isolation::Isolated` | Its own loopback and ports, forwarded back to the King |
-| A machine of its own | `Isolation::Sealed` | That, plus its own filesystem and process table |
+| Host network, host machine | `Isolation::Shared` | Nothing of its own. The default. |
+| Its own network | `Isolation::Isolated` | Its own loopback and ports, forwarded back to the King |
+| Own file system | `Isolation::Sealed` | That, plus its own filesystem and process table |
+
+The King chooses on **two tabs** — Network and Files — because those are the two
+questions he actually has. The panel is a projection of the one enum rather than
+a second model of it: host/host is `Shared`, own/host is `Isolated`, own/own is
+`Sealed`, and the fourth square does not exist because the holder is one
+`unshare` in which `--mount` is *added* to `--net`. That square is said rather
+than hidden — with Files on "own file system", the Network tab's host row is
+disabled and carries the reason.
 
 Its own axis rather than more `WorkspaceMode` variants, because "can this agent
 trample my folder?" and "can it trample my port?" are independent questions.
@@ -318,13 +326,22 @@ Its workspace and its project's `.git` (writable), a read-only `/usr` and
 allowed in, declared as `[[mount]]` blocks in the same manifests that declare
 shared services. [`shared-resources.md`](shared-resources.md) has the format.
 
-The isolation panel offers a **quick-add** list built from his own `PATH`,
-because that is the only honest answer to "which tools do I have". A recognised
-entry brings the folders its tool actually needs — `~/.cargo` without `~/.rustup`
-gives a `cargo` that re-downloads the toolchain, measured — and an unrecognised
-one is offered read-only. Windows folders under `/mnt/c` are dropped: WSL
-appends the whole Windows `PATH`, which put twenty-five unusable `.exe`
-directories in front of the four that mattered.
+The isolation panel's **Files** tab offers a checkbox per folder, built from his
+own `PATH`, because that is the only honest answer to "which tools do I have". A
+recognised entry brings the folders its tool actually needs — `~/.cargo` without
+`~/.rustup` gives a `cargo` that re-downloads the toolchain, measured — and an
+unrecognised one is offered read-only. Windows folders under `/mnt/c` are
+dropped: WSL appends the whole Windows `PATH`, which put twenty-five unusable
+`.exe` directories in front of the four that mattered.
+
+A box ticks **and unticks**: `services::declare_mount` appends the block and
+`services::withdraw_mount` cuts it out again, both editing the text rather than
+re-serialising, so the comments in the file survive either. A folder the
+*project* declared is shown ticked and fixed — part of what the plan will see,
+and living in somebody's committed manifest, which a picker must not edit
+because a box was clicked. A folder shared by hand is listed too, even if its
+tool has left `PATH` or the folder is gone: a stale line is the one most worth
+clearing.
 
 Five things about the mount namespace that were measured rather than assumed,
 each a silent wrong answer rather than an error:

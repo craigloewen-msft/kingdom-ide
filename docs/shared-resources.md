@@ -73,8 +73,8 @@ that never started, and all you saw was "never answered on port 5432".
 
 ### Folders, for a sealed plan (`[[mount]]`)
 
-The same manifests declare a second kind, for a plan opened with **a machine of
-its own** (`Isolation::Sealed`).
+The same manifests declare a second kind, for a plan opened with **its own file
+system** (`Isolation::Sealed`).
 
 | Property | Required | Type | What is allowed | What it does |
 |---|---|---|---|---|
@@ -110,12 +110,24 @@ A folder that simply is not there is **skipped**, not refused: a stale line
 should not stop a plan from opening. Nothing about a mount touches Docker — a
 manifest declaring only folders raises nothing and is not reference-counted.
 
-You rarely need to write these by hand. Opening a plan with a machine of its own
-offers a list built from your own `PATH`, and one press writes the block into
-`$KINGDOM_HOME/services.toml`. Always your profile: `~/.cargo` is where cargo
-lives whatever project you are on, and writing your home directory's layout into
-a committed manifest would put it in somebody else's repository. An offer names
-every folder its tool needs, not just the one on `PATH`.
+You rarely need to write these by hand. The isolation panel's **Files** tab
+lists folders built from your own `PATH`, with a checkbox each, and ticking one
+writes the block into `$KINGDOM_HOME/services.toml`. Always your profile:
+`~/.cargo` is where cargo lives whatever project you are on, and writing your
+home directory's layout into a committed manifest would put it in somebody
+else's repository. An offer names every folder its tool needs, not just the one
+on `PATH`.
+
+**Unticking removes the block again.** Both the write and the removal edit the
+text rather than re-serialising the document, so every comment in the file
+survives them — including a note you left above a folder you kept. Three rows
+read differently from the rest:
+
+| Row | What it means |
+|---|---|
+| ticked, greyed, marked `this project` | declared in the project's own manifest. Shown because the plan will see it; not removable from a picker, because that file is committed and somebody else's too |
+| `Shared by hand: <path>` | in a manifest but not on `PATH`. Listed so you can still see it and clear it |
+| a folder that no longer exists | listed **only** if already declared. A stale line is the one most worth clearing; a stale *offer* would be a promise Kingdom would silently skip |
 
 ### The one case where it is not localhost
 
