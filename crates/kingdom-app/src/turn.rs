@@ -171,24 +171,48 @@ pub(crate) async fn converse(
         Err(e) => return settle(plan_id, Err(e)),
     };
 
-    // A network of this plan's own, if it was opened with one. Raised here --
-    // once per turn, before the first round -- rather than inside each tool,
-    // because all of them must land in the *same* namespace and a per-call
-    // check would be three chances to forget.
+    // The *project's* root, read once into a binding because three things
+    // below need it and they must agree: the namespaces are built from it, the
+    // services are required for the city, and the prompt is told where they
+    // are. A `CityBrief`'s own path is the plan's worktree, so it cannot answer
+    // this.
+    //
+    // Read **before** the namespaces are raised, because a sealed plan's mount
+    // set is built from it: a worktree's `.git` lives in the city, not in the
+    // workspace, and a sealed plan without it has no working `git` at all.
+    let city_root = city_root_of(&plan_id);
+
+    // The namespaces this plan was opened with, if any. Raised here -- once per
+    // turn, before the first round -- rather than inside each tool, because all
+    // of them must land in the *same* namespace and a per-call check would be
+    // three chances to forget.
     //
     // A failure here is fatal to the turn on purpose. The alternative is
-    // running the agent on the shared network after the King asked for
-    // isolation, which is the one outcome this feature must never produce
-    // silently: he would find out when it took the port he was using.
-    if snapshot(&plan_id).is_some_and(|p| p.network.is_isolated()) {
-        if let Err(e) = crate::netns::ensure(&plan_id).await {
+    // running the agent on the shared network, or on the King's own
+    // filesystem, after he asked for isolation -- the one outcome this feature
+    // must never produce silently: he would find out when it took the port he
+    // was using, or deleted something he needed.
+    if let Some(isolation) = snapshot(&plan_id)
+        .map(|p| p.isolation)
+        .filter(|i| i.is_isolated())
+    {
+        let request = crate::namespaces::Request {
+            isolation,
+            workspace: std::path::PathBuf::from(&workspace.path),
+            city_root: city_root.clone(),
+            // The folders the King declared, from his profile and this
+            // project. Empty for a plan that is not sealed, which never looks
+            // at them.
+            allowed: crate::services::mounts_for(city_root.as_deref()),
+        };
+        if let Err(e) = crate::namespaces::ensure(&plan_id, &request).await {
             // `Refused` rather than `Transport`: a missing slirp4netns or a
             // kernel that forbids namespaces is a settled answer, and
             // `is_transient` must not send the turn round again to be told the
             // same thing. The message names the package to install.
             return settle(plan_id, Err(crate::llm::ModelError::Refused(e.to_string())));
         }
-        crate::netns::watch(&plan_id);
+        crate::namespaces::net::watch(&plan_id);
     }
 
     // The shared services this city declares. **Not raised here** -- a well is
@@ -204,13 +228,6 @@ pub(crate) async fn converse(
     //
     // A city with no manifest costs nothing here -- `require` reads one absent
     // file and returns before waiting on anything.
-    //
-    // The *project's* root is read once, into a binding, because two things
-    // below need it and they must agree: the services are required for the
-    // city, and the prompt is told where they are. A `CityBrief`'s own path is
-    // the plan's worktree, so it cannot answer this.
-    let city_root = city_root_of(&plan_id);
-
     if let Some(city_root) = &city_root {
         if let Err(e) = crate::services::require(&plan_id, city_root).await {
             // `Refused` for the same reason as above: a missing Docker daemon
@@ -314,6 +331,13 @@ pub(crate) async fn converse(
                 city_root
                     .as_deref()
                     .unwrap_or_else(|| std::path::Path::new(&workspace.path)),
+                // What the model is allowed to see. A sealed plan is told so,
+                // because a filesystem that is not the user's reads as a broken
+                // machine to a model that was not told.
+                snapshot(&plan_id).map(|p| p.isolation).unwrap_or_default(),
+                // And which folders, so a sealed plan knows where its fence is
+                // rather than only that it has one.
+                crate::services::mounts_for(city_root.as_deref()),
             ),
             turns,
             // Set only on the first round of a turn that follows a silent one.

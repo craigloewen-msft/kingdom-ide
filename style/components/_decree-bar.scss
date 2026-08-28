@@ -220,34 +220,6 @@
   padding: 0;
 }
 
-// The isolation panel's tab strip. One tab today; the strip exists so the
-// second one is a row in a list rather than a new layout.
-//
-// Borrowed wholesale from the rail's `.filter-toggle` / `.filter-btn`, so a
-// segmented control looks the same wherever the King meets one.
-.isolation-tabs {
-  display: flex;
-  flex-shrink: 0;
-  align-self: flex-start;
-  margin-top: 10px;
-  border: 1px solid t.$edge;
-  border-radius: 6px;
-  overflow: hidden;
-  width: fit-content;
-}
-
-.isolation-tab {
-  padding: 3px 9px;
-  background: transparent;
-  border: none;
-  color: t.$ink-faint;
-  font-size: 11px;
-  cursor: pointer;
-
-  &:hover { color: t.$ink; }
-  &.active { background: t.$deep; color: t.$gold; }
-}
-
 // Two lines per option, because the difference between them is a *bargain*
 // (isolation vs. immediacy) and a bare label cannot carry that.
 .workspace-row {
@@ -269,6 +241,83 @@
 
 .workspace-name { font-size: 12px; }
 .workspace-detail { font-size: 11px; color: t.$ink-faint; }
+
+// Quick-add: the folders a sealed plan may see.
+//
+// Bare on purpose. What a plan can reach deserves a real picture eventually --
+// which folders, in which mode, and who else shares them -- and that is its own
+// piece of design. This is a list that works, so the decision can be made now.
+.quick-add {
+  margin: 4px 10px 2px;
+  padding: 8px 10px;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  background: t.$deep;
+}
+
+.quick-add-head {
+  margin: 0 0 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: t.$ink-faint;
+}
+
+.quick-add-empty {
+  margin: 0;
+  font-size: 11px;
+  color: t.$ink-faint;
+}
+
+.quick-add-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  // Enough for a handful without pushing Start off a short window.
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.quick-add-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1px 8px;
+  width: 100%;
+  padding: 5px 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: t.$radius;
+  color: t.$ink-dim;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover:not(:disabled) { background: t.$panel-2; color: t.$ink; }
+
+  // Already shared: shown rather than hidden, so the King can see what a
+  // sealed plan already has without opening another screen.
+  &.already { cursor: default; opacity: 0.55; }
+}
+
+.quick-add-why { font-size: 11px; }
+
+.quick-add-paths {
+  grid-column: 1;
+  font-family: t.$font-mono;
+  font-size: 10px;
+  color: t.$ink-faint;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-add-mark {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  font-size: 10px;
+  font-family: t.$font-mono;
+  color: t.$gold-dim;
+  white-space: nowrap;
+}
 
 .branch-list {
   list-style: none;

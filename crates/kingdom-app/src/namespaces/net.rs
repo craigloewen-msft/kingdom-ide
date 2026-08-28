@@ -6,7 +6,7 @@
 //! dies. That is the collision AGENTS.md names as the reason this product
 //! exists, and until now Kingdom could only *watch* it happen.
 //!
-//! A plan opened with [`NetworkMode::Isolated`] gets a Linux network namespace
+//! A plan opened with [`Isolation::Isolated`] gets a Linux network namespace
 //! of its own. Inside it, `127.0.0.1:3000` is a different socket from the one
 //! on the King's machine and from every other plan's, so nothing collides and
 //! no agent has to be told to pick another port.
@@ -88,6 +88,7 @@
 //! saying so plainly is worth more than a guarantee that does not hold --
 //! `tools::Sandbox::root` makes the same admission about paths.
 
+use super::{kill, lock, sanitise, wait_for_child, Namespace, NetworkError, Request};
 use kingdom_core::PlanId;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -120,32 +121,6 @@ const NEVER_FORWARD: &[u16] = &[];
 /// forwarding call and any future diagnostic cannot drift apart.
 const GUEST_ADDR: &str = "10.0.2.100";
 
-/// One isolated plan's network.
-pub struct Namespace {
-    /// The holder process. Killing it collects the namespace.
-    holder: u32,
-    /// The `slirp4netns` process giving that namespace a way out.
-    slirp: u32,
-    /// Its JSON control socket, which is how ports get forwarded.
-    api_socket: PathBuf,
-    /// Guest port -> (host port, slirp's id for the forward, and the relay
-    /// standing between them, if one was needed).
-    forwards: HashMap<u16, Forward>,
-    /// Chrome's own CDP port inside this namespace, if a browser has been
-    /// launched for this plan. Excluded from [`forwards_of`] -- see its own
-    /// docs for why the King's badge must never show it.
-    cdp_port: Option<u16>,
-    /// Service port -> the relay putting a shared service on this namespace's
-    /// own loopback. See [`open_wells`].
-    ///
-    /// Kept apart from `forwards` because it is the opposite direction of
-    /// travel and has to be treated as such everywhere: a forward carries the
-    /// plan's own server *out* to the King, where a well carries a container
-    /// *in* to the plan. [`Namespace::listeners`] is where that distinction
-    /// earns its keep.
-    wells: HashMap<u16, Well>,
-}
-
 /// One shared service standing on a plan's own loopback.
 ///
 /// # Why the target is kept and not just the pid
@@ -161,16 +136,16 @@ pub struct Namespace {
 /// [`crate::services::address_for`] asks about that container rather than about
 /// the number.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Well {
+pub(super) struct Well {
     /// The relay's pid inside the namespace, so it can be killed with the rest.
-    pid: u32,
+    pub(super) pid: u32,
     /// The container address it forwards to, as `host:port`.
     target: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Forward {
-    host_port: u16,
+pub(super) struct Forward {
+    pub(super) host_port: u16,
     /// slirp's own handle for this rule, needed to remove it again.
     id: i64,
     /// The relay's pid, inside the namespace, hopping `tap0:guest_port` to
@@ -180,125 +155,7 @@ struct Forward {
     relay: Option<u32>,
 }
 
-/// Every namespace this server is holding.
-///
-/// Process-global for the reason `tools::bash`'s `JOBS` is: a namespace must
-/// outlive the tool call that created it, because the whole point is that the
-/// *next* call lands in the same one.
-static NAMESPACES: OnceLock<Mutex<HashMap<PlanId, Namespace>>> = OnceLock::new();
-
-fn namespaces() -> &'static Mutex<HashMap<PlanId, Namespace>> {
-    NAMESPACES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Why an isolated plan could not be started.
-///
-/// Written for the King, because he is the one who has to act on it: every
-/// variant either names a package to install or a kernel setting to change.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum NetworkError {
-    #[error(
-        "slirp4netns is not installed. A plan with its own network needs it to \
-         reach anything outside -- without it there would be no DNS, no \
-         crates.io and no git. Install it with `sudo pacman -S slirp4netns` \
-         (Arch), `sudo apt install slirp4netns` (Debian/Ubuntu) or `sudo dnf \
-         install slirp4netns` (Fedora)."
-    )]
-    SlirpMissing,
-
-    #[error(
-        "this kernel will not let an ordinary user create a network namespace \
-         ({0}). On Debian and its derivatives this is usually \
-         `kernel.unprivileged_userns_clone=0`; enable it with `sudo sysctl -w \
-         kernel.unprivileged_userns_clone=1`."
-    )]
-    Unprivileged(String),
-
-    #[error("the network namespace could not be created: {0}")]
-    Failed(String),
-}
-
-/// Whether this machine can give a plan a network of its own, and why not.
-///
-/// Checked before a plan is opened rather than when its first command runs, so
-/// the King is told at the moment he chooses -- a plan that accepted the
-/// setting and then quietly ran shared would be exactly the invisible isolation
-/// this feature exists to end.
-pub fn availability() -> Result<(), NetworkError> {
-    if !cfg!(target_os = "linux") {
-        return Err(NetworkError::Unprivileged(
-            "network namespaces are a Linux feature".to_string(),
-        ));
-    }
-    if which("slirp4netns").is_none() {
-        return Err(NetworkError::SlirpMissing);
-    }
-    if which("unshare").is_none() || which("nsenter").is_none() {
-        return Err(NetworkError::Failed(
-            "`unshare` and `nsenter` are needed; install util-linux".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Finds an executable on `PATH`.
-///
-/// Hand-rolled rather than shelling out to `which`, which is itself a program
-/// that may not be installed -- and spawning a process to ask whether we can
-/// spawn a process is a strange thing to do.
-fn which(program: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-/// The argv prefix that puts a command inside a plan's namespace.
-///
-/// **Empty for a shared-network plan**, which is what makes every call site a
-/// no-op by default: `bash`, `tmux` and the browser all prepend this
-/// unconditionally and get exactly their old behaviour when the plan has no
-/// namespace. That is deliberate -- a call site that had to *remember* to check
-/// is a call site that will forget, and the one that forgets is the one that
-/// starts a server on the King's own `:3000`.
-pub fn enter_prefix(plan: &PlanId) -> Vec<String> {
-    let registry = match namespaces().lock() {
-        Ok(r) => r,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    registry
-        .get(plan)
-        .map(|ns| ns.enter_prefix())
-        .unwrap_or_default()
-}
-
-/// This plan's own network namespace, for comparing against something that
-/// claims to be in it -- the check `tools::tmux::daemon_belongs_here` needs to
-/// tell a live daemon from a stale one.
-///
-/// `None` for a shared-network plan, the same as `enter_prefix`'s empty
-/// vector, and for the same reason: there is nothing of the plan's own to
-/// compare against.
-pub fn holder_ns(plan: &PlanId) -> Option<std::path::PathBuf> {
-    let registry = lock();
-    let namespace = registry.get(plan)?;
-    std::fs::read_link(format!("/proc/{}/ns/net", namespace.holder)).ok()
-}
-
 impl Namespace {
-    fn enter_prefix(&self) -> Vec<String> {
-        vec![
-            "nsenter".to_string(),
-            // Load-bearing. See the module docs: without it, re-entering our
-            // own user namespace fails on setgroups.
-            "--preserve-credentials".to_string(),
-            format!("--user=/proc/{}/ns/user", self.holder),
-            format!("--net=/proc/{}/ns/net", self.holder),
-            "--".to_string(),
-        ]
-    }
-
     /// Ports something inside the namespace is listening on.
     ///
     /// Read from the host, with no subprocess: `/proc/<pid>/net` is per network
@@ -361,53 +218,6 @@ fn parse_listeners(table: &str) -> Vec<u16> {
         })
         .filter(|port| *port != 0)
         .collect()
-}
-
-/// Gives a plan a network of its own.
-///
-/// Idempotent: a plan that already has one keeps it, because the processes it
-/// has already started are in that namespace and there is no way to move them.
-///
-/// Called when a plan's first tool runs rather than when it is opened, so a
-/// plan that never executes anything never pays for three processes.
-pub async fn ensure(plan: &PlanId) -> Result<(), NetworkError> {
-    if lock().contains_key(plan) {
-        return Ok(());
-    }
-
-    availability()?;
-
-    let namespace = Namespace::create(plan).await?;
-
-    let mut registry = lock();
-    // Another turn may have raced us here while we were spawning. Keep the one
-    // already registered and tear this one down, rather than overwriting it and
-    // leaking a holder nobody can reach.
-    if registry.contains_key(plan) {
-        namespace.tear_down();
-        return Ok(());
-    }
-    registry.insert(plan.clone(), namespace);
-    Ok(())
-}
-
-fn lock() -> std::sync::MutexGuard<'static, HashMap<PlanId, Namespace>> {
-    match namespaces().lock() {
-        Ok(r) => r,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-/// Tears down a plan's network and everything still running in it.
-///
-/// Called when a plan is merged or archived. Without it, a holder and a
-/// slirp4netns survive for the life of the server for every isolated plan ever
-/// opened -- and, worse, so does whatever the agent left listening.
-pub fn shutdown(plan: &PlanId) {
-    let namespace = lock().remove(plan);
-    if let Some(namespace) = namespace {
-        namespace.tear_down();
-    }
 }
 
 /// What a plan currently has forwarded, for the ports badge.
@@ -687,7 +497,7 @@ fn port_span() -> u64 {
 }
 
 impl Namespace {
-    async fn create(plan: &PlanId) -> Result<Self, NetworkError> {
+    pub(super) async fn create(plan: &PlanId, request: &Request) -> Result<Self, NetworkError> {
         use tokio::process::Command;
 
         // Whatever a *previous* server left behind for this plan. A namespace
@@ -697,23 +507,52 @@ impl Namespace {
         // the plan, in the spirit of `kingdom_browser::sweep_orphans`.
         reclaim_previous(plan);
 
+        // What the holder will be, which is the whole of the difference
+        // between the two isolated kinds. A sealed plan takes two more
+        // namespaces and a script that builds it a filesystem; everything
+        // below this point -- slirp, the api socket, the pidfile, the registry
+        // entry -- is identical for both, which is the point of building it
+        // this way rather than as two `create`s.
+        let sealed = request.isolation.is_sealed();
+        let mount_plan = sealed.then(|| {
+            super::mount::MountPlan::with_allowed(
+                plan.as_str(),
+                &request.workspace,
+                request.city_root.as_deref(),
+                &request.allowed,
+            )
+        });
+
+        let mut unshare_args = vec!["--user", "--map-root-user", "--net"];
+        if sealed {
+            // The filesystem and the process table. `--pid` is what makes `ps`
+            // inside show this plan's own handful of processes rather than the
+            // King's several hundred, and it is why the holder must be the
+            // thing that `exec`s `sleep` -- pid 1 of that namespace.
+            unshare_args.push("--mount");
+            unshare_args.push("--pid");
+        }
+        unshare_args.push("--fork");
+        unshare_args.push("--");
+
+        // `lo` up: a plan's own server on 127.0.0.1 is the entire point, and a
+        // fresh namespace's loopback is DOWN. A sealed plan's script does the
+        // same thing at its end, after it has a filesystem to do it from.
+        let script = match &mount_plan {
+            Some(mount_plan) => super::mount::holder_script(mount_plan),
+            None => "ip link set lo up; exec sleep infinity".to_string(),
+        };
+
         // The holder. `--map-root-user` so the agent is root *inside* its own
-        // namespace, which is what lets it bring up `lo`; it is still the
-        // King's uid everywhere that matters, because a user namespace maps
-        // rather than grants.
+        // namespace, which is what lets it bring up `lo` -- and, for a sealed
+        // plan, mount and pivot_root at all. It is still the King's uid
+        // everywhere that matters, because a user namespace maps rather than
+        // grants: measured, a write to `/usr/bin` from inside is refused.
         let mut holder = Command::new("unshare")
-            .args([
-                "--user",
-                "--map-root-user",
-                "--net",
-                "--fork",
-                "--",
-                "sh",
-                "-c",
-                // `lo` up: a plan's own server on 127.0.0.1 is the entire point,
-                // and a fresh namespace's loopback is DOWN.
-                "ip link set lo up; exec sleep infinity",
-            ])
+            .args(&unshare_args)
+            .arg("sh")
+            .arg("-c")
+            .arg(&script)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -790,10 +629,15 @@ impl Namespace {
             forwards: HashMap::new(),
             cdp_port: None,
             wells: HashMap::new(),
+            // Recorded only for a sealed plan, and it is what every later
+            // `enter_prefix` reads to know this namespace has a filesystem of
+            // its own -- and where to stand in it.
+            scratch: mount_plan.as_ref().map(|plan| plan.root.clone()),
+            workdir: mount_plan.map(|plan| plan.workdir),
         })
     }
 
-    fn tear_down(&self) {
+    pub(super) fn tear_down(&self) {
         // Relays first: each is a child of nothing but its own bind, and
         // killing it before the holder avoids a moment where the relay is
         // still accepting into a namespace whose holder is already gone.
@@ -814,6 +658,21 @@ impl Namespace {
         kill(self.holder);
         let _ = std::fs::remove_file(&self.api_socket);
         let _ = std::fs::remove_file(pid_path(&self.api_socket));
+
+        // The scratch root a sealed plan was assembled in. Empty by now: every
+        // mount in it belonged to the holder's own mount namespace and went
+        // with the holder, and `pivot_root` left the directories themselves
+        // behind. Found by looking after a live test rather than by reasoning
+        // -- four skeleton roots were sitting under `$XDG_RUNTIME_DIR`, one per
+        // plan ever sealed, for the life of the machine.
+        //
+        // `remove_dir_all` is safe here precisely because it is empty: if a
+        // mount somehow survived, the directory would be non-empty and busy,
+        // and the removal fails rather than reaching through a live bind into
+        // the King's own files. Best effort, like everything else here.
+        if let Some(root) = &self.scratch {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }
 
@@ -927,37 +786,6 @@ fn api_socket_path(plan: &PlanId) -> PathBuf {
         .join(format!("{}.sock", sanitise(plan.as_str())))
 }
 
-/// Keeps a plan id to characters that are safe in a filename.
-fn sanitise(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-/// The pid of the namespace-owning child `unshare --fork` made.
-async fn wait_for_child(parent: u32) -> Option<u32> {
-    for _ in 0..50 {
-        let path = format!("/proc/{parent}/task/{parent}/children");
-        if let Ok(children) = std::fs::read_to_string(&path) {
-            if let Some(pid) = children
-                .split_whitespace()
-                .next()
-                .and_then(|p| p.parse().ok())
-            {
-                return Some(pid);
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    None
-}
-
 async fn wait_for_socket(path: &std::path::Path) -> bool {
     for _ in 0..100 {
         if path.exists() {
@@ -966,14 +794,6 @@ async fn wait_for_socket(path: &std::path::Path) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     false
-}
-
-fn kill(pid: u32) {
-    // SAFETY: a pid this module spawned. A stale pid at worst signals nothing;
-    // it cannot reach another user's process, since Kingdom is unprivileged.
-    unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
-    }
 }
 
 /// Asks slirp4netns to open a door from the host into the namespace.
@@ -1223,6 +1043,8 @@ pub(crate) fn pretend_wells_are_open(plan: &PlanId, targets: &[&str]) {
         forwards: HashMap::new(),
         cdp_port: None,
         wells: HashMap::new(),
+        workdir: None,
+        scratch: None,
     });
     for (index, target) in targets.iter().enumerate() {
         let port = target
@@ -1300,6 +1122,7 @@ pub async fn reserve_cdp_port(plan: &PlanId) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::namespaces;
     use super::*;
 
     /// The `/proc/net/tcp` shape, pinned against a real capture.
@@ -1338,17 +1161,6 @@ mod tests {
         assert!(parse_listeners(table).is_empty());
     }
 
-    /// A plan with no namespace gets an empty prefix.
-    ///
-    /// The invariant the whole design rests on: every call site prepends this
-    /// unconditionally, so "empty" is what makes a shared-network plan behave
-    /// exactly as it did before this module existed.
-    #[test]
-    fn a_shared_network_plan_is_never_wrapped() {
-        let nobody = PlanId::new("plan-that-was-never-isolated");
-        assert!(enter_prefix(&nobody).is_empty());
-    }
-
     /// Every drawn port is inside the forwarding range.
     ///
     /// The range matters twice: below it are ports projects choose for
@@ -1372,39 +1184,6 @@ mod tests {
     #[test]
     fn the_range_counts_both_of_its_ends() {
         assert_eq!(port_span(), 10_000);
-    }
-
-    /// The `--preserve-credentials` flag is not optional.
-    ///
-    /// Pinned as a *test* rather than left to a comment because its absence
-    /// does not fail to compile and does not fail loudly: `nsenter` refuses
-    /// with `setgroups failed: Operation not permitted`, which surfaces as a
-    /// tool that mysteriously will not run. Measured on a real kernel before
-    /// this module was written.
-    #[test]
-    fn entering_a_namespace_preserves_credentials() {
-        let namespace = Namespace {
-            holder: 4242,
-            slirp: 4243,
-            api_socket: PathBuf::from("/run/nowhere.sock"),
-            forwards: HashMap::new(),
-            cdp_port: None,
-            wells: HashMap::new(),
-        };
-        let prefix = namespace.enter_prefix();
-
-        assert_eq!(prefix.first().map(String::as_str), Some("nsenter"));
-        assert!(
-            prefix.iter().any(|part| part == "--preserve-credentials"),
-            "without this flag nsenter cannot re-enter our own user namespace"
-        );
-        // Both namespaces, named from the holder: the user namespace is what
-        // makes the net namespace enterable unprivileged.
-        assert!(prefix.iter().any(|p| p == "--user=/proc/4242/ns/user"));
-        assert!(prefix.iter().any(|p| p == "--net=/proc/4242/ns/net"));
-        // The terminator, so a command starting with a dash is not read as a
-        // flag to nsenter itself.
-        assert_eq!(prefix.last().map(String::as_str), Some("--"));
     }
 
     /// A plan id becomes a filename without ever escaping its directory.
@@ -1469,6 +1248,8 @@ mod tests {
                 forwards,
                 cdp_port: Some(9222),
                 wells: HashMap::new(),
+                workdir: None,
+                scratch: None,
             },
         );
         *namespaces().lock().unwrap() = registry;

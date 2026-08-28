@@ -118,11 +118,13 @@ impl SystemPrompt {
         approved: bool,
         kingdom_root: &Path,
         city_root: &Path,
+        isolation: kingdom_core::Isolation,
+        allowed: Vec<kingdom_core::services::MountSpec>,
     ) -> Self {
         let root = Path::new(&workspace.path);
         Self {
             city: city.clone(),
-            workspace: workspace_block(workspace),
+            workspace: workspace_block(workspace, isolation, &allowed),
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
@@ -308,7 +310,11 @@ const SKILLS_PREAMBLE: &str = "The following skills are available. Invoke them w
 /// 64% of which opened with a `cd` to this very path, to notice that nothing
 /// said commands **start** here. `tools/bash.rs` says it too, at the one moment
 /// it is acted on; this says it once, up front, for every tool that takes a path.
-fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
+fn workspace_block(
+    workspace: &kingdom_core::Workspace,
+    isolation: kingdom_core::Isolation,
+    allowed: &[kingdom_core::services::MountSpec],
+) -> String {
     let mut out = format!(
         "Working directory: {}\nEvery command runs here, and every relative path is \
          resolved from here.\n",
@@ -337,6 +343,47 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
              -- you do not need to choose a model in the picker.",
         );
     }
+
+    // Said only where it is true, and it is worth saying: a sealed plan's
+    // commands run against a filesystem that is *not* the user's, and a model
+    // that does not know this reads an absent `~/.ssh` or an unfamiliar `ps`
+    // output as a broken machine and starts trying to repair it. Naming the
+    // boundary once, up front, is much cheaper than the exploration it saves.
+    if isolation.is_sealed() {
+        out.push_str(
+            "\n\nThis plan is sealed: it has its own network, its own filesystem and \
+             its own process table. You can see this workspace, its project's git \
+             directory, a read-only system, and whatever folders the user has \
+             allowed in -- and nothing else of his. A file you cannot find outside \
+             those is not missing, it is simply not shared with you; say so rather \
+             than working around it. `ps` shows only this plan's own processes.",
+        );
+
+        // The folders themselves, named. Without this the model knows it is
+        // fenced in but not where the fence is, which is the difference between
+        // "I cannot see ~/.ssh, so I will say so" and a turn spent hunting for
+        // a toolchain that was never shared.
+        if !allowed.is_empty() {
+            out.push_str("\n\nFolders shared with you, beyond the system:\n");
+            for mount in allowed {
+                let _ = write!(
+                    out,
+                    "\n- {} ({})",
+                    mount.path,
+                    if mount.mode.is_writable() {
+                        "you may write here"
+                    } else {
+                        "read-only"
+                    }
+                );
+            }
+            out.push_str(
+                "\n\nThe user adds to this list from the isolation panel when he opens \
+                 a plan. If something you genuinely need is missing, say which folder \
+                 and why rather than trying to work without it.",
+            );
+        }
+    }
     out
 }
 
@@ -352,7 +399,7 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
 /// loopback, and a plan with a network of its own reaches `127.0.0.1` inside
 /// its *own* namespace where nothing was listening.
 ///
-/// `netns::open_wells` makes something listen there. So for an isolated plan
+/// `namespaces::net::open_wells` makes something listen there. So for an isolated plan
 /// the prior is now simply *correct*, and the block says so instead of warning
 /// against it -- the shortest possible instruction, which is the one most
 /// likely to be followed. For a plan on the machine's network nothing has
@@ -772,7 +819,11 @@ mod tests {
                 argument_hint: None,
                 path: PathBuf::from("/somewhere/.claude/skills/build/SKILL.md"),
             }];
-            prompt.workspace = workspace_block(&kingdom_core::Workspace::in_place("/somewhere"));
+            prompt.workspace = workspace_block(
+                &kingdom_core::Workspace::in_place("/somewhere"),
+                kingdom_core::Isolation::Shared,
+                &[],
+            );
 
             let rendered = prompt.render();
 
@@ -938,7 +989,7 @@ mod tests {
         );
 
         for workspace in [isolated, kingdom_core::Workspace::in_place("/dev/city")] {
-            let block = workspace_block(&workspace);
+            let block = workspace_block(&workspace, kingdom_core::Isolation::Shared, &[]);
 
             assert!(
                 block.contains(&workspace.path),
@@ -948,6 +999,53 @@ mod tests {
                 block.contains("Every command runs here"),
                 "naming the directory is not the same as saying work begins in \
                  it -- that gap is what buys a `cd` on every command: {block}"
+            );
+        }
+    }
+
+    /// A sealed plan is told its filesystem is not the user's.
+    ///
+    /// Without this the model reads an absent `~/.ssh`, an unfamiliar `ps` or a
+    /// missing tool as a machine in need of repair, and spends a turn trying to
+    /// fix it. The boundary is cheap to state and expensive to discover.
+    #[test]
+    fn a_sealed_plan_is_told_what_it_can_see() {
+        let workspace = kingdom_core::Workspace::in_place("/dev/city");
+
+        let sealed = workspace_block(
+            &workspace,
+            kingdom_core::Isolation::Sealed,
+            &[kingdom_core::services::MountSpec {
+                path: "~/.cargo".to_string(),
+                mode: kingdom_core::services::MountMode::Rw,
+            }],
+        );
+        assert!(
+            sealed.contains("sealed"),
+            "a sealed plan must be told so: {sealed}"
+        );
+        assert!(
+            sealed.contains("~/.cargo") && sealed.contains("you may write here"),
+            "a sealed plan must be told which folders it has, not merely that \
+             it is fenced in: {sealed}"
+        );
+        assert!(
+            sealed.contains("not missing"),
+            "and told how to read an absent file, which is the actual failure \
+             this prevents: {sealed}"
+        );
+
+        // And the other two modes say nothing of the kind, because for them it
+        // would be false: their filesystem *is* the user's.
+        for ordinary in [
+            kingdom_core::Isolation::Shared,
+            kingdom_core::Isolation::Isolated,
+        ] {
+            let block = workspace_block(&workspace, ordinary, &[]);
+            assert!(
+                !block.contains("sealed"),
+                "{ordinary:?} shares the user's filesystem and must not claim \
+                 otherwise: {block}"
             );
         }
     }
@@ -975,7 +1073,7 @@ mod tests {
         let city = temp().join("agora");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-told-localhost");
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
 
         let block = services_block(&plan, &city);
 
@@ -1011,7 +1109,7 @@ mod tests {
             "a shared database is still shared: {block}"
         );
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// A plan on the machine's network is still warned, because for it the
@@ -1025,7 +1123,7 @@ mod tests {
         let city = temp().join("agora-shared");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-on-the-machines-network");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         let block = services_block(&plan, &city);
 
@@ -1053,7 +1151,7 @@ mod tests {
         crate::services::pretend_a_named_well_is_running(&city, "cache", "172.31.4.10", 6379);
         crate::services::pretend_a_named_well_is_running(&city, "other", "172.31.9.10", 6379);
         let plan = kingdom_core::PlanId::new("plan-told-about-two-caches");
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
 
         let block = services_block(&plan, &city);
 
@@ -1067,7 +1165,7 @@ mod tests {
              {block}"
         );
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// The block is built from the **project's** root, not the plan's
@@ -1088,7 +1186,7 @@ mod tests {
         let city = temp().join("agora-with-a-worktree");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-in-a-worktree");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         // Where an isolated plan actually works: inside the city, under
         // `.kingdom/`. Asking about *this* path must not be mistaken for the
@@ -1117,7 +1215,7 @@ mod tests {
         let city = temp().join("no-wells");
         std::fs::create_dir_all(&city).unwrap();
         let plan = kingdom_core::PlanId::new("plan-in-an-ordinary-project");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         assert!(services_block(&plan, &city).is_empty());
     }

@@ -608,7 +608,7 @@ pub async fn begin_plan(
     city: Option<String>,
     choice: Option<ModelChoice>,
     workspace: Option<WorkspaceMode>,
-    network: Option<kingdom_core::NetworkMode>,
+    isolation: Option<kingdom_core::Isolation>,
 ) -> Result<Plan, ServerFnError> {
     use kingdom_core::{CityId, NoteKind};
 
@@ -648,14 +648,14 @@ pub async fn begin_plan(
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let network = network.unwrap_or_default();
+    let isolation = isolation.unwrap_or_default();
 
     // Refused *before* a plan exists, not when its first command runs. A plan
     // that took the setting and then quietly ran on the shared network would be
     // exactly the invisible isolation this feature exists to end -- and the
     // King would only find out when two agents collided on 3000 anyway.
-    if network.is_isolated() {
-        crate::netns::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
+    if isolation.is_isolated() {
+        crate::namespaces::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
     }
 
     let mut plan = Plan::opened(
@@ -664,7 +664,7 @@ pub async fn begin_plan(
         &prompt,
         &choice,
         workspace.clone(),
-        network,
+        isolation,
     );
     // Where an agent is fenced in is not something it said, it is something that
     // happened -- and isolation the user cannot see is isolation he cannot
@@ -678,14 +678,24 @@ pub async fn begin_plan(
     );
     // The same argument, for the other axis. A plan with its own network can
     // bind whatever port it likes, and the King needs to know that the `:3000`
-    // this plan talks about is not the `:3000` in his own browser.
-    if network.is_isolated() {
-        plan.note(
+    // this plan talks about is not the `:3000` in his own browser -- and a
+    // sealed plan cannot see his files at all, which changes what it is
+    // reasonable to ask of it.
+    match isolation {
+        kingdom_core::Isolation::Shared => {}
+        kingdom_core::Isolation::Isolated => plan.note(
             NoteKind::Workspace,
             "On a network of its own: ports it opens belong to this plan alone, \
              and are forwarded to the host on ports shown in the chamber."
                 .to_string(),
-        );
+        ),
+        kingdom_core::Isolation::Sealed => plan.note(
+            NoteKind::Workspace,
+            "On a machine of its own: its own network, and its own filesystem. \
+             It sees this workspace, a read-only system and the folders you \
+             allow in -- nothing else of yours is there to be changed."
+                .to_string(),
+        ),
     }
 
     let mut kingdom = lock()?;
@@ -712,7 +722,9 @@ pub async fn begin_plan(
 /// after he has typed his prompt.
 #[server(NetworkAvailable, "/api")]
 pub async fn network_available() -> Result<Option<String>, ServerFnError> {
-    Ok(crate::netns::availability().err().map(|e| e.to_string()))
+    Ok(crate::namespaces::availability()
+        .err()
+        .map(|e| e.to_string()))
 }
 
 /// Local branches in a city's repository, for the workspace picker.
@@ -1020,7 +1032,7 @@ type LiveAgent = (
     // and it is read here because only the kingdom knows it.
     String,
     kingdom_core::CityId,
-    kingdom_core::NetworkMode,
+    kingdom_core::Isolation,
 );
 
 /// A city with live agents in it, and where its project sits on disk.
@@ -1077,7 +1089,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
                     plan.id.clone(),
                     plan.title.clone(),
                     plan.city.clone(),
-                    plan.network,
+                    plan.isolation,
                 )
             })
             .collect();
@@ -1149,7 +1161,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
             // has none is answered with an empty list anyway -- the guard is
             // here to say so rather than to avoid a fault.
             let ports = if network.is_isolated() {
-                crate::netns::forwards_of(&plan)
+                crate::namespaces::net::forwards_of(&plan)
                     .into_iter()
                     .map(|(guest, host)| kingdom_core::PortForward { guest, host })
                     .collect()
@@ -2518,7 +2530,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     //
     // Unconditional, like the draft read above: a plan on the shared network
     // has no namespace and this does nothing at all.
-    crate::netns::shutdown(&plan_id);
+    crate::namespaces::shutdown(&plan_id);
 
     // The city's shared services are **not** touched here. They are reconciled
     // once the plan has actually been settled below -- see the call after
@@ -2633,6 +2645,84 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
 pub async fn shared_resources() -> Result<kingdom_core::ResourceInventory, ServerFnError> {
     let kingdom = { lock()?.clone() };
     Ok(crate::services::inventory(&kingdom).await)
+}
+
+/// The folders Kingdom offers to share with a sealed plan on this machine.
+///
+/// Answered per *city*, because the answer depends on what has already been
+/// declared -- for the machine and for that project -- and an offer already
+/// taken is shown as taken rather than repeated.
+///
+/// Read afresh on each asking rather than cached: the King may install a
+/// toolchain while Kingdom runs, and one who just did should not have to
+/// restart the server to be offered it.
+#[server(MountOffers, "/api")]
+pub async fn mount_offers(
+    city: Option<String>,
+) -> Result<Vec<kingdom_core::services::MountCandidate>, ServerFnError> {
+    let city_root = {
+        let kingdom = lock()?;
+        city.map(kingdom_core::CityId::new)
+            .and_then(|id| kingdom.city(&id).cloned())
+            .map(|c| std::path::Path::new(&kingdom.root).join(&c.path))
+    };
+    Ok(crate::services::mount_candidates(city_root.as_deref()))
+}
+
+/// Shares a folder with sealed plans, by writing it to a manifest.
+///
+/// Takes the folders of **one offer** rather than a single path, because a
+/// toolchain is usually more than one folder and half of one is a toolchain
+/// that does not work -- `~/.cargo` without `~/.rustup` gives a `cargo` that
+/// re-downloads the toolchain on every build.
+///
+/// # Why the city is a `CityId` and not a path
+///
+/// The same reason [`declare_shared_resource`] gives: the browser cannot be
+/// trusted with a filesystem path, so a city id is resolved against the open
+/// kingdom here.
+#[server(DeclareMount, "/api")]
+pub async fn declare_mount(
+    scope: String,
+    city: Option<String>,
+    folders: Vec<kingdom_core::services::MountSpec>,
+) -> Result<String, ServerFnError> {
+    use kingdom_core::services::ServiceScope;
+
+    let Some(kind) = ServiceScope::from_wire(&scope) else {
+        return Err(ServerFnError::new(format!(
+            "`{scope}` is not a level a shared folder can be kept at."
+        )));
+    };
+
+    let scope = match kind {
+        ServiceScope::Host => crate::services::Scope::Host,
+        ServiceScope::City => {
+            let kingdom = lock()?;
+            let Some(city) = city
+                .map(kingdom_core::CityId::new)
+                .and_then(|id| kingdom.city(&id).cloned())
+            else {
+                return Err(ServerFnError::new(
+                    "A folder that belongs to one project needs a project. \
+                     Pick one, or share it with the whole machine instead.",
+                ));
+            };
+            crate::services::Scope::City(std::path::Path::new(&kingdom.root).join(&city.path))
+        }
+    };
+
+    let mut written = None;
+    for spec in &folders {
+        written = Some(
+            crate::services::declare_mount(&scope, spec)
+                .map_err(|e| ServerFnError::new(e.to_string()))?,
+        );
+    }
+
+    written
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| ServerFnError::new("That offer named no folders."))
 }
 
 /// Declares a new shared resource, writing it to the manifest its scope keeps.
@@ -2779,6 +2869,8 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
         plan.approved_proposal().is_some(),
         &root,
         &city_root,
+        plan.isolation,
+        crate::services::mounts_for(Some(&city_root)),
     )
     .render())
 }
@@ -2820,7 +2912,7 @@ fn expand_home(path: &str) -> String {
 #[cfg(all(test, feature = "ssr"))]
 pub(crate) mod tests {
     use super::*;
-    use kingdom_core::NetworkMode;
+    use kingdom_core::Isolation;
     use std::path::PathBuf;
 
     /// Containment must survive traversal, not merely prefix-matching.
@@ -2903,7 +2995,7 @@ pub(crate) mod tests {
                 "A decree",
                 &ModelChoice::new("mock", None),
                 Workspace::in_place("/dev/testburg"),
-                NetworkMode::Shared,
+                Isolation::Shared,
             )
         };
 
@@ -2969,7 +3061,7 @@ pub(crate) mod tests {
                     "A decree",
                     &ModelChoice::new("mock", None),
                     Workspace::in_place("/dev/shopfront"),
-                    NetworkMode::Shared,
+                    Isolation::Shared,
                 )
             })
             .collect();
@@ -3170,7 +3262,7 @@ pub(crate) mod tests {
             "Read the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place(city_path.to_string_lossy()),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.permissions = kingdom_core::Permissions::Propose;
 
@@ -3341,7 +3433,7 @@ pub(crate) mod tests {
                 "A fabricated decree",
                 &ModelChoice::new("mock", None),
                 Workspace::in_place("/dev/testburg"),
-                NetworkMode::Shared,
+                Isolation::Shared,
             )]
         }
 
@@ -3358,7 +3450,7 @@ pub(crate) mod tests {
             "The King's own decree",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )];
         assert_eq!(
             seed_starter_plans(recorded.clone(), &[], starter_plans),
@@ -3389,7 +3481,7 @@ pub(crate) mod tests {
             "A decree whose turn died",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
 
         // Exactly what a turn killed mid-flight leaves behind.
@@ -3761,7 +3853,7 @@ pub(crate) mod tests {
                 id: Some("abc".into()),
                 base: Some("main".into()),
             },
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         let subagent = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
 
@@ -3818,7 +3910,7 @@ pub(crate) mod tests {
                         plan.id.clone(),
                         plan.title.clone(),
                         plan.city.clone(),
-                        plan.network,
+                        plan.isolation,
                     )
                 })
                 .collect();
@@ -3846,7 +3938,7 @@ pub(crate) mod tests {
             "Fix the parser",
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )
     }
 

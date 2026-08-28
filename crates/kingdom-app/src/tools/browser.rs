@@ -71,7 +71,7 @@ pub fn start_housekeeping() -> usize {
     // that browser would be somebody else's server -- see
     // `kingdom_browser::on_enter_namespace`.
     kingdom_browser::on_enter_namespace(|plan| {
-        crate::netns::enter_prefix(&kingdom_core::PlanId::new(plan))
+        crate::namespaces::enter_prefix(&kingdom_core::PlanId::new(plan))
     });
 
     // And how to reserve a fixed CDP port and its relay -- the companion hook,
@@ -80,7 +80,7 @@ pub fn start_housekeeping() -> usize {
     // is. See `kingdom_browser::on_reserve_cdp_port`.
     kingdom_browser::on_reserve_cdp_port(|plan| {
         let plan = kingdom_core::PlanId::new(plan);
-        async move { crate::netns::reserve_cdp_port(&plan).await }
+        async move { crate::namespaces::net::reserve_cdp_port(&plan).await }
     });
 
     let reclaimed = kingdom_browser::sweep_orphans();

@@ -48,7 +48,7 @@
 //! The supervision concern is answered rather than dropped: this is the King's
 //! *own* process, started by hand, and it still ends with the plan --
 //! [`shutdown`] is called when a plan is merged or archived, beside
-//! [`crate::netns::shutdown`], and the panel's close button ends it deliberately
+//! [`crate::namespaces::shutdown`], and the panel's close button ends it deliberately
 //! through [`crate::api::end_terminal`]. Looking away is not an act; closing is.
 //!
 //! Output produced while nobody is attached is not lost: it accumulates in a
@@ -165,7 +165,7 @@ impl Session {
     }
 }
 
-/// Every plan's shell. The same shape as `netns::NAMESPACES` and
+/// Every plan's shell. The same shape as `namespaces::NAMESPACES` and
 /// `services::SERVICES`, and held for the same reason: it lives in the process
 /// rather than on disk, so a restarted server starts a fresh one.
 static SESSIONS: OnceLock<Mutex<HashMap<PlanId, Arc<Session>>>> = OnceLock::new();
@@ -177,7 +177,7 @@ fn sessions() -> &'static Mutex<HashMap<PlanId, Arc<Session>>> {
 /// Ends a plan's shell and forgets it.
 ///
 /// Called when the King closes the panel deliberately, and when a plan is
-/// merged or archived -- there beside [`crate::netns::shutdown`] and *before*
+/// merged or archived -- there beside [`crate::namespaces::shutdown`] and *before*
 /// it, because the shell holds the worktree as its working directory and `git
 /// worktree remove` must not be fighting it.
 pub fn shutdown(plan: &PlanId) {
@@ -233,16 +233,27 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
     // says "in this plan's network". Measured rather than imagined: that shell
     // tried to bind :3000 and took `Address already in use` from the King's own
     // server. A refusal he can read beats a lie he cannot see.
-    if plan.network.is_isolated() {
-        if let Err(e) = crate::netns::ensure(plan_id).await {
+    if plan.isolation.is_isolated() {
+        let city_root = crate::api::city_root_of(plan_id);
+        let request = crate::namespaces::Request {
+            isolation: plan.isolation,
+            workspace: cwd.clone(),
+            // The same folders the agent's own tools get, so the King's shell
+            // and his agent see the same filesystem. A shell that could run
+            // `cargo` where the agent could not -- or the reverse -- would make
+            // every diagnosis he attempts in here misleading.
+            allowed: crate::services::mounts_for(city_root.as_deref()),
+            city_root,
+        };
+        if let Err(e) = crate::namespaces::ensure(plan_id, &request).await {
             return Err(format!(
-                "This plan has a network of its own, but it could not be \
+                "This plan has isolation of its own, but it could not be \
                  opened -- so no shell was started. A shell on the \
-                 machine's network would be the wrong answer rather than \
-                 a lesser one.\r\n\r\n{e}\r\n"
+                 machine's network and filesystem would be the wrong \
+                 answer rather than a lesser one.\r\n\r\n{e}\r\n"
             ));
         }
-        crate::netns::watch(plan_id);
+        crate::namespaces::net::watch(plan_id);
     }
 
     // The well, for the same reason and on the same terms as the namespace
@@ -265,12 +276,12 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
 
     // The same prefix every tool gets, and empty for a shared-network plan --
     // so this is the King's ordinary shell unless he asked for isolation.
-    let enter = crate::netns::enter_prefix(plan_id);
+    let enter = crate::namespaces::enter_prefix(plan_id);
 
     // Belt and braces on the guarantee above. An isolated plan whose prefix came
     // back empty would silently be a host shell, and that is the one outcome
     // worth refusing outright rather than degrading to.
-    if plan.network.is_isolated() && enter.is_empty() {
+    if plan.isolation.is_isolated() && enter.is_empty() {
         return Err(
             "This plan's network could not be entered, so no shell was started.\r\n".to_string(),
         );

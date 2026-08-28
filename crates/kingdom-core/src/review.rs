@@ -17,7 +17,7 @@
 //! uneven replace. The browser renders two columns and re-decides nothing.
 
 use crate::ids::{CityId, PlanId};
-use crate::model::{Language, NetworkMode, PortForward, SharedService};
+use crate::model::{Isolation, Language, PortForward, SharedService};
 use serde::{Deserialize, Serialize};
 
 /// One agent's changes, and enough about the agent to draw them.
@@ -109,7 +109,7 @@ pub struct AgentNetwork {
     /// The town its marker stands in.
     pub city: CityId,
     /// Whether it has a network of its own, or shares the King's.
-    pub network: NetworkMode,
+    pub network: Isolation,
     /// What it has forwarded to the host right now. Empty for a plan on the
     /// shared network, which forwards nothing because it needs to forward
     /// nothing.

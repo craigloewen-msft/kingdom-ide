@@ -1163,7 +1163,7 @@ fn ConversationBody(
     // ports arrive over the same watch socket as everything else, pushed by the
     // namespace's watcher as servers come up and go down.
     let plan_isolated =
-        Memo::new(move |_| live.with(|p| p.as_ref().is_some_and(|p| p.network.is_isolated())));
+        Memo::new(move |_| live.with(|p| p.as_ref().is_some_and(|p| p.isolation.is_isolated())));
     let plan_ports =
         Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.ports.clone()).unwrap_or_default()));
     // The city's shared services. Unlike the two above this is not conditional
@@ -3505,7 +3505,7 @@ mod tests {
             "Do the thing",
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("forge"),
-            kingdom_core::NetworkMode::Shared,
+            kingdom_core::Isolation::Shared,
         )
     }
 

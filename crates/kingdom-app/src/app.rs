@@ -5,7 +5,7 @@ use crate::components::{Conversation, PromptBar, SharedResourcesView, Sidebar};
 use kingdom_citymap::map::MapPresence;
 use kingdom_citymap::CityMap;
 use kingdom_core::{
-    Attention, CityActivity, CityId, Kingdom, ModelChoice, NetworkMode, Plan, WorkspaceMode,
+    Attention, CityActivity, CityId, Isolation, Kingdom, ModelChoice, Plan, WorkspaceMode,
 };
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -92,12 +92,15 @@ const EFFORT_KEY: &str = "kingdom.effort";
 const WORKSPACE_KEY: &str = "kingdom.workspace";
 #[cfg(feature = "hydrate")]
 const BRANCH_KEY: &str = "kingdom.branch";
-/// Where the last-used network mode is remembered.
+/// Where the last-used isolation is remembered.
 ///
 /// Its own key rather than a field of the workspace's, because it is its own
-/// axis -- see [`kingdom_core::NetworkMode`].
+/// axis -- see [`kingdom_core::Isolation`]. The key still reads `network`
+/// because that is what is already in every King's browser storage, and the two
+/// values it can hold are unchanged: renaming it would silently reset
+/// everyone's remembered choice for no gain the King can see.
 #[cfg(feature = "hydrate")]
-const NETWORK_KEY: &str = "kingdom.network";
+const ISOLATION_KEY: &str = "kingdom.network";
 
 /// Shared UI state, provided via context so the three regions stay in sync
 /// without threading props through every layer.
@@ -160,8 +163,8 @@ pub struct KingdomState {
     /// How the next new plan will be isolated on disk.
     pub workspace: RwSignal<WorkspaceMode>,
     /// Whether the next plan gets a network of its own. A separate axis from
-    /// `workspace`; see [`kingdom_core::NetworkMode`].
-    pub network: RwSignal<NetworkMode>,
+    /// `workspace`; see [`kingdom_core::Isolation`].
+    pub isolation: RwSignal<Isolation>,
     /// The file the chamber's panel is showing, relative to the plan's city.
     ///
     /// Written by the chamber and read by the map, which is why it is here: the
@@ -282,7 +285,7 @@ impl KingdomState {
             error: RwSignal::new(None),
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
-            network: RwSignal::new(NetworkMode::default()),
+            isolation: RwSignal::new(Isolation::default()),
             focus_file: RwSignal::new(None),
             picked_file: RwSignal::new(None),
             works: RwSignal::new(Vec::new()),
@@ -357,9 +360,9 @@ impl KingdomState {
     }
 
     /// Records whether the next plan gets a network of its own.
-    pub fn choose_network(&self, mode: NetworkMode) {
-        store_network(&mode);
-        self.network.set(mode);
+    pub fn choose_isolation(&self, mode: Isolation) {
+        store_isolation(&mode);
+        self.isolation.set(mode);
     }
 
     /// Folds the cities rail away, or brings it back, remembering which.
@@ -473,25 +476,26 @@ fn restore_workspace(mode: RwSignal<WorkspaceMode>) {
     let _ = mode;
 }
 
-/// Restores the remembered network mode, in the same place and for the same
+/// Restores the remembered isolation, in the same place and for the same
 /// reason as [`restore_workspace`].
-fn restore_network(mode: RwSignal<NetworkMode>) {
+fn restore_isolation(mode: RwSignal<Isolation>) {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         let Some(storage) = local_storage() else {
             return;
         };
-        let Some(stored) = storage.get_item(NETWORK_KEY).ok().flatten() else {
+        let Some(stored) = storage.get_item(ISOLATION_KEY).ok().flatten() else {
             return;
         };
         // Anything unrecognised means shared. The default is deliberately the
-        // *un*isolated one here, the opposite of the workspace's: a network
-        // namespace needs slirp4netns, and a machine that has since lost it
+        // *un*isolated one here, the opposite of the workspace's: every
+        // isolated mode needs slirp4netns, and a machine that has since lost it
         // should open on the mode that always works rather than on one the
         // server would refuse.
         mode.set(match stored.as_str() {
-            "isolated" => NetworkMode::Isolated,
-            _ => NetworkMode::Shared,
+            "isolated" => Isolation::Isolated,
+            "sealed" => Isolation::Sealed,
+            _ => Isolation::Shared,
         });
     });
 
@@ -499,14 +503,15 @@ fn restore_network(mode: RwSignal<NetworkMode>) {
     let _ = mode;
 }
 
-fn store_network(mode: &NetworkMode) {
+fn store_isolation(mode: &Isolation) {
     #[cfg(feature = "hydrate")]
     if let Some(storage) = local_storage() {
         let _ = storage.set_item(
-            NETWORK_KEY,
+            ISOLATION_KEY,
             match mode {
-                NetworkMode::Shared => "shared",
-                NetworkMode::Isolated => "isolated",
+                Isolation::Shared => "shared",
+                Isolation::Isolated => "isolated",
+                Isolation::Sealed => "sealed",
             },
         );
     }
@@ -782,7 +787,7 @@ fn watch_kingdom_network(state: KingdomState) {
             k.plans
                 .iter()
                 .filter(|plan| plan.is_live() && !plan.is_subagent())
-                .map(|plan| (plan.id.clone(), plan.network))
+                .map(|plan| (plan.id.clone(), plan.isolation))
                 .collect::<Vec<_>>()
         })
     });
@@ -837,7 +842,7 @@ pub fn App() -> impl IntoView {
     provide_context(state);
     restore_choice(state.choice);
     restore_workspace(state.workspace);
-    restore_network(state.network);
+    restore_isolation(state.isolation);
     restore_rail_collapsed(state.rail_collapsed, state.rail_preference);
     // After the restore, so "enough room again" gives back the King's own
     // preference rather than the default standing in for it.

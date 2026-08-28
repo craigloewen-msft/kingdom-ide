@@ -53,7 +53,7 @@ detail and the reasoning for each gap.
   nothing is rendering, or rendering a ring nothing is refreshing.
 - **Resource arbitration beyond ports** — the second of the product's three
   questions, now half-answered. A plan can be given a network of its own
-  (`netns.rs`), so two agents no longer collide on 3000: each has its own, and
+  (`namespaces/`), so two agents no longer collide on 3000: each has its own, and
   the chamber shows where to reach it. That is *avoidance*, not arbitration —
   nothing detects or reports a genuine clash, and the other shared resources are
   untouched. A shared `target/` directory is the obvious next one: two plans
