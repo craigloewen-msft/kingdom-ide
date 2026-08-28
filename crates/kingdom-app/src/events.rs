@@ -286,7 +286,7 @@ pub(crate) fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> P
                         manifest_path: scope.manifest_path().to_string_lossy().to_string(),
                         scope: service.scope,
                         name: service.name,
-                        image: service.image,
+                        what: service.what,
                     }
                 })
                 .collect()
@@ -468,7 +468,7 @@ mod tests {
         }];
         let services = vec![kingdom_core::SharedService {
             name: "db".into(),
-            image: "mongo:7".into(),
+            what: "mongo:7".into(),
             address: "127.0.0.1:27017".into(),
             users: 1,
             scope: kingdom_core::ServiceScope::City,
@@ -576,6 +576,11 @@ mod tests {
     /// machine" would tell the King a project's database was shared with every
     /// other project he has open, which is the one thing about a well he most
     /// needs to be right.
+    ///
+    /// The older form also says `image`, which is what `what` was called before
+    /// a resource had a kind. It is read through a serde alias, so a browser
+    /// holding an older bundle across a server upgrade still draws its badge
+    /// rather than failing to parse the plan it is watching.
     #[test]
     fn a_shared_service_from_before_the_two_levels_reads_as_a_projects_own() {
         let older = r#"{
@@ -591,6 +596,7 @@ mod tests {
         assert_eq!(service.scope, kingdom_core::ServiceScope::City);
         assert!(service.manifest_path.is_empty());
         assert_eq!(service.users, 3);
+        assert_eq!(service.what, "mongo:7", "`image` is still read as `what`");
     }
 
     /// The whole point of the module: a change made through the funnel reaches

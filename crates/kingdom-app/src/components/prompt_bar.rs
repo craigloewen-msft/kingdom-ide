@@ -678,7 +678,9 @@ fn IsolationChoices(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl 
             .map(|resource| {
                 format!(
                     "{} ({}) at localhost:{}",
-                    resource.spec.name, resource.spec.image, resource.spec.port,
+                    resource.spec.name,
+                    resource.spec.kind.what(),
+                    resource.spec.port,
                 )
             })
             .collect::<Vec<_>>()

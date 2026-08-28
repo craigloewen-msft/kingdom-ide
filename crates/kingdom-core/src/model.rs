@@ -601,8 +601,20 @@ pub struct PortForward {
 pub struct SharedService {
     /// The service's name from the city's manifest, e.g. `db`.
     pub name: String,
-    /// The image it runs, e.g. `mongo:7`.
-    pub image: String,
+    /// The one line saying what it is, e.g. `mongo:7` for a container.
+    ///
+    /// Named `what` rather than `image` because this type crosses to the
+    /// browser and the browser draws it: a field called `image` is a promise
+    /// that every shared resource is a container, made to code that has no way
+    /// of checking. What it contains for a given kind is
+    /// [`crate::services::ResourceKind::what`].
+    ///
+    /// Still reads `image`, which is what it was called before there were
+    /// kinds. One word, and it means a browser holding an older bundle open
+    /// across a server upgrade still draws its badge rather than failing to
+    /// parse the plan it is watching.
+    #[serde(alias = "image")]
+    pub what: String,
     /// Where to reach it, as `host:port`.
     pub address: String,
     /// How many plans are using it right now, this one included.

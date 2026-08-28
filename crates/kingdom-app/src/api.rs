@@ -1143,7 +1143,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
                         .to_string(),
                     scope: service.scope,
                     name: service.name,
-                    image: service.image,
+                    what: service.what,
                 })
                 .collect();
             // Absent rather than empty: see the doc above.
@@ -2739,19 +2739,22 @@ pub async fn declare_mount(
 /// only paths this can write to are a city of the kingdom he opened, or his own
 /// profile.
 ///
-/// # Four fields, and no environment
+/// # Why it takes the whole spec
 ///
-/// A resource is reached at `localhost` on its own port, so there is nothing to
-/// plumb and nothing for this to carry. The `env` argument that used to be here
-/// is gone with the field it wrote.
+/// It used to take six scalars, and half of them -- image, volume -- are fields
+/// only a container has. A second kind would have meant either another argument
+/// nothing else uses or a second server function, where the typed spec already
+/// says exactly what was declared. The form builds the same value it renders in
+/// the preview, so what he is shown is what is written.
+///
+/// Validated here rather than trusted: the spec crosses the wire, so it is
+/// rendered and parsed before anything is written -- which `declare` does, on
+/// the whole file.
 #[server(DeclareSharedResource, "/api")]
 pub async fn declare_shared_resource(
     scope: String,
     city: Option<String>,
-    name: String,
-    image: String,
-    port: u16,
-    volume: String,
+    spec: kingdom_core::ServiceSpec,
 ) -> Result<String, ServerFnError> {
     use kingdom_core::services::ServiceScope;
 
@@ -2776,16 +2779,6 @@ pub async fn declare_shared_resource(
             };
             crate::services::Scope::City(std::path::Path::new(&kingdom.root).join(&city.path))
         }
-    };
-
-    let spec = kingdom_core::ServiceSpec {
-        name: name.trim().to_string(),
-        image: image.trim().to_string(),
-        port,
-        // An empty box is "no volume", which is a different declaration from a
-        // volume named "" -- and the one the parser would refuse.
-        volume: Some(volume.trim().to_string()).filter(|v| !v.is_empty()),
-        retired_env: None,
     };
 
     let path =

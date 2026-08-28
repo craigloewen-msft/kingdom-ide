@@ -557,6 +557,16 @@ do there, and every field of a manifest, is
 [`shared-resources.md`](shared-resources.md). What follows is the mechanism
 under it.
 
+A resource declares **what kind of thing it is** — `ResourceKind`, carrying what
+that kind needs, which for the one kind there is (`docker`) is an image and a
+volume. The split that follows from it is the one that matters: `services/mod.rs`
+holds what is true of *sharing* — the reference count, the two levels,
+`reconcile`'s invariant, the ledger — and `services/docker.rs` holds the
+conversation with a daemon. There is no trait: one runtime behind a `dyn` proves
+nothing, and an exhaustive `match` makes the compiler name every place a second
+kind must decide something. See
+[`shared-resources.md`](shared-resources.md#what-kind-of-thing-it-is).
+
 A well is declared at one of **two levels**, and the level decides only which
 file the declaration lives in:
 
@@ -582,6 +592,7 @@ A city declares what it needs in `<city>/.kingdom/services.toml`, committed:
 
 ```toml
 [[service]]
+type  = "docker"
 name  = "db"
 image = "mongo:7"
 port  = 27017
