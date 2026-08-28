@@ -76,8 +76,10 @@ crates/
                     slirp to forward each to a host port. ssr only, and Linux
                     only at runtime -- availability() refuses elsewhere
     terminal.rs     The King's own shell, over a socket, in a plan's workspace
-                    and its network — the door into an isolated plan (route +
-                    URL on both targets via `terminal_route`; the pty ssr only)
+                    and its network — the door into an isolated plan. One shell
+                    per plan, outliving any socket: panels attach and detach,
+                    and closing one only detaches (route + URL on both targets
+                    via `terminal_route`; the pty ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
@@ -461,7 +463,10 @@ it at the four moments that population changes — a kingdom opened, a plan
 opened, a plan finished, a kingdom closed — which is what makes a server restart
 invisible to five agents that had a database. Taking a turn and opening a shell
 call `services::require`, which waits for a raise in flight and refuses if a
-promised well is missing, but raises nothing itself.
+promised well is missing; it raises no container, but it *is* where
+`netns::open_wells` stands the relay onto an isolated plan's own loopback — that
+relay belongs to one plan's namespace, so it cannot be done by the per-scope
+pass that runs when a kingdom opens.
 
 Shown to the King as **the well**; called a shared service in code
 (`ServiceSpec`, `RunningService`, `SharedService`). There is a screen for seeing
@@ -531,7 +536,12 @@ cannot work: publishing the container and pointing plans at `127.0.0.1` is
 exactly the second line. Kingdom publishes **nothing** and gives each service a
 fixed address on a per-city network instead.
 
-Six things worth knowing:
+The second line also has a converse, and it is what lets a plan use the
+ordinary address anyway: the loopback that is refused is the **host's**. The
+plan's own is empty and free, so Kingdom relays each service onto it. See
+`netns::open_wells` and the bullet below.
+
+Seven things worth knowing:
 
 - **The address is assigned, not allocated.** A service's IP comes from its
   position in the manifest, which is what makes it knowable *before* the
@@ -543,8 +553,20 @@ Six things worth knowing:
 - **Plans find it through `tools::child_environment`**, which `bash`, `tmux` and
   the King's terminal already route through — the same reasoning that makes
   `netns::enter_prefix` a no-op rather than a thing each call site remembers.
-  The system prompt says it too, because every model's prior for "connect to the
-  database" is `localhost`, and here that is precisely wrong.
+- **An isolated plan is given `localhost`, not the IP.** `netns::open_wells`
+  stands a relay on `127.0.0.1:<port>` *inside that plan's namespace* and
+  splices it to the container, so the address every model reaches for first is
+  simply correct there. This does not contradict the measurement above — the
+  loopback that cannot be reached is the *host's*, and the one being bound is
+  the plan's own, which is empty precisely because it is isolated. The
+  substitution is per plan, and only where the relay actually bound: a plan on
+  the machine's network keeps the IP, because binding its `127.0.0.1` would
+  take the King's real port. The system prompt says whichever is true for that
+  plan, since a false sentence there is followed as diligently as a true one.
+- **A well's port is never forwarded back to the King.** Its relay listens
+  inside the namespace, so `/proc/<holder>/net/tcp` reports it like any dev
+  server; `netns::forwardable` drops it, or the ports badge would offer him a
+  MongoDB socket to open in a browser tab.
 - **Reference counted by plan id, not by an integer.** The last plan out stops
   the container; a plan closed twice cannot decrement twice and strand the four
   still using it. A test pins that.

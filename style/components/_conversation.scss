@@ -1178,6 +1178,49 @@
   line-height: 1.45;
 }
 
+// --- The decree he did not have to type -------------------------------------
+//
+// Between the error strip and the composer. Outside the log for the error
+// strip's reason — the log is what was said and done, and this is a decision
+// still to make — and outside the composer row because that row is Send, Stop
+// and Done: a fourth control appearing there would shift the others under the
+// King's cursor.
+//
+// Deliberately not gold. Gold in this chamber means "this is yours to decide",
+// and these decide nothing: they send words he could have typed himself. Same
+// reasoning as `.log-jump`, which is the other control in this chamber that
+// only saves him an action.
+.chamber-nudges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 10px 20px 0;
+  background: t.$panel;
+}
+
+// Shaped like `.done-btn`, which is the weight of a control that acts without
+// being the main thing in the room.
+.nudge-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  background: t.$panel-2;
+  color: t.$ink-dim;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+
+  &:hover {
+    border-color: t.$gold-dim;
+    color: t.$ink;
+  }
+}
+
 // A settled plan is a record, not a place to type: this stands where the
 // composer was, so the chamber stops inviting work that can no longer land.
 .chamber-outcome {

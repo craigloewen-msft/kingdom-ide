@@ -214,6 +214,63 @@ impl MeshBuilder {
         }
     }
 
+    /// Adds the walls of a prism facing *inward*, for a shaft seen from above.
+    ///
+    /// Not [`Self::wall_ring`] with the points reversed: that normalises its
+    /// winding through [`upward_ring`] before it builds anything, so reversing
+    /// them changes nothing at all and back-face culling eats the whole shaft.
+    /// The same trap [`Self::spire`] documents against [`Self::cone`], one
+    /// level down -- here the fix is to wind each quad the other way rather
+    /// than to walk the ring the other way.
+    pub fn inward_wall_ring(&mut self, polygon: &[Vec2], base_y: f32, top_y: f32) {
+        if polygon.len() < 3 || top_y <= base_y {
+            return;
+        }
+        let ring = upward_ring(polygon);
+        for index in 0..ring.len() {
+            let current = ring[index];
+            let next = ring[(index + 1) % ring.len()];
+            self.quad(
+                Vec3::new(current.x, top_y, current.y),
+                Vec3::new(next.x, top_y, next.y),
+                Vec3::new(next.x, base_y, next.y),
+                Vec3::new(current.x, base_y, current.y),
+            );
+        }
+    }
+
+    /// Adds a flat horizontal ring: a disc with a hole in the middle.
+    ///
+    /// What caps a hollow drum. [`Self::ground_polygon`] can only fill a solid
+    /// outline, and filling this one would put a lid over the very hole the
+    /// shaft is drawn to show.
+    pub fn annulus(&mut self, center: Vec2, inner: f32, outer: f32, y: f32, segments: usize) {
+        let segments = segments.max(3);
+        if outer <= inner {
+            return;
+        }
+        let at = |radius: f32, index: usize| {
+            let angle = index as f32 / segments as f32 * std::f32::consts::TAU;
+            Vec3::new(
+                center.x + angle.cos() * radius,
+                y,
+                center.y + angle.sin() * radius,
+            )
+        };
+        for index in 0..segments {
+            let next = index + 1;
+            // Inner edge first and outer second, which is the winding that
+            // faces upward once the ring is laid into a y-up world -- the
+            // opposite order builds a ring visible only from underneath.
+            self.quad(
+                at(inner, index),
+                at(inner, next),
+                at(outer, next),
+                at(outer, index),
+            );
+        }
+    }
+
     /// Adds a closed cylinder, used for towers and tree trunks.
     pub fn cylinder(
         &mut self,
@@ -1195,6 +1252,69 @@ mod tests {
                 "a spire face at {outward:?} pointed inward as {normal:?}"
             );
         }
+    }
+
+    /// The rim of a well: a flat ring, facing up, with the hole left open.
+    ///
+    /// Capping the drum instead would make it a plinth, and the hole is the
+    /// whole point of a well.
+    #[test]
+    fn an_annulus_faces_upward_and_keeps_its_hole() {
+        let mut builder = MeshBuilder::new();
+        builder.annulus(Vec2::ZERO, 6.0, 10.0, 4.0, 12);
+        let mesh = builder.build();
+
+        for face in triangles(&mesh) {
+            assert!(
+                winding_normal(face).y > 0.99,
+                "a rim triangle faced {:?}, so the well is visible only from \
+                 underneath",
+                winding_normal(face)
+            );
+            for point in face {
+                let across = Vec2::new(point.x, point.z).length();
+                assert!(
+                    across >= 6.0 - 1e-3,
+                    "a rim vertex {across:.2} from the middle is inside the \
+                     mouth -- the hole has been covered over"
+                );
+            }
+        }
+        assert_normals_are_unit_length(&mesh);
+    }
+
+    /// The whole reason [`MeshBuilder::inward_wall_ring`] exists rather than
+    /// reusing `wall_ring` with the points reversed.
+    ///
+    /// `wall_ring` normalises its winding through [`upward_ring`] before it
+    /// builds anything, so a caller that hands it a reversed ring gets exactly
+    /// the same outward-facing shaft back and back-face culling eats it. The
+    /// same trap [`MeshBuilder::spire`] documents against `cone`.
+    #[test]
+    fn an_inward_wall_ring_faces_the_middle() {
+        let mut builder = MeshBuilder::new();
+        builder.inward_wall_ring(&ring(10.0, 12), 0.0, 5.0);
+        let mesh = builder.build();
+
+        for face in triangles(&mesh) {
+            let normal = winding_normal(face);
+            let outward = Vec3::new(
+                (face[0].x + face[1].x + face[2].x) / 3.0,
+                0.0,
+                (face[0].z + face[1].z + face[2].z) / 3.0,
+            )
+            .normalize_or_zero();
+            assert!(
+                normal.dot(outward) < 0.0,
+                "a shaft face at {outward:?} pointed outward as {normal:?}, so \
+                 the inside of the well is culled away"
+            );
+            assert!(
+                normal.y.abs() < 1e-3,
+                "a shaft face is not vertical: {normal:?}"
+            );
+        }
+        assert_normals_are_unit_length(&mesh);
     }
 
     /// The underside is what makes the map an object rather than a cut-out, so

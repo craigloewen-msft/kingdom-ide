@@ -75,15 +75,15 @@ pub struct SystemPrompt {
     /// Every skill the workspace can reach, as a catalogue of names and
     /// descriptions. Bodies are fetched on demand by the `skill` tool.
     pub skills: Vec<Skill>,
-    /// The city's shared services and where to reach them, or empty when it
-    /// declares none.
+    /// The city's shared services and where **this plan** reaches them, or
+    /// empty when it declares none.
     ///
     /// Said in the prompt as well as put in the environment because the two
     /// answer different questions. The environment is what a command *uses*;
-    /// this is what stops the model writing `localhost:27017` in the first
-    /// place -- a plan's namespace provably cannot reach its own loopback
-    /// there, and an agent that has never been told will reach for it every
-    /// time.
+    /// this is what decides what the model writes in the first place -- and
+    /// every model's prior is `localhost`. For an isolated plan that prior is
+    /// now right, and this says so; for a plan on the machine's network it is
+    /// still wrong, and this still warns.
     pub services: String,
 }
 
@@ -99,7 +99,12 @@ impl SystemPrompt {
     ///
     /// `kingdom_root` bounds the guidance walk. See [`discover_guidance`] for
     /// why that bound is load-bearing rather than tidiness.
+    ///
+    /// The `plan` is here for one reason: two plans on one project are not
+    /// necessarily told the same address for its database. See
+    /// [`services_block`].
     pub fn assemble(
+        plan: &kingdom_core::PlanId,
         city: &CityBrief,
         workspace: &kingdom_core::Workspace,
         permissions: Permissions,
@@ -113,7 +118,7 @@ impl SystemPrompt {
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
-            services: services_block(Path::new(&city.path)),
+            services: services_block(plan, Path::new(&city.path)),
         }
     }
 
@@ -327,23 +332,38 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
     out
 }
 
-/// The city's shared services, and the one thing a model must not assume about
-/// them.
+/// The city's shared services, and where this particular plan reaches them.
 ///
 /// Empty for almost every project, which is what keeps this free: a city with
 /// no manifest adds nothing to any prompt.
 ///
-/// The warning is the point. Every model's prior for "connect to the database"
-/// is `localhost`, and here that is precisely wrong -- a plan with a network of
-/// its own reaches `127.0.0.1` inside its *own* namespace, where nothing is
-/// listening, and the failure looks like a broken database rather than a wrong
-/// address. Measured before this was written: a namespace can reach the
-/// container's address and provably cannot reach the host's loopback.
-fn services_block(city_root: &Path) -> String {
+/// # Why the address depends on the plan
+///
+/// Every model's prior for "connect to the database" is `localhost`, and this
+/// block used to exist to fight that prior: a container is not on the host's
+/// loopback, and a plan with a network of its own reaches `127.0.0.1` inside
+/// its *own* namespace where nothing was listening.
+///
+/// `netns::open_wells` makes something listen there. So for an isolated plan
+/// the prior is now simply *correct*, and the block says so instead of warning
+/// against it -- the shortest possible instruction, which is the one most
+/// likely to be followed. For a plan on the machine's network nothing has
+/// changed and the warning stands, because for that plan it is still true.
+///
+/// Telling an isolated plan the old warning would be worse than saying nothing:
+/// a model that believes `localhost` will fail writes code to avoid it, and a
+/// false sentence in a prompt is followed as diligently as a true one.
+fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
     let running = crate::services::running_in(city_root);
     if running.is_empty() {
         return String::new();
     }
+
+    // The ports this plan reaches on its own loopback. Read from the registry
+    // rather than assumed from the plan's network mode: a relay that failed to
+    // bind means `localhost` is not true here, and the prompt must not promise
+    // what the environment does not deliver.
+    let on_the_loopback = crate::netns::wells_of(plan);
 
     let mut out = String::from(
         "This project has shared services running -- one set, shared by every \
@@ -358,22 +378,53 @@ fn services_block(city_root: &Path) -> String {
             kingdom_core::ServiceScope::Host => "shared across every project on this machine",
             kingdom_core::ServiceScope::City => "shared by this project",
         };
+        // The address as *this plan* reaches it. An isolated plan is given the
+        // loopback one, which is the address it should actually type.
+        let address = if on_the_loopback.contains(&service.port) {
+            format!("localhost:{}", service.port)
+        } else {
+            service.address()
+        };
         let _ = writeln!(
             out,
-            "\n- **{}** ({}) at `{}` -- {shared_with}",
-            service.name,
-            service.image,
-            service.address()
+            "\n- **{}** ({}) at `{address}` -- {shared_with}",
+            service.name, service.image,
         );
     }
+
+    let everything_local = running
+        .iter()
+        .all(|service| on_the_loopback.contains(&service.port));
+
+    if everything_local {
+        out.push_str(
+            "\nThese are on **your own loopback**: this plan has a network of its \
+             own, and Kingdom has put each service on `localhost` at its usual \
+             port inside it. So connect the ordinary way -- \
+             `mongodb://localhost:27017`, `postgres://localhost:5432` -- and it \
+             works. You do not need to set anything up, read any environment \
+             variable, or configure an address before running the project: the \
+             usual variables (for example `$MONGODB_URI`) are set too, and they \
+             say the same thing.\n\nYour `localhost` is yours alone -- it is not \
+             the user's, and not another agent's -- so nothing you bind here can \
+             collide with them.",
+        );
+    } else {
+        out.push_str(
+            "\nUse those addresses, not `localhost` -- the services are not on this \
+             machine's loopback, and a connection to `127.0.0.1` will fail. The \
+             usual environment variables are already set for every command you run, \
+             so prefer reading them (for example `$MONGODB_URI`) over writing an \
+             address by hand.",
+        );
+    }
+
+    // Said in both cases, and it matters more in the first: an address that is
+    // easy to reach is easy to reach carelessly, and the data behind it still
+    // belongs to everyone.
     out.push_str(
-        "\nUse those addresses, not `localhost` -- the services are not on this \
-         machine's loopback, and a connection to `127.0.0.1` will fail. The \
-         usual environment variables are already set for every command you run, \
-         so prefer reading them (for example `$MONGODB_URI`) over writing an \
-         address by hand.\n\nThey are shared, so treat the data in them as \
-         someone else's too: other agents are reading and writing it at the \
-         same time.",
+        "\n\nThey are shared, so treat the data in them as someone else's too: \
+         other agents are reading and writing it at the same time.",
     );
     out
 }
@@ -902,5 +953,92 @@ mod tests {
     fn only_an_approved_plan_is_told_to_follow_one() {
         assert!(permissions_block(Permissions::Full, true).contains("plan the user approved"));
         assert!(!permissions_block(Permissions::Full, false).contains("plan the user approved"));
+    }
+
+    /// An isolated plan is told the ordinary address works, rather than warned
+    /// away from it.
+    ///
+    /// The reason this is a test and not a comment: the block used to say the
+    /// exact opposite, and it said it *correctly* -- until a relay was put on
+    /// the plan's loopback. A prompt that kept the old warning would be a false
+    /// sentence, and a model follows a false instruction as diligently as a
+    /// true one: it would write code to work around a problem that no longer
+    /// exists.
+    #[test]
+    fn a_plan_with_the_well_on_its_loopback_is_told_to_use_localhost() {
+        let city = temp().join("agora");
+        crate::services::pretend_a_well_is_running(&city, 27017);
+        let plan = kingdom_core::PlanId::new("plan-told-localhost");
+        crate::netns::pretend_wells_are_open(&plan, &[27017]);
+
+        let block = services_block(&plan, &city);
+
+        assert!(
+            block.contains("localhost:27017"),
+            "the address the agent should type must be the address it is shown: {block}"
+        );
+        assert!(
+            !block.contains("172.31.4.10"),
+            "showing both addresses invites the agent to pick the awkward one: {block}"
+        );
+        assert!(
+            !block.contains("will fail"),
+            "the warning against localhost is now false here: {block}"
+        );
+        // The point of the whole change, said plainly enough that a model
+        // reaching for a config step does not take one.
+        assert!(
+            block.contains("do not need to set anything up"),
+            "an agent that thinks it must configure an address will configure \
+             one: {block}"
+        );
+        // Easier to reach is easier to clobber, so this must survive.
+        assert!(
+            block.contains("someone else's"),
+            "a shared database is still shared: {block}"
+        );
+
+        crate::netns::forget_namespace(&plan);
+    }
+
+    /// A plan on the machine's network is still warned, because for it the
+    /// warning is still true.
+    ///
+    /// Such a plan has no loopback of its own, so nothing was relayed onto it
+    /// and `127.0.0.1` really does reach nothing. Telling it otherwise would
+    /// send it hunting for a fault in the project's own code.
+    #[test]
+    fn a_plan_on_the_machines_network_is_still_warned_off_localhost() {
+        let city = temp().join("agora-shared");
+        crate::services::pretend_a_well_is_running(&city, 27017);
+        let plan = kingdom_core::PlanId::new("plan-on-the-machines-network");
+        crate::netns::forget_namespace(&plan);
+
+        let block = services_block(&plan, &city);
+
+        assert!(
+            block.contains("172.31.4.10:27017"),
+            "the container's address is the only one that works here: {block}"
+        );
+        assert!(
+            block.contains("not `localhost`"),
+            "this plan's 127.0.0.1 is the user's own, and reaches nothing: {block}"
+        );
+    }
+
+    /// A project with no shared services adds nothing to any prompt.
+    ///
+    /// What keeps this block free for almost every city, and worth pinning
+    /// while the block is being changed: an empty city that started emitting a
+    /// heading would put a paragraph about databases in front of every agent
+    /// on every round of every turn.
+    #[test]
+    fn a_city_with_no_wells_says_nothing_at_all() {
+        let city = temp().join("no-wells");
+        std::fs::create_dir_all(&city).unwrap();
+        let plan = kingdom_core::PlanId::new("plan-in-an-ordinary-project");
+        crate::netns::forget_namespace(&plan);
+
+        assert!(services_block(&plan, &city).is_empty());
     }
 }

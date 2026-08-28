@@ -294,6 +294,7 @@ pub(crate) async fn converse(
 
         let brief = Brief {
             system_prompt: SystemPrompt::assemble(
+                &plan_id,
                 &city,
                 &workspace,
                 permissions,

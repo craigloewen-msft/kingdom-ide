@@ -15,7 +15,7 @@ use super::activity::Activity;
 use super::bridge::LodLevel;
 use super::camera::MapCamera;
 use super::lod::ActiveLod;
-use super::network::{AGENT_HEIGHT, Network, WELL_HEIGHT};
+use super::network::{AGENT_HEIGHT, Network, well_label_height};
 use super::spawn::{Holding, LoadedMap};
 
 /// Labels beyond this many are dropped, newest first. A dense ward can put
@@ -389,8 +389,15 @@ pub fn update_labels(
             // avoid, and up close is where the King is asking *which* of them
             // this one is.
             for well in &network.0.wells {
-                let Some(anchor) = project(Vec3::new(well.center[0], WELL_HEIGHT, well.center[1]))
-                else {
+                // The anchor is derived from this well's own radius rather
+                // than from a shared constant: several wells on one square are
+                // each drawn smaller, so one height would float a plaque over
+                // the small ones and bury it in the large.
+                let Some(anchor) = project(Vec3::new(
+                    well.center[0],
+                    well_label_height(well.radius),
+                    well.center[1],
+                )) else {
                     continue;
                 };
                 if outside(anchor, viewport) {

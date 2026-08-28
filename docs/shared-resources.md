@@ -111,14 +111,34 @@ verbatim and fail an hour later as a connection to a host called `{hosts}`.
 This is how an agent finds the well, and it is why the address cannot simply be
 written down: it does not exist until the container does.
 
-### Why never `localhost`
+### How an agent reaches a well
 
-The address in `DATABASE_URL` is an **IP**, and an agent must use it rather than
-`127.0.0.1`. Two reasons, both measured rather than assumed:
+**An isolated plan reaches it at `localhost`, at the service's own port.** Not
+because the container is published there — nothing is published on your
+loopback, ever — but because Kingdom stands a relay inside that plan's network
+namespace on `127.0.0.1:<port>` and splices it through to the container. So
+`mongodb://localhost:27017` is true inside the plan, is still *your* loopback
+on your own machine, and is a different database again in the plan next door.
+
+That is why the isolation is what makes the friendly address possible rather
+than what forbids it: five agents can each hold `localhost:27017` without
+colliding, and all five land in the one shared container.
+
+A plan on the machine's network gets the container's IP instead. It has no
+loopback of its own, so a relay there would bind *your* `127.0.0.1:27017` —
+exactly the port collision Kingdom exists to prevent. `$DATABASE_URL` and its
+kind are filled in accordingly, per plan, so the variable is always true where
+it is read; the fallback also applies if a relay could not be raised, because
+an awkward address that works beats a familiar one that does not.
+
+### Why the address underneath is still an IP
+
+The relay has to reach the container, and your own machine has to be able to
+open it too. Neither can use a name, and neither can use a published port:
 
 - A plan with a network of its own runs `slirp4netns --disable-host-loopback`,
-  so `127.0.0.1` inside it is *its own* loopback, where nothing is listening.
-  A container published to your loopback is provably unreachable from there.
+  so `127.0.0.1` inside it is *its own* loopback. A container published to your
+  loopback is provably unreachable from there — measured, not assumed.
 - Docker's DNS resolves service names only between containers on the same
   network, so neither your machine nor a plan's namespace can look up `db`.
 
@@ -126,8 +146,9 @@ So Kingdom gives each set of services a network of its own out of `172.31.0.0/16
 and assigns addresses **from manifest order**, which is what makes an address
 knowable before the container exists — and therefore substitutable into a
 variable. `docker network create --subnet` installs a host route, so you can
-open the address from your own machine too. Nothing is published on your
-loopback, so a shared resource can never take a port from you.
+open the address from your own machine too, and the ports badge shows it.
+Nothing is published on your loopback, so a shared resource can never take a
+port from you.
 
 ### The volume, and your data
 
@@ -152,7 +173,9 @@ and a kingdom is closed.
 
 Taking a turn and opening a shell deliberately raise *nothing*. They check, and
 refuse if something the project promised is missing — opening a terminal is not
-a reason to start a database.
+a reason to start a database. What they *do* do is stand the relay that puts an
+isolated plan's wells on its own `localhost`, because that relay lives inside
+that one plan's network and cannot exist before the plan does.
 
 ```mermaid
 sequenceDiagram

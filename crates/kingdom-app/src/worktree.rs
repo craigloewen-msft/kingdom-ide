@@ -173,12 +173,24 @@ fn is_name_clash(e: &WorktreeError) -> bool {
 /// tree, the wrong branch checked out -- is a real event in the plan's life and
 /// belongs in the plan's log, where the user is already looking. `Err` is kept
 /// for the server being unable to do the work at all.
+///
+/// The two refusals are split by **whose move it is next**, which is the only
+/// question the conversation asks of them. Kingdom declining to try is the
+/// user's to settle; git trying and failing is work, and work is what an agent
+/// is for.
 pub enum Finish {
     /// It is done. The plan settles with this outcome.
     Settled(Outcome),
     /// It could not be done, in words worth showing verbatim. The plan keeps
     /// whatever status it had, because nothing about it has changed.
     Refused(String),
+    /// git attempted the merge and declined: the branch has diverged from its
+    /// base. Like [`Finish::Refused`] in every respect that touches disk --
+    /// the merge is aborted and the plan keeps its status -- and different in
+    /// exactly one: this one names a job, so the chamber can offer to send the
+    /// court after the latest base branch rather than leaving the user to type
+    /// the request himself.
+    Diverged(String),
 }
 
 /// Lands a plan's work on the branch its workspace was cut from.
@@ -252,7 +264,7 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
                 refusal.push_str(&format!("  {path}\n"));
             }
         }
-        return Ok(Finish::Refused(refusal));
+        return Ok(Finish::Diverged(refusal));
     }
 
     let commit = head_of(city_root).await?;
@@ -663,7 +675,11 @@ mod tests {
         let before = head_of(root).await.unwrap();
 
         let finish = merge(root, &workspace).await.unwrap();
-        let Finish::Refused(why) = finish else {
+        // `Diverged` and not `Refused`: git was asked and declined, which is the
+        // one merge refusal an agent can clear. The chamber offers to send the
+        // court after the base branch on exactly this distinction, so a
+        // regression that collapsed the two would take that button away.
+        let Finish::Diverged(why) = finish else {
             panic!("a conflicting merge must be refused, not performed");
         };
         assert!(
@@ -689,6 +705,48 @@ mod tests {
             worktree.join("README.md").is_file(),
             "the plan's work must survive a refusal, so it can be retried"
         );
+    }
+
+    /// The other side of that distinction, and the reason it is worth a variant.
+    ///
+    /// A city with the wrong branch checked out is refused **before git is ever
+    /// asked to merge**, and it is the user's to clear: no agent can switch the
+    /// branch in his own working copy, and moving it out from under him is
+    /// precisely the collision this product exists to prevent. So it stays
+    /// `Refused`, and the chamber offers no "catch up" button beside it -- which
+    /// would point at the wrong hand entirely.
+    #[tokio::test]
+    async fn the_wrong_branch_checked_out_is_the_kings_to_clear_not_the_courts() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        let workspace = prepare(root, &WorkspaceMode::Fresh, "tidy-the-sidebar")
+            .await
+            .unwrap();
+
+        // The King wandered off `main` in his own checkout, which is his to do.
+        git(root, &["checkout", "-b", "experiment"]).await.unwrap();
+
+        let finish = merge(root, &workspace).await.unwrap();
+        let Finish::Refused(why) = finish else {
+            panic!(
+                "a city on the wrong branch is refused, and is not a divergence \
+                 an agent could merge away"
+            );
+        };
+        assert!(
+            why.contains("main") && why.contains("experiment"),
+            "the refusal must name both branches, or he cannot act on it: {why}"
+        );
+
+        // And a plan that never recorded a base is the third case: nowhere
+        // certain to merge it, so nobody -- King or court -- can be pointed at a
+        // next move, and it stays `Refused` too.
+        let mut baseless = workspace.clone();
+        baseless.base = None;
+        let Finish::Refused(_) = merge(root, &baseless).await.unwrap() else {
+            panic!("a plan with no recorded base has no divergence to settle");
+        };
     }
 
     /// The happy path, and the answer to the question this module deferred:

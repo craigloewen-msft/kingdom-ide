@@ -2503,6 +2503,13 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // document.
     let draft = crate::tools::propose_plan::draft_body(&workspace);
 
+    // The King's own shell in this plan goes first of all. It has the worktree
+    // as its working directory, so `git worktree remove` below would be
+    // fighting a live process; and a shell in a namespace about to be torn down
+    // is a shell into nowhere. Nothing happens for a plan he never opened one
+    // in.
+    crate::terminal::shutdown(&plan_id);
+
     // The plan's network goes before its worktree does. Ordered deliberately:
     // the namespace holds whatever the agent left running -- a dev server, a
     // watcher -- and those processes have the worktree as their working
@@ -2578,6 +2585,10 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
         // Nothing about the plan has changed, so nothing about its status
         // does either: it is still awaiting review, because it is.
         Finish::Refused(why) => p.note(NoteKind::Merge, why),
+        // The same on disk, and a different kind on purpose. This is the one
+        // refusal an agent can clear, and the chamber finds it by matching on
+        // the kind -- see `NoteKind::MergeConflict`.
+        Finish::Diverged(why) => p.note(NoteKind::MergeConflict, why),
     })
     .ok_or_else(|| ServerFnError::new("That plan vanished mid-decree."))?;
 
@@ -2707,6 +2718,21 @@ pub async fn list_models() -> Result<ModelCatalogue, ServerFnError> {
     Ok(crate::llm::catalogue::catalogue().await)
 }
 
+/// Ends the King's shell in a plan, deliberately.
+///
+/// The panel's close button, and nothing else. A shell now outlives its socket
+/// (see [`crate::terminal`]), so the browser can no longer end one by
+/// disconnecting -- which is the whole point, since navigating to a diff
+/// disconnects too. Closing has to be said out loud.
+///
+/// Takes no lock and answers `()`: it neither reads nor changes the records,
+/// and a plan that has no shell is not an error, it is the ordinary case.
+#[server(EndTerminal, "/api")]
+pub async fn end_terminal(plan: String) -> Result<(), ServerFnError> {
+    crate::terminal::shutdown(&PlanId::new(plan));
+    Ok(())
+}
+
 /// The system prompt a plan's model is given, rendered exactly as a turn would
 /// send it.
 ///
@@ -2744,6 +2770,7 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
     let root = std::path::PathBuf::from(&kingdom.root);
 
     Ok(SystemPrompt::assemble(
+        &plan_id,
         &brief,
         &plan.workspace,
         plan.permissions,

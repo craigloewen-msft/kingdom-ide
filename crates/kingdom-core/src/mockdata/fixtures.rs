@@ -303,16 +303,9 @@ volume = \"shopfront-db\"
 import { createServer } from "node:http";
 import { MongoClient } from "mongodb";
 
-// Kingdom sets this for every command it runs here. Do NOT use localhost --
-// the database is not on this machine's loopback, and 127.0.0.1 will fail.
-const uri = process.env.MONGODB_URI;
-if (!uri) {
-  console.error(
-    "MONGODB_URI is not set. Kingdom sets it from .kingdom/services.toml;\n" +
-      "if you are running this by hand, set it to the address in the ports badge."
-  );
-  process.exit(1);
-}
+// Kingdom puts the database on this plan's own localhost, and sets
+// MONGODB_URI to the same thing. Either works; no setup either way.
+const uri = process.env.MONGODB_URI || "mongodb://localhost:27017";
 
 // Who is writing. Each agent should set this to something recognisable so the
 // ledger shows whose entry is whose.
@@ -383,13 +376,17 @@ entries the other agents wrote.
 `.kingdom/services.toml` declares the MongoDB this project needs. Kingdom:
 
 - starts **one** container for the whole project, when the first plan needs it;
-- puts its address in `$MONGODB_URI` for every command any plan runs;
-- shows that address in the ports badge, so you can connect to it yourself;
+- relays it onto **your own `localhost`**, at its usual port, so
+  `mongodb://localhost:27017` works here with nothing to set up;
+- sets `$MONGODB_URI` to the same address, for every command any plan runs;
+- shows the container's own address in the ports badge, so you can connect to
+  it from your machine too;
 - stops it when the **last** plan working on this project is done, keeping the
   data in a named volume.
 
-You do not run `docker` yourself, and you must not use `localhost` -- the
-database is not on your loopback.
+You do not run `docker` yourself. `localhost` is right *because* each plan has
+a network of its own: your loopback is nobody else's, so five agents can all
+use the same address and all reach the same database.
 
 ## The five-agent rehearsal
 
@@ -399,7 +396,9 @@ database is not on your loopback.
 3. Every plan binds `:3000` and none of them collide -- each is in its own
    namespace. The ports badge gives each one a different host address.
 4. In each plan: `curl -X POST localhost:3000/entry -d '{"note":"hello"}'`.
-   That `localhost` is the plan's *own* server, which is fine.
+   That `localhost` is the plan's *own* server -- and `localhost:27017` is that
+   plan's route to the one shared database. Both are the plan's own loopback,
+   and neither collides with anybody.
 5. Then `curl localhost:3000/entries` in any one of them. It lists entries from
    **all five agents** -- one database behind five servers.
 6. Open the ports badge: one well, five plans using it.

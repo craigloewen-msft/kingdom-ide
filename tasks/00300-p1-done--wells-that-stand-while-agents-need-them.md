@@ -91,6 +91,21 @@ finish a subagent, so one recorded as a drawer could never be released and would
 hold its well open for the life of the process. It works in its parent's
 worktree and reaches the well through the parent's claim.
 
+## Where the loopback relay ended up
+
+Merging main brought in wells-on-a-plan's-`localhost`
+(`netns::open_wells`), which had been hung off the end of `ensure` — the
+function this work deleted. The two features meet cleanly once you notice they
+are at **different grains**: raising a container is per *scope* and now happens
+when a kingdom opens, while a relay lives inside one plan's network namespace
+and cannot exist before that plan does.
+
+So `open_wells` moved to `require`, the per-plan path, which both `turn` and
+`terminal` already route through *after* raising the namespace — preserving the
+original "one function nobody has to remember" argument. Putting it in `raise`
+would have been wrong twice: no namespace exists at kingdom-open, and `raise`
+handles a whole city's agents at once rather than the one plan a relay is for.
+
 ## Proven against a real daemon
 
 `a_restart_brings_the_well_back_to_the_agents_that_had_it` simulates the restart

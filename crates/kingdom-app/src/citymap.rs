@@ -6,11 +6,26 @@
 //!
 //! # Why this is cached
 //!
-//! Building a manifest walks every file of every project. Measured over a real
-//! dev folder -- five repositories, 2,117 files -- that is about 1.7 seconds and
-//! 4.4 MB of JSON. Too slow to pay on every mount, and far too cheap to deserve
-//! a background job with its own lifecycle, so it is simply memoised and
-//! rebuilt when the kingdom it describes is no longer the kingdom that is open.
+//! Building a manifest walks every file of every project, plans a road network
+//! and scatters woodland. Measured over a real dev folder -- seven
+//! repositories, 3,080 holdings -- that is about 0.95 seconds and 4.4 MB of
+//! JSON. Too slow to pay on every mount, and far too cheap to deserve a
+//! background job with its own lifecycle, so it is simply memoised and rebuilt
+//! when the kingdom it describes is no longer the kingdom that is open.
+//!
+//! **The figure is a debug server's**, which is the one that matters: the
+//! documented way to run Kingdom is `cargo leptos serve`, and that builds this
+//! binary with the plain `dev` profile. It was once 15 seconds, and both halves
+//! of the difference are worth knowing about before anyone touches either.
+//! `kingdom-citymap` is pinned to `opt-level = 3` even in a debug build (see the
+//! workspace `Cargo.toml`, which carries the measurement), and its road planner
+//! is an A* rather than the exhaustive search it began as (see
+//! `build::streets::Ground::route`).
+//!
+//! What this cache is really hiding is therefore *restarts*: the King pays the
+//! build once per server, and under `cargo leptos watch` every save is a new
+//! server. That is why the cost is worth keeping down rather than merely
+//! memoising -- a memoised 15 seconds is still 15 seconds, once per save.
 //!
 //! The key is the kingdom's root path plus its city names. That deliberately
 //! does *not* notice a file changing inside a project: the map draws the shape

@@ -23,7 +23,7 @@ pub fn PromptBar() -> impl IntoView {
     let (draft, set_draft) = signal(String::new());
     let (showing_models, set_showing_models) = signal(false);
     let (showing_workspace, set_showing_workspace) = signal(false);
-    let (showing_network, set_showing_network) = signal(false);
+    let (showing_isolation, set_showing_isolation) = signal(false);
 
     let catalogue = Resource::new(|| (), |_| list_models());
 
@@ -156,7 +156,7 @@ pub fn PromptBar() -> impl IntoView {
                     title="Choose the model and how hard it thinks"
                     on:click=move |_| {
                         set_showing_workspace.set(false);
-                        set_showing_network.set(false);
+                        set_showing_isolation.set(false);
                         set_showing_models.update(|s| *s = !*s);
                     }
                 >
@@ -176,7 +176,7 @@ pub fn PromptBar() -> impl IntoView {
                     title="Choose where this work happens"
                     on:click=move |_| {
                         set_showing_models.set(false);
-                        set_showing_network.set(false);
+                        set_showing_isolation.set(false);
                         set_showing_workspace.update(|s| *s = !*s);
                     }
                 >
@@ -184,21 +184,32 @@ pub fn PromptBar() -> impl IntoView {
                     <span class="chip-chevron">"\u{2304}"</span>
                 </button>
 
-                // Whether the next plan gets a network of its own. Beside the
-                // other two because it is the same kind of decision -- settled
-                // before a prompt is spent, recorded on the plan, and not
-                // changeable afterwards.
+                // How far the next plan is walled off. Beside the other two
+                // because it is the same kind of decision -- settled before a
+                // prompt is spent, recorded on the plan, and not changeable
+                // afterwards.
+                //
+                // The chip reads a constant "Isolation" rather than the current
+                // network mode, because it now opens a panel that will hold
+                // more than one setting: a chip that named one of them would
+                // stop being true the moment a second tab arrives. What it does
+                // keep is a mark when anything inside is off its default, so
+                // the King can still see he asked for something out of the
+                // ordinary without opening it.
                 <button
-                    class="network-chip"
+                    class="isolation-chip"
                     class:isolated={move || state.network.get().is_isolated()}
-                    title="Choose whether this plan gets a network of its own"
+                    title="Choose how far this plan is walled off"
                     on:click=move |_| {
                         set_showing_models.set(false);
                         set_showing_workspace.set(false);
-                        set_showing_network.update(|s| *s = !*s);
+                        set_showing_isolation.update(|s| *s = !*s);
                     }
                 >
-                    {move || state.network.get().label()}
+                    "Isolation"
+                    <Show when=move || state.network.get().is_isolated()>
+                        <span class="chip-mark">"\u{2022}"</span>
+                    </Show>
                     <span class="chip-chevron">"\u{2304}"</span>
                 </button>
             </div>
@@ -215,8 +226,8 @@ pub fn PromptBar() -> impl IntoView {
                 <WorkspacePicker on_close=move || set_showing_workspace.set(false)/>
             </Show>
 
-            <Show when={move || showing_network.get()}>
-                <NetworkPicker on_close=move || set_showing_network.set(false)/>
+            <Show when={move || showing_isolation.get()}>
+                <IsolationPicker on_close=move || set_showing_isolation.set(false)/>
             </Show>
 
             <Show when={move || state.error.get().is_some()}>
@@ -593,10 +604,81 @@ fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
     }
 }
 
-/// Whether the next plan gets a network of its own.
+/// Which setting the isolation panel is showing.
+///
+/// One variant today. It exists as an enum rather than a bool because the point
+/// of the panel is that there will be more -- a shared `target/`, a filesystem
+/// remit -- and a bool would have to be replaced rather than extended on the
+/// day the second one lands.
+///
+/// Local to this file, not `kingdom-core`: it is view state and never crosses
+/// the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum IsolationTab {
+    #[default]
+    Network,
+}
+
+impl IsolationTab {
+    /// Every tab, in the order the strip draws them.
+    const ALL: &'static [IsolationTab] = &[IsolationTab::Network];
+
+    fn label(self) -> &'static str {
+        match self {
+            IsolationTab::Network => "Network",
+        }
+    }
+}
+
+/// How far the next plan is walled off from the machine and from its siblings.
 ///
 /// Shaped like [`WorkspacePicker`] deliberately: they are the same kind of
 /// decision and should not present two different chromes for it.
+///
+/// # Why a tab strip over one tab
+///
+/// Network is the only isolation Kingdom can grant today, but it is not the
+/// only one that matters -- a shared `target/` blocks two plans as surely as a
+/// shared port does (see the roadmap). Naming the panel for the *question*
+/// rather than for today's single answer means the second answer is a variant
+/// and a component, not a rename of everything the King has learned.
+#[component]
+fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+    let tab = RwSignal::new(IsolationTab::default());
+
+    view! {
+        <div class="workspace-picker isolation-picker">
+            <div class="picker-head">
+                <span class="picker-title">"Isolation"</span>
+                <button class="picker-close" on:click=move |_| on_close()>"\u{2715}"</button>
+            </div>
+
+            <div class="isolation-tabs">
+                {IsolationTab::ALL
+                    .iter()
+                    .copied()
+                    .map(|each| {
+                        view! {
+                            <button
+                                class="isolation-tab"
+                                class:active=move || tab.get() == each
+                                on:click=move |_| tab.set(each)
+                            >
+                                {each.label()}
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+
+            <Show when=move || tab.get() == IsolationTab::Network>
+                <NetworkTab on_close=on_close/>
+            </Show>
+        </div>
+    }
+}
+
+/// Whether the next plan gets a network of its own.
 ///
 /// # Why the unavailable case is a disabled row and not a hidden one
 ///
@@ -607,7 +689,7 @@ fn WorkspacePicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
 /// it, and one whose prompt is refused after he has typed it learns the same
 /// thing at a worse moment.
 #[component]
-fn NetworkPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+fn NetworkTab(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
     let state = expect_context::<KingdomState>();
 
     // Asked once per opening rather than cached: slirp4netns can be installed
@@ -632,54 +714,47 @@ fn NetworkPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl Int
     let settled = Memo::new(move |_| available.get().is_some());
 
     view! {
-        <div class="workspace-picker network-picker">
-            <div class="picker-head">
-                <span class="picker-title">"Network"</span>
-                <button class="picker-close" on:click=move |_| on_close()>"\u{2715}"</button>
-            </div>
+        <ul class="workspace-list">
+            <li>
+                <button
+                    class="workspace-row"
+                    class:chosen={move || !current.get().is_isolated()}
+                    on:click=move |_| choose(NetworkMode::Shared)
+                >
+                    <span class="workspace-name">"The machine's network"</span>
+                    <span class="workspace-detail">
+                        "Ports are shared with everything else. Two plans that \
+                         both want :3000 will collide."
+                    </span>
+                </button>
+            </li>
 
-            <ul class="workspace-list">
-                <li>
-                    <button
-                        class="workspace-row"
-                        class:chosen={move || !current.get().is_isolated()}
-                        on:click=move |_| choose(NetworkMode::Shared)
-                    >
-                        <span class="workspace-name">"The machine's network"</span>
-                        <span class="workspace-detail">
-                            "Ports are shared with everything else. Two plans that \
-                             both want :3000 will collide."
-                        </span>
-                    </button>
-                </li>
+            <li>
+                <button
+                    class="workspace-row"
+                    class:chosen={move || current.get().is_isolated()}
+                    // Disabled while the answer is still coming, so a fast
+                    // click cannot choose an option that turns out to be
+                    // unavailable.
+                    disabled={move || !settled.get() || refusal.get().is_some()}
+                    on:click=move |_| choose(NetworkMode::Isolated)
+                >
+                    <span class="workspace-name">"A network of its own"</span>
+                    <span class="workspace-detail">
+                        "Its own loopback: it can take :3000 without touching \
+                         yours. Ports it opens are forwarded back to you."
+                    </span>
+                </button>
 
-                <li>
-                    <button
-                        class="workspace-row"
-                        class:chosen={move || current.get().is_isolated()}
-                        // Disabled while the answer is still coming, so a fast
-                        // click cannot choose an option that turns out to be
-                        // unavailable.
-                        disabled={move || !settled.get() || refusal.get().is_some()}
-                        on:click=move |_| choose(NetworkMode::Isolated)
-                    >
-                        <span class="workspace-name">"A network of its own"</span>
-                        <span class="workspace-detail">
-                            "Its own loopback: it can take :3000 without touching \
-                             yours. Ports it opens are forwarded back to you."
-                        </span>
-                    </button>
-
-                    // The reason, and the command that fixes it. Kingdom does
-                    // not install anything on the King's machine; it says what
-                    // to install.
-                    <Show when=move || refusal.get().is_some()>
-                        <p class="network-unavailable">
-                            {move || refusal.get().unwrap_or_default()}
-                        </p>
-                    </Show>
-                </li>
-            </ul>
-        </div>
+                // The reason, and the command that fixes it. Kingdom does
+                // not install anything on the King's machine; it says what
+                // to install.
+                <Show when=move || refusal.get().is_some()>
+                    <p class="network-unavailable">
+                        {move || refusal.get().unwrap_or_default()}
+                    </p>
+                </Show>
+            </li>
+        </ul>
     }
 }

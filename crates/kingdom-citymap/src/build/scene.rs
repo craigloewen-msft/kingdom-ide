@@ -96,6 +96,8 @@ pub fn build_city_world(layout: &CityLayout, name: &str) -> MapWorld {
         &[],
         layout.ward_gap,
     );
+    // A city on its own has one square and nothing to tell it apart from, so
+    // its tag stays empty -- `MapPlaza::town` says why.
     let plazas: Vec<MapPlaza> = plaza.into_iter().collect();
     let wards = wards(&layout.districts);
     let buildings: Vec<MapBuilding> = layout
@@ -215,7 +217,14 @@ pub fn build_realm_world(layout: &WorldLayout) -> MapWorld {
         if let Some(plaza) = plaza.as_ref() {
             square_labels.extend(square_label(plaza_ground(plaza), &town.name, SQUARE_INK));
         }
-        plazas.extend(plaza);
+        // Tagged here, which is the only place that knows both the square and
+        // whose it is. `MapManifest::square_of` is what reads it, so that a
+        // wellhead can stand on the paving rather than in the middle of the
+        // settlement -- see `map::network::well_stand`.
+        plazas.extend(plaza.map(|plaza| MapPlaza {
+            town: town.name.clone(),
+            ..plaza
+        }));
     }
 
     let buildings: Vec<MapBuilding> = layout

@@ -515,7 +515,8 @@ pub enum NetworkMode {
 }
 
 impl NetworkMode {
-    /// Short label for the prompt bar's chip.
+    /// Short label for the Network tab of the prompt bar's isolation panel.
+    /// The chip itself reads "Isolation" whatever this says.
     pub fn label(&self) -> &'static str {
         match self {
             NetworkMode::Shared => "shared network",
@@ -2573,8 +2574,23 @@ pub enum NoteKind {
     /// Where this plan is working, and how it was prepared.
     Workspace,
     /// What happened when the user moved to finish the plan: work landing, a
-    /// conflict git refused, a worktree disposed of.
+    /// worktree disposed of, a refusal only the user can clear.
     Merge,
+    /// git attempted the merge and declined: the branch has diverged from the
+    /// one it was cut from.
+    ///
+    /// Its own kind rather than [`NoteKind::Merge`] for [`NoteKind::EmptyReply`]'s
+    /// reason -- something has to be able to *find* it. This is the one merge
+    /// refusal the court can fix by itself, so the conversation offers to send
+    /// it after the latest base branch, and it decides that by matching on this
+    /// kind. Sniffing the note's prose for the word "conflict" would break the
+    /// first time git reworded its own message.
+    ///
+    /// The other two refusals stay [`NoteKind::Merge`] on purpose: a plan with
+    /// no recorded base, and a city with the wrong branch checked out, are both
+    /// the user's to settle, and offering to send an agent at them would point
+    /// at the wrong hand.
+    MergeConflict,
     /// The user called a halt on a turn that was running.
     ///
     /// Its own kind rather than [`NoteKind::Failed`] because nothing failed:
@@ -2608,6 +2624,10 @@ impl NoteKind {
             NoteKind::Failed => "failed",
             NoteKind::Workspace => "workspace",
             NoteKind::Merge => "merge",
+            // Identical to a plain merge note, because to a reader it is the
+            // same event. The kind exists to be matched on, not to be coloured
+            // differently -- exactly as `EmptyReply` is below.
+            NoteKind::MergeConflict => "merge",
             NoteKind::Stopped => "stopped",
             // Styled as a failure because it is one. The kind exists to be
             // matched on by the turn loop, not to be coloured differently.
