@@ -116,7 +116,7 @@ impl Tool for Bash {
         // AGENTS.md's rule for the port holds either way: Phoenix wins on
         // wording, never on facts about Kingdom. The facts do not differ here --
         // Phoenix's commands start in their working directory too -- so this is
-        // the `SHARED_MACHINE` case rather than the `label`/`since` case: kept
+        // the `shared_machine_block` case rather than the `label`/`since` case: kept
         // alongside Phoenix's sentence because Kingdom measured a reason for it.
         r#"Executes shell commands via bash -c, capturing combined stdout/stderr.
 Every call starts in your workspace root, so you never need to `cd` there first.

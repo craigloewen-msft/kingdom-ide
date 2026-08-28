@@ -263,9 +263,17 @@ that distance back, and a test pins the ordering.
 *Phoenix wins on wording, never on facts about Kingdom.* Where a Phoenix string
 would describe behaviour Kingdom does not have, the behaviour is authoritative:
 its `bash` description is trimmed of the `label` and `since` arguments this tool
-does not take. `SHARED_MACHINE` goes the other way — no Phoenix counterpart,
-kept anyway, because several agents on one machine is Kingdom's own subject.
-Both departures are tested.
+does not take. The shared-machine block goes the other way — no Phoenix
+counterpart, kept anyway, because several agents on one machine is Kingdom's own
+subject. Both departures are tested.
+
+That block is also the clearest live instance of the rule below it. It used to
+tell every plan to "pick an unusual free port rather than taking a project's
+default"; `namespaces/net.rs` then gave an isolated plan a loopback of its own,
+which made the advice false — so it is gone. An isolated or sealed plan is now
+told plainly that `:3000` here is its own, and a plan on the host network keeps
+only the half that was never about port numbers: do not kill what you did not
+start, and say so if a port is taken.
 
 *A claim is kept only while it is true.* The mermaid hint was **not** ported at
 first, because Kingdom had no markdown renderer and the claim had once cost a
