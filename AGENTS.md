@@ -67,6 +67,7 @@ The translation, in full:
 | on this machine / a network of its own / a machine of its own | `Isolation::Shared` / `Isolated` / `Sealed` |
 | a workshop | `Sandbox` |
 | a well | a shared container — `ServiceSpec`, `RunningService`, `SharedService` |
+| what a well *is* | `ResourceKind` — today only `ResourceKind::Docker(DockerSpec)` |
 | a folder let in | `MountSpec`, `MountMode`, `namespaces::mount` |
 | shared resources (the screen) | `SharedResource`, `ResourceInventory`, `wells.rs` |
 | a realm (fixture) | `FixtureSpec`, `fixtures.rs` |

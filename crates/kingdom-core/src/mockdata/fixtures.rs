@@ -255,9 +255,9 @@ fn monorepo() -> FixtureSpec {
 /// - **shared mutable state**, so "another agent wrote this" is visible rather
 ///   than argued about.
 fn shopfront() -> FixtureSpec {
-    // The manifest. Four fields and no environment: an agent reaches this
-    // database at `localhost:27017`, which is what `server.js` below connects
-    // to with nothing configured.
+    // The manifest. A kind, four fields and no environment: an agent reaches
+    // this database at `localhost:27017`, which is what `server.js` below
+    // connects to with nothing configured.
     let manifest = "\
 # What this project needs standing in order to run.
 #
@@ -267,6 +267,10 @@ fn shopfront() -> FixtureSpec {
 # through to the one shared container -- so there is nothing to configure.
 
 [[service]]
+# What kind of thing this is. `docker` is the only kind today, and the only
+# one a manifest written before there were kinds could have meant -- so this
+# line is optional and every older file still reads exactly as it did.
+type  = \"docker\"
 name  = \"db\"
 image = \"mongo:7\"
 port  = 27017

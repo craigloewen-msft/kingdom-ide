@@ -149,7 +149,7 @@ pub fn SharedResourcesView() -> impl IntoView {
 
                     // One banner for the whole screen rather than a confusing
                     // "not started" on every row. See `services::docker_trouble`.
-                    let docker = inventory.docker_trouble.clone();
+                    let docker = inventory.runtime_trouble.clone();
                     let troubles = inventory.troubles.clone();
                     let empty = inventory.is_empty();
 
@@ -258,7 +258,7 @@ pub fn SharedResourcesView() -> impl IntoView {
                                                                             {resource.spec.name.clone()}
                                                                         </span>
                                                                         <span class="wells-entry-image">
-                                                                            {resource.spec.image.clone()}
+                                                                            {resource.spec.kind.what()}
                                                                         </span>
                                                                         // The address an agent uses,
                                                                         // on the row rather than only
@@ -372,19 +372,24 @@ fn Detail(resource: SharedResource) -> impl IntoView {
         manifest_path,
         state,
         address,
-        container,
+        handle,
+        hint,
         users,
         city_name,
         ..
     } = resource;
 
     let running = matches!(state, ServiceState::Running);
-    let logs = format!("docker logs {container}");
     // The address an agent actually types. True whatever the state: it is a
     // property of the declaration -- the service's own port -- rather than of
-    // the container, which is the entire point of relaying it onto the plan's
+    // the resource, which is the entire point of relaying it onto the plan's
     // loopback.
     let local = format!("localhost:{}", spec.port);
+    // What this kind of thing is called, and the rows only it has. Asked of the
+    // kind rather than reached for, so this screen has no opinion about what a
+    // container is -- see `ResourceKind::facts`.
+    let kind_label = spec.kind.label();
+    let facts = spec.kind.facts();
 
     view! {
         <div class="well-card">
@@ -408,8 +413,21 @@ fn Detail(resource: SharedResource) -> impl IntoView {
             </div>
 
             <dl class="well-facts">
-                <dt>"Image"</dt>
-                <dd><code>{spec.image.clone()}</code></dd>
+                // Whatever this kind of resource is described by -- an image and
+                // a volume, for a container. Drawn from a list rather than
+                // hard-coded here, so a kind with neither does not leave two
+                // empty rows on the card.
+                <For
+                    each={
+                        let facts = facts.clone();
+                        move || facts.clone()
+                    }
+                    key=|(label, _): &(&'static str, String)| *label
+                    let:fact
+                >
+                    <dt>{fact.0}</dt>
+                    <dd><code>{fact.1.clone()}</code></dd>
+                </For>
 
                 <dt>"Shared with"</dt>
                 <dd>
@@ -443,24 +461,15 @@ fn Detail(resource: SharedResource) -> impl IntoView {
                     }}
                 </dd>
 
-                <dt>"Container"</dt>
+                // The row the kind names itself: "Docker container", with what
+                // the runtime calls this one and how to look at it.
+                <dt>{kind_label}</dt>
                 <dd>
-                    <code>{container.clone()}</code>
-                    <span class="well-hint">{logs}</span>
-                </dd>
-
-                <dt>"Data"</dt>
-                <dd>
-                    {match &spec.volume {
-                        Some(volume) => format!(
-                            "Kept in the named volume `{volume}`, which outlives the container."
-                        ),
-                        // Stated rather than omitted: "no volume" is a decision
-                        // with a consequence, and the consequence is that the
-                        // data goes when the container does.
-                        None => "No volume \u{2014} data goes when the container is removed."
-                            .to_string(),
-                    }}
+                    <code>{handle.clone()}</code>
+                    // How he looks at it himself. Written by the runtime that
+                    // owns the resource, not composed here: a browser cannot
+                    // run a `docker` command and has no business writing one.
+                    <span class="well-hint">{hint.clone()}</span>
                 </dd>
 
                 <dt>"In use by"</dt>
@@ -577,14 +586,20 @@ fn NewResource(
     // What is about to be written, exactly. Built through the same `render`
     // the server appends, so the preview cannot show one thing and the file
     // receive another.
+    //
+    // The kind is fixed at Docker because it is the only one there is. When
+    // there is a second, this is where the chooser's value goes -- and
+    // `ResourceKind::all()` is the list to render it from.
     let spec = Memo::new(move |_| ServiceSpec {
         name: name.get().trim().to_string(),
-        image: image.get().trim().to_string(),
         port: port.get().parse().unwrap_or(0),
-        volume: {
-            let v = volume.get();
-            (!v.is_empty()).then_some(v)
-        },
+        kind: kingdom_core::ResourceKind::Docker(kingdom_core::services::DockerSpec {
+            image: image.get().trim().to_string(),
+            volume: {
+                let v = volume.get();
+                (!v.is_empty()).then_some(v)
+            },
+        }),
     });
 
     // Said while he types rather than after the write, and asked of
@@ -597,7 +612,7 @@ fn NewResource(
         if !kingdom_core::services::is_usable_name(&spec.name) {
             return Some("A name may use letters, digits, `-` and `_` only.");
         }
-        if spec.image.is_empty() {
+        if image.get().trim().is_empty() {
             return Some("Name an image to run, tag included \u{2014} `postgres:16`.");
         }
         if spec.port == 0 {
@@ -616,16 +631,16 @@ fn NewResource(
         let spec = spec.get_untracked();
         let scope = scope.get_untracked();
         let city = city.get_untracked();
-        let volume = volume.get_untracked();
         async move {
             error.set(None);
+            // The whole spec, rather than the six scalars this used to send.
+            // Half of those were fields only a container has, so the signature
+            // would have had to grow an argument per kind -- and the form has
+            // already built the exact value the writer wants.
             let result = declare_shared_resource(
                 scope.wire_name().to_string(),
                 (scope == ServiceScope::City).then_some(city),
-                spec.name.clone(),
-                spec.image.clone(),
-                spec.port,
-                volume,
+                spec,
             )
             .await;
 
@@ -834,9 +849,11 @@ mod tests {
     fn two_projects_may_each_have_a_db() {
         let spec = ServiceSpec {
             name: "db".to_string(),
-            image: "mongo:7".to_string(),
             port: 27017,
-            volume: None,
+            kind: kingdom_core::ResourceKind::Docker(kingdom_core::services::DockerSpec {
+                image: "mongo:7".to_string(),
+                volume: None,
+            }),
         };
         let row = |city: Option<&str>, scope| SharedResource {
             spec: spec.clone(),
@@ -846,7 +863,8 @@ mod tests {
             manifest_path: String::new(),
             state: ServiceState::Idle,
             address: None,
-            container: String::new(),
+            handle: String::new(),
+            hint: String::new(),
             users: Vec::new(),
         };
 

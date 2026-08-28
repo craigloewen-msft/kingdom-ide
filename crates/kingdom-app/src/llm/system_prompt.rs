@@ -462,7 +462,7 @@ fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
         let _ = writeln!(
             out,
             "\n- **{}** ({}) at `{address}` -- {shared_with}",
-            service.name, service.image,
+            service.name, service.what,
         );
     }
 
