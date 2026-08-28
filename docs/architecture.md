@@ -349,6 +349,15 @@ each a silent wrong answer rather than an error:
 - **`nsenter --wdns`, not `--wd` and not `current_dir`.** Every caller sets the
   working directory host-side, and that path is resolved *before* the mount
   namespace is entered — so a sealed plan ran every command in `/`.
+- **The host-side path check has to know about `/app` as well.** The workspace
+  has two names *inside* the namespace, and the prompt tells the model to use
+  the short one — but `tools::Sandbox::resolve` runs out in the server, where
+  only the real path exists. It refused `/app/public/index.html` as "outside
+  this plan's workspace" while naming a root the prompt had just called the
+  same directory. Every tool that takes a path was affected and only for sealed
+  plans, because `bash` and `tmux` execute *inside*, where `/app` is real.
+  `resolve` now maps the alias onto the root **after** normalising `..` away
+  and **before** the boundary check, so `/app/../etc/passwd` is still refused.
 - **tmux is stamped with its holder** rather than asked for `#{pid}`, which in a
   PID namespace is that namespace's numbering and named an unrelated host
   process.
@@ -404,6 +413,63 @@ a bare machine:
 ```bash
 cargo test-all -- --ignored live::
 ```
+
+One of them needs the server binary built first, because the helper below *is*
+that binary and `current_exe` under the test harness is the harness:
+
+```bash
+cargo build -p kingdom-app --bin kingdom-app --no-default-features --features ssr
+KINGDOM_HELPER_BINARY=target/debug/kingdom-app \
+  cargo test-all -- --ignored a_symlink_out_of_the_workspace_is_not_followed
+```
+
+### The file tools run inside the plan, not beside it
+
+`bash`, `tmux` and the King's terminal enter the namespace through `nsenter`.
+The tools that take a *path* — `read_file`, `patch`, `search`, `read_image` —
+did not: they ran in the server process, on the King's own filesystem, held
+inside the workspace by the string comparison in `tools::Sandbox::resolve`.
+
+That is the honest boundary for a plan working on the King's machine, and it is
+what `Sandbox::root` has always admitted to. For a **sealed** plan it was a
+promise the mechanism could not keep, and one measurement shows why — a symlink
+at `<workspace>/innocent.txt` pointing outside:
+
+```text
+  host-side std::fs::read : Ok("the King's private key\n")
+  inside the namespace    : No such file or directory
+```
+
+The path named is genuinely inside the workspace, so `resolve` passes it and the
+kernel follows the link. The agent can create that link itself — `bash` runs
+inside, and writing a symlink needs no target — and the workspace is
+bind-mounted, so it appears on the host where the file tools would follow it.
+Both halves are ordinary; only their meeting point was wrong.
+
+So those four now run inside too. `tools::inside` re-enters **this same binary**
+in a hidden `--tool` mode, the way `main.rs` already does for `--relay`, and the
+tool runs on a filesystem where only mounted things exist. `ToolOutcome` is
+already `Serialize`, so the wire format is the domain type and there is no
+second shape to keep in step. Four things this pays for:
+
+- **The binary is bound in at `/kingdom-helper`**, as a *file* rather than a
+  directory — a bind onto a `mkdir`ed target fails with `Not a directory` and
+  takes the holder with it. `target/debug/` is not mounted for an arbitrary
+  project, so `nsenter` would otherwise have nothing to execute.
+- **Permissions travel with the call.** They decide *which* `patch` exists —
+  under `Propose` it may write only the plan's draft — so a helper defaulting to
+  `Full` would hand a proposing plan the unrestricted editor.
+- **Clipboards travel out and back.** They live in the server's memory because
+  they outlive one call; the helper is a fresh process each time. Dropped, the
+  thing clipboards exist for — moving code between two files — would paste
+  nothing.
+- **A helper that cannot be reached is a refusal, never a fall-back.** Running
+  on the King's filesystem after he asked for a machine of its own is the
+  outcome the feature exists to prevent, and it is the same rule `bash` and
+  `terminal.rs` already apply to a network they cannot enter.
+
+It applies only to sealed plans: `Shared` and `Isolated` have no filesystem of
+their own to enter, so there is nothing to gain and a subprocess to lose.
 
 ## A database of the city's own
 

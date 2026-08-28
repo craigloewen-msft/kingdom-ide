@@ -16,6 +16,12 @@
 //! tool has to remember is a check the next tool will forget, and the tool that
 //! forgets is the one that quietly edits a file in somebody else's checkout.
 //!
+//! For a **sealed** plan the seam does more than check: it sends the tools that
+//! touch files into the plan's own filesystem, so the kernel confines them
+//! rather than the comparison above. A path rule cannot survive a symlink that
+//! points out of the workspace; a mount namespace does not have to. See
+//! [`inside`].
+//!
 //! Read [`Sandbox::resolve`] before adding a tool that touches the filesystem,
 //! and [`Sandbox::root`] before adding one that spawns a process -- the
 //! guarantee is real for the first and deliberately weaker for the second.
@@ -23,6 +29,9 @@
 pub mod ask_user_question;
 pub mod bash;
 pub mod browser;
+// Running a path-taking tool inside a sealed plan's own filesystem, so the
+// kernel confines it rather than a string comparison. See the module docs.
+pub mod inside;
 pub mod patch;
 pub mod profile;
 pub mod propose_plan;
@@ -186,6 +195,30 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
         .into_iter()
         .find(|t| t.name() == tool)
     {
+        // A sealed plan's file tools run inside its own filesystem rather than
+        // reaching into it from the host, so the kernel is what confines them
+        // instead of a path comparison. See [`inside`] for the symlink that
+        // makes the difference concrete.
+        //
+        // `!inside_already` keeps this from recursing: the helper calls this
+        // same function on the far side, where the plan is sealed too, and
+        // without the guard it would re-enter forever.
+        if shop.isolation().is_sealed() && !shop.inside_already() && inside::runs_inside(tool) {
+            return match inside::run_inside(tool, &input, shop).await {
+                Ok(outcome) => outcome,
+                // Refused, never run on the host. A sealed plan quietly
+                // reading the King's own filesystem after he asked for a
+                // machine of its own is the one outcome this must not produce
+                // -- the same rule `bash` and the terminal apply to a network
+                // they cannot enter.
+                Err(reason) => Refusal::Refused(format!(
+                    "`{tool}` could not be run inside this plan's own filesystem, so it \
+                     was not run at all: {reason}. Running it on the machine's filesystem \
+                     would be the wrong answer rather than a lesser one."
+                ))
+                .into(),
+            };
+        }
         return t.run(input, shop).await;
     }
 
@@ -222,6 +255,11 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
 /// guarantee it is operating under differs between them, and a tool that cannot
 /// tell cannot say so.
 ///
+/// It carries [`kingdom_core::Isolation`] for a narrower reason, and only one:
+/// a sealed plan's workspace exists inside its namespace under **two** names,
+/// and [`Sandbox::resolve`] has to accept both. See
+/// [`crate::namespaces::mount::WORKSPACE_AT`].
+///
 /// It also carries *which call this is*. Most tools never look: a command does
 /// not care which plan asked for it. But a tool that has to reach back out --
 /// to put a question in front of the user and wait for his answer -- needs
@@ -250,6 +288,24 @@ pub struct Sandbox {
     /// cost of being wrong that way is bytes; the other way it is a model told
     /// nothing about an image it could have read.
     sighted: bool,
+    /// How far this plan is walled off from the machine.
+    ///
+    /// Read by [`Sandbox::resolve`] alone, and only to answer one question:
+    /// does this plan's workspace have a second name? Defaults to
+    /// [`kingdom_core::Isolation::Shared`], which has none -- so a caller that
+    /// never says gets exactly the boundary that existed before this field did.
+    isolation: kingdom_core::Isolation,
+    /// Whether this sandbox is *already* inside the plan's own filesystem.
+    ///
+    /// True only in the helper process -- see [`crate::tools::inside`]. It is
+    /// what stops [`invoke`] handing a call straight back to another helper
+    /// forever: on the far side the plan is still sealed, so the sealed test
+    /// alone would recurse.
+    ///
+    /// A field rather than an inference from the environment because it is a
+    /// fact about *this call*, and a tool that had to guess would guess wrong
+    /// the first time somebody ran the server inside a container.
+    inside_already: bool,
 }
 
 /// A refusal: the tool would not run, and why.
@@ -260,11 +316,20 @@ pub struct Sandbox {
 /// of exactly the same call.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error(
-        "{path} is outside this plan's workspace. Everything this plan may \
-             touch is under {root}; use a path inside it."
-    )]
-    OutsideWorkspace { path: String, root: String },
+    #[error("{}", outside_workspace(.path, .root, .alias.as_deref()))]
+    OutsideWorkspace {
+        path: String,
+        root: String,
+        /// The other name this same workspace answers to, when it has one.
+        ///
+        /// `Some("/app")` for a sealed plan, and the reason this field exists:
+        /// such a plan is *told* by its system prompt that its work is at
+        /// `/app`, so a refusal naming only the long host path names a
+        /// directory the model has been assured is the same one it just asked
+        /// about. That reads as a contradiction rather than as a correction,
+        /// and a refusal a model cannot act on earns a retry of the same call.
+        alias: Option<String>,
+    },
 
     #[error("{tool} was called with arguments it cannot read: {detail}")]
     BadArguments { tool: String, detail: String },
@@ -274,6 +339,22 @@ pub enum Refusal {
 
     #[error("{0}")]
     Refused(String),
+}
+
+/// The words [`Refusal::OutsideWorkspace`] is rendered with.
+///
+/// A function rather than a format string because the sealed case names two
+/// paths and says they are one directory, which no single `#[error]` literal
+/// can express without claiming something false in the other case.
+fn outside_workspace(path: &str, root: &str, alias: Option<&str>) -> String {
+    let where_it_may_go = match alias {
+        Some(alias) => format!("{alias} (the same directory as {root})"),
+        None => root.to_string(),
+    };
+    format!(
+        "{path} is outside this plan's workspace. Everything this plan may \
+         touch is under {where_it_may_go}; use a path inside it."
+    )
 }
 
 impl From<Refusal> for ToolOutcome {
@@ -294,7 +375,35 @@ impl Sandbox {
             tool_call: None,
             permissions: Permissions::Full,
             sighted: true,
+            isolation: kingdom_core::Isolation::Shared,
+            inside_already: false,
         }
+    }
+
+    /// Marks this sandbox as one already standing inside the plan's own
+    /// filesystem. See the field, and [`crate::tools::inside`].
+    pub fn already_inside(mut self) -> Self {
+        self.inside_already = true;
+        self
+    }
+
+    /// Whether this call is already running inside the plan's filesystem.
+    pub fn inside_already(&self) -> bool {
+        self.inside_already
+    }
+
+    /// How far this plan is walled off from the machine.
+    pub fn isolation(&self) -> kingdom_core::Isolation {
+        self.isolation
+    }
+
+    /// Records how far this plan is walled off from the machine.
+    ///
+    /// The one caller is the turn loop, which is where a plan's isolation is
+    /// known. See the field, and [`Sandbox::resolve`] where it is spent.
+    pub fn walled_off_by(mut self, isolation: kingdom_core::Isolation) -> Self {
+        self.isolation = isolation;
+        self
     }
 
     /// Records whether the model driving this turn can look at a picture.
@@ -358,8 +467,19 @@ impl Sandbox {
     /// working directory, and a command that types an absolute path or `cd /`
     /// goes wherever it likes. That is a real hole and it is stated here rather
     /// than implied away, because a guarantee people believe in and that does
-    /// not hold is worse than a limit they can see. Closing it means an
-    /// OS-level sandbox, which is a deliberate later decision.
+    /// not hold is worse than a limit they can see.
+    ///
+    /// **For a sealed plan the OS is the boundary instead**, and both halves of
+    /// that sentence are now true: `bash` and `tmux` run inside the plan's
+    /// namespaces, and so do the tools that take paths -- see
+    /// [`crate::tools::inside`]. The path rule still runs, but it is no longer
+    /// the only thing standing between a plan and the King's disk, which
+    /// matters because a path rule cannot survive a symlink pointing out of the
+    /// workspace and a mount namespace does not have to.
+    ///
+    /// For a `Shared` or `Isolated` plan this paragraph's first half is still
+    /// the whole truth: the King chose to work on his own filesystem, and the
+    /// only thing bounding a tool is the check above.
     pub fn root(&self) -> &Path {
         Path::new(&self.workspace.path)
     }
@@ -388,6 +508,31 @@ impl Sandbox {
     /// the symlink caveat is real: a symlink already inside the workspace and
     /// pointing out of it is followed. Worktrees are cut by us and contain no
     /// such link unless something put one there.
+    ///
+    /// # The second name a sealed plan's workspace has
+    ///
+    /// A sealed plan's workspace is mounted twice inside its namespace: at its
+    /// real host path, and again at [`crate::namespaces::mount::WORKSPACE_AT`]
+    /// -- which is where its
+    /// commands start and what its system prompt tells it to use. So the model
+    /// says `/app/public/index.html`, and this function, which knows only the
+    /// host path, used to refuse it *while naming a root the prompt has just
+    /// assured the model is the same directory*. Every path-taking tool failed
+    /// that way, and only for sealed plans: `bash` and `tmux` run **inside**
+    /// the namespace, where `/app` genuinely exists, so they were fine and the
+    /// asymmetry hid the bug.
+    ///
+    /// Translated **before** the boundary check rather than by widening it, so
+    /// there is still exactly one root and one comparison. The order is
+    /// load-bearing: normalising first means `/app/../etc/passwd` has become
+    /// `/etc/passwd` before the alias is looked for, so it never matches and is
+    /// refused exactly as it always was. `strip_prefix` is component-wise, so
+    /// `/apple` is not `/app`.
+    ///
+    /// Only when the plan is actually sealed. For a plan on the King's own
+    /// filesystem `/app` is an ordinary directory it has no business writing
+    /// to, and rewriting the path there would turn this check into an escape
+    /// hatch.
     pub fn resolve(&self, path: &str) -> Result<PathBuf, Refusal> {
         let root = normalise(self.root());
         let candidate = Path::new(path);
@@ -398,16 +543,46 @@ impl Sandbox {
             root.join(candidate)
         };
 
-        let resolved = normalise(&joined);
+        let normalised = normalise(&joined);
+        let resolved = self.through_the_alias(&normalised, &root);
 
         if !resolved.starts_with(&root) {
             return Err(Refusal::OutsideWorkspace {
                 path: path.to_string(),
                 root: root.display().to_string(),
+                alias: self.workspace_alias().map(str::to_string),
             });
         }
 
         Ok(resolved)
+    }
+
+    /// The other name this plan's workspace answers to, if it has one.
+    ///
+    /// `None` for every plan but a sealed one -- see [`Sandbox::resolve`].
+    fn workspace_alias(&self) -> Option<&'static str> {
+        self.isolation
+            .is_sealed()
+            .then_some(crate::namespaces::mount::WORKSPACE_AT)
+    }
+
+    /// An already-normalised path with the alias spelled out as the real root.
+    ///
+    /// Left untouched when there is no alias, when the path is not under it, or
+    /// when the workspace *is* the alias -- the last of which cannot happen
+    /// today but would otherwise silently double the prefix.
+    fn through_the_alias(&self, normalised: &Path, root: &Path) -> PathBuf {
+        let Some(alias) = self.workspace_alias() else {
+            return normalised.to_path_buf();
+        };
+        let alias = Path::new(alias);
+        if root == alias {
+            return normalised.to_path_buf();
+        }
+        match normalised.strip_prefix(alias) {
+            Ok(inside) => root.join(inside),
+            Err(_) => normalised.to_path_buf(),
+        }
     }
 
     /// The other direction: a resolved path as the workspace sees it.
@@ -688,6 +863,137 @@ mod tests {
         ));
     }
 
+    /// A sealed sandbox, which is the only kind whose workspace has two names.
+    fn sealed() -> Sandbox {
+        sandbox().walled_off_by(kingdom_core::Isolation::Sealed)
+    }
+
+    /// A sealed plan may name its own work at `/app`, which is what it was told
+    /// to do.
+    ///
+    /// The exact call from the report this fixes: `read_file` on
+    /// `/app/public/index.html` came back "outside this plan's workspace",
+    /// naming a root the system prompt had just told the model was the *same
+    /// directory*. Every tool that takes a path failed the same way, because
+    /// they all resolve through here.
+    #[test]
+    fn a_sealed_plan_may_name_its_work_at_the_alias() {
+        let shop = sealed();
+
+        assert_eq!(
+            shop.resolve("/app/public/index.html").unwrap(),
+            PathBuf::from("/dev/city/public/index.html")
+        );
+        assert_eq!(
+            shop.resolve("/app").unwrap(),
+            PathBuf::from("/dev/city"),
+            "the alias alone is the workspace root"
+        );
+        // And the real path still works, because inside the namespace both are
+        // genuinely there. A model that used one spelling in round three and
+        // the other in round four must not be told it has moved.
+        assert_eq!(
+            shop.resolve("/dev/city/public/index.html").unwrap(),
+            PathBuf::from("/dev/city/public/index.html")
+        );
+    }
+
+    /// The alias must not become a way round the check it sits in front of.
+    ///
+    /// This is the case the ordering exists for: `resolve` normalises `..`
+    /// away *before* looking for the alias, so `/app/../etc/passwd` is already
+    /// `/etc/passwd` by then and matches nothing. Were the two swapped, the
+    /// alias would rewrite it to the workspace root and hand back an escape.
+    #[test]
+    fn the_alias_is_not_a_way_out_of_the_workspace() {
+        let shop = sealed();
+
+        for escape in [
+            "/app/../etc/passwd",
+            "/app/../../etc/passwd",
+            "/app/public/../../secrets",
+            // Not the alias at all: `strip_prefix` is component-wise, so a
+            // directory that merely starts with the same letters is outside.
+            "/apple/secrets",
+            "/application",
+            // And the ordinary refusals are untouched.
+            "/etc/passwd",
+            "../secrets",
+        ] {
+            assert!(
+                matches!(shop.resolve(escape), Err(Refusal::OutsideWorkspace { .. })),
+                "{escape:?} leaves the workspace and must be refused even for a \
+                 sealed plan"
+            );
+        }
+    }
+
+    /// The alias exists only where it is true.
+    ///
+    /// For a plan on the King's own filesystem `/app` is an ordinary directory
+    /// -- quite possibly somebody's project -- and translating it would turn
+    /// this check into an escape hatch rather than a boundary.
+    #[test]
+    fn a_plan_that_is_not_sealed_has_no_alias() {
+        for isolation in [
+            kingdom_core::Isolation::Shared,
+            kingdom_core::Isolation::Isolated,
+        ] {
+            let shop = sandbox().walled_off_by(isolation);
+            assert!(
+                matches!(
+                    shop.resolve("/app/public/index.html"),
+                    Err(Refusal::OutsideWorkspace { .. })
+                ),
+                "{isolation:?} has no filesystem of its own, so /app is somebody \
+                 else's directory"
+            );
+        }
+
+        // The default, for every caller that never says: `artifact.rs`, the
+        // directory listing and the diff route all build a sandbox this way.
+        assert!(matches!(
+            sandbox().resolve("/app/public/index.html"),
+            Err(Refusal::OutsideWorkspace { .. })
+        ));
+    }
+
+    /// A refusal names the path the model is actually using.
+    ///
+    /// A sealed plan is told by its prompt that its work is at `/app`. A
+    /// refusal that answered with only the long host path would be telling it
+    /// to use a directory it has been assured is the same one -- which reads as
+    /// a contradiction rather than a correction, and earns a retry of the very
+    /// same call.
+    #[test]
+    fn a_sealed_plans_refusal_names_the_path_it_was_given() {
+        let refused = sealed()
+            .resolve("/etc/passwd")
+            .expect_err("/etc/passwd is outside any workspace")
+            .to_string();
+
+        assert!(
+            refused.contains("/app"),
+            "a sealed plan must be told where it may go in the words it was \
+             given: {refused}"
+        );
+        assert!(
+            refused.contains("/dev/city"),
+            "and the real path too, since both work: {refused}"
+        );
+
+        // A plan with no alias is told exactly what it always was -- no mention
+        // of a directory that means nothing to it.
+        let ordinary = sandbox()
+            .resolve("/etc/passwd")
+            .expect_err("still outside")
+            .to_string();
+        assert!(
+            !ordinary.contains("/app"),
+            "a plan on the King's own filesystem has no second name: {ordinary}"
+        );
+    }
+
     /// The round trip a recorded artifact depends on: what `relative` names,
     /// `resolve` must find again.
     ///
@@ -712,6 +1018,21 @@ mod tests {
         assert!(
             shop.relative(Path::new("/dev/elsewhere/a.png")).is_none(),
             "a file outside the workspace has no name this plan can serve"
+        );
+
+        // The same round trip starting from the *alias*, which is the spelling
+        // a sealed plan's model is told to use. `resolve` hands back host paths
+        // whichever name it was given, so the record is identical and the
+        // artifact route -- which knows nothing of namespaces -- still finds
+        // the file. Had the alias leaked into what is recorded, every picture a
+        // sealed plan took would 403 in the chamber.
+        let sealed = sealed();
+        let through_the_alias = sealed.resolve("/app/shots/a.png").unwrap();
+        assert_eq!(through_the_alias, written, "both names, one file");
+        assert_eq!(
+            sealed.relative(&through_the_alias).as_deref(),
+            Some("shots/a.png"),
+            "a record must carry neither root"
         );
     }
 

@@ -142,6 +142,15 @@ pub struct Bind {
     /// Read-only is the default everywhere it can be: a toolchain a plan can
     /// rewrite is a toolchain every *later* plan inherits the damage from.
     pub writable: bool,
+    /// Whether this bind's source is a single file rather than a directory.
+    ///
+    /// It changes how the mount point is made, and getting it wrong is fatal
+    /// under `set -e`: a bind mount's target must already exist and must be the
+    /// same *kind* of thing as its source, so a file bound onto a freshly
+    /// `mkdir`ed directory fails with `Not a directory` and takes the holder
+    /// with it. The one file Kingdom binds is its own helper binary -- see
+    /// [`HELPER_AT`].
+    pub is_file: bool,
     /// Whether the source must be created before it is mounted.
     ///
     /// For the scratch directories Kingdom owns under `/tmp` and talks through
@@ -186,7 +195,45 @@ pub struct Bind {
 ///
 /// So both exist, they are the same directory, and a write through one is
 /// visible at the other. `/app` is only where you arrive.
+///
+/// # The host side has to know about it too
+///
+/// Two names is a fact about the *namespace*, but the path check every tool is
+/// held to runs out here in the server, where only one of them exists.
+/// `tools::Sandbox::resolve` knew the workspace by its host path alone, so a
+/// model doing exactly what the prompt told it -- `read_file` on
+/// `/app/public/index.html` -- was refused for naming a path "outside this
+/// plan's workspace", quoting a root the prompt had just called the same
+/// directory. It hit every path-taking tool and only sealed plans; `bash` and
+/// `tmux` run *inside*, where `/app` is real, which is what hid it. That
+/// function now translates the alias before its boundary check, and this
+/// constant is what it translates.
 pub const WORKSPACE_AT: &str = "/app";
+
+/// Where Kingdom's own binary appears inside a sealed plan.
+///
+/// # Why a server binary is mounted into a plan's root at all
+///
+/// The tools that take a path -- `read_file`, `patch`, `search`, `read_image`
+/// -- used to run in the server process, on the host, and were held inside the
+/// workspace by a string comparison in `tools::Sandbox::resolve` alone. That is
+/// weaker than it looks: a **symlink inside the workspace pointing out of it**
+/// passes the check, because the path named is genuinely inside, and the kernel
+/// then follows it. Measured against a real sealed plan -- a link at
+/// `<workspace>/innocent.txt` pointing at a file outside was read in full
+/// host-side, and reported `No such file or directory` from inside the
+/// namespace, where the target is not mounted.
+///
+/// So those tools now run *inside* too, and the thing that runs them is this
+/// same binary re-entered in a hidden `--tool` mode. `nsenter` needs something
+/// to execute **inside the new root**, where the King's `target/debug/` is not
+/// mounted for an arbitrary project -- so the binary is bound to a fixed path
+/// of its own. Read-only, and as a *file*: see [`Bind::is_file`].
+///
+/// The precedent is `main.rs`'s `--relay` mode, which re-enters the same binary
+/// for a TCP splice. That one needs no mount namespace and so runs from its
+/// host path; this one does, which is the whole reason for the bind.
+pub const HELPER_AT: &str = "/kingdom-helper";
 
 impl Bind {
     pub fn read_only(source: impl Into<PathBuf>) -> Self {
@@ -194,6 +241,7 @@ impl Bind {
             source: source.into(),
             ensure_source: false,
             writable: false,
+            is_file: false,
             at: None,
         }
     }
@@ -203,6 +251,18 @@ impl Bind {
             source: source.into(),
             ensure_source: false,
             writable: true,
+            is_file: false,
+            at: None,
+        }
+    }
+
+    /// A single file, bound read-only. See [`Bind::is_file`].
+    pub fn file(source: impl Into<PathBuf>) -> Self {
+        Self {
+            source: source.into(),
+            ensure_source: false,
+            writable: false,
+            is_file: true,
             at: None,
         }
     }
@@ -230,6 +290,7 @@ impl Bind {
             source: source.into(),
             ensure_source: true,
             writable: true,
+            is_file: false,
             at: None,
         }
     }
@@ -293,6 +354,18 @@ impl MountPlan {
         binds.push(Bind::writable(workspace));
         binds.push(Bind::writable(workspace).mounted_at(WORKSPACE_AT));
 
+        // Kingdom's own binary, so the file tools can run *inside* this root
+        // rather than reaching into it from the host. See [`HELPER_AT`].
+        //
+        // Absent in a test -- `current_exe` is the test harness, not the
+        // server -- and skipped rather than faked: a plan whose helper could
+        // not be bound is one where `run_inside` finds nothing to execute and
+        // says so, which is a better failure than a mount that silently binds
+        // the wrong file.
+        if let Some(exe) = helper_binary() {
+            binds.push(Bind::file(exe).mounted_at(HELPER_AT));
+        }
+
         // The city's git directory, without which `git` does not work in a
         // worktree at all. Skipped when the workspace *is* the city -- an
         // in-place plan already has its `.git` inside the workspace bind.
@@ -331,6 +404,10 @@ impl MountPlan {
                 // it would turn a typo in a manifest into an empty directory
                 // silently mounted over nothing.
                 ensure_source: false,
+                // A declared mount is always a folder: the panel offers
+                // directories from `PATH`, and a manifest naming a single file
+                // is not a shape Kingdom produces.
+                is_file: false,
                 // At its own path, which is what makes a mounted toolchain
                 // work at all. See [`Bind::at`].
                 at: None,
@@ -347,6 +424,37 @@ impl MountPlan {
             workdir: PathBuf::from(WORKSPACE_AT),
         }
     }
+}
+
+/// Kingdom's own binary, for binding into a sealed plan's root.
+///
+/// `None` when it cannot be identified, which is the ordinary case **in the
+/// test suite**: `current_exe` there is the test harness, not the server. A
+/// sealed plan built without it simply has no helper, and
+/// `tools::inside::run_inside` reports that rather than running the harness by
+/// mistake.
+///
+/// `KINGDOM_HELPER_BINARY` overrides it. That exists for the live tests, which
+/// run under the harness and so would otherwise be unable to exercise the one
+/// path that matters most -- a tool actually running inside a sealed plan. It
+/// is read from the environment rather than passed down because the decision is
+/// made deep inside `MountPlan::built_in`, and threading a test-only argument
+/// through the whole mount set would put the fixture in the production shape.
+pub fn helper_binary() -> Option<PathBuf> {
+    if let Some(named) = std::env::var_os("KINGDOM_HELPER_BINARY") {
+        let named = PathBuf::from(named);
+        return named.is_file().then_some(named);
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    // A test harness is not the server. Rust names them
+    // `target/debug/deps/kingdom_app-<hash>`, so the `deps/` parent is the
+    // reliable tell -- the binary proper is `target/debug/kingdom-app`.
+    let is_test_harness = exe
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|name| name == "deps");
+    (!is_test_harness).then_some(exe)
 }
 
 /// The King's home directory, for expanding a `~` in a declared mount.
@@ -446,7 +554,16 @@ pub fn holder_script(plan: &MountPlan) -> String {
         if bind.ensure_source {
             out.push_str(&format!("mkdir -p {source}\n"));
         }
-        out.push_str(&format!("mkdir -p {target}\n"));
+        // A bind mount's target must exist already **and be the same kind of
+        // thing as its source**. A file bound onto a `mkdir`ed directory fails
+        // with `Not a directory`, which under `set -e` takes the holder with
+        // it -- and that surfaces much later as an unrelated `nsenter` error.
+        if bind.is_file {
+            out.push_str(&format!("mkdir -p $(dirname {target})\n"));
+            out.push_str(&format!("touch {target}\n"));
+        } else {
+            out.push_str(&format!("mkdir -p {target}\n"));
+        }
         // `--rbind` rather than `--bind`: /usr and /dev have submounts, and a
         // plain bind silently leaves them out.
         out.push_str(&format!("mount --rbind {source} {target}\n"));
@@ -990,6 +1107,88 @@ mod live {
     /// Where a plan's root is assembled, as the module itself decides it.
     fn plan_scratch_root(plan: &str) -> std::path::PathBuf {
         super::MountPlan::built_in(plan, std::path::Path::new("/tmp/unused"), None).root
+    }
+
+    /// The file tools run *inside*, so a symlink cannot walk out of the plan.
+    ///
+    /// This is the test that would have caught the hole. `read_file`, `patch`,
+    /// `search` and `read_image` used to run in the server process, held inside
+    /// the workspace by `tools::Sandbox::resolve`'s path comparison alone --
+    /// and a **symlink inside the workspace pointing out of it** defeats that
+    /// completely, because the path named is genuinely inside. The kernel then
+    /// follows the link. Measured before the fix: the file below came back in
+    /// full.
+    ///
+    /// The agent can make that link itself; `bash` runs inside and writing a
+    /// symlink needs no target. Inside the namespace the target was never
+    /// mounted, so there is nothing to follow and the read fails closed.
+    ///
+    /// Needs the real binary, because the helper is this binary re-entered and
+    /// `current_exe` under the harness is the harness. See
+    /// `mount::helper_binary`.
+    #[tokio::test]
+    #[ignore = "creates a real namespace; needs KINGDOM_HELPER_BINARY built first"]
+    async fn a_symlink_out_of_the_workspace_is_not_followed() {
+        let plan = PlanId::new("plan-sealed-symlink-test");
+        let root = std::env::temp_dir().join("kingdom-sealed-symlink");
+        let workspace = root.join("workspace");
+        let secret = root.join("secret");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        std::fs::create_dir_all(&secret).expect("somewhere outside it");
+        std::fs::write(secret.join("id_rsa"), "the King's private key\n").unwrap();
+        std::fs::write(workspace.join("real.txt"), "legitimate work\n").unwrap();
+        // The escape: a link inside, pointing out.
+        std::os::unix::fs::symlink(secret.join("id_rsa"), workspace.join("innocent.txt")).unwrap();
+
+        crate::namespaces::ensure(
+            &plan,
+            &crate::namespaces::Request {
+                isolation: Isolation::Sealed,
+                workspace: workspace.clone(),
+                city_root: None,
+                allowed: Vec::new(),
+            },
+        )
+        .await
+        .expect("a sealed namespace must come up");
+
+        let shop = crate::tools::Sandbox::new(kingdom_core::Workspace::in_place(
+            workspace.to_string_lossy(),
+        ))
+        .for_plan(plan.clone())
+        .walled_off_by(Isolation::Sealed);
+
+        // The escape is refused -- and note *how*: not by a path rule, but
+        // because inside this filesystem the target does not exist.
+        let escaped = crate::tools::invoke(
+            "read_file",
+            serde_json::json!({"path": "innocent.txt"}),
+            &shop,
+        )
+        .await;
+        match &escaped {
+            kingdom_core::ToolOutcome::Refused { reason } => assert!(
+                !reason.contains("private key"),
+                "the King's file must not appear in the answer: {reason}"
+            ),
+            other => panic!("a symlink out of the workspace must not be read: {other:?}"),
+        }
+
+        // And the plan's own work is still perfectly readable, by either name.
+        for path in ["real.txt", "/app/real.txt"] {
+            let read =
+                crate::tools::invoke("read_file", serde_json::json!({ "path": path }), &shop).await;
+            match read {
+                kingdom_core::ToolOutcome::Done { output, .. } => {
+                    assert!(output.contains("legitimate work"), "{path}: {output}")
+                }
+                other => panic!("{path} is the plan's own work and must be readable: {other:?}"),
+            }
+        }
+
+        crate::namespaces::shutdown(&plan);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Builds a sealed namespace and asks it questions from the outside.

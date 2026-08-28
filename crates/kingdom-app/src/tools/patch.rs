@@ -875,7 +875,12 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> std::io::Result<()
     std::fs::rename(&temp, path)
 }
 
-fn clipboards_for(plan: &str) -> HashMap<String, String> {
+/// This plan's clipboards.
+///
+/// `pub(crate)` because `tools::inside` carries them across the process
+/// boundary when a tool runs inside a sealed plan: the helper is a fresh
+/// process each call and cannot hold state that must outlive one.
+pub(crate) fn clipboards_for(plan: &str) -> HashMap<String, String> {
     let guard = CLIPBOARDS.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .as_ref()
@@ -884,7 +889,8 @@ fn clipboards_for(plan: &str) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn store_clipboards(plan: &str, clipboards: HashMap<String, String>) {
+/// Records this plan's clipboards. See [`clipboards_for`].
+pub(crate) fn store_clipboards(plan: &str, clipboards: HashMap<String, String>) {
     let mut guard = CLIPBOARDS.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .get_or_insert_with(HashMap::new)
