@@ -144,10 +144,11 @@ pub fn PortsBadge(
                             </ul>
                             <p class="ports-note">
                                 "One set of services, shared by every plan on this \
-                                 project -- started when the first plan needed them \
-                                 and stopped when the last one is done. You can reach \
-                                 them at these addresses too; they are not published \
-                                 on your localhost."
+                                 project \u{2014} started when the first plan needed \
+                                 them and stopped when the last one is done. The \
+                                 addresses above are the ones this plan reaches them \
+                                 at; with a network of its own that is `localhost`, \
+                                 at each service's usual port."
                             </p>
                             // The badge answers "where do I connect?". "Where is
                             // this declared, and what else does this machine

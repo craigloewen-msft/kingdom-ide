@@ -14,6 +14,62 @@ started once and stopped once — not five, and not one by accident.
 
 Today a shared resource is always a **Docker container**.
 
+## How an agent reaches one
+
+**At `localhost`, on the service's own port.** `mongodb://localhost:27017`,
+`postgres://localhost:5432`. Nothing to configure, no environment variable to
+read, no address to be taught — the agent connects the way it would if the
+database were running on its own machine, because as far as it can tell it is.
+
+That is the whole feature, and everything below is in service of it.
+
+It is true because a plan with a network of its own has a **loopback of its
+own**. Kingdom stands a relay inside that namespace on `127.0.0.1:<port>` and
+splices it through to the container. So `localhost:27017` is true inside the
+plan, is still *your* loopback on your own machine, and is a different database
+again in the plan next door. Five agents can each hold `localhost:27017` without
+colliding, and all five land in the one shared container.
+
+So the isolation is what *makes* the friendly address possible, rather than what
+forbids it — and the isolation picker says so when the project you have selected
+shares anything.
+
+### The one case where it is not localhost
+
+A plan on **the machine's network** gets the container's address instead —
+`172.31.4.10:27017`. It has no loopback of its own, so a relay there would bind
+*your* `127.0.0.1:27017`: exactly the port collision Kingdom exists to prevent,
+committed by Kingdom. Such a plan is told the real address in its system prompt.
+
+The same fallback applies if a relay could not be raised at all, because an
+awkward address that works beats a familiar one that does not. Kingdom decides
+this in one place — `services::address_for` — and the prompt, the ports badge
+and the resources screen all read it, so none of them can promise something
+another denies.
+
+Two resources can also want the same port: your own Redis and a project's are
+both `:6379` by default. A loopback has one socket per port, so only the first
+gets `localhost` and the second is given its container address. Kingdom matches
+on **which container** a relay reaches, not on the port number, so the second
+resource is never quietly handed the first one's data.
+
+### Why the address underneath is still an IP
+
+The relay has to reach the container, and your own machine has to be able to
+open it too. Neither can use a name, and neither can use a published port:
+
+- A plan with a network of its own runs `slirp4netns --disable-host-loopback`,
+  so `127.0.0.1` inside it is *its own* loopback. A container published to your
+  loopback is provably unreachable from there — measured, not assumed.
+- Docker's DNS resolves service names only between containers on the same
+  network, so neither your machine nor a plan's namespace can look up `db`.
+
+So Kingdom gives each set of services a network of its own out of `172.31.0.0/16`
+and assigns addresses **from manifest order**. `docker network create --subnet`
+installs a host route, so you can open that address from your own machine too,
+and the screen shows it as *"from your own machine"*. Nothing is published on
+your loopback, so a shared resource can never take a port from you.
+
 ## The screen
 
 **Shared resources**, in the cities rail, or at `/resources`. It answers three
@@ -21,6 +77,7 @@ questions the ports badge in a chamber cannot:
 
 | Question | Where the answer is |
 |---|---|
+| Where does an agent reach this? | Every row, and the top of the detail pane |
 | What does this machine share at all? | The ledger, grouped by owner |
 | Who is in this database *right now*? | The detail pane, by plan title |
 | Where do I go to change it? | The detail pane, as an absolute path |
@@ -56,9 +113,6 @@ Use **the whole machine** for something that is yours rather than any project's
 — one Redis you keep around, a local S3 stand-in. It lives in your profile
 (`$KINGDOM_HOME`, default `~/.kingdom`), so it is never committed anywhere.
 
-When both levels declare the same environment variable, **the project wins**:
-the more specific declaration is the one it meant.
-
 ```mermaid
 flowchart TD
   H["~/.kingdom/services.toml<br/>the whole machine"]
@@ -75,14 +129,14 @@ flowchart TD
 
 ## What a declaration says
 
-The form writes TOML, and the file is the source of truth. A complete example:
+The form writes TOML, and the file is the source of truth. A complete example —
+this is *all* of it:
 
 ```toml
 [[service]]
 name   = "db"
 image  = "mongo:7"
 port   = 27017
-env    = { MONGODB_URI = "mongodb://{host}:{port}/shopfront", MONGO_DB = "shopfront" }
 volume = "shopfront-db"
 ```
 
@@ -90,75 +144,64 @@ volume = "shopfront-db"
 |---|---|---|
 | `name` | yes | What you call it, and half the container's name. Letters, digits, `-` and `_` only, unique within the file. |
 | `image` | yes | The image to run, **tag included**. `mongo:7`, not `mongo`. |
-| `port` | yes | The port the service listens on *inside* the container. |
-| `env` | no | Variables handed to every command an agent runs. See below. |
+| `port` | yes | The port the service listens on — and the port an agent reaches it at. |
 | `volume` | no | A named Docker volume for the data. Without one, the data goes with the container. |
 
-### `{host}` and `{port}`
+That is the whole vocabulary. There is nothing to say about addresses because
+the address is `localhost:<port>`, and nothing to say about environment
+variables because none are set.
 
-An `env` value may contain `{host}` and `{port}`, which are replaced with the
-container's real address the moment it is up:
+### `env` was removed, and a manifest that still has it is refused
 
-```toml
-env = { DATABASE_URL = "postgres://postgres@{host}:{port}/app", PGDATABASE = "app" }
+Kingdom used to let a service declare variables — `MONGODB_URI = "mongodb://
+{host}:{port}/shopfront"` — and handed them to every command a plan ran. That
+was a second way to learn one address, and the two could disagree.
+
+A manifest still carrying `env` is **refused by name**, not ignored:
+
+```
+service `db` sets `env`, which Kingdom no longer uses — an agent reaches a
+shared resource at `localhost` on the service's own port, with nothing to
+configure. Remove that line.
 ```
 
-A value with no placeholder passes through untouched, so a plain `PGDATABASE`
-can sit beside a URL. Anything else in braces — `{hosts}`, `{HOST}` — is
-**refused when the file is read**, because it would otherwise reach an agent
-verbatim and fail an hour later as a connection to a host called `{hosts}`.
+Refused rather than dropped because TOML parsers discard an unknown key without
+a word, and a project that went on believing its agents get `$DATABASE_URL`
+while nothing set it would fail an hour later in a way that reads as a bug in
+its own code. Delete the line and the service works.
 
-This is how an agent finds the well, and it is why the address cannot simply be
-written down: it does not exist until the container does.
+If a project genuinely wants a variable, it belongs in that project's own
+configuration — an `.env` file, a config default — pointed at `localhost`, where
+it is a fact the project states rather than one Kingdom injects.
 
-### How an agent reaches a well
+### What Kingdom knows about an image
 
-**An isolated plan reaches it at `localhost`, at the service's own port.** Not
-because the container is published there — nothing is published on your
-loopback, ever — but because Kingdom stands a relay inside that plan's network
-namespace on `127.0.0.1:<port>` and splices it through to the container. So
-`mongodb://localhost:27017` is true inside the plan, is still *your* loopback
-on your own machine, and is a different database again in the plan next door.
+For `mongo`, `postgres`, `mysql`, `mariadb` and `redis`, Kingdom knows three
+things without being told, so the form does not ask:
 
-That is why the isolation is what makes the friendly address possible rather
-than what forbids it: five agents can each hold `localhost:27017` without
-colliding, and all five land in the one shared container.
+| | What it is for |
+|---|---|
+| The default **port** | Filled into the form when you type the image, and editable. |
+| Where it keeps its **data** | Where a named volume gets mounted. |
+| What it needs to **boot** | `postgres` exits 1 without `POSTGRES_PASSWORD`; Kingdom passes one. |
 
-A plan on the machine's network gets the container's IP instead. It has no
-loopback of its own, so a relay there would bind *your* `127.0.0.1:27017` —
-exactly the port collision Kingdom exists to prevent. `$DATABASE_URL` and its
-kind are filled in accordingly, per plan, so the variable is always true where
-it is read; the fallback also applies if a relay could not be raised, because
-an awkward address that works beats a familiar one that does not.
+That last one is container-facing and never reaches an agent — the opposite
+direction of travel from the `env` above. Without it, declaring `postgres:16`
+produced a resource that never started, and all you saw was "never answered on
+port 5432".
 
-### Why the address underneath is still an IP
-
-The relay has to reach the container, and your own machine has to be able to
-open it too. Neither can use a name, and neither can use a published port:
-
-- A plan with a network of its own runs `slirp4netns --disable-host-loopback`,
-  so `127.0.0.1` inside it is *its own* loopback. A container published to your
-  loopback is provably unreachable from there — measured, not assumed.
-- Docker's DNS resolves service names only between containers on the same
-  network, so neither your machine nor a plan's namespace can look up `db`.
-
-So Kingdom gives each set of services a network of its own out of `172.31.0.0/16`
-and assigns addresses **from manifest order**, which is what makes an address
-knowable before the container exists — and therefore substitutable into a
-variable. `docker network create --subnet` installs a host route, so you can
-open the address from your own machine too, and the ports badge shows it.
-Nothing is published on your loopback, so a shared resource can never take a
-port from you.
+An image outside the table works fine: name the port it listens on, and a volume
+on it is mounted at `/data`.
 
 ### The volume, and your data
 
-`volume` names a Docker volume mounted where the image keeps its data (Kingdom
-knows the path for `mongo`, `postgres`, `mysql`, `mariadb` and `redis`;
-anything else gets `/data`).
+`volume` names a Docker volume mounted where the image keeps its data.
 
 With one, the data survives the container being stopped and started. Without
-one, it does not. That is right for a cache and wrong for a database, so it is
-stated per service rather than assumed either way.
+one, it does not. The form **names one for you** — `kingdom-<scope>-<name>-data`
+— because losing a database because an optional box was left empty is the worse
+of the two mistakes, and a volume on a cache costs nothing. Clear the box if you
+want the data to go with the container.
 
 When the last plan finishes, the container is **stopped, not removed**, and the
 volume is left alone. Losing your data because five agents finished their work
@@ -186,7 +229,7 @@ sequenceDiagram
   K->>K: a kingdom with live agents opens
   K->>D: run the container, wait for the port
   D-->>K: up at 172.31.44.10:27017
-  K-->>P1: MONGODB_URI in every command
+  K-->>P1: `localhost:27017`, in the prompt and in fact
   P2->>K: a second plan opens
   K->>D: inspect — already running
   K-->>P2: the same address

@@ -269,3 +269,33 @@
   font-size: 11px;
   line-height: 1.5;
 }
+
+// What a network of its own buys on *this* project: the shared resources the
+// plan would reach at `localhost`. Sits under the option it is an argument for.
+.network-wells {
+  margin: 8px 10px 0;
+  padding: 0 0 0 14px;
+  list-style: none;
+
+  li {
+    position: relative;
+    color: t.$gold-dim;
+    font-family: t.$font-mono;
+    font-size: 11px;
+    line-height: 1.7;
+
+    &::before {
+      content: "\2022";
+      position: absolute;
+      left: -10px;
+      color: t.$ink-faint;
+    }
+  }
+}
+
+.network-wells-note {
+  margin: 6px 10px 2px;
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.5;
+}
