@@ -70,6 +70,11 @@ pub mod map;
 #[cfg(any(feature = "hydrate", test))]
 pub mod mode;
 pub mod progress;
+// Unconditional, like `progress` and for a sharper version of its reason: the
+// one curve everything sized from a count shares is needed by `build` (ssr) and
+// `engine` (hydrate) both, and `cargo test` builds this crate with no features
+// at all -- so this is arithmetic the bare suite pins.
+pub mod scale;
 
 #[cfg(feature = "hydrate")]
 mod view;

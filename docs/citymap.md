@@ -14,6 +14,7 @@ Every file is a building, measured from the file itself. The rules live in
 | House height | Branches per line of code, clamped 11–54 | `Building::height`, `DENSITY_HEIGHT` |
 | Height ceiling | ~1.9× the footprint's shorter side, so nothing hides its neighbours under the fixed camera | `Building::height_ceiling` |
 | Town size | File count × `LAND_PER_FILE` (37,300 units each) | `settlement_extent` |
+| Driveway width | Inbound references, **linear** to a knee of 16 | `build/streets.rs` `drive_width` |
 | House shape and colour | What the file is *for* — test → watchtower, docs → scriptorium, config → council hall | `Category` → `BuildingKind` |
 | Chimneys, crates, forge stacks | Bucketed branch density | `meshes::complexity_step` |
 
@@ -72,28 +73,56 @@ sized from the change, on a separate ruler: a column of the agent's colour above
 the roof for lines added, a shroud over the house for lines removed.
 `engine/works.rs` draws them.
 
-`magnitude(churn)` turns a count of lines into `0.0..=1.0`, and height, girth,
-the pulse's brightness and the removal skirt all read it. It is a **saturating
-ratio**, `churn / (churn + HALF_CHURN)`:
+**One rule spans all of it: twice the count, twice the mark.** The footprint,
+the column and the driveway are all linear now, which is what lets the map be
+read without undoing a curve in your head. `crate::scale::linear_then_tail` is
+the shared shape and `map/works.rs` computes the shroud's share.
 
-- near zero it is nearly linear, so small changes differ in proportion to size;
+`magnitude(churn)` turns a count of lines into `0.0..=1.0`, and both the
+column's height and its width read it. It is **linear up to `LINEAR_CHURN`
+(300 lines), then a saturating tail**:
+
+- under the knee it is exactly proportional — a +100 is exactly twice a +50;
 - it never plateaus, so 935 lines and 3,872 stay different marks;
-- `HALF_CHURN` is 110, close to this repository's p75 (per-file added lines run
-  p25 = 6, median = 27, p75 = 115, p90 = 246, p99 = 935), so the steep part
-  covers p25 to p90 and the flattening happens among the rewrites.
+- the tail joins the line at matching slope, so there is no visible kink;
+- 300 is fitted to this repository (per-file added lines: p25 = 6, median = 26,
+  p75 = 117, p90 = 263, p95 = 425, p99 = 935, max 2,137), so everything up to
+  p95 is drawn to scale and only the rewrites are compressed.
+
+**Why a column is not linear all the way up, when a footprint is.** A lot is a
+share of its folder's ground, so it can simply grow; a column is one axis with a
+hard ceiling — 58 units, under the 60 the camera's fit reserves for a roofline —
+so something has to give at the top or the tallest column can be framed out.
 
 The input is **absolute** lines — never a share of the busiest file in the same
-plan, which made two agents incomparable. Girth ramps with the **square root**
-of the magnitude, which is what makes it a genuine second channel rather than
-the first restated: height carries proportionality, girth keeps a small change
-wide enough to resolve in the rail's pane.
+plan, which made two agents incomparable. `BAND_FLOOR` (2.5 units) is the only
+thing that is not proportional, and it is deliberately as small as it can be: a
+floor is a flat tax on the bottom of the range, and it was cut from 3.5 when the
+curve above it became honest.
 
-The trade made deliberately: the very top of the range is compressed, so a
-1,000-line change and a 4,000-line one come out nearly alike. Both mean *very
-large*, and telling `+8` from `+100` does not.
+The ruler here has been replaced three times, and `LINEAR_CHURN`'s own docs hold
+the record: relative (two agents, two rulers), then logarithmic (a +8 and a +100
+looked alike, and everything past 600 lines drew identically), then a saturating
+ratio (never proportional anywhere — a +27 and a +115 were 4.3× apart in work
+and 2.6× apart on screen).
 
-The shroud has its own scale — *how much of this file is going away* is a ratio
-of the file's own length, not of churn.
+### A removal is one mark, not two
+
+**The shroud, and nothing else.** A block rises from the ground and covers as
+much of the house as the file is losing — half the file cut, half the house
+covered. That share is a ratio of the file's own length, computed in
+`map/works.rs::cover_of`, so it is linear by construction. A deletion is simply
+a cover of 1.0.
+
+There used to be a second mark as well: a stain spreading across the ground
+around the house, sized on a gentler curve so it stayed visible when the map sits
+in the rail's pane at a couple of pixels per house. The King reported reading
+only the shroud, so the stain is gone — one fact, one mark. What it was for is
+now carried by `SHROUD_FLOOR` (a cut always covers at least 8% of its house) and
+`SHROUD_GIRTH` (the block is wider than any roof on the map).
+
+The grammar has exactly one rule and no exceptions: **what is being built rises
+above the roof; what is being taken away covers the house.**
 
 ## Wells and networks: what each agent is plugged into
 
