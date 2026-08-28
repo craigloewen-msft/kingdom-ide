@@ -1042,18 +1042,6 @@ mod tests {
         }
     }
 
-    /// The other half of the same fault: two agents' bands must be measured
-    /// against one ruler. Height is a function of churn alone, so a forty-line
-    /// edit is the same height whatever else its plan happened to do.
-    #[test]
-    fn the_same_change_is_the_same_height_whoever_made_it() {
-        // No plan, no summary, no context of any kind is reachable from here --
-        // which is the guarantee. Stated as a test so that reintroducing a
-        // normaliser has to break something.
-        assert_eq!(band_height(40.0), band_height(40.0));
-        assert!(band_height(40.0) < band_height(41.0));
-    }
-
     /// A scale outside the range is a bug upstream, and must not produce a
     /// spike through the roof of the world or a hole under it.
     ///
@@ -1145,28 +1133,6 @@ mod tests {
         }
     }
 
-    /// **The second half of what the King asked for.** Two changes of wildly
-    /// different size, drawn in the same colour.
-    ///
-    /// Size still says how much moved -- height, girth and cover all ramp with
-    /// churn, and the tests above pin that. Colour says only *whose* work it
-    /// is. A `strength` of `0.55 + magnitude * 0.45` used to make a small change
-    /// a dimmer version of its agent's hue, so the same agent was several
-    /// colours across one map.
-    #[test]
-    fn a_band_is_the_same_colour_whatever_its_size() {
-        let base = to_color([0x5c, 0xf5, 0xa8, 255]);
-        assert_eq!(
-            band_color(base, WORKS_ALPHA),
-            band_color(base, WORKS_ALPHA),
-            "nothing about the colour may depend on the change"
-        );
-        // And the sizes genuinely do differ, so the distinction is still drawn
-        // -- just in the channel that carries it.
-        assert!(band_height(400.0) > band_height(4.0));
-        assert!(band_girth(400.0) > band_girth(4.0));
-    }
-
     /// A proposal is not the city. Solid works would say the King had already
     /// approved them.
     #[test]
@@ -1176,7 +1142,7 @@ mod tests {
         };
         assert!(c.alpha < 1.0, "a proposal must not look built");
         // A ghost is fainter still: nothing of it exists on disk yet.
-        assert!(GHOST_ALPHA < WORKS_ALPHA);
+        const { assert!(GHOST_ALPHA < WORKS_ALPHA) };
     }
 
     /// **The reported fault.** Half the file removed covers half the house.

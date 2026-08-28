@@ -110,6 +110,10 @@ impl SystemPrompt {
     /// the *project*. Passing the workspace here silently matched no city key,
     /// and the block came out empty -- so a plan whose project shares a
     /// database was never told it had one.
+    // Nine independent facts, not a struct waiting to happen: `city_root` and
+    // `city.path` differ on purpose (see above), so naming each at the call
+    // site is what keeps them from being confused.
+    #[allow(clippy::too_many_arguments)]
     pub fn assemble(
         plan: &kingdom_core::PlanId,
         city: &CityBrief,

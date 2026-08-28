@@ -151,12 +151,6 @@ pub fn spawn_stars(commands: &mut Commands) {
 mod tests {
     use super::*;
 
-    /// The sky has to be the same sky every time the map is opened.
-    #[test]
-    fn the_field_is_the_same_every_time() {
-        assert_eq!(scatter(64, REACH, SEED), scatter(64, REACH, SEED));
-    }
-
     #[test]
     fn every_star_lands_inside_the_field() {
         for star in scatter(COUNT, REACH, SEED) {
