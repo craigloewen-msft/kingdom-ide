@@ -20,13 +20,13 @@
 //!
 //! # Why it does not start or stop anything
 //!
-//! A well is raised when a plan needs it and stopped when the last plan lets go
-//! -- `services::ensure` and `services::release` hold a reference count of plan
-//! ids for exactly that. A stop button would fight that count in front of five
-//! working agents, and a start button would raise a database nobody had asked
-//! for. So this screen **reports** state and never commands it. The one thing
-//! it writes is a new declaration, which is a change to a file rather than to
-//! anything running.
+//! A well is raised when a kingdom or a plan opens and stopped when the last
+//! agent that could reach it is gone -- `services::reconcile` holds that
+//! invariant, keyed on the live population. A stop button would fight that
+//! count in front of five working agents, and a start button would raise a
+//! database nobody had asked for. So this screen **reports** state and never
+//! commands it. The one thing it writes is a new declaration, which is a change
+//! to a file rather than to anything running.
 //!
 //! # Why the form appends text
 //!
@@ -40,6 +40,18 @@ use crate::app::KingdomState;
 use kingdom_core::{ServiceScope, ServiceSpec, ServiceState, SharedResource};
 use leptos::prelude::*;
 
+/// How often the ledger re-reads itself while the screen is open, in
+/// milliseconds.
+///
+/// Five seconds, which is well under the time it takes to wonder whether the
+/// screen is broken and well over the cost of answering. See [`watch_wells`].
+///
+/// Browser-only, like the timer it feeds: the server renders this screen once
+/// and never polls, so under `ssr` this is genuinely dead rather than merely
+/// unused.
+#[cfg(feature = "hydrate")]
+const LEDGER_POLL_MS: u64 = 5_000;
+
 /// `/resources` -- everything this machine shares, and the form for one more.
 #[component]
 pub fn SharedResourcesView() -> impl IntoView {
@@ -51,6 +63,10 @@ pub fn SharedResourcesView() -> impl IntoView {
         move || revision.get(),
         |_| async move { shared_resources().await.ok() },
     );
+
+    // And bumped on a timer too, so a well that comes up *after* this screen
+    // was opened appears on it. See `watch_wells`.
+    watch_wells(revision);
 
     // Which row's detail is open, as `scope name` -- unique across the whole
     // ledger, where a bare name is not: two projects may both declare `db`.
@@ -246,6 +262,44 @@ pub fn SharedResourcesView() -> impl IntoView {
             </Suspense>
         </div>
     }
+}
+
+/// Re-reads the ledger on a timer for as long as this screen is open.
+///
+/// # Why the screen needs this at all
+///
+/// A well is raised when a kingdom or a plan opens, and that work is
+/// *spawned* -- pulling an image can take minutes, and the King is not made to
+/// wait on it. So a resource that reads `not started` when this screen mounts
+/// may be up moments later, and the fetch here is one-shot. Without a poll the
+/// King would be looking at a screen whose whole job is saying what is running,
+/// showing him something that stopped being true seconds after he arrived, with
+/// a reload as the only cure.
+///
+/// A timer rather than a socket: this state changes on the order of *minutes*,
+/// belongs to no plan, and would mean a new field on `PlanPulse` that moves for
+/// reasons unrelated to any plan. `inventory` also asks Docker exactly one
+/// question for the whole screen, so a tick is cheap.
+///
+/// # Why the handle is owned
+///
+/// The same reason `conversation.rs::ticking_clock` owns its own: an interval
+/// left running after the screen is gone keeps fetching forever, invisibly,
+/// because nothing it updates is on screen to look wrong. `on_cleanup` clears
+/// it when the King navigates away.
+fn watch_wells(revision: RwSignal<u32>) {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Ok(handle) = leptos::leptos_dom::helpers::set_interval_with_handle(
+            move || revision.update(|r| *r += 1),
+            std::time::Duration::from_millis(LEDGER_POLL_MS),
+        ) {
+            on_cleanup(move || handle.clear());
+        }
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    let _ = revision;
 }
 
 /// A row's identity across the whole ledger.

@@ -28,10 +28,11 @@ questions the ports badge in a chamber cannot:
 The badge behind the 🔌 in a chamber still answers *"what can this plan
 reach?"* — a glance — and links here for the rest.
 
-**The screen never starts or stops anything.** A well is raised when a plan
-needs it and stopped when the last plan lets go; a stop button would fight that
-reference count in front of five working agents. The one thing the screen writes
-is a new declaration, which is a change to a file.
+**The screen never starts or stops anything.** A well is raised when a kingdom
+or a plan with live agents opens, and stopped when the last agent that could
+reach it is gone; a stop button would fight that count in front of five working
+agents. The one thing the screen writes is a new declaration, which is a change
+to a file.
 
 ## The two levels
 
@@ -165,17 +166,28 @@ would be the worst possible reading of "tear down".
 
 ## The life of a well
 
+A well stands **exactly while at least one live agent that can reach it
+exists**. That is the whole rule, and Kingdom checks it at the four moments the
+population changes: a kingdom is opened, a plan is opened, a plan is finished,
+and a kingdom is closed.
+
+Taking a turn and opening a shell deliberately raise *nothing*. They check, and
+refuse if something the project promised is missing — opening a terminal is not
+a reason to start a database. What they *do* do is stand the relay that puts an
+isolated plan's wells on its own `localhost`, because that relay lives inside
+that one plan's network and cannot exist before the plan does.
+
 ```mermaid
 sequenceDiagram
-  participant P1 as first plan
   participant K as Kingdom
   participant D as Docker
+  participant P1 as first plan
   participant P2 as second plan
-  P1->>K: a turn begins
+  K->>K: a kingdom with live agents opens
   K->>D: run the container, wait for the port
   D-->>K: up at 172.31.44.10:27017
   K-->>P1: MONGODB_URI in every command
-  P2->>K: a turn begins
+  P2->>K: a second plan opens
   K->>D: inspect — already running
   K-->>P2: the same address
   P1->>K: merged
@@ -184,10 +196,18 @@ sequenceDiagram
   K->>D: stop (volume kept)
 ```
 
+Because opening the kingdom is one of those moments, **a restart is invisible**:
+five agents that had a database before the server stopped find it again without
+any of them having to take a turn first. The raising happens in the background,
+so the map opens at once and the wells appear as they come up — which is why the
+shared resources screen refreshes itself while you have it open.
+
 On a server restart, containers still carrying Kingdom's labels are **adopted**
 rather than killed — the opposite of what happens to a stale network namespace,
 and for a good reason: a namespace with no server attached is worthless, and a
-database holds state.
+database holds state. Shutting the server down therefore stops nothing, and a
+container found standing that no live agent needs is left alone rather than
+stopped: that server never raised it and cannot know it is safe to take away.
 
 **A change to the file takes effect the next time the service starts**, not the
 moment you save it. A container already up is not restarted under a working
@@ -210,7 +230,7 @@ After removing one, stop the container yourself if it is still up:
 |---|---|
 | An orange banner across the screen | Docker is not installed, or the daemon is not answering. Nothing can be running; try `sudo systemctl start docker`. |
 | A yellow row with a file path | That manifest does not parse. The message says why and which file. **Nothing else in that file works either** until it is fixed. |
-| `not started` | Ordinary. Nothing has asked for it yet — a project with no plan open. |
+| `not started` | Ordinary. Nothing needs it — a project with no live agent open. |
 | `unknown` | It is declared, but with no daemon answering Kingdom cannot tell. |
 
 A project whose manifest is broken **refuses to start an agent** rather than

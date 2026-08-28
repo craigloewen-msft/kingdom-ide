@@ -11,6 +11,28 @@
 //! MongoDB -- started once when the first plan wants it, stopped once when the
 //! last plan is done -- not five, and not one by accident.
 //!
+//! # The invariant, and the one door to it
+//!
+//! > A well stands exactly while at least one **live, non-subagent plan that
+//! > can reach it** exists.
+//!
+//! [`reconcile`] is the only thing in this module that starts or stops
+//! anything. It is handed the whole live population and makes that sentence
+//! true: every well those agents can reach is up, raised **once per scope**,
+//! and every well nobody is left drawing from is stopped. Everything else here
+//! reports.
+//!
+//! It is called at the four moments the population changes -- a kingdom opens,
+//! a plan opens, a plan is finished, a kingdom closes. Raising and stopping
+//! being one pass over one input is what stops them drifting into disagreeing:
+//! the older shape, an `ensure` per plan on one side and a `release` per plan
+//! on the other, had no single place where the invariant was stated.
+//!
+//! Taking a turn and opening a shell deliberately do **not** raise anything.
+//! They call [`require`], which waits for a pass already in flight and then
+//! refuses if a promised well is missing. Opening a terminal is not a reason to
+//! start a database.
+//!
 //! # The measurement the whole design rests on
 //!
 //! A plan's namespace **can already reach a container by its bridge address**.
@@ -46,6 +68,12 @@
 //! it holds state. So on a restart this module **adopts** the containers it
 //! finds still carrying its labels rather than killing them, and a plan that
 //! comes back finds its data where it left it.
+//!
+//! The same reasoning bounds [`reconcile`]'s sweep: it never stops a container
+//! this process did not raise. At boot the registry is empty, so a container
+//! left standing by a previous server is adopted if an agent needs it and left
+//! alone otherwise -- stopping it would be killing a database on the strength
+//! of a label, having never spoken to whoever started it.
 //!
 //! # Two levels, one mechanism
 //!
@@ -236,6 +264,34 @@ fn registry() -> std::sync::MutexGuard<'static, Registry> {
     }
 }
 
+/// Held for the length of one raise-or-stop pass, so the conversation with
+/// Docker happens **once**.
+///
+/// Distinct from [`SERVICES`] and deliberately a different kind of lock. The
+/// registry is a `std::sync::Mutex` because every read of it is synchronous and
+/// instant; this is a `tokio::sync::Mutex` because the section it guards is
+/// full of awaits -- `docker run`, and a wait for a port that is allowed to take
+/// three minutes.
+///
+/// What it prevents is concrete: a kingdom opening, a turn beginning and a shell
+/// being opened can all ask for the same well within a second of each other. Two
+/// of them inside `ensure_one` at once means two `docker run`s for one container
+/// name, and the loser gets a bare "name already in use" that reads as a
+/// Kingdom bug. Under this, the second caller waits and then finds the container
+/// standing, which is the answer it wanted anyway.
+///
+/// **The registry guard is never held across an await inside this section.**
+/// Desired state is read, the guard dropped, Docker asked, and the guard
+/// retaken to record -- the discipline the rest of this module already keeps.
+static RAISING: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+async fn raising() -> tokio::sync::MutexGuard<'static, ()> {
+    RAISING
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
 /// Why a city's services could not be raised.
 ///
 /// Every variant is written for the King, because he is the one who acts on it.
@@ -309,39 +365,30 @@ fn scopes_for(city_root: &Path) -> [Scope; 2] {
     [Scope::Host, Scope::City(city_root.to_path_buf())]
 }
 
-/// Makes sure every service this plan can reach is up, and records that this
-/// plan is drawing from it.
+/// Brings a city's wells up and records the plans drawing from them.
 ///
-/// Both scopes: the King's own wells and the project's. Idempotent in both
-/// halves: a service already running is adopted rather than restarted, and a
-/// plan already registered as a drawer stays exactly one user. Plans two
-/// through five therefore find the service standing and pay only for a
-/// `docker inspect`.
+/// Private, and per **scope** rather than per plan: raising is now driven by
+/// [`reconcile`], which has already grouped the live agents by the key they
+/// share. Called once for a project five agents are working in, not five times.
 ///
-/// # And puts them on the plan's own loopback
+/// Idempotent, which is what makes adopt-on-restart work: a service already
+/// running is adopted rather than restarted, a stopped one is started with its
+/// volume intact, and a plan already registered as a drawer stays exactly one
+/// user.
 ///
-/// The last thing this does, for an isolated plan, is
-/// [`crate::netns::open_wells`] -- so the agent reaches its database at
-/// `localhost:27017` rather than at an address it has to be taught. Done here
-/// rather than at each call site on the reasoning `tools::child_environment`
-/// and `netns::enter_prefix` are built on: `turn` and `terminal` both already
-/// route through this one function, and a call site that had to *remember* is
-/// one that will forget -- leaving an agent with a `localhost` that works in
-/// the chamber and not in the King's shell, or the reverse.
+/// # It does not put anything on a loopback
 ///
-/// It follows the containers rather than leading them because the relay needs
-/// an address to reach, and the address does not exist until the container
-/// does. It is also why the caller must have raised the namespace first; both
-/// callers do.
-pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningService>, ServiceError> {
-    let mut manifests = Vec::new();
-    for scope in scopes_for(city_root) {
-        let manifest = manifest_in(&scope)?;
-        if !manifest.is_empty() {
-            manifests.push((scope, manifest));
-        }
-    }
-    if manifests.is_empty() {
+/// Relaying a well onto a plan's own `127.0.0.1` is per **plan** -- it needs
+/// that plan's namespace, which does not exist until the plan takes a turn or
+/// the King opens a shell in it. This runs when a *kingdom* opens, where no
+/// namespace has been raised yet. [`require`] is the per-plan path and is
+/// where [`crate::netns::open_wells`] is called from.
+async fn raise(
+    scope: &Scope,
+    drawers: &HashSet<PlanId>,
+) -> Result<Vec<RunningService>, ServiceError> {
+    let manifest = manifest_in(scope)?;
+    if manifest.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -349,34 +396,202 @@ pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningServic
         return Err(ServiceError::DockerMissing);
     }
 
-    let mut up = Vec::new();
-    for (scope, manifest) in manifests {
-        let key = scope.key();
-        let network = network_name(&key);
-        let subnet = ensure_network(&network).await?;
+    let key = scope.key();
+    let network = network_name(&key);
+    let subnet = ensure_network(&network).await?;
 
-        for (index, spec) in manifest.services.iter().enumerate() {
-            let service = ensure_one(&scope, &key, &network, subnet, index, spec).await?;
-            {
-                let mut registry = registry();
-                let id = (key.clone(), spec.name.clone());
-                registry.running.insert(id.clone(), service.clone());
-                registry.users.entry(id).or_default().insert(plan.clone());
-            }
-            up.push(service);
+    let mut up = Vec::new();
+    for (index, spec) in manifest.services.iter().enumerate() {
+        let service = ensure_one(scope, &key, &network, subnet, index, spec).await?;
+        {
+            // Taken and dropped around the record, never held across the await
+            // above. See `RAISING`.
+            let mut registry = registry();
+            let id = (key.clone(), spec.name.clone());
+            registry.running.insert(id.clone(), service.clone());
+            // **Replaced, not extended.** `reconcile` hands down the whole live
+            // population for this scope, so that set is the answer rather than
+            // an addition to it. Extending was a real bug while this was being
+            // written: a plan that finished stayed in the count forever, and
+            // `users_of` reported a database as busy that nobody was in.
+            registry.users.insert(id, drawers.clone());
+        }
+        up.push(service);
+    }
+
+    Ok(up)
+}
+
+/// Brings the kingdom's wells into line with the agents that are actually
+/// alive.
+///
+/// **The one entry point that starts or stops anything.** Everything else in
+/// this module reports. It is given the whole live population -- every
+/// non-subagent plan still in play, with the root of the city it works in --
+/// and makes exactly two things true:
+///
+/// - every well those agents can reach is **up**, raised once per scope;
+/// - every well **nobody** is left drawing from is stopped.
+///
+/// # Why the whole population rather than one plan
+///
+/// Because the invariant is about the population, and a per-plan call cannot
+/// state it. The four moments it changes -- a kingdom opens, a plan opens, a
+/// plan is finished, a kingdom closes -- all call this with the current list,
+/// so raising and stopping are computed by the same pass from the same input
+/// and cannot drift into disagreeing.
+///
+/// It also makes "raise once" structural rather than incidental: five agents on
+/// one project are grouped into one scope before Docker is asked anything.
+///
+/// # What it will not do
+///
+/// It never stops a container this process did not raise. At boot the registry
+/// is empty, so a container left standing by a previous server is invisible
+/// here and is left alone -- it is adopted if an agent needs it, and otherwise
+/// untouched. Stopping it would mean killing a database on the strength of a
+/// label, having never spoken to whoever started it.
+///
+/// # Failures
+///
+/// Reported to the log and skipped, per scope. This is not `turn.rs`'s
+/// judgement and deliberately so: there, a missing daemon must fail the turn
+/// rather than run an agent with no database. Here, refusing to open the
+/// kingdom because Docker is down would take the King's whole map away over a
+/// project he may not be working in. [`require`] is what still refuses, at the
+/// moment it matters.
+pub async fn reconcile(agents: Vec<(PlanId, PathBuf)>) {
+    // One pass, one Docker conversation. Held for the whole of it so a turn
+    // beginning underneath waits for this rather than racing it.
+    let _guard = raising().await;
+
+    // Who wants what, grouped by the key everything downstream is a function
+    // of. A `BTreeMap` so the order is stable: two scopes raised in a
+    // different order on two runs would make the logs unreadable for no gain.
+    let mut wanted: BTreeMap<String, (Scope, HashSet<PlanId>)> = BTreeMap::new();
+    for (plan, city_root) in agents {
+        for scope in scopes_for(&city_root) {
+            wanted
+                .entry(scope.key())
+                .or_insert_with(|| (scope, HashSet::new()))
+                .1
+                .insert(plan.clone());
         }
     }
 
-    // On the plan's own loopback, so `localhost` is the right answer here. A
-    // no-op for a shared-network plan, which has no loopback of its own to put
-    // anything on -- see `netns::open_wells`.
-    let addresses: Vec<(String, u16)> = up
-        .iter()
-        .map(|service| (service.host.clone(), service.port))
-        .collect();
-    crate::netns::open_wells(plan, &addresses).await;
+    // Raised first, then the sweep. This order matters when a plan finishes in
+    // a city another plan is still working in: the surviving agent's claim is
+    // recorded before anything is considered orphaned, so a well is never
+    // stopped and immediately started again.
+    for (key, (scope, drawers)) in &wanted {
+        if let Err(e) = raise(scope, drawers).await {
+            leptos::logging::warn!("could not raise the shared resources for {key}: {e}");
+        }
+    }
 
-    Ok(up)
+    // Everything this process has standing that nobody in the population above
+    // is drawing from. Collected under the guard and stopped outside it.
+    let orphaned: Vec<RunningService> = {
+        let mut registry = registry();
+        let claimed: HashSet<&String> = wanted.keys().collect();
+
+        let ids: Vec<(String, String)> = registry.running.keys().cloned().collect();
+        let mut orphaned = Vec::new();
+        for id in ids {
+            if claimed.contains(&id.0) {
+                continue;
+            }
+            registry.users.remove(&id);
+            if let Some(service) = registry.running.remove(&id) {
+                orphaned.push(service);
+            }
+        }
+        orphaned
+    };
+
+    for service in orphaned {
+        // Stopped, never removed, and the named volume left alone: the King's
+        // data is the whole reason the service existed.
+        let _ = docker(&["stop", &service.container]).await;
+    }
+}
+
+/// Answers whether this plan's wells are up, waiting for a raise already in
+/// flight.
+///
+/// What `turn.rs` and `terminal.rs` call. Neither of them raises anything any
+/// more -- opening a shell is not a reason to start a database -- but both must
+/// still **refuse** when a well the plan was promised is missing, which is the
+/// promise `docs/shared-resources.md` makes: a project whose manifest is broken
+/// refuses to start an agent rather than running one with no database and
+/// saying nothing.
+///
+/// # Why it awaits rather than merely checking
+///
+/// Because a kingdom opens by *spawning* its reconcile, so a turn beginning a
+/// second later would otherwise look at a half-raised city and refuse over a
+/// well that was seconds from being up. Taking the same guard means this waits
+/// for that pass and then reads a settled answer.
+pub async fn require(plan: &PlanId, city_root: &Path) -> Result<(), ServiceError> {
+    // Reads the manifests before waiting on anything: a city that declares
+    // nothing -- the overwhelming majority -- is answered here, without
+    // touching the guard or the daemon.
+    let mut declared = Vec::new();
+    for scope in scopes_for(city_root) {
+        let manifest = manifest_in(&scope)?;
+        if !manifest.is_empty() {
+            declared.push((scope, manifest));
+        }
+    }
+    if declared.is_empty() {
+        return Ok(());
+    }
+
+    // Whatever pass is in flight finishes first. Dropped immediately: this
+    // reads state, it does not change it.
+    drop(raising().await);
+
+    let mut standing: Vec<(String, u16)> = Vec::new();
+    for (scope, manifest) in declared {
+        let key = scope.key();
+        for spec in &manifest.services {
+            let id = (key.clone(), spec.name.clone());
+            let mut registry = registry();
+            let Some(service) = registry.running.get(&id) else {
+                return Err(ServiceError::Failed {
+                    name: spec.name.clone(),
+                    detail: "it is declared by this project but is not running. \
+                             Kingdom raises it when an agent that needs it is \
+                             open; the shared resources screen says why it is \
+                             not up."
+                        .to_string(),
+                });
+            };
+            standing.push((service.host.clone(), service.port));
+            // This plan is one of its drawers from here on. The well is
+            // already up, so this is bookkeeping rather than a start -- it is
+            // what stops the well being swept out from under a plan that
+            // reached it between two reconciles.
+            registry.users.entry(id).or_default().insert(plan.clone());
+        }
+    }
+
+    // And onto this plan's own loopback, so the agent reaches its database at
+    // `localhost:27017` rather than at an address it has to be taught.
+    //
+    // **Here rather than in `raise`**, which is where it lived when raising was
+    // per-plan. A relay lives inside one plan's namespace, and `raise` now runs
+    // when a *kingdom* opens -- before any namespace exists, and for a whole
+    // city's worth of agents at once. This is the per-plan path, it runs after
+    // the caller has raised the namespace, and both callers that need it
+    // (`turn` and `terminal`) already route through here: the same "one
+    // function nobody has to remember" argument that put it in `ensure`.
+    //
+    // Idempotent and a no-op for a shared-network plan, which has no loopback
+    // of its own to put anything on -- see `netns::open_wells`.
+    crate::netns::open_wells(plan, &standing).await;
+
+    Ok(())
 }
 
 /// The environment a plan's tools get for the services it can reach.
@@ -479,9 +694,8 @@ pub fn users_of_key(key: &str, service: &str) -> usize {
 /// from this" for every agent actually connected to it. The caller holds a
 /// [`RunningService`], which carries its own key.
 ///
-/// Reads the same reference set [`ensure`] registers into and [`release`]
-/// removes from, so it is true at the moment it is asked and makes no record of
-/// its own.
+/// Reads the same reference set [`reconcile`] maintains, so it is true at the
+/// moment it is asked and makes no record of its own.
 pub fn draws_from(key: &str, service: &str, plan: &PlanId) -> bool {
     let id = (key.to_string(), service.to_string());
     registry()
@@ -495,51 +709,6 @@ pub fn draws_from(key: &str, service: &str, plan: &PlanId) -> bool {
 pub fn address_of(city_root: &Path, service: &str) -> Option<String> {
     let key = (city_key(city_root), service.to_string());
     registry().running.get(&key).map(RunningService::address)
-}
-
-/// Notes that a plan is finished with the services it was drawing from,
-/// stopping any that nobody is left drawing from.
-///
-/// Called when a plan is merged or archived, beside `netns::shutdown`. Both
-/// scopes, and the host one is why the reference count is a set of plan ids
-/// rather than a number per city: a machine-wide well is released only when the
-/// last plan *anywhere* lets go of it.
-///
-/// The container is **stopped, not removed**, and its named volume is left
-/// alone: the King's data is the whole reason the service existed, and losing
-/// it because five agents finished their work would be the worst possible
-/// interpretation of "tear down".
-pub async fn release(plan: &PlanId, city_root: &Path) {
-    let keys: Vec<String> = scopes_for(city_root).iter().map(Scope::key).collect();
-
-    let orphaned: Vec<RunningService> = {
-        let mut registry = registry();
-        let mut orphaned = Vec::new();
-        let ids: Vec<(String, String)> = registry
-            .users
-            .keys()
-            .filter(|(key, _)| keys.contains(key))
-            .cloned()
-            .collect();
-
-        for id in ids {
-            let Some(users) = registry.users.get_mut(&id) else {
-                continue;
-            };
-            users.remove(plan);
-            if users.is_empty() {
-                registry.users.remove(&id);
-                if let Some(service) = registry.running.remove(&id) {
-                    orphaned.push(service);
-                }
-            }
-        }
-        orphaned
-    };
-
-    for service in orphaned {
-        let _ = docker(&["stop", &service.container]).await;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,6 +1550,79 @@ mod tests {
         crate::netns::forget_namespace(&plan);
     }
 
+    /// Reconciling a city that declares nothing touches nothing.
+    ///
+    /// The overwhelmingly common case, and now on the path of *every kingdom
+    /// open*: if this cost a subprocess, opening a folder of twenty ordinary
+    /// projects would shell out twenty times before the map appeared. It
+    /// returns before `which("docker")` is ever reached.
+    #[tokio::test]
+    async fn reconciling_a_city_without_a_manifest_costs_nothing() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+        let city = tempfile::tempdir().expect("a city that declares nothing");
+        let plan = PlanId::new("quiet-plan");
+
+        reconcile(vec![(plan.clone(), city.path().to_path_buf())]).await;
+
+        assert!(
+            running_in(city.path()).is_empty(),
+            "a city with no manifest must have nothing standing"
+        );
+        assert!(environment(&plan, city.path()).is_empty());
+    }
+
+    /// Closing a kingdom lets go of every well it was holding.
+    ///
+    /// An empty population is what `leave_kingdom` hands down, and it must mean
+    /// "nobody is drawing from anything" rather than "nothing changed". Before
+    /// this, wells stayed claimed for the life of the server by plans the King
+    /// had closed.
+    ///
+    /// Registered directly rather than started, so no daemon is needed: the
+    /// claim under test is the bookkeeping. `docker stop` on the way out is a
+    /// no-op against a container that was never created.
+    #[tokio::test]
+    async fn closing_a_kingdom_lets_go_of_every_well() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+        let city = tempfile::tempdir().expect("a temporary city");
+        let key = city_key(city.path());
+        let plan = PlanId::new("leaving-plan");
+
+        {
+            let mut registry = registry();
+            let id = (key.clone(), "db".to_string());
+            registry.running.insert(
+                id.clone(),
+                RunningService {
+                    name: "db".to_string(),
+                    image: "mongo:7".to_string(),
+                    host: "172.31.9.10".to_string(),
+                    port: 27017,
+                    container: "kingdom-leaving-test-db".to_string(),
+                    scope: ServiceScope::City,
+                    key: key.clone(),
+                },
+            );
+            registry
+                .users
+                .insert(id, [plan.clone()].into_iter().collect());
+        }
+
+        reconcile(Vec::new()).await;
+
+        assert_eq!(
+            users_of(city.path(), "db"),
+            0,
+            "a closed kingdom's plans are drawing from nothing"
+        );
+        assert!(
+            running_in(city.path()).is_empty(),
+            "and the well is no longer held by this server"
+        );
+    }
+
     /// A container is never published to the host.
     ///
     /// Pinned as a test because the temptation to add `-p` is exactly what the
@@ -1785,7 +2027,7 @@ mod host_scope {
         let alice = PlanId::new("host-scope-alice");
         let bob = PlanId::new("host-scope-bob");
 
-        let raised = ensure(&alice, one.path())
+        let raised = raise(&Scope::Host, &[alice.clone()].into_iter().collect())
             .await
             .expect("the first plan raises it");
         assert_eq!(raised.len(), 1);
@@ -1794,9 +2036,15 @@ mod host_scope {
         assert_eq!(container, "kingdom-host-scopecache");
 
         // A plan in a *different* project finds the same container standing.
-        let adopted = ensure(&bob, two.path())
-            .await
-            .expect("the second plan adopts it");
+        // Through `reconcile`, because that is what a second plan opening
+        // actually does, and it must hand down *both* drawers -- the whole
+        // population, not an increment.
+        reconcile(vec![
+            (alice.clone(), one.path().to_path_buf()),
+            (bob.clone(), two.path().to_path_buf()),
+        ])
+        .await;
+        let adopted = running_in(two.path());
         assert_eq!(
             adopted[0].address(),
             raised[0].address(),
@@ -1820,8 +2068,9 @@ mod host_scope {
 
         // One project finishing does not take it from the other. This is the
         // reference count spanning cities, which is the whole difference
-        // between a host well and a city one.
-        release(&alice, one.path()).await;
+        // between a host well and a city one. Alice finishing means she is no
+        // longer in the population; Bob still is.
+        reconcile(vec![(bob.clone(), two.path().to_path_buf())]).await;
         assert_eq!(users_of_key("host", "scopecache"), 1);
         assert_eq!(
             container_state(&container).await,
@@ -1829,7 +2078,9 @@ mod host_scope {
             "another project is still using it"
         );
 
-        release(&bob, two.path()).await;
+        // And the last one out stops it: an empty population, which is also
+        // what closing the kingdom hands down.
+        reconcile(Vec::new()).await;
         assert_eq!(users_of_key("host", "scopecache"), 0);
         assert_eq!(container_state(&container).await, ContainerState::Stopped);
 
@@ -1877,7 +2128,8 @@ mod real_docker {
         let two = PlanId::new("real-plan-2");
 
         // First plan starts the service.
-        let up = ensure(&one, &root).await.expect("the service must come up");
+        reconcile(vec![(one.clone(), root.clone())]).await;
+        let up = running_in(&root);
         assert_eq!(up.len(), 1);
         let service = up[0].clone();
         assert!(
@@ -1906,9 +2158,12 @@ mod real_docker {
         );
 
         // Second plan finds it standing rather than starting another.
-        let again = ensure(&two, &root)
-            .await
-            .expect("the second plan draws too");
+        reconcile(vec![
+            (one.clone(), root.clone()),
+            (two.clone(), root.clone()),
+        ])
+        .await;
+        let again = running_in(&root);
         assert_eq!(
             again[0].container, service.container,
             "adopted, not restarted"
@@ -1932,7 +2187,7 @@ mod real_docker {
         let _ = docker(&["exec", &service.container, "redis-cli", "save"]).await;
 
         // One plan leaving does not stop it.
-        release(&one, &root).await;
+        reconcile(vec![(two.clone(), root.clone())]).await;
         assert_eq!(users_of(&root, "cache"), 1);
         assert_eq!(
             container_state(&service.container).await,
@@ -1940,7 +2195,7 @@ mod real_docker {
         );
 
         // The last plan leaving does.
-        release(&two, &root).await;
+        reconcile(Vec::new()).await;
         assert_eq!(users_of(&root, "cache"), 0);
         assert_eq!(
             container_state(&service.container).await,
@@ -1949,7 +2204,8 @@ mod real_docker {
 
         // A later plan gets it back, with its data.
         let three = PlanId::new("real-plan-3");
-        let restarted = ensure(&three, &root).await.expect("the service comes back");
+        reconcile(vec![(three.clone(), root.clone())]).await;
+        let restarted = running_in(&root);
         assert_eq!(restarted[0].container, service.container);
         let read = docker(&[
             "exec",
@@ -1967,9 +2223,187 @@ mod real_docker {
         );
 
         // Tidy up: this test owns every name it used.
-        release(&three, &root).await;
+        reconcile(Vec::new()).await;
         let _ = docker(&["rm", "-f", &service.container]).await;
         let _ = docker(&["volume", "rm", "kingdom-services-real-test-data"]).await;
+        let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A restart brings the well back to the agents that had it.
+    ///
+    /// The failure this whole change exists to fix. A container does not live
+    /// in the server process but the registry does, so a restart -- which
+    /// `cargo leptos watch` performs on every save -- used to leave five live
+    /// agents with no database and every surface reporting "not started", until
+    /// one of them happened to take a turn.
+    ///
+    /// Simulates the restart honestly: the registry is emptied **and** the
+    /// container stopped, which is the state the previous server's last release
+    /// leaves behind. What must come back is the *same* container with the
+    /// *same* data, because adopt-rather-than-recreate is what the King's data
+    /// depends on.
+    #[tokio::test]
+    #[ignore = "needs a running Docker daemon"]
+    async fn a_restart_brings_the_well_back_to_the_agents_that_had_it() {
+        let root = std::env::temp_dir().join("kingdom-services-restart-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".kingdom")).expect("make the city");
+        std::fs::write(
+            root.join(kingdom_core::services::MANIFEST_PATH),
+            r#"
+            [[service]]
+            name  = "cache"
+            image = "redis:7-alpine"
+            port  = 6379
+            env   = { REDIS_URL = "redis://{host}:{port}" }
+            volume = "kingdom-services-restart-test-data"
+            "#,
+        )
+        .expect("write the manifest");
+
+        let alice = PlanId::new("restart-alice");
+        let bob = PlanId::new("restart-bob");
+        let population = vec![(alice.clone(), root.clone()), (bob.clone(), root.clone())];
+
+        // A session in which two agents are working with a database up.
+        reconcile(population.clone()).await;
+        let before = running_in(&root);
+        assert_eq!(before.len(), 1);
+        let service = before[0].clone();
+        assert_eq!(users_of(&root, "cache"), 2);
+
+        let written = docker(&[
+            "exec",
+            &service.container,
+            "redis-cli",
+            "set",
+            "kingdom-restart-probe",
+            "survived",
+        ])
+        .await;
+        assert!(written.is_ok(), "could not write: {written:?}");
+        let _ = docker(&["exec", &service.container, "redis-cli", "save"]).await;
+
+        // The server stops. The registry goes with the process; the container
+        // is left stopped, as the last release would have left it.
+        let _ = docker(&["stop", &service.container]).await;
+        {
+            let mut registry = registry();
+            registry.running.clear();
+            registry.users.clear();
+        }
+        assert!(
+            running_in(&root).is_empty(),
+            "the fixture must start from a server that knows nothing"
+        );
+
+        // The server starts again and opens the kingdom, which is the one call
+        // this change adds.
+        reconcile(population).await;
+
+        let after = running_in(&root);
+        assert_eq!(after.len(), 1, "the well is standing again");
+        assert_eq!(
+            after[0].container, service.container,
+            "adopted, not recreated"
+        );
+        assert_eq!(
+            after[0].address(),
+            service.address(),
+            "the address must survive a restart, or every agent's env is stale"
+        );
+        assert_eq!(
+            users_of(&root, "cache"),
+            2,
+            "both agents that had it must be counted again, not one and not none"
+        );
+
+        // It answers, and the King's data is where he left it.
+        tokio::net::TcpStream::connect(after[0].address())
+            .await
+            .expect("the service must answer at the address handed to plans");
+        let read = docker(&[
+            "exec",
+            &service.container,
+            "redis-cli",
+            "get",
+            "kingdom-restart-probe",
+        ])
+        .await
+        .expect("read back");
+        assert_eq!(
+            read.trim(),
+            "survived",
+            "a restart must not cost the King his data"
+        );
+
+        reconcile(Vec::new()).await;
+        let _ = docker(&["rm", "-f", &service.container]).await;
+        let _ = docker(&["volume", "rm", "kingdom-services-restart-test-data"]).await;
+        let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two reconciles at once raise one container, not two.
+    ///
+    /// A kingdom opening, a plan opening and a turn beginning can all land
+    /// within a second of each other. Without the `RAISING` guard two of them
+    /// reach `docker run` for the same container name and the loser takes a
+    /// bare "name already in use", which reads as a Kingdom bug rather than a
+    /// race. Fired concurrently rather than in sequence, because in sequence
+    /// this passes with no guard at all.
+    #[tokio::test]
+    #[ignore = "needs a running Docker daemon"]
+    async fn concurrent_reconciles_raise_one_container() {
+        let root = std::env::temp_dir().join("kingdom-services-race-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".kingdom")).expect("make the city");
+        std::fs::write(
+            root.join(kingdom_core::services::MANIFEST_PATH),
+            r#"
+            [[service]]
+            name  = "cache"
+            image = "redis:7-alpine"
+            port  = 6379
+            "#,
+        )
+        .expect("write the manifest");
+
+        let container = container_name(&city_key(&root), "cache");
+        let _ = docker(&["rm", "-f", &container]).await;
+
+        let running: Vec<_> = (1..=4)
+            .map(|n| {
+                let plan = PlanId::new(format!("race-plan-{n}"));
+                let root = root.clone();
+                tokio::spawn(async move { reconcile(vec![(plan, root)]).await })
+            })
+            .collect();
+        for handle in running {
+            handle.await.expect("no reconcile may panic");
+        }
+
+        // One container by that name, and it is up.
+        let found = docker(&[
+            "ps",
+            "--all",
+            "--filter",
+            &format!("name=^{container}$"),
+            "--format",
+            "{{.Names}}",
+        ])
+        .await
+        .expect("docker must answer");
+        assert_eq!(
+            found.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "four concurrent reconciles must leave exactly one container: {found}"
+        );
+        assert_eq!(container_state(&container).await, ContainerState::Running);
+
+        reconcile(Vec::new()).await;
+        let _ = docker(&["rm", "-f", &container]).await;
         let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1997,12 +2431,19 @@ mod five_agents {
         };
         let root = std::path::PathBuf::from(city);
 
-        // Five plans, opened one after another as the King would.
+        // Five plans, opened one after another as the King would -- each open
+        // reconciling against the population so far, which is exactly what
+        // `begin_plan` does.
         let plans: Vec<PlanId> = (1..=5).map(|n| PlanId::new(format!("agent-{n}"))).collect();
 
         let mut addresses = Vec::new();
-        for plan in &plans {
-            let up = ensure(plan, &root).await.expect("the service must come up");
+        for open_so_far in 1..=plans.len() {
+            let population: Vec<(PlanId, PathBuf)> = plans[..open_so_far]
+                .iter()
+                .map(|plan| (plan.clone(), root.clone()))
+                .collect();
+            reconcile(population).await;
+            let up = running_in(&root);
             assert_eq!(up.len(), 1, "the manifest declares exactly one service");
             addresses.push(up[0].address());
         }
@@ -2025,9 +2466,7 @@ mod five_agents {
         );
 
         // Four leaving does not take the database away from the fifth.
-        for plan in &plans[..4] {
-            release(plan, &root).await;
-        }
+        reconcile(vec![(plans[4].clone(), root.clone())]).await;
         assert_eq!(users_of(&root, "db"), 1);
         assert_eq!(
             container_state(&running[0].container).await,
@@ -2036,7 +2475,7 @@ mod five_agents {
         );
 
         // The last one out stops it.
-        release(&plans[4], &root).await;
+        reconcile(Vec::new()).await;
         assert_eq!(users_of(&root, "db"), 0);
         assert_eq!(
             container_state(&running[0].container).await,

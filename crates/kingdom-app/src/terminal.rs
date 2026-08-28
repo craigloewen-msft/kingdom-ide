@@ -248,9 +248,12 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
     // The well, for the same reason and on the same terms as the namespace
     // above: the King's shell must be able to reach this city's database, and a
     // shell that silently could not would send him hunting for a fault in the
-    // project. Nothing happens for a city that declares no services.
+    // project. **Opening a shell does not raise one** -- that is not a reason to
+    // start a database -- so this waits for any pass in flight and then checks,
+    // and puts the well on this plan's loopback. Nothing happens for a city
+    // that declares no services.
     if let Some(city_root) = crate::api::city_root_of(plan_id) {
-        if let Err(e) = crate::services::ensure(plan_id, &city_root).await {
+        if let Err(e) = crate::services::require(plan_id, &city_root).await {
             return Err(format!(
                 "This project declares shared services, and they could \
                  not be raised -- so no shell was started. A shell that \
