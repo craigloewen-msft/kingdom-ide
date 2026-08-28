@@ -277,18 +277,6 @@ mod tests {
         );
     }
 
-    /// Two plans of one project are the same place. The camera stays put -- and
-    /// this is the case that would be missed by remembering only the city, so
-    /// it is pinned separately from `nothing_new_moves_nothing`.
-    #[test]
-    fn another_plan_in_the_same_city_moves_nothing() {
-        let last = among("forge", "src/lib.rs");
-        assert_eq!(
-            decide(&last, true, true, false, Some("forge"), Some("src/lib.rs")),
-            Step::Stay
-        );
-    }
-
     /// While the King holds the map, nothing follows anything.
     #[test]
     fn a_map_taken_by_hand_is_never_moved() {

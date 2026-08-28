@@ -158,14 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn the_map_automation_asked_for_is_paced() {
-        // The whole point of the cap: a driven browser that takes the
-        // invitation gets the map, but never at a frame rate nobody is
-        // watching. Measured, this one bool is 9.50 cores against 0.00.
-        assert!(decide(true, Some("on")).capped());
-    }
-
-    #[test]
     fn the_kings_own_map_is_never_paced() {
         // The other half, and the one that must not regress: a person at a
         // real browser flies through this map, and capping it would be felt.

@@ -338,8 +338,8 @@ mod tests {
         let plan = PlanId::new("plan-42");
         assert_eq!(preferred(&plan), preferred(&plan));
         // And through `assign`, which is what actually draws it.
-        let once = assign_banners(&[plan.clone()]);
-        let again = assign_banners(&[plan.clone()]);
+        let once = assign_banners(std::slice::from_ref(&plan));
+        let again = assign_banners(std::slice::from_ref(&plan));
         assert_eq!(once, again);
         assert_eq!(once[0].1, preferred(&plan));
     }
@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(assigned[0].1, wanted, "the first keeps its preference");
         assert_ne!(assigned[1].1, wanted, "the second must not be identical");
         // Alone, the bumped plan still gets the colour it always had.
-        assert_eq!(assign_banners(&[clash.clone()])[0].1, wanted);
+        assert_eq!(assign_banners(std::slice::from_ref(&clash))[0].1, wanted);
     }
 
     /// More agents than colours is a case worth drawing badly rather than not

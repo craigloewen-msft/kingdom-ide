@@ -1282,9 +1282,7 @@ fn candidates_with(
         // committed manifest makes the whole offer one this panel may not undo.
         let scopes: Vec<Option<ServiceScope>> = live.iter().map(|m| declared_at(&m.path)).collect();
         let declared = match scopes.iter().all(|s| s.is_some()) {
-            true if scopes.iter().any(|s| *s == Some(ServiceScope::City)) => {
-                Some(ServiceScope::City)
-            }
+            true if scopes.contains(&Some(ServiceScope::City)) => Some(ServiceScope::City),
             true => Some(ServiceScope::Host),
             false => None,
         };

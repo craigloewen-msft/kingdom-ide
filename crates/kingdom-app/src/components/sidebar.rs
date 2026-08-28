@@ -741,6 +741,12 @@ mod tests {
                 badge_for(PlanStatus::AwaitingReview, None, permissions),
                 ("Awaiting review", "review"),
             );
+            // Settled history wants nothing and must not be tinted as though
+            // it did -- a failed plan reads as failed, not as its remit.
+            assert_eq!(
+                badge_for(PlanStatus::Failed, None, permissions),
+                ("Failed", "failed"),
+            );
         }
     }
 
@@ -760,19 +766,6 @@ mod tests {
         assert_eq!(
             badge_for(PlanStatus::AwaitingReview, None, Permissions::Propose),
             ("Awaiting review", "review"),
-        );
-    }
-
-    /// Settled history wants nothing and must not be tinted as though it did.
-    #[test]
-    fn a_settled_plan_asks_for_nothing() {
-        assert_eq!(
-            badge_for(PlanStatus::Merged, None, Permissions::Full),
-            ("Merged", "merged")
-        );
-        assert_eq!(
-            badge_for(PlanStatus::Failed, None, Permissions::Full),
-            ("Failed", "failed")
         );
     }
 

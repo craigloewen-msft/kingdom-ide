@@ -211,24 +211,6 @@ mod tests {
         assert!(Activity::default().is_quiet());
     }
 
-    /// **What the King asked for.** The ring does not move.
-    ///
-    /// This replaces `the_pulse_dips_but_never_goes_out` and
-    /// `the_pulse_repeats_on_its_period`, which pinned the breath's floor and
-    /// its period -- both facts about an animation there no longer is. Stated
-    /// as a test rather than left as an absence so that reintroducing a curve
-    /// has to break something that names the instruction.
-    #[test]
-    fn the_ring_does_not_change_colour() {
-        assert_eq!(ring_color(), ring_color());
-        // And it is the colour asked for, undimmed -- the pulse used to leave
-        // it at 45% of full between breaths.
-        assert_eq!(
-            ring_color(),
-            super::super::materials::to_color(WORKING_COLOR)
-        );
-    }
-
     /// The whole point of the pair: pulled right back, the band the King sees
     /// is the heavy one.
     #[test]

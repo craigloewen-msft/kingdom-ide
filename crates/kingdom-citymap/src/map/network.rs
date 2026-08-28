@@ -356,15 +356,15 @@ mod resolve {
             };
             let color = growth_of(banner);
 
-            if agent.on_host_network() {
-                if let Some(ring) = host.as_ref() {
-                    links.push(Link {
-                        kind: LinkKind::ToHost,
-                        points: vec![center, nearest_on(&ring.path, center)],
-                        width: LINK_WIDTH,
-                        color,
-                    });
-                }
+            if agent.on_host_network()
+                && let Some(ring) = host.as_ref()
+            {
+                links.push(Link {
+                    kind: LinkKind::ToHost,
+                    points: vec![center, nearest_on(&ring.path, center)],
+                    width: LINK_WIDTH,
+                    color,
+                });
             }
 
             for well in wells_reached(&wells, town_name, agent) {
