@@ -83,6 +83,11 @@ declared was silently dropped**. The namespace came up perfectly and `cargo`
 simply was not in it. There is now a two-line unit test that would have caught
 it, beside the live one that did.
 
+A ninth came from *looking at the machine* after a live run rather than reading
+anything: each sealed plan left its scratch root under `$XDG_RUNTIME_DIR`, one
+per plan ever sealed, for the life of the machine. `tear_down` sweeps it now,
+and the live test asserts it is gone.
+
 ## On the King's open question: the user
 
 He asked whether to include the user, and worried about root. The answer is that
