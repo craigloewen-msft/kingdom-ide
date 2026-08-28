@@ -467,9 +467,39 @@ pub struct MountCandidate {
     pub folders: Vec<MountSpec>,
     /// What the King is told this is for.
     pub why: String,
-    /// Whether every folder in it is already declared, so the offer can be
-    /// shown as taken rather than repeated.
-    pub already: bool,
+    /// Where this offer is already declared, if it is: `None` for one not
+    /// shared at all.
+    ///
+    /// # Why the scope and not a bare `bool`
+    ///
+    /// The panel this feeds is a set of **checkboxes**, and a box that can be
+    /// ticked must be able to be unticked. Untick writes to the King's own
+    /// profile, which is the only manifest that panel may edit -- a folder a
+    /// *project* declared lives in a committed file belonging to whoever else
+    /// works on it, and silently editing that from a picker would be Kingdom
+    /// changing somebody's repository because a box was clicked.
+    ///
+    /// So "shared" and "shared somewhere I may unshare it" are two different
+    /// facts, and a bool could carry only the first.
+    #[serde(default)]
+    pub declared: Option<ServiceScope>,
+}
+
+impl MountCandidate {
+    /// Whether this offer is already shared, wherever it was declared.
+    ///
+    /// Kept as a method so the sites that only ask "is it taken?" read exactly
+    /// as they did when this was a field.
+    pub fn already(&self) -> bool {
+        self.declared.is_some()
+    }
+
+    /// Whether this panel may withdraw it again.
+    ///
+    /// True only for the King's own profile. See [`Self::declared`].
+    pub fn removable(&self) -> bool {
+        matches!(self.declared, Some(ServiceScope::Host))
+    }
 }
 
 /// Why a manifest could not be used.

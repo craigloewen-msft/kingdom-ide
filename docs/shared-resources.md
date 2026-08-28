@@ -31,8 +31,7 @@ again in the plan next door. Five agents can each hold `localhost:27017` without
 colliding, and all five land in the one shared container.
 
 So the isolation is what *makes* the friendly address possible, rather than what
-forbids it — and the isolation picker says so when the project you have selected
-shares anything.
+forbids it.
 
 ### The one case where it is not localhost
 
@@ -209,11 +208,10 @@ would be the worst possible reading of "tear down".
 
 ## Folders, for a sealed plan
 
-The same manifests declare a second kind. A plan opened with **a machine of its
-own** (`Isolation::Sealed`) has a filesystem of its own: its workspace, its
-project's git directory, and a read-only system. That is enough to read and
-build a great deal, and not enough for a toolchain you keep in your home
-directory.
+The same manifests declare a second kind. A plan opened with **its own file
+system** (`Isolation::Sealed`) has one: its workspace, its project's git
+directory, and a read-only system. That is enough to read and build a great
+deal, and not enough for a toolchain you keep in your home directory.
 
 ```toml
 [[mount]]
@@ -238,20 +236,32 @@ access means re-downloading the registry every time.
 `~` is expanded when the folder is mounted, not when the file is read, so a
 committed project manifest means "this user's home" wherever it is checked out.
 
-### Quick-add
+### Ticking a folder
 
-You rarely need to write these by hand. Opening a plan with **a machine of its
-own** offers a list built from your own `PATH` — the only honest answer to
-"which tools do I have" — and one press writes the block for you, into
-`$KINGDOM_HOME/services.toml`. Always your profile: `~/.cargo` is where cargo
-lives whatever project you are on, and writing your home directory's layout into
-a project's committed manifest would put it in somebody else's repository. A
-folder that genuinely belongs to one project is declared here, by hand, where
-the scope is yours to choose.
+You rarely need to write these by hand. The isolation panel's **Files** tab
+lists folders built from your own `PATH` — the only honest answer to "which
+tools do I have" — with a checkbox each, and ticking one writes the block for
+you into `$KINGDOM_HOME/services.toml`. Always your profile: `~/.cargo` is where
+cargo lives whatever project you are on, and writing your home directory's
+layout into a project's committed manifest would put it in somebody else's
+repository. A folder that genuinely belongs to one project is declared here, by
+hand, where the scope is yours to choose.
+
+Unticking removes the block again. Both the write and the removal edit the text
+rather than re-serialising the document, so every comment in the file survives
+them — including a note you left above a folder you kept.
 
 An offer names every folder its tool needs, not just the one on `PATH`. Anything
 Kingdom does not recognise is still offered, read-only — a tool it has never
 heard of is still a tool you have.
+
+Three rows read differently from the rest:
+
+| Row | What it means |
+|---|---|
+| ticked, greyed, marked `this project` | declared in the project's own manifest. Shown because the plan will see it; not removable from a picker, because that file is committed and somebody else's too |
+| `Shared by hand: <path>` | in a manifest but not on `PATH`. Listed so you can still see it and clear it |
+| a folder that no longer exists | listed **only** if it is already declared. A stale line is the one most worth clearing; a stale *offer* would be a promise Kingdom would silently skip |
 
 ### What is refused
 

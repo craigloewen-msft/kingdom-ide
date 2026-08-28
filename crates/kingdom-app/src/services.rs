@@ -1024,32 +1024,102 @@ fn candidates_from(
     home: &str,
     city_root: Option<&Path>,
 ) -> Vec<kingdom_core::services::MountCandidate> {
-    use kingdom_core::services::{known_extras, known_path, MountCandidate, MountMode, MountSpec};
+    let city = city_root
+        .map(|root| declared_in(&Scope::City(root.to_path_buf())))
+        .unwrap_or_default();
+    candidates_with(path_entries, home, &declared_in(&Scope::Host), &city)
+}
+
+/// The folders one scope's manifest declares, or none if it cannot be read.
+///
+/// The per-scope half of [`mounts_for`], which merges the two. Kept apart
+/// because the offer needs to know *which* file a folder came from -- see
+/// [`kingdom_core::services::MountCandidate::declared`].
+fn declared_in(scope: &Scope) -> Vec<kingdom_core::services::MountSpec> {
+    manifest_in(scope).map(|m| m.mounts).unwrap_or_default()
+}
+
+/// Where a row of the offer came from.
+///
+/// The two differ in exactly two ways, and both are about honesty rather than
+/// taste: a folder Kingdom *offers* must exist, because an offer it would
+/// silently skip is worse than none; a folder already *declared* is shown
+/// whether it exists or not, because a stale line the King wants to clear is
+/// the one he most needs to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Found on `PATH`, or one of the well-known extras.
+    Offered,
+    /// Read out of a manifest, and so already shared.
+    Declared,
+}
+
+/// The same decision again, with the manifests passed in as well.
+///
+/// Split one layer further than [`candidates_from`] for the reason that one was
+/// split from [`mount_candidates`]: what a folder's checkbox *does* depends on
+/// which manifest declared it, and a test of that must not depend on which
+/// manifests the machine running it happens to have.
+fn candidates_with(
+    path_entries: &[PathBuf],
+    home: &str,
+    host_mounts: &[kingdom_core::services::MountSpec],
+    city_mounts: &[kingdom_core::services::MountSpec],
+) -> Vec<kingdom_core::services::MountCandidate> {
+    use kingdom_core::services::{
+        known_extras, known_path, MountCandidate, MountMode, MountSpec, ServiceScope,
+    };
 
     let home = home.to_string();
-    let declared = mounts_for(city_root);
     let expand = |path: &str| -> String {
         match path.strip_prefix('~') {
             Some(rest) => format!("{}{}", home.trim_end_matches('/'), rest),
             None => path.to_string(),
         }
     };
-    // A folder already declared, by the path it actually resolves to -- so
+    // Where a folder is declared, by the path it actually resolves to -- so
     // `~/.cargo` in his profile and `/home/him/.cargo` in a project count as
     // the same folder rather than being offered twice.
-    let is_declared = |path: &str| declared.iter().any(|m| m.expanded(&home) == expand(path));
+    //
+    // A project's declaration wins when both name it, because that is the
+    // answer the checkbox has to act on: such a folder stays shared however the
+    // King's own profile is edited, so offering to withdraw it here would be
+    // offering something that would not happen.
+    let declared_at = |path: &str| -> Option<ServiceScope> {
+        let wanted = expand(path);
+        if city_mounts.iter().any(|m| m.expanded(&home) == wanted) {
+            return Some(ServiceScope::City);
+        }
+        if host_mounts.iter().any(|m| m.expanded(&home) == wanted) {
+            return Some(ServiceScope::Host);
+        }
+        None
+    };
 
     let mut out: Vec<MountCandidate> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    // Every folder any emitted row already names, expanded. What keeps a
+    // declared-by-hand row from repeating a folder the offer above it covers.
+    let mut covered: Vec<String> = Vec::new();
 
-    let mut offer = |folders: Vec<MountSpec>, why: String| {
+    let mut offer = |folders: Vec<MountSpec>, why: String, origin: Origin| {
         // Every folder must exist, or the offer is one that would be silently
         // skipped at mount time and is better not made.
+        //
+        // Not so for a folder already declared: a stale line in a manifest is
+        // exactly the one the King most wants to see and clear, and dropping it
+        // because the folder has since gone would leave it unremovable here.
         let live: Vec<MountSpec> = folders
             .into_iter()
-            .filter(|m| Path::new(&expand(&m.path)).exists())
+            .filter(|m| origin == Origin::Declared || Path::new(&expand(&m.path)).exists())
             .collect();
         if live.is_empty() {
+            return;
+        }
+        // A folder some offer above already names is not shown again: the row
+        // that names the whole toolchain is the useful one, and a second row
+        // for `~/.cargo` alone beneath it is the same decision twice.
+        if origin == Origin::Declared && live.iter().all(|m| covered.contains(&expand(&m.path))) {
             return;
         }
         let key = live
@@ -1061,8 +1131,24 @@ fn candidates_from(
             return;
         }
         seen.push(key);
+        covered.extend(live.iter().map(|m| expand(&m.path)));
+        // Shared only when *every* folder of the offer is: half a toolchain is
+        // not a toolchain, and a box shown ticked for one would promise a
+        // `cargo` that has no `~/.rustup`. Ticking such a row adds the missing
+        // half, which `declare_mount` already allows by being idempotent.
+        //
+        // Of the scopes found, the *project* is the answer: one folder from a
+        // committed manifest makes the whole offer one this panel may not undo.
+        let scopes: Vec<Option<ServiceScope>> = live.iter().map(|m| declared_at(&m.path)).collect();
+        let declared = match scopes.iter().all(|s| s.is_some()) {
+            true if scopes.iter().any(|s| *s == Some(ServiceScope::City)) => {
+                Some(ServiceScope::City)
+            }
+            true => Some(ServiceScope::Host),
+            false => None,
+        };
         out.push(MountCandidate {
-            already: live.iter().all(|m| is_declared(&m.path)),
+            declared,
             folders: live,
             why,
         });
@@ -1093,6 +1179,7 @@ fn candidates_from(
                     })
                     .collect(),
                 known.why.to_string(),
+                Origin::Offered,
             ),
             // Unrecognised, and so offered exactly as found: read-only, and
             // named for itself because nothing more is known about it.
@@ -1102,6 +1189,7 @@ fn candidates_from(
                     mode: MountMode::Ro,
                 }],
                 format!("On your PATH: {shown}"),
+                Origin::Offered,
             ),
         }
     }
@@ -1115,6 +1203,22 @@ fn candidates_from(
                 mode: *mode,
             }],
             (*why).to_string(),
+            Origin::Offered,
+        );
+    }
+
+    // Anything already shared that none of the above would have named: a folder
+    // written into a manifest by hand, or one whose tool has since left `PATH`.
+    //
+    // Without this the list is a set of checkboxes that cannot show, let alone
+    // clear, part of what a sealed plan will actually see -- and this panel is
+    // meant to be the truth about exactly that. Last, because these are the
+    // unusual ones and the offers above are what he came to read.
+    for mount in city_mounts.iter().chain(host_mounts.iter()) {
+        offer(
+            vec![mount.clone()],
+            format!("Shared by hand: {}", mount.path),
+            Origin::Declared,
         );
     }
 
@@ -1215,6 +1319,129 @@ pub fn declare_mount(
     })?;
 
     Ok(path)
+}
+
+/// Stops sharing a folder, by removing its block from a manifest.
+///
+/// The inverse of [`declare_mount`], and what lets the Files tab offer a
+/// checkbox rather than a one-way button. Until this existed the only way to
+/// stop sharing `~/.ssh` with sealed plans was to find the file and edit TOML
+/// by hand -- a thing nobody does, and so a decision nobody revisits.
+///
+/// # Why it edits the text rather than re-serialising
+///
+/// The same reason [`declare_mount`] appends text: the manifest is a file
+/// people comment, and turning it into a `ServiceManifest` and back would eat
+/// every comment in it as the price of removing one block. So the block's own
+/// lines are cut out and everything else is left exactly as it was written.
+///
+/// A comment sitting *above* the block is deliberately left behind. It reads as
+/// an orphan, which is untidy -- and the alternative is a rule that cannot tell
+/// "the note explaining this mount" from "the paragraph at the top of the file
+/// explaining what Kingdom does with it", and would delete the second.
+///
+/// Idempotent: a path that is not there is nothing to do rather than an error,
+/// which is what makes a double press on a checkbox harmless.
+pub fn withdraw_mount(
+    scope: &Scope,
+    spec: &kingdom_core::services::MountSpec,
+) -> Result<PathBuf, DeclareError> {
+    let path = scope.manifest_path();
+    let shown = path.to_string_lossy().to_string();
+
+    let Ok(existing) = std::fs::read_to_string(&path) else {
+        // No manifest at all: the folder is already not shared here.
+        return Ok(path);
+    };
+
+    let Some(next) = without_mount(&existing, &spec.path) else {
+        return Ok(path);
+    };
+
+    // The whole file, exactly as [`declare_mount`] checks it: the King must be
+    // left with a manifest that still works. Finding out here costs a message;
+    // finding out later costs a plan that will not open.
+    kingdom_core::services::parse(&next).map_err(|e| DeclareError::Invalid(e.to_string()))?;
+
+    std::fs::write(&path, next).map_err(|e| DeclareError::Unwritable {
+        path: shown,
+        detail: e.to_string(),
+    })?;
+
+    Ok(path)
+}
+
+/// A manifest's text with one `[[mount]]` block removed, or `None` if it names
+/// no such folder.
+///
+/// Split out from [`withdraw_mount`] so the text surgery is testable without a
+/// disk, and because it is the only part of the removal that can be subtly
+/// wrong.
+///
+/// A block runs from its own header line to the next header line, so the
+/// removal takes that block's keys with it and nothing else. *Which* block is
+/// decided by *parsing the candidate*, not by matching the path as a string:
+/// `path = "~/.cargo"` and `path = '~/.cargo'` are one folder written two ways,
+/// and a string match would leave one of them behind.
+fn without_mount(text: &str, wanted: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    // Where each block begins. A table header is the only thing in a file this
+    // shape that starts a line with `[`.
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with('['))
+        .map(|(i, _)| i)
+        .collect();
+
+    for (nth, start) in heads.iter().copied().enumerate() {
+        if lines[start].trim() != "[[mount]]" {
+            continue;
+        }
+        // The block runs to the next header -- but not quite. The blank lines
+        // and comments immediately before that header belong to *it*, not to
+        // this block, and taking them would delete the note the King wrote
+        // above a folder he is keeping.
+        let next = heads.get(nth + 1).copied().unwrap_or(lines.len());
+        let mut end = next;
+        while end > start + 1 {
+            let line = lines[end - 1].trim();
+            if line.is_empty() || line.starts_with('#') {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        let block = lines[start..end].join("\n");
+        // A block that does not parse on its own is not one we can be sure
+        // about, so it is left alone rather than guessed at.
+        let Ok(parsed) = kingdom_core::services::parse(&block) else {
+            continue;
+        };
+        if parsed.mounts.first().map(|m| m.path.as_str()) != Some(wanted) {
+            continue;
+        }
+
+        let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+        kept.extend_from_slice(&lines[..start]);
+        kept.extend_from_slice(&lines[end..]);
+        let mut out = kept.join("\n");
+        // The blank lines that separated the block from its neighbours are now
+        // doubled up. Left as one gap, so clearing three folders one at a time
+        // does not leave a file that is mostly whitespace.
+        while out.contains("\n\n\n") {
+            out = out.replace("\n\n\n", "\n\n");
+        }
+        // And a file must not start with the gap that used to sit under the
+        // block that has gone.
+        let out = out.trim_start_matches('\n').trim_end().to_string();
+        return Some(match out.is_empty() {
+            true => String::new(),
+            false => format!("{out}\n"),
+        });
+    }
+
+    None
 }
 
 /// Finds an executable on `PATH`.
@@ -1705,6 +1932,304 @@ mod mount_offer_tests {
         );
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// An offer says *where* it is declared, not merely that it is.
+    ///
+    /// The distinction the Files tab's checkboxes are built on: a box may be
+    /// unticked only when unticking it would do something, and this panel
+    /// writes to the King's own profile alone. A folder a project declared
+    /// lives in a committed file belonging to whoever else works on that
+    /// repository -- shown, because the plan will see it, and not offered for
+    /// removal.
+    #[test]
+    fn an_offer_says_which_manifest_declared_it() {
+        use kingdom_core::services::{MountMode, MountSpec, ServiceScope};
+
+        let home = std::env::temp_dir().join("kingdom-offer-scope-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        let shown = home.display().to_string();
+
+        let mine = |path: &str, mode| MountSpec {
+            path: path.to_string(),
+            mode,
+        };
+
+        // Nothing declared anywhere: nothing to untick.
+        let none = candidates_with(&[home.join(".cargo/bin")], &shown, &[], &[]);
+        let rust = none.iter().find(|c| c.why.contains("Rust")).unwrap();
+        assert_eq!(rust.declared, None);
+        assert!(!rust.already());
+
+        // Half of it declared is not declared: a `cargo` with no `~/.rustup`
+        // re-downloads the toolchain, so a box ticked for it would be a
+        // promise the mount cannot keep.
+        let half = candidates_with(
+            &[home.join(".cargo/bin")],
+            &shown,
+            &[mine("~/.cargo", MountMode::Rw)],
+            &[],
+        );
+        let rust = half.iter().find(|c| c.why.contains("Rust")).unwrap();
+        assert_eq!(rust.declared, None, "half a toolchain is not a toolchain");
+
+        // All of it, in his profile: ticked, and his to untick.
+        let host = candidates_with(
+            &[home.join(".cargo/bin")],
+            &shown,
+            &[
+                mine("~/.cargo", MountMode::Rw),
+                mine("~/.rustup", MountMode::Rw),
+            ],
+            &[],
+        );
+        let rust = host.iter().find(|c| c.why.contains("Rust")).unwrap();
+        assert_eq!(rust.declared, Some(ServiceScope::Host));
+        assert!(rust.removable());
+
+        // One folder from the project's own manifest makes the whole offer one
+        // this panel may not undo.
+        let city = candidates_with(
+            &[home.join(".cargo/bin")],
+            &shown,
+            &[mine("~/.cargo", MountMode::Rw)],
+            &[mine("~/.rustup", MountMode::Rw)],
+        );
+        let rust = city.iter().find(|c| c.why.contains("Rust")).unwrap();
+        assert_eq!(rust.declared, Some(ServiceScope::City));
+        assert!(rust.already(), "it is shared");
+        assert!(!rust.removable(), "but not from here");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A folder shared by hand is listed even though nothing offers it.
+    ///
+    /// Otherwise the checkboxes are not the truth about what a sealed plan can
+    /// see: a line typed into the manifest, or one whose tool has since left
+    /// `PATH`, would be mounted and invisible here -- and so impossible to
+    /// clear from the one screen that claims to say what a plan may see.
+    ///
+    /// Such a row is shown even when the folder is **gone**, which is the
+    /// opposite of the rule for an offer, and deliberately: a stale line is
+    /// exactly the one worth clearing.
+    #[test]
+    fn a_folder_shared_by_hand_is_still_listed() {
+        use kingdom_core::services::{MountMode, MountSpec, ServiceScope};
+
+        let home = std::env::temp_dir().join("kingdom-offer-hand-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let shown = home.display().to_string();
+
+        let offered = candidates_with(
+            &[],
+            &shown,
+            &[MountSpec {
+                path: "/opt/nowhere".to_string(),
+                mode: MountMode::Ro,
+            }],
+            &[],
+        );
+
+        let hand = offered
+            .iter()
+            .find(|c| c.folders.iter().any(|f| f.path == "/opt/nowhere"))
+            .expect("a folder the King shared must be listed, so he can unshare it");
+        assert_eq!(hand.declared, Some(ServiceScope::Host));
+        assert!(hand.removable());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A declared folder an offer already names is not listed twice.
+    ///
+    /// `~/.cargo` is both what the King declared and part of the Rust offer.
+    /// Two rows for it would be the same decision asked twice, with the second
+    /// one able to half-undo the first.
+    #[test]
+    fn a_declared_folder_does_not_repeat_an_offer() {
+        use kingdom_core::services::{MountMode, MountSpec};
+
+        let home = std::env::temp_dir().join("kingdom-offer-dup-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        let shown = home.display().to_string();
+
+        let declared = vec![
+            MountSpec {
+                path: "~/.cargo".to_string(),
+                mode: MountMode::Rw,
+            },
+            MountSpec {
+                path: "~/.rustup".to_string(),
+                mode: MountMode::Rw,
+            },
+        ];
+        let offered = candidates_with(&[home.join(".cargo/bin")], &shown, &declared, &[]);
+
+        let naming_cargo = offered
+            .iter()
+            .filter(|c| c.folders.iter().any(|f| f.path == "~/.cargo"))
+            .count();
+        assert_eq!(naming_cargo, 1, "one folder, one box");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod mount_removal_tests {
+    use super::*;
+
+    /// A withdrawal takes the block and leaves everything else, comments
+    /// included.
+    ///
+    /// The whole reason this is text surgery rather than a serde round trip:
+    /// the manifest is a file people write and comment, and re-serialising it
+    /// would silently eat the paragraph at the top explaining what Kingdom does
+    /// with the file.
+    #[test]
+    fn one_block_goes_and_the_rest_of_the_file_stays() {
+        let before = r#"# What this machine lends to sealed plans.
+
+[[service]]
+name  = "db"
+image = "mongo:7"
+port  = 27017
+
+[[mount]]
+path = "~/.cargo"
+mode = "rw"
+
+[[mount]]
+path = "~/.ssh"
+mode = "ro"
+"#;
+
+        let after = without_mount(before, "~/.ssh").expect("it is in there");
+
+        assert!(
+            after.contains("# What this machine lends to sealed plans."),
+            "a removal must not eat his comments"
+        );
+        assert!(after.contains("~/.cargo"), "the other folder stays");
+        assert!(after.contains("mongo:7"), "and so does the service");
+        assert!(!after.contains("~/.ssh"), "the withdrawn one is gone");
+
+        // And what is left is still a manifest.
+        let parsed = kingdom_core::services::parse(&after).expect("still valid");
+        assert_eq!(parsed.mounts.len(), 1);
+        assert_eq!(parsed.services.len(), 1);
+    }
+
+    /// A comment above the *next* block is not taken with this one.
+    ///
+    /// The block-to-next-header rule reads a trailing comment as part of the
+    /// block above it, where a person reading the file sees a note about the
+    /// folder below. Getting this wrong deletes the King's own words while
+    /// removing a folder he never commented.
+    #[test]
+    fn a_note_above_the_next_folder_stays_with_it() {
+        let before = r#"[[mount]]
+path = "~/.cargo"
+mode = "rw"
+
+# Only because the deploy script needs it.
+[[mount]]
+path = "~/.ssh"
+mode = "ro"
+"#;
+
+        let after = without_mount(before, "~/.cargo").expect("it is in there");
+
+        assert!(
+            after.contains("# Only because the deploy script needs it."),
+            "the note belongs to the folder it sits above: {after:?}"
+        );
+        assert!(after.contains("~/.ssh"));
+        assert!(!after.contains("~/.cargo"));
+    }
+
+    /// Withdrawing a folder that is not shared is nothing to do.
+    ///
+    /// What makes a double press on a checkbox harmless: `None` here becomes a
+    /// successful no-op in [`withdraw_mount`], rather than an error about a
+    /// state the King already wanted.
+    #[test]
+    fn a_folder_that_is_not_there_is_left_alone() {
+        let text = "[[mount]]\npath = \"~/.cargo\"\nmode = \"rw\"\n";
+
+        assert_eq!(without_mount(text, "~/.npm"), None);
+        assert_eq!(without_mount("", "~/.cargo"), None);
+    }
+
+    /// The path is matched by *parsing* the block, not by finding the string.
+    ///
+    /// TOML has more than one way to write one string, and a King who typed
+    /// single quotes -- or who put the two keys the other way round -- must not
+    /// end up with a checkbox that unticks and then re-ticks itself because the
+    /// block was never actually removed.
+    #[test]
+    fn a_block_is_matched_however_it_was_written() {
+        let text = "[[mount]]\nmode = 'ro'\npath = '~/.ssh'\n";
+
+        let after = without_mount(text, "~/.ssh").expect("single quotes are still that folder");
+        assert!(after.trim().is_empty());
+    }
+
+    /// The last folder out leaves an empty file rather than a ragged one.
+    #[test]
+    fn removing_the_only_block_empties_the_file() {
+        let text = "[[mount]]\npath = \"~/.cargo\"\nmode = \"rw\"\n";
+
+        let after = without_mount(text, "~/.cargo").expect("it is in there");
+        assert_eq!(after, "");
+        assert!(kingdom_core::services::parse(&after).is_ok());
+    }
+
+    /// Withdrawing writes the file, and the next read no longer has it.
+    ///
+    /// The round trip, because the pieces can each be right and the whole still
+    /// wrong: `declare_mount` appends and `withdraw_mount` cuts, and the proof
+    /// that they agree is a folder declared and then withdrawn leaving what was
+    /// there before.
+    #[test]
+    fn declaring_and_withdrawing_leave_the_manifest_as_it_was() {
+        use kingdom_core::services::{MountMode, MountSpec};
+
+        let root = std::env::temp_dir().join("kingdom-withdraw-city");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".kingdom")).unwrap();
+        let scope = Scope::City(root.clone());
+        let manifest = scope.manifest_path();
+        std::fs::write(&manifest, "# kept\n").unwrap();
+
+        let spec = MountSpec {
+            path: "~/.cargo".to_string(),
+            mode: MountMode::Rw,
+        };
+
+        declare_mount(&scope, &spec).expect("declaring");
+        assert!(declared_in(&scope).iter().any(|m| m.path == "~/.cargo"));
+
+        withdraw_mount(&scope, &spec).expect("withdrawing");
+        assert!(
+            !declared_in(&scope).iter().any(|m| m.path == "~/.cargo"),
+            "a folder withdrawn is one a sealed plan no longer sees"
+        );
+        assert!(
+            std::fs::read_to_string(&manifest).unwrap().contains("# kept"),
+            "and his own words survive the round trip"
+        );
+
+        // Again, on a folder that is no longer there: harmless.
+        withdraw_mount(&scope, &spec).expect("a second press does nothing");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
