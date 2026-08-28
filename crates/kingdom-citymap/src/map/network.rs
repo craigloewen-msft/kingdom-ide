@@ -670,8 +670,11 @@ pub const WELL_WATER_COLOR: MapColor = [0x24, 0x42, 0x4a, 255];
 
 /// The timber of a well's canopy: two posts and the beam across them.
 ///
-/// Dark enough to read against the stone below it at a glance, and the same
-/// family of browns the settlement's own trim and tree trunks are painted in --
+/// Dark enough to read against the stone below it at a glance -- 209.0 from
+/// [`WELL_COLOR`] on the ruler the rest of these notes use, which is the
+/// surface it is actually painted on; a test in `build::streets` pins that,
+/// alongside the stonework's own distance from the paving. It is also the same
+/// family of browns the settlement's trim and tree trunks are painted in --
 /// this is a thing that was *built*, by the same hands as the houses around it.
 pub const WELL_TIMBER_COLOR: MapColor = [0x6b, 0x4a, 0x32, 255];
 
