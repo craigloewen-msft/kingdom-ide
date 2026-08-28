@@ -6,9 +6,10 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    annotate_file, annotate_proposal, approve_plan, delete_entry, draft_plan, finish_plan,
-    get_kingdom, plan_briefing, plan_delete_file, plan_write_file, say, send_file_notes,
-    send_notes, set_aside_plan, stop_plan, unqueue, withdraw_file_note, withdraw_note,
+    annotate_file, annotate_proposal, approve_plan, delete_entry, draft_plan, end_terminal,
+    finish_plan, get_kingdom, plan_briefing, plan_delete_file, plan_write_file, say,
+    send_file_notes, send_notes, set_aside_plan, stop_plan, unqueue, withdraw_file_note,
+    withdraw_note,
 };
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
@@ -1728,7 +1729,19 @@ fn ConversationBody(
                         width=terminal_width
                         focused=focused_now
                         on_focus=toggle_focus
-                        on_close=Callback::new(move |_: ()| aside.set(Aside::Hidden))
+                        on_close=Callback::new(move |_: ()| {
+                            aside.set(Aside::Hidden);
+                            // Hiding the panel no longer ends the shell -- that
+                            // is the point of the change -- so the × has to say
+                            // so out loud. Failure is swallowed deliberately:
+                            // the panel is already gone, and an error about a
+                            // shell the King has finished with would be noise
+                            // in the composer.
+                            let plan = id.get_value().to_string();
+                            leptos::task::spawn_local(async move {
+                                let _ = end_terminal(plan).await;
+                            });
+                        })
                     />
                 </Show>
 
