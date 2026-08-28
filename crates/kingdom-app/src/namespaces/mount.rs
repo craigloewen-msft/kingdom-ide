@@ -943,7 +943,29 @@ mod live {
 
         // Its own process table: pid 1 is the holder's sleep, not the King's
         // init, and the count is a handful rather than several hundred.
-        assert_eq!(run("cat /proc/1/comm"), "sleep");
+        //
+        // This doubles as the readiness assertion. `ensure` must not return
+        // until the holder has finished building its root, and pid 1 reading
+        // `sleep` rather than `sh` is precisely that: the script `exec`s sleep
+        // as its last act. This failed intermittently -- about one run in four
+        // under parallel load -- when `ensure` returned as soon as slirp's
+        // socket appeared, leaving callers to enter a namespace that was still
+        // mounting.
+        assert_eq!(
+            run("cat /proc/1/comm"),
+            "sleep",
+            "ensure() returned before the holder finished building its root"
+        );
+
+        // A resolver that something can actually read. The bind used to be
+        // attempted before `pivot_root`, where `/etc/resolv.conf`'s absolute
+        // symlink resolves against the *host's* root -- so it silently did
+        // nothing and the plan had no DNS at all.
+        assert_eq!(
+            run("test -s /etc/resolv.conf && echo yes"),
+            "yes",
+            "a sealed plan must be able to resolve a name"
+        );
         let processes: usize = run("ls -d /proc/[0-9]* | wc -l")
             .parse()
             .unwrap_or(usize::MAX);

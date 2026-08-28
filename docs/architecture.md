@@ -363,6 +363,14 @@ Two further bugs were found only by running it: the private `/tmp` was mounted
 never created in the new root, which killed the holder and surfaced a second
 later as an unrelated `nsenter` error. Both have regression tests.
 
+A third was found the same way, and only under parallel load: **a sealed plan is
+ready when its holder has finished building its root, not when the holder
+exists.** `ensure` used to return as soon as slirp's API socket appeared, while
+the script was still mounting and had not yet pivoted — so a caller entering in
+that window saw the old root, no private `/tmp` and no resolver. The holder
+`exec`s `sleep` as its last act, so pid 1 becoming `sleep` is the script's own
+report that it finished, and that is what is now waited for.
+
 The live tests that prove all of this are opt-in, because the suite must run on
 a bare machine:
 
