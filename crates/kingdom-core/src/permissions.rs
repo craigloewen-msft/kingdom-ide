@@ -31,7 +31,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// [`Permissions::Full`] is what the user grants, once, on a proposal they
 /// accept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Hash` is derived for the rail's `<For>` key, which must be `Eq + Hash` and
+/// has to include this: approval widens the permissions **without moving the
+/// status**, so a key without it would reuse a row that has stopped being true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Permissions {
     /// Reads and reports, and cannot touch the world.
     ///
@@ -69,12 +73,39 @@ impl Permissions {
         matches!(self, Permissions::Propose)
     }
 
-    /// How the conversation view names this level to the user.
+    /// What stage of the work this level *is*, as the user reads it.
+    ///
+    /// The rail and the chamber both badge a live plan with this, and it is
+    /// the only thing that separates the two halves of the product's stance:
+    /// an agent reading the code to draw a plan up, and an agent changing files
+    /// under a plan that was accepted. Both are `PlanStatus::Drafting` and
+    /// always will be -- a status is where a plan is in its *life*, and a sixth
+    /// variant to say one word would ripple through `ALL`, the map legend and
+    /// every match on plan state. Exactly the argument [`crate::Attention`]
+    /// already makes for a different question.
+    ///
+    /// A subagent says "Surveying" and no rail ever draws it: subagents are
+    /// excluded from the rail, and reach the user only in the errand list of
+    /// the chamber that sent them.
     pub fn label(&self) -> &'static str {
         match self {
             Permissions::ReadOnly => "Surveying",
-            Permissions::Propose => "Drawing up a plan",
+            Permissions::Propose => "Exploring",
             Permissions::Full => "Working",
+        }
+    }
+
+    /// CSS class suffix, e.g. `plan-exploring`.
+    ///
+    /// The sibling of [`crate::PlanStatus::css_suffix`], so the one place a
+    /// state turns into pixels -- `style/_status.scss` -- keeps being the only
+    /// one. Deliberately *not* the same suffixes: `drafting` still exists and
+    /// still means the status, which the errand dots read.
+    pub fn css_suffix(&self) -> &'static str {
+        match self {
+            Permissions::ReadOnly => "surveying",
+            Permissions::Propose => "exploring",
+            Permissions::Full => "working",
         }
     }
 }
