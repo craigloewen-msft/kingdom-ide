@@ -10,12 +10,32 @@ Every file is a building, measured from the file itself. The rules live in
 
 | What you see | What it is measured from | In code |
 |---|---|---|
-| House footprint | The file's share of its folder's ground, by `20 + √bytes` | `weight`, `Building::footprint` |
+| House footprint | The file's share of its folder's ground, **linear in lines** | `weight`, `Building::footprint` |
 | House height | Branches per line of code, clamped 11–54 | `Building::height`, `DENSITY_HEIGHT` |
 | Height ceiling | ~1.9× the footprint's shorter side, so nothing hides its neighbours under the fixed camera | `Building::height_ceiling` |
 | Town size | File count × `LAND_PER_FILE` (37,300 units each) | `settlement_extent` |
 | House shape and colour | What the file is *for* — test → watchtower, docs → scriptorium, config → council hall | `Category` → `BuildingKind` |
 | Chimneys, crates, forge stacks | Bucketed branch density | `meshes::complexity_step` |
+
+**The footprint is linear, and deliberately so:** twice the lines is twice the
+area, a hundred times is a hundred times. It was `20 + √bytes`, and the square
+root was the fault — it spent most of its range before the files that matter
+began, so 64 KB bought about five times the lot of 1 KB rather than sixty-four.
+Measured over this repository, only **33%** of holdings stood within ±43% of
+their proportional share, and a file with exactly twice a neighbour's content
+drew a median **0.66×** the area — less than the smaller file's own share, let
+alone twice it. Linearly that figure is **87%**. A folder weighs the *sum of its
+children*, which is what lets the proportion survive the recursion down to a
+lot, and the house covers a constant share of that lot (`LOT_COVERAGE`) so it
+reaches the eye intact.
+
+Two floors keep the rule drawable rather than absolute. `MIN_HOLDING_LINES` (60)
+stops a three-line `mod.rs` earning a house under a world unit across, with a
+height ceiling below the 11-unit floor every archetype is modelled against.
+`UNREAD_HOLDING_LINES` (120) gives a nominal lot to files the scanner never
+opened — binaries, and anything over 2 MB — whose line count is zero because
+nobody counted, not because they are empty. Sizing those by bytes would hand one
+3.5 MB bundled `.min.js` a quarter of the town: **it is a rule about text.**
 
 Two consequences worth knowing. A plot is a *share of its folder*, so the same
 file looks bigger among small siblings than among large ones. And the average

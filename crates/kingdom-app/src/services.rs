@@ -2221,7 +2221,9 @@ mode = "ro"
             "a folder withdrawn is one a sealed plan no longer sees"
         );
         assert!(
-            std::fs::read_to_string(&manifest).unwrap().contains("# kept"),
+            std::fs::read_to_string(&manifest)
+                .unwrap()
+                .contains("# kept"),
             "and his own words survive the round trip"
         );
 

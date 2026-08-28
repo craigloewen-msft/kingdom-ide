@@ -62,6 +62,64 @@ pub(crate) const REFERENCE_WORLD: f32 = 1000.0;
 /// makes reaching one setback safe from ever touching the lot next door.
 pub(crate) const LOT_SETBACK: f32 = 12.0;
 
+/// The fewest lines a holding is ever sized as having.
+///
+/// [`weight`] is linear in lines, and taken literally a three-line `mod.rs`
+/// would get a three-line lot: a house under a world unit across, with a height
+/// ceiling — `plan * 1.9` — falling straight through the 11-unit floor that
+/// every archetype is modelled against. So the proportion is honoured down to
+/// about a screenful of code and no further.
+///
+/// It costs about a tenth of the files in this repository their exact share,
+/// and every one of them is a file whose entire content fits on one screen.
+/// That is the right place to stop: below it the difference being drawn is
+/// smaller than the ink used to draw it.
+const MIN_HOLDING_LINES: f32 = 60.0;
+
+/// The lot given to a file the scanner never opened.
+///
+/// Binary assets, and anything over `scan::MAX_ANALYZED_BYTES`, are never read,
+/// so [`Metrics::lines`](crate::build::model::Metrics::lines) is zero for them
+/// — not because they are empty but because nobody counted. Sizing them from
+/// `bytes` instead would hand a 3.5 MB bundled `.min.js` a quarter of the town
+/// on the strength of one line, which is exactly the claim the linear rule is
+/// not making: it is a rule about *text*. A fixed nominal lot says "something
+/// stands here, and it is not code the map can measure".
+const UNREAD_HOLDING_LINES: f32 = 120.0;
+
+/// The share of its lot's area a house covers.
+///
+/// Constant, so that a lot twice the size carries a house twice the size. The
+/// figure is the middle of the range the old per-house hash used to roll, so
+/// the density of a street is unchanged -- only its evenness.
+const LOT_COVERAGE: f32 = 0.26;
+
+/// The most of one side of its lot a house may take.
+///
+/// [`LOT_COVERAGE`] fixes the area, and `skew` trades one side against the
+/// other to vary the shape; on a lot that is already long and thin that trade
+/// can push a side out to the boundary. This keeps the front garden on every
+/// lot, so a house never touches the street planned along its edge.
+const MAX_LOT_SIDE: f32 = 0.8;
+
+/// The narrowest a cell may be cut, in world units.
+///
+/// A split's ratio follows the weights either side of it, and with weights now
+/// linear that ratio can be genuinely tiny — a 60-line file beside a 5,000-line
+/// one is a hair over 1% of their cell. Some floor is needed or the thin side
+/// becomes a sliver no house can stand on, but the floor this replaced was a
+/// *share* — a flat `0.08` — which charged a large cell 8% of its ground for
+/// its smallest file however small that file was, and so over-served the
+/// tiniest holdings by up to 29×.
+///
+/// Expressed as land instead, it costs whatever it has to and no more: in a
+/// small cell it binds about as often as the old clamp did, and in a large one
+/// it is a rounding error. It is measured against the side being cut, which is
+/// [`Rect::span`], because that is the direction the sliver would be thin in,
+/// and the street about to be carved from that cell is charged for on top of
+/// it — half of an avenue can be fifteen units on its own.
+const MIN_LOT_THICKNESS: f32 = 22.0;
+
 /// World units of height per branch-per-line.
 ///
 /// Tuned against the density this repository actually shows: a median file
@@ -313,7 +371,7 @@ impl Building {
     /// How tall the building stands: how *branchy* the file is, not how big.
     ///
     /// Size is already the footprint — a file's lot is its share of its
-    /// folder's ground, weighted by `√bytes`. Height used to follow
+    /// folder's ground, in proportion to its lines. Height used to follow
     /// `ln(lines)` as well, which spent a second dimension restating the
     /// first: measured across this repository, lines and total complexity
     /// correlate at 0.94, so the two axes rose and fell together and the
@@ -357,11 +415,27 @@ impl Building {
 
     /// The ground the building actually covers, inset from its lot so
     /// neighbours do not touch.
+    ///
+    /// The house covers a **constant share of its lot's area**, and the hash
+    /// varies only its proportions and where it sits. That division is the
+    /// point: the lot is now linear in the file's length, so anything that
+    /// scales the house by an amount the file did not earn is noise laid
+    /// directly over the signal. The old occupancy ran `0.46..0.58` on each
+    /// side from the hash, which is up to 1.55x of area -- enough on its own to
+    /// make a file look half again as big as an equal neighbour.
+    ///
+    /// Nothing is lost visually. `skew` still makes one house oblong and the
+    /// next square, and the offsets still stand them off-centre on their plots,
+    /// so a street reads as varied as it did; two houses on equal lots simply
+    /// now cover equal ground.
     pub fn footprint(&self) -> Rect {
         let hash = stable_hash(&self.name);
-        let occupancy = 0.46 + (hash % 12) as f32 / 100.0;
-        let width = self.lot.width * occupancy;
-        let height = self.lot.height * (occupancy - 0.04);
+        // 0.88..=1.12: what one side gains in proportion the other gives back,
+        // so the product -- the area -- is `LOT_COVERAGE` either way.
+        let skew = 0.88 + (hash % 25) as f32 / 100.0;
+        let side = LOT_COVERAGE.sqrt();
+        let width = (self.lot.width * side * skew).min(self.lot.width * MAX_LOT_SIDE);
+        let height = (self.lot.height * side / skew).min(self.lot.height * MAX_LOT_SIDE);
         let free_x = self.lot.width - width;
         let free_y = self.lot.height - height;
         Rect {
@@ -1007,11 +1081,29 @@ pub(crate) fn stable_hash(value: &str) -> u32 {
     })
 }
 
+/// How much ground a node has earned, in lines of content.
+///
+/// **Linear, deliberately.** A file with twice as much in it gets twice the
+/// land, so the map answers "how much is in here?" by area and not by a curve
+/// the reader has to undo in their head. This was `20 + √bytes`, and the square
+/// root *was* the fault: 64 KB earned about five times the lot of 1 KB rather
+/// than sixty-four. Measured across this repository, only 32% of holdings
+/// stood within ±43% of their proportional share, and a file with exactly twice
+/// its neighbour's content drew a median **0.66×** the area — less than the
+/// smaller one's own share, let alone twice it.
+///
+/// **A folder weighs exactly the sum of its children.** The old directory arm
+/// was a different formula from the file arm, so what a folder was given and
+/// what it had to hand out were two unrelated numbers and the proportion leaked
+/// away at every level of the recursion. Summing is what lets the ratio survive
+/// [`partition_recursive`] all the way down to a lot.
 fn weight(node: &Node) -> f32 {
-    if node.is_directory() {
-        node.metrics.file_count as f32 * 16.0 + (node.metrics.bytes as f32).sqrt()
-    } else {
-        20.0 + (node.metrics.bytes as f32).sqrt()
+    match node.kind {
+        NodeKind::Directory => node.children.iter().map(weight).sum(),
+        NodeKind::File { .. } if node.metrics.lines > 0 => {
+            (node.metrics.lines as f32).max(MIN_HOLDING_LINES)
+        }
+        NodeKind::File { .. } => UNREAD_HOLDING_LINES,
     }
 }
 
@@ -1053,7 +1145,16 @@ fn partition_recursive<'a>(
         }
     }
     let first_weight: f32 = nodes[..split].iter().map(|node| weight(node)).sum();
-    let ratio = (first_weight / total).clamp(0.08, 0.92);
+    // A minimum *lot*, not a minimum share: see `MIN_LOT_THICKNESS`.
+    //
+    // The floor has to leave room for the street this split is about to carve
+    // as well as for the lot, because half that street comes out of each side
+    // *after* the ratio is applied. Charging only for the lot is what let a
+    // 31-unit avenue eat a cell down to a house it then ran through.
+    let span = rect.span();
+    let street = corridor_width(nodes.iter().map(|node| arrivals(&node.metrics)).sum());
+    let floor = ((MIN_LOT_THICKNESS + street * 0.5) / span).min(0.4);
+    let ratio = (first_weight / total).clamp(floor, 1.0 - floor);
 
     // Everything standing either side of this split has to cross it to leave,
     // so the whole subtree is what the street carries.
@@ -1210,6 +1311,186 @@ mod tests {
             modest.height(),
             enormous.height(),
         );
+    }
+
+    /// A file of a given length, which is what a lot is now measured from.
+    fn text_file(name: &str, path: &str, lines: usize) -> Node {
+        Node {
+            name: name.to_owned(),
+            relative_path: PathBuf::from(path),
+            kind: NodeKind::File {
+                category: Category::Source,
+            },
+            metrics: Metrics {
+                // Deliberately unrelated to `lines`: nothing about a lot may
+                // read the byte count any more.
+                bytes: 1_000,
+                lines,
+                code_lines: lines,
+                file_count: 1,
+                ..Metrics::default()
+            },
+            children: Vec::new(),
+        }
+    }
+
+    /// A settlement of one ward holding exactly these files, by name and length.
+    fn ward_of(files: &[(&str, usize)]) -> CityLayout {
+        let mut root = Node::directory("project".to_owned(), PathBuf::new());
+        let mut ward = Node::directory("src".to_owned(), PathBuf::from("src"));
+        ward.children = files
+            .iter()
+            .map(|(name, lines)| text_file(name, &format!("src/{name}"), *lines))
+            .collect();
+        for child in &ward.children {
+            ward.metrics.add(child.metrics);
+        }
+        root.metrics = ward.metrics;
+        root.children = vec![ward];
+        CityLayout::build(&root)
+    }
+
+    fn lot_area_of(city: &CityLayout, name: &str) -> f32 {
+        city.buildings
+            .iter()
+            .find(|building| building.name == name)
+            .unwrap_or_else(|| panic!("{name} stands somewhere"))
+            .lot
+            .area()
+    }
+
+    /// **The King's own rule.** Twice the content, twice the ground.
+    #[test]
+    fn twice_the_lines_buys_about_twice_the_lot() {
+        // Four files so the recursive split has real work to do, and lengths
+        // well clear of `MIN_HOLDING_LINES` so the floor is not what is being
+        // measured. Each is twice the one before it.
+        let city = ward_of(&[
+            ("one.rs", 200),
+            ("two.rs", 400),
+            ("four.rs", 800),
+            ("eight.rs", 1_600),
+        ]);
+
+        for (smaller, larger) in [
+            ("one.rs", "two.rs"),
+            ("two.rs", "four.rs"),
+            ("four.rs", "eight.rs"),
+        ] {
+            let ratio = lot_area_of(&city, larger) / lot_area_of(&city, smaller);
+            assert!(
+                (1.7..=2.3).contains(&ratio),
+                "{larger} has twice the lines of {smaller} but {ratio:.2}x the ground"
+            );
+        }
+    }
+
+    /// The fall-off the King reported, stated as he stated it.
+    ///
+    /// Under `20 + √bytes` this pair came out about 11x apart rather than a
+    /// hundred, because a square root spends most of its range before the
+    /// files that matter even start. Nothing may compress the ratio again.
+    ///
+    /// The two are given a street of ordinary neighbours to stand among,
+    /// because a settlement of *only* these two is barely a hundred units
+    /// across and `MIN_LOT_THICKNESS` — rightly — will not cut a 117-unit cell
+    /// a hundred ways. A hundredfold difference needs a town big enough to
+    /// draw it, which any real repository holding a 10,000-line file is.
+    #[test]
+    fn a_hundred_times_the_lines_buys_about_a_hundred_times_the_ground() {
+        let mut files: Vec<(String, usize)> = (0..20).map(|i| (format!("f{i}.rs"), 300)).collect();
+        files.push(("small.rs".to_owned(), 100));
+        files.push(("large.rs".to_owned(), 10_000));
+        let named: Vec<(&str, usize)> = files.iter().map(|(n, l)| (n.as_str(), *l)).collect();
+
+        let city = ward_of(&named);
+
+        let ratio = lot_area_of(&city, "large.rs") / lot_area_of(&city, "small.rs");
+        assert!(
+            (70.0..=140.0).contains(&ratio),
+            "a 100x longer file got {ratio:.1}x the ground"
+        );
+    }
+
+    /// The house has to carry the proportion too, or the lot's honesty never
+    /// reaches the eye: this is what a constant `LOT_COVERAGE` is for.
+    #[test]
+    fn the_house_grows_with_its_lot_and_not_with_its_name() {
+        let city = ward_of(&[("one.rs", 300), ("two.rs", 600)]);
+        let house = |name: &str| {
+            let footprint = city
+                .buildings
+                .iter()
+                .find(|building| building.name == name)
+                .expect("the file stands somewhere")
+                .footprint();
+            footprint.area()
+        };
+
+        let ratio = house("two.rs") / house("one.rs");
+        assert!(
+            (1.7..=2.3).contains(&ratio),
+            "twice the lines covered {ratio:.2}x the ground"
+        );
+    }
+
+    /// A file nobody could read is not a file with nothing in it.
+    #[test]
+    fn a_file_the_scanner_never_opened_gets_a_nominal_lot() {
+        // `scan` leaves `lines` at zero for a binary or an over-large file
+        // while still recording its size, so a rule that read `bytes` would
+        // hand this bundle most of the ward on the strength of no content at
+        // all.
+        let mut bundle = text_file("bundle.min.js", "src/bundle.min.js", 0);
+        bundle.metrics.bytes = 3_500_000;
+        bundle.metrics.code_lines = 0;
+
+        let mut root = Node::directory("project".to_owned(), PathBuf::new());
+        let mut ward = Node::directory("src".to_owned(), PathBuf::from("src"));
+        ward.children = vec![bundle, text_file("module.rs", "src/module.rs", 120)];
+        for child in &ward.children {
+            ward.metrics.add(child.metrics);
+        }
+        root.metrics = ward.metrics;
+        root.children = vec![ward];
+
+        let city = CityLayout::build(&root);
+        let ratio = lot_area_of(&city, "bundle.min.js") / lot_area_of(&city, "module.rs");
+        assert!(
+            (0.7..=1.4).contains(&ratio),
+            "an unread 3.5 MB bundle took {ratio:.1}x the ground of a 120-line file"
+        );
+    }
+
+    /// What a folder is given and what it hands out have to be the same number,
+    /// or the proportion leaks away at every level of the recursion.
+    #[test]
+    fn a_folder_weighs_exactly_what_its_contents_weigh() {
+        let mut inner = Node::directory("inner".to_owned(), PathBuf::from("src/inner"));
+        inner.children = vec![
+            text_file("a.rs", "src/inner/a.rs", 300),
+            text_file("b.rs", "src/inner/b.rs", 700),
+        ];
+        let mut ward = Node::directory("src".to_owned(), PathBuf::from("src"));
+        ward.children = vec![inner, text_file("c.rs", "src/c.rs", 1_000)];
+
+        assert_eq!(weight(&ward), 2_000.0);
+        assert_eq!(weight(&ward.children[0]), 1_000.0);
+    }
+
+    /// The floor, and the fact that it is a floor rather than a curve.
+    #[test]
+    fn a_file_too_short_to_draw_lands_on_the_floor_and_no_lower() {
+        let stub = text_file("mod.rs", "src/mod.rs", 3);
+        let short = text_file("tiny.rs", "src/tiny.rs", 30);
+        let above = text_file("real.rs", "src/real.rs", 600);
+
+        // Everything below the floor weighs the same -- that is the price of
+        // keeping a house big enough to stand up.
+        assert_eq!(weight(&stub), MIN_HOLDING_LINES);
+        assert_eq!(weight(&short), MIN_HOLDING_LINES);
+        // And everything above it is its own length exactly, with no curve.
+        assert_eq!(weight(&above), 600.0);
     }
 
     #[test]
