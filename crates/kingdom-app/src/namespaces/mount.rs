@@ -151,7 +151,42 @@ pub struct Bind {
     /// yet, and `mount --rbind` of a missing source fails under `set -e` and
     /// takes the whole holder with it.
     pub ensure_source: bool,
+    /// Where it appears **inside** the plan, when that is not its own path.
+    ///
+    /// `None` -- almost always -- means the folder appears at the same path it
+    /// has on the King's machine, which is what makes a mounted toolchain work:
+    /// `~/.cargo/bin/cargo` looks for its registry at `~/.cargo/registry`.
+    ///
+    /// `Some` is for the workspace's second home at `/app`. See
+    /// [`WORKSPACE_AT`].
+    pub at: Option<PathBuf>,
 }
+
+/// Where a sealed plan's workspace appears, and where its commands start.
+///
+/// # Why the work gets a second path
+///
+/// A worktree's real path is long, and it is *the King's* -- `/home/him/dev/
+/// project/.kingdom/<uuid>`. An agent that reads `pwd` and sees that has no
+/// reason to think it is sealed at all, and the strongest signal we have that
+/// this is a machine of its own is the one place it looks first.
+///
+/// # Why it is a second path and not the only one
+///
+/// The obvious version -- mount the workspace at `/app` and nowhere else --
+/// breaks two things, both measured rather than reasoned about:
+///
+/// 1. **git.** The workspace is a *worktree*; its `.git` file points at
+///    `<city>/.git/worktrees/<id>`, and that directory's `gitdir` file points
+///    back at the worktree **by its real path**. Without it `git worktree list`
+///    disagrees with the filesystem.
+/// 2. **Every tool that takes a path.** `tools::Sandbox::resolve` hands back
+///    absolute host paths, and `tools::child_environment` builds `KINGDOM_HOME`
+///    from the workspace root. All of them name the real path.
+///
+/// So both exist, they are the same directory, and a write through one is
+/// visible at the other. `/app` is only where you arrive.
+pub const WORKSPACE_AT: &str = "/app";
 
 impl Bind {
     pub fn read_only(source: impl Into<PathBuf>) -> Self {
@@ -159,6 +194,7 @@ impl Bind {
             source: source.into(),
             ensure_source: false,
             writable: false,
+            at: None,
         }
     }
 
@@ -167,7 +203,24 @@ impl Bind {
             source: source.into(),
             ensure_source: false,
             writable: true,
+            at: None,
         }
+    }
+
+    /// The same folder, appearing somewhere else inside the plan.
+    ///
+    /// See [`WORKSPACE_AT`], which is the only caller.
+    pub fn mounted_at(self, at: impl Into<PathBuf>) -> Self {
+        Self {
+            at: Some(at.into()),
+            ..self
+        }
+    }
+
+    /// Where this lands inside the plan: its own path unless it was given
+    /// another.
+    pub fn target(&self) -> &Path {
+        self.at.as_deref().unwrap_or(&self.source)
     }
 
     /// A directory Kingdom owns on the host and both sides must see, created
@@ -177,6 +230,7 @@ impl Bind {
             source: source.into(),
             ensure_source: true,
             writable: true,
+            at: None,
         }
     }
 }
@@ -233,8 +287,11 @@ impl MountPlan {
             binds.push(Bind::read_only(PathBuf::from("/").join(name)));
         }
 
-        // The work itself.
+        // The work itself, at its own path -- and again at `/app`, which is
+        // where the plan's commands start. Both, deliberately: see
+        // [`WORKSPACE_AT`].
         binds.push(Bind::writable(workspace));
+        binds.push(Bind::writable(workspace).mounted_at(WORKSPACE_AT));
 
         // The city's git directory, without which `git` does not work in a
         // worktree at all. Skipped when the workspace *is* the city -- an
@@ -274,6 +331,9 @@ impl MountPlan {
                 // it would turn a typo in a manifest into an empty directory
                 // silently mounted over nothing.
                 ensure_source: false,
+                // At its own path, which is what makes a mounted toolchain
+                // work at all. See [`Bind::at`].
+                at: None,
             });
         }
 
@@ -281,7 +341,10 @@ impl MountPlan {
             root: scratch_root(plan),
             layout,
             binds,
-            workdir: workspace.to_path_buf(),
+            // `/app`, not the workspace's own path. This is handed to
+            // `nsenter --wdns`, so it is resolved *inside* the namespace where
+            // both paths exist -- and the King asked for the obvious one.
+            workdir: PathBuf::from(WORKSPACE_AT),
         }
     }
 }
@@ -373,7 +436,7 @@ pub fn holder_script(plan: &MountPlan) -> String {
         let target = shell_quote(&format!(
             "{}{}",
             plan.root.to_string_lossy(),
-            bind.source.to_string_lossy()
+            bind.target().to_string_lossy()
         ));
         // A scratch directory Kingdom owns may legitimately not exist yet --
         // the browser profile is made when a browser first launches, long
@@ -537,6 +600,51 @@ mod tests {
             .find(|b| b.source == workspace)
             .expect("the workspace is always mounted");
         assert!(work.writable, "the workspace is the work");
+    }
+
+    /// The workspace appears at `/app` as well as at its own path, and that is
+    /// where commands start.
+    ///
+    /// Both halves matter and they fail differently. Without the `/app` bind
+    /// the `--wdns` handed to `nsenter` names a directory that does not exist
+    /// inside, and **every** command in the plan fails to start. Without the
+    /// real path, git's worktree metadata and every absolute path a tool
+    /// resolves point at nothing.
+    #[test]
+    fn the_workspace_is_at_app_and_at_its_own_path() {
+        let workspace = PathBuf::from("/tmp/kingdom-mount-test/workspace");
+        let plan = MountPlan::built_in("plan-app", &workspace, None);
+
+        assert_eq!(
+            plan.workdir,
+            Path::new(WORKSPACE_AT),
+            "commands start at /app"
+        );
+
+        let at_app = plan
+            .binds
+            .iter()
+            .find(|b| b.target() == Path::new(WORKSPACE_AT))
+            .expect("the workspace must appear at /app");
+        assert_eq!(at_app.source, workspace, "/app is the workspace itself");
+        assert!(at_app.writable, "the work is writable through /app too");
+
+        // And still at its own path, which is a *different* bind of the same
+        // source rather than the same one renamed.
+        assert!(
+            plan.binds
+                .iter()
+                .any(|b| b.target() == workspace && b.source == workspace),
+            "the workspace must keep its own path, or git and every tool that \
+             resolves an absolute path break"
+        );
+
+        // The script has to mount it twice, once at each target.
+        let script = holder_script(&plan);
+        assert!(
+            script.contains(&format!("{}/app", plan.root.display())),
+            "the script must mount the workspace at /app"
+        );
     }
 
     /// `/bin` is reproduced as a symlink, never mounted, on a merged-usr host.
@@ -921,11 +1029,29 @@ mod live {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
 
-        // Commands start in the workspace. This is `--wdns` earning its keep:
-        // with `current_dir` or `--wd` this answers `/`, and every build an
-        // agent runs happens in the wrong place with no error.
-        assert_eq!(run("pwd"), workspace.display().to_string());
+        // Commands start at `/app`. This is `--wdns` earning its keep: with
+        // `current_dir` or `--wd` this answers `/`, and every build an agent
+        // runs happens in the wrong place with no error.
+        assert_eq!(run("pwd"), super::WORKSPACE_AT);
         assert_eq!(run("cat marker.txt"), "the work");
+
+        // The same directory under both names, not a copy: the workspace keeps
+        // its real path because git's worktree metadata and every tool that
+        // resolves an absolute path name it. Proven by writing through one and
+        // reading through the other, which a copy would fail.
+        assert_eq!(
+            run(&format!("cat {}/marker.txt", workspace.display())),
+            "the work",
+            "the workspace must still exist at its own path"
+        );
+        assert_eq!(
+            run(&format!(
+                "echo through-app > /app/probe.txt && cat {}/probe.txt",
+                workspace.display()
+            )),
+            "through-app",
+            "/app and the real path must be one directory, not two"
+        );
 
         // The King's home is not there to be deleted. The whole point.
         assert_eq!(

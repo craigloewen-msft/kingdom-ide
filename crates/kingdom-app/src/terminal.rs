@@ -241,8 +241,9 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
             // The same folders the agent's own tools get, so the King's shell
             // and his agent see the same filesystem. A shell that could run
             // `cargo` where the agent could not -- or the reverse -- would make
-            // every diagnosis he attempts in here misleading.
-            allowed: crate::services::mounts_for(city_root.as_deref()),
+            // every diagnosis he attempts in here misleading. Hence the plan's
+            // own recorded choice, not a fresh read of the manifests.
+            allowed: crate::services::mounts_for_plan(city_root.as_deref(), plan.mounts.as_deref()),
             city_root,
         };
         if let Err(e) = crate::namespaces::ensure(plan_id, &request).await {

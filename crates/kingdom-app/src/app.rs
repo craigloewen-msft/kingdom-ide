@@ -165,6 +165,21 @@ pub struct KingdomState {
     /// Whether the next plan gets a network of its own. A separate axis from
     /// `workspace`; see [`kingdom_core::Isolation`].
     pub isolation: RwSignal<Isolation>,
+    /// Which folders the next sealed plan will be given.
+    ///
+    /// `None` until the isolation panel has seeded it from the machine's
+    /// offers, which it does the first time the Files tab shows "its own".
+    /// Carried to the server by `begin_plan` and recorded on the plan -- see
+    /// [`kingdom_core::Plan::mounts`].
+    ///
+    /// # Why this is here rather than inside the panel
+    ///
+    /// The panel is unmounted every time it is closed, and a selection that
+    /// died with it would reset each time the King glanced at the Network tab
+    /// and came back. It also has to outlive the panel by one step: the Start
+    /// button is in the composer, not in the picker, and it is Start that sends
+    /// this.
+    pub mounts: RwSignal<Option<Vec<kingdom_core::services::MountSpec>>>,
     /// The file the chamber's panel is showing, relative to the plan's city.
     ///
     /// Written by the chamber and read by the map, which is why it is here: the
@@ -286,6 +301,7 @@ impl KingdomState {
             choice: RwSignal::new(None),
             workspace: RwSignal::new(WorkspaceMode::default()),
             isolation: RwSignal::new(Isolation::default()),
+            mounts: RwSignal::new(None),
             focus_file: RwSignal::new(None),
             picked_file: RwSignal::new(None),
             works: RwSignal::new(Vec::new()),

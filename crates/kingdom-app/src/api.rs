@@ -609,6 +609,7 @@ pub async fn begin_plan(
     choice: Option<ModelChoice>,
     workspace: Option<WorkspaceMode>,
     isolation: Option<kingdom_core::Isolation>,
+    mounts: Option<Vec<kingdom_core::services::MountSpec>>,
 ) -> Result<Plan, ServerFnError> {
     use kingdom_core::{CityId, NoteKind};
 
@@ -666,6 +667,12 @@ pub async fn begin_plan(
         workspace.clone(),
         isolation,
     );
+    // What the King ticked in the isolation panel, recorded on the plan so it
+    // is settled for the plan's whole life -- see [`Plan::mounts`]. Only for a
+    // sealed plan: nothing else reads it, and storing a list against a plan
+    // that has the King's whole filesystem anyway would be a fence it does not
+    // have.
+    plan.mounts = isolation.is_sealed().then_some(mounts).flatten();
     // Where an agent is fenced in is not something it said, it is something that
     // happened -- and isolation the user cannot see is isolation he cannot
     // trust, so it is recorded in the log rather than only in the header.
@@ -2922,7 +2929,7 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
         &root,
         &city_root,
         plan.isolation,
-        crate::services::mounts_for(Some(&city_root)),
+        crate::services::mounts_for_plan(Some(&city_root), plan.mounts.as_deref()),
     )
     .render())
 }

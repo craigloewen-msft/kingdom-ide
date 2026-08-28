@@ -413,6 +413,51 @@ pub fn mounts_for(city_root: Option<&Path>) -> Vec<kingdom_core::services::Mount
     out
 }
 
+/// The folders a plan actually gets, given what it recorded when it opened.
+///
+/// The rule the whole per-plan choice rests on, in one place so the three
+/// callers -- the agent's turn, the King's terminal, and the system prompt --
+/// cannot disagree about what a plan can see. Two of them disagreeing would
+/// mean a shell that can run `cargo` where the agent cannot, which makes every
+/// diagnosis attempted in that shell misleading.
+///
+/// - `None`: the plan predates the choice, or was never sealed. The manifests
+///   are read exactly as they always were.
+/// - `Some`: the King chose, at the moment he opened it. His list, plus
+///   whatever the **project** declares -- because that is the project stating
+///   what it needs in order to run, not a preference a picker may overrule.
+///
+/// Duplicates are dropped keeping the more permissive mode, for the reason
+/// [`mounts_for`] gives: one folder mounted twice at one path leaves whichever
+/// landed second silently on top.
+pub fn mounts_for_plan(
+    city_root: Option<&Path>,
+    chosen: Option<&[kingdom_core::services::MountSpec]>,
+) -> Vec<kingdom_core::services::MountSpec> {
+    use kingdom_core::services::MountMode;
+
+    let Some(chosen) = chosen else {
+        return mounts_for(city_root);
+    };
+
+    let mut out: Vec<kingdom_core::services::MountSpec> = Vec::new();
+    let project = city_root
+        .map(|root| declared_in(&Scope::City(root.to_path_buf())))
+        .unwrap_or_default();
+
+    for mount in chosen.iter().chain(project.iter()) {
+        match out.iter_mut().find(|held| held.path == mount.path) {
+            Some(held) => {
+                if mount.mode.is_writable() {
+                    held.mode = MountMode::Rw;
+                }
+            }
+            None => out.push(mount.clone()),
+        }
+    }
+    out
+}
+
 /// The two scopes a plan working in this city draws from, host first.
 ///
 /// Host first is load-bearing in exactly one place: [`environment`] lets a
@@ -1039,6 +1084,35 @@ fn declared_in(scope: &Scope) -> Vec<kingdom_core::services::MountSpec> {
     manifest_in(scope).map(|m| m.mounts).unwrap_or_default()
 }
 
+/// `~/.kingdom` replaced by the profile directory actually in use.
+///
+/// [`kingdom_core::services::known_extras`] offers Kingdom's own records so a
+/// plan can read what other plans are doing, and it has to write the path as
+/// `~/.kingdom` because `kingdom-core` does no I/O and cannot read
+/// `KINGDOM_HOME`. Here we can.
+///
+/// It matters precisely when Kingdom is being used to build Kingdom: a
+/// rehearsal session sets `KINGDOM_HOME` elsewhere, and offering `~/.kingdom`
+/// there would share a drawer that session never writes to -- the plan would
+/// see an empty or stale set of siblings and conclude nothing else was running.
+///
+/// Left alone when the profile *is* `~/.kingdom`, so the ordinary case still
+/// reads as the tilde path the King recognises.
+fn profile_substituted(path: &str) -> String {
+    if path != kingdom_core::services::KINGDOM_PROFILE {
+        return path.to_string();
+    }
+    let home = crate::profile::home();
+    let shown = home.to_string_lossy();
+    // The default location, written the way the King reads it.
+    if let Ok(user) = std::env::var("HOME") {
+        if shown == format!("{}/.kingdom", user.trim_end_matches('/')) {
+            return path.to_string();
+        }
+    }
+    shown.to_string()
+}
+
 /// Where a row of the offer came from.
 ///
 /// The two differ in exactly two ways, and both are about honesty rather than
@@ -1199,7 +1273,7 @@ fn candidates_with(
     for (path, why, mode) in known_extras() {
         offer(
             vec![MountSpec {
-                path: (*path).to_string(),
+                path: profile_substituted(path),
                 mode: *mode,
             }],
             (*why).to_string(),
@@ -2917,6 +2991,121 @@ mod tests {
             dirty_files: 0,
             structure: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_mounts {
+    use super::*;
+    use kingdom_core::services::{MountMode, MountSpec};
+
+    fn spec(path: &str, mode: MountMode) -> MountSpec {
+        MountSpec {
+            path: path.to_string(),
+            mode,
+        }
+    }
+
+    /// A city whose manifest declares the given block.
+    fn city_declaring(body: &str) -> tempfile::TempDir {
+        let city = tempfile::tempdir().expect("a temporary city");
+        let manifest = city.path().join(kingdom_core::services::MANIFEST_PATH);
+        std::fs::create_dir_all(manifest.parent().expect("a parent")).expect("the .kingdom dir");
+        std::fs::write(&manifest, body).expect("a manifest");
+        city
+    }
+
+    /// A plan that recorded no choice reads the manifests, exactly as before.
+    ///
+    /// The compatibility half: every plan already on disk, and every plan that
+    /// is not sealed, must be unaffected by the per-plan choice existing.
+    #[test]
+    fn a_plan_with_no_choice_falls_back_to_the_manifests() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+
+        let city = city_declaring("[[mount]]\npath = \"/opt/project-needs\"\nmode = \"ro\"\n");
+
+        let got = mounts_for_plan(Some(city.path()), None);
+
+        assert!(
+            got.iter().any(|m| m.path == "/opt/project-needs"),
+            "a plan that never chose must still get what the manifests declare"
+        );
+        assert_eq!(got, mounts_for(Some(city.path())), "identical to before");
+    }
+
+    /// A plan that chose gets its own list -- and the project's, which is not
+    /// the King's to opt out of from a picker.
+    #[test]
+    fn a_chosen_list_is_used_and_the_project_still_applies() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+
+        let city = city_declaring("[[mount]]\npath = \"/opt/project-needs\"\nmode = \"ro\"\n");
+
+        let chosen = vec![spec("~/.cargo", MountMode::Rw)];
+        let got = mounts_for_plan(Some(city.path()), Some(&chosen));
+
+        assert!(
+            got.iter().any(|m| m.path == "~/.cargo"),
+            "what he ticked must be there"
+        );
+        assert!(
+            got.iter().any(|m| m.path == "/opt/project-needs"),
+            "a project states what it needs to run; a picker may not overrule it"
+        );
+    }
+
+    /// Unticking everything gives a plan nothing, rather than quietly giving it
+    /// the manifests back.
+    ///
+    /// The distinction [`kingdom_core::Plan::mounts`] is an `Option` for. If
+    /// this regressed, a King who deliberately stripped a plan bare would be
+    /// handed his whole toolchain instead -- the opposite of what he asked for,
+    /// and silently.
+    #[test]
+    fn unticking_everything_means_everything() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+
+        // Something in his profile, which an empty choice must NOT pull in.
+        std::fs::write(
+            home.path().join(kingdom_core::services::HOST_MANIFEST_FILE),
+            "[[mount]]\npath = \"~/.cargo\"\nmode = \"rw\"\n",
+        )
+        .expect("a host manifest");
+
+        let got = mounts_for_plan(None, Some(&[]));
+
+        assert!(
+            got.is_empty(),
+            "an explicit empty choice must give a plan nothing, got {got:?}"
+        );
+    }
+
+    /// One folder named twice keeps the more permissive mode.
+    ///
+    /// Mounting the same path twice leaves whichever landed second silently on
+    /// top, so the two have to be merged rather than both emitted -- and the
+    /// stricter of the two would break whatever needed to write.
+    #[test]
+    fn a_folder_named_twice_keeps_the_more_permissive_mode() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+
+        let city = city_declaring("[[mount]]\npath = \"/opt/shared\"\nmode = \"rw\"\n");
+
+        // He ticked it read-only; the project needs to write there.
+        let chosen = vec![spec("/opt/shared", MountMode::Ro)];
+        let got = mounts_for_plan(Some(city.path()), Some(&chosen));
+
+        let named: Vec<_> = got.iter().filter(|m| m.path == "/opt/shared").collect();
+        assert_eq!(named.len(), 1, "one folder, one mount");
+        assert!(
+            named[0].mode.is_writable(),
+            "the stricter mode would break whatever needed to write"
+        );
     }
 }
 
