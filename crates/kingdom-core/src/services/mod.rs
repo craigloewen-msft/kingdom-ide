@@ -29,6 +29,29 @@
 //! `&str` and never opens a file. That is what lets the whole parse be tested
 //! without a disk, a Docker daemon or a running server; `kingdom-app` reads the
 //! bytes and calls [`parse`].
+//!
+//! # What a resource *is*, and what runs it
+//!
+//! Every shared resource is a Docker container today, and for a long time the
+//! code said so in its field names. It no longer does: a declaration carries a
+//! [`ResourceKind`], which holds what that kind of thing needs -- for the one
+//! kind there is, a [`docker::DockerSpec`] with an image and a volume.
+//!
+//! The kind is an **enum carrying its payload**, not a tag beside a bag of
+//! optional fields and not a trait object. A second kind is then a variant, and
+//! every place that has to decide something is named by the compiler rather
+//! than found by reading -- which a trait with one implementor would not do,
+//! since a driver shaped wrongly for a new kind still compiles.
+//!
+//! This module knows what the kinds *are* and nothing about running them. The
+//! runtime half lives in `kingdom_app::services`, which matches on the kind and
+//! hands off to `kingdom_app::services::docker`.
+
+pub mod docker;
+pub mod mounts;
+
+pub use docker::{data_dir_for, known_image, DockerSpec, KnownImage};
+pub use mounts::{known_extras, known_path, KnownPath, MountCandidate, MountMode, MountSpec};
 
 use crate::ids::CityId;
 use serde::{Deserialize, Serialize};
@@ -118,357 +141,219 @@ pub struct ServiceManifest {
     pub mounts: Vec<MountSpec>,
 }
 
-/// One folder a sealed plan may see.
+/// A whole manifest exactly as it appears in the file.
 ///
-/// # Why this is declared and not inferred
+/// The counterpart of [`RawService`], and there for the same reason: the file's
+/// services are flat blocks, and the typed [`ServiceSpec`] they become is not.
+/// Only [`parse`] uses it -- [`ServiceManifest`] keeps its own derived serde
+/// for the wire, where the typed shape is the one both sides want.
+#[derive(Debug, Default, Deserialize)]
+struct RawManifest {
+    #[serde(default, rename = "service")]
+    services: Vec<RawService>,
+    #[serde(default, rename = "mount")]
+    mounts: Vec<MountSpec>,
+}
+
+/// One resource the city shares.
 ///
-/// A sealed plan starts with a read-only system, its workspace and its git
-/// directory -- enough to read and build most things, and not enough for a
-/// toolchain the King keeps in his home directory. `~/.cargo` is the ordinary
-/// case: without it `cargo` re-downloads its whole registry, and without
-/// `~/.rustup` it re-downloads the toolchain itself. Measured, not guessed.
-///
-/// Kingdom will not go looking through his home directory and mount what it
-/// finds. What a plan can see is his decision, written down, in a file he can
-/// read back later -- the same judgement `ServiceSpec` makes about containers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MountSpec {
-    /// The folder on the King's machine, absolute or beginning with `~`.
-    ///
-    /// It appears at the **same path** inside the plan, which is what makes a
-    /// mounted toolchain work at all: `~/.cargo/bin/cargo` looks for its
-    /// registry at `~/.cargo/registry`, and a folder mounted somewhere else
-    /// would be a folder it cannot find.
-    pub path: String,
-    /// Whether the plan may write there. Read-only unless it says otherwise.
-    ///
-    /// Defaulting to read-only is the whole point of declaring these: a
-    /// toolchain a plan can rewrite is one every *later* plan inherits the
-    /// damage from. `rw` is nonetheless right for a cache -- see
-    /// [`known_path`], where each well-known folder carries the mode it
-    /// actually needs.
-    #[serde(default)]
-    pub mode: MountMode,
-}
-
-/// Whether a mounted folder is writable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MountMode {
-    /// The plan may read it and not change it.
-    #[default]
-    Ro,
-    /// The plan may write to it -- a cache, or a registry that fills itself in.
-    Rw,
-}
-
-impl MountMode {
-    pub fn is_writable(&self) -> bool {
-        matches!(self, MountMode::Rw)
-    }
-
-    /// How this is written in a manifest.
-    pub fn wire_name(&self) -> &'static str {
-        match self {
-            MountMode::Ro => "ro",
-            MountMode::Rw => "rw",
-        }
-    }
-}
-
-impl MountSpec {
-    /// This mount as the `[[mount]]` block a person would have typed.
-    ///
-    /// Rendered and appended for the same reason [`ServiceSpec::render`] is:
-    /// the manifest is a file people comment, and re-serialising the document
-    /// would eat every comment in it.
-    pub fn render(&self) -> String {
-        let mut out = String::from("[[mount]]\n");
-        let _ = writeln!(out, "path = {}", toml_string(&self.path));
-        let _ = writeln!(out, "mode = {}", toml_string(self.mode.wire_name()));
-        out
-    }
-
-    /// The path with a leading `~` replaced by the given home directory.
-    ///
-    /// Expansion happens at *use* rather than at parse, so what the King wrote
-    /// is what he reads back -- and a manifest that travels between machines,
-    /// as a committed project manifest does, still means "this user's home"
-    /// wherever it lands.
-    pub fn expanded(&self, home: &str) -> String {
-        match self.path.strip_prefix('~') {
-            Some(rest) => format!("{}{}", home.trim_end_matches('/'), rest),
-            None => self.path.clone(),
-        }
-    }
-}
-
-/// One container the city shares.
+/// Split into the facts every kind has -- a name and a port -- and a
+/// [`ResourceKind`] carrying what only that kind needs. That division is the
+/// whole change: `image` and `volume` used to sit here, on a type that four
+/// other modules read without caring what a container was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceSpec {
-    /// What the King calls it, and half of the container's identity. Unique
+    /// What the King calls it, and half of the resource's identity. Unique
     /// within a manifest.
     pub name: String,
-    /// The image to run, tag included.
-    pub image: String,
-    /// The port the service listens on *inside* the container -- and the port
-    /// an agent reaches it on, because that is the whole promise: a relay puts
-    /// the container on the plan's own loopback at this same number.
-    pub port: u16,
-    /// A named Docker volume for the service's data, kept when the container is
-    /// stopped.
+    /// The port the service listens on -- and the port an agent reaches it on,
+    /// because that is the whole promise: a relay puts the resource on the
+    /// plan's own loopback at this same number.
     ///
-    /// `None` means the data goes with the container. That is right for a cache
-    /// and wrong for a database, so it is stated per service rather than
-    /// assumed either way.
-    #[serde(default)]
-    pub volume: Option<String>,
-}
-
-/// What Kingdom knows about a well-known image without being told.
-///
-/// # Why a table rather than more fields on the form
-///
-/// The King should not have to know Postgres's port, where Mongo keeps its
-/// files, or that `postgres:16` refuses to boot without a password, in order to
-/// share a database. Every one of those is a fact about the image rather than a
-/// decision about his project, and a form that asks for facts it could look up
-/// is a form that can be got wrong.
-///
-/// Deliberately small and deliberately here: `kingdom-core` does no I/O, so the
-/// whole table is tested without a daemon, and one table means the port the
-/// form fills in and the data directory the volume is mounted at cannot
-/// disagree about what `mongo` is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KnownImage {
-    /// The port it listens on, which the form offers and an agent reaches it
-    /// on.
+    /// On [`ServiceSpec`] rather than inside the kind because it is the one
+    /// fact every kind must have: it is what an agent is told, and a kind with
+    /// no port would be a resource nobody could reach.
     pub port: u16,
-    /// Where it keeps its data, so a named volume is mounted somewhere useful.
-    pub data_dir: &'static str,
-    /// What it needs in its **own** environment in order to start at all.
+    /// What kind of thing this is, and what that kind needs.
+    pub kind: ResourceKind,
+}
+
+/// What kind of thing a shared resource is, with what that kind needs.
+///
+/// # Why the payload is inside the variant
+///
+/// The alternative -- a bare tag beside `image: Option<String>` and
+/// `volume: Option<String>` -- makes the kind a comment. Nothing would stop a
+/// declaration naming a kind that has no image while carrying one, and every
+/// reader would have to know which fields its kind actually uses. Here, a
+/// resource that is a container **has** a [`DockerSpec`] and one that is not
+/// cannot be given an image at all.
+///
+/// Adding a kind is: add a variant, and follow the compiler to the handful of
+/// places that must decide something.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ResourceKind {
+    /// A Docker container, started and stopped by Kingdom. The only kind today.
+    Docker(DockerSpec),
+}
+
+impl ResourceKind {
+    /// The stable string this kind is written as in a manifest and on a form.
     ///
-    /// Container-facing: nothing here is ever shown to an agent. `postgres`
-    /// exits 1 without a password -- measured, not assumed -- so a King who
-    /// typed `postgres:16` and nothing else would otherwise get a resource that
-    /// never comes up.
-    pub boot: &'static [(&'static str, &'static str)],
-}
-
-/// What is known about an image, by its name with any tag and registry
-/// stripped.
-///
-/// `None` for anything unrecognised, which is not a refusal: such an image runs
-/// perfectly well, it just has to be told its port, and gets `/data` if it is
-/// given a volume.
-pub fn known_image(image: &str) -> Option<KnownImage> {
-    let name = image.split(':').next().unwrap_or(image);
-    let name = name.rsplit('/').next().unwrap_or(name);
-    let known = |port, data_dir, boot| {
-        Some(KnownImage {
-            port,
-            data_dir,
-            boot,
-        })
-    };
-    match name {
-        "mongo" => known(27017, "/data/db", &[]),
-        // Without this it exits 1 on first boot with a message about
-        // POSTGRES_PASSWORD, and the King sees only "never answered on port
-        // 5432". A fixed password is right here: nothing is published on his
-        // loopback, and the container is reachable only from his own machine
-        // and the plans he opens.
-        "postgres" => known(
-            5432,
-            "/var/lib/postgresql/data",
-            &[("POSTGRES_PASSWORD", "postgres")],
-        ),
-        "mysql" | "mariadb" => known(3306, "/var/lib/mysql", &[("MYSQL_ROOT_PASSWORD", "root")]),
-        "redis" => known(6379, "/data", &[]),
-        _ => None,
-    }
-}
-
-/// Where an image keeps its data, for a named volume to be mounted at.
-///
-/// `/data` for anything unrecognised -- a guess, but a harmless one: a volume
-/// mounted at the wrong path costs an empty directory, where no volume at all
-/// costs the King his data.
-pub fn data_dir_for(image: &str) -> &'static str {
-    known_image(image).map_or("/data", |known| known.data_dir)
-}
-
-/// What Kingdom knows about a folder a toolchain keeps, without being told.
-///
-/// The counterpart to [`known_image`], and shaped like it deliberately: a small
-/// table, here in `kingdom-core` so the whole of it is tested without a disk,
-/// naming facts about a *tool* rather than decisions about the King's project.
-///
-/// # Why a `PATH` entry maps to a set
-///
-/// The obvious rule -- "share the directory the binary is in" -- is wrong for
-/// most real toolchains, and quietly so. `~/.cargo/bin/cargo` on its own runs,
-/// and then re-downloads the entire crate registry because `~/.cargo/registry`
-/// is not there; without `~/.rustup` it re-downloads the toolchain itself.
-/// Measured, from inside a real sealed namespace: it began syncing 1.97.1.
-///
-/// So each entry names every folder that tool needs, and the mode each one
-/// needs it in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KnownPath {
-    /// What the King is told this is for, in one phrase.
-    pub why: &'static str,
-    /// The folders, with the mode each needs.
-    pub folders: &'static [(&'static str, MountMode)],
-}
-
-/// What is known about a `PATH` entry, by the folder it is.
-///
-/// `None` for anything unrecognised, which is not a refusal: such a folder is
-/// still offered, read-only and unadorned. A tool Kingdom has never heard of is
-/// still a tool the King has.
-pub fn known_path(entry: &str) -> Option<KnownPath> {
-    let entry = entry.trim_end_matches('/');
-    // Matched on the tail rather than the whole path, because everything here
-    // lives under a home directory whose name differs per machine.
-    let known = |why, folders| Some(KnownPath { why, folders });
-    match tail(entry).as_str() {
-        ".cargo/bin" | ".cargo" => known(
-            "Rust: cargo, rustc and the crate registry",
-            // Both writable: the registry cache and the toolchain are filled in
-            // as a build runs, and a read-only pair means every build
-            // re-downloads everything it needs.
-            &[("~/.cargo", MountMode::Rw), ("~/.rustup", MountMode::Rw)],
-        ),
-        ".local/bin" => known(
-            "Locally installed tools -- uv, pipx and the like",
-            &[("~/.local/bin", MountMode::Ro)],
-        ),
-        ".local/share/mise/shims" | ".local/share/mise" => known(
-            "mise: the shims, and the versions they point at",
-            &[("~/.local/share/mise", MountMode::Ro)],
-        ),
-        ".npm-global/bin" | ".npm-global" => known(
-            "Globally installed npm packages",
-            &[
-                ("~/.npm-global", MountMode::Ro),
-                // npm writes here whenever it resolves anything.
-                ("~/.npm", MountMode::Rw),
-            ],
-        ),
-        ".local/share/pnpm" => known(
-            "pnpm, and its content-addressed store",
-            &[("~/.local/share/pnpm", MountMode::Rw)],
-        ),
-        ".bun/bin" | ".bun" => known("Bun, and its cache", &[("~/.bun", MountMode::Rw)]),
-        ".deno/bin" | ".deno" => known("Deno, and its cache", &[("~/.deno", MountMode::Rw)]),
-        ".nvm/versions/node" | ".nvm" => known(
-            "nvm, and every Node it manages",
-            &[("~/.nvm", MountMode::Ro)],
-        ),
-        "go/bin" => known("Go, and its module cache", &[("~/go", MountMode::Rw)]),
-        ".pyenv/bin" | ".pyenv/shims" | ".pyenv" => known(
-            "pyenv, and every Python it manages",
-            &[("~/.pyenv", MountMode::Ro)],
-        ),
-        _ => None,
-    }
-}
-
-/// Folders worth offering that are not on `PATH` at all.
-///
-/// A tool's *configuration* is not somewhere a binary lives, so no amount of
-/// reading `PATH` will find it -- and a plan that can run `git` but has no
-/// `~/.gitconfig` commits as "unknown", which looks like a bug in the project
-/// rather than a folder nobody shared.
-///
-/// Offered, never assumed: `~/.ssh` in particular is the King's private key,
-/// and Kingdom will not hand that to an agent because it seemed convenient.
-pub fn known_extras() -> &'static [(&'static str, &'static str, MountMode)] {
-    &[
-        (
-            "~/.gitconfig",
-            "Your git identity, so a plan's commits are yours",
-            MountMode::Ro,
-        ),
-        (
-            "~/.config/git",
-            "Your git configuration, where it lives in a folder",
-            MountMode::Ro,
-        ),
-        (
-            "~/.ssh",
-            "Your SSH keys -- only if a plan must push or pull over SSH",
-            MountMode::Ro,
-        ),
-        ("~/.config/uv", "uv's configuration", MountMode::Ro),
-        ("~/.cache/uv", "uv's package cache", MountMode::Rw),
-    ]
-}
-
-/// The last one or two components of a path, which is what a known folder is
-/// recognised by.
-///
-/// Two components rather than one because `bin` alone says nothing, and the
-/// folder above it is the tool: `.cargo/bin`, `.npm-global/bin`. Three where
-/// the tool nests deeper, which `mise` and `nvm` do.
-fn tail(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    for take in [4, 3, 2, 1] {
-        if parts.len() >= take {
-            let candidate = parts[parts.len() - take..].join("/");
-            if candidate.starts_with('.') || candidate.starts_with("go/") {
-                return candidate;
-            }
+    /// The same word `type` takes in the file, so what the King types and what
+    /// the parser matches cannot drift apart.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ResourceKind::Docker(_) => "docker",
         }
     }
-    parts.last().map(|p| p.to_string()).unwrap_or_default()
-}
 
-/// One folder Kingdom offers to share with sealed plans.
-///
-/// Runtime truth, like [`SharedResource`]: it is answered by looking at the
-/// King's actual machine and is never persisted. What he *chooses* becomes a
-/// [`MountSpec`] in a manifest; this is only the offer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MountCandidate {
-    /// The folders this offer would add, with the mode each needs. Several,
-    /// because a toolchain is usually more than one -- see [`KnownPath`].
-    pub folders: Vec<MountSpec>,
-    /// What the King is told this is for.
-    pub why: String,
-    /// Where this offer is already declared, if it is: `None` for one not
-    /// shared at all.
-    ///
-    /// # Why the scope and not a bare `bool`
-    ///
-    /// The panel this feeds is a set of **checkboxes**, and a box that can be
-    /// ticked must be able to be unticked. Untick writes to the King's own
-    /// profile, which is the only manifest that panel may edit -- a folder a
-    /// *project* declared lives in a committed file belonging to whoever else
-    /// works on it, and silently editing that from a picker would be Kingdom
-    /// changing somebody's repository because a box was clicked.
-    ///
-    /// So "shared" and "shared somewhere I may unshare it" are two different
-    /// facts, and a bool could carry only the first.
-    #[serde(default)]
-    pub declared: Option<ServiceScope>,
-}
-
-impl MountCandidate {
-    /// Whether this offer is already shared, wherever it was declared.
-    ///
-    /// Kept as a method so the sites that only ask "is it taken?" read exactly
-    /// as they did when this was a field.
-    pub fn already(&self) -> bool {
-        self.declared.is_some()
+    /// What the King reads on a row.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ResourceKind::Docker(_) => "Docker container",
+        }
     }
 
-    /// Whether this panel may withdraw it again.
+    /// The one line saying what this resource is -- an image, for a container.
     ///
-    /// True only for the King's own profile. See [`Self::declared`].
-    pub fn removable(&self) -> bool {
-        matches!(self.declared, Some(ServiceScope::Host))
+    /// What the ledger row, the ports badge and the system prompt print beside
+    /// the name. Asked of the kind so that none of those three has to know what
+    /// a Docker image is.
+    pub fn what(&self) -> String {
+        match self {
+            ResourceKind::Docker(docker) => docker.what(),
+        }
+    }
+
+    /// The rows the detail pane prints, in order, as label and value.
+    ///
+    /// A list rather than fields the screen reaches into, because "Image" and
+    /// "Data" are facts about a *container*: a kind with neither would leave
+    /// the browser drawing two empty rows it had hard-coded.
+    pub fn facts(&self) -> Vec<(&'static str, String)> {
+        match self {
+            ResourceKind::Docker(docker) => docker.facts(),
+        }
+    }
+
+    /// Every kind there is, for a form to offer and a test to iterate.
+    ///
+    /// Returns the wire names rather than values, because a value needs a
+    /// payload and "what kinds exist" is a question asked before there is one.
+    pub fn all() -> &'static [&'static str] {
+        &["docker"]
+    }
+
+    /// The manifest lines only this kind has, for [`ServiceSpec::render`].
+    ///
+    /// Written by the kind rather than by the renderer above it, which is the
+    /// same argument [`Self::facts`] makes for the screen: `image` and `volume`
+    /// mean nothing to a kind that has neither.
+    fn render_fields(&self) -> String {
+        match self {
+            ResourceKind::Docker(docker) => docker.render_fields(),
+        }
+    }
+
+    /// The name of a field this kind requires and does not have, if any.
+    ///
+    /// Asked by [`ServiceManifest::validate`], which is deliberately still the
+    /// single place a field is judged -- so faults are reported in the order
+    /// they appear in the file, whatever kind each service is. A kind that
+    /// checked its own fields at parse time would report the *second* service's
+    /// missing image before the first service's missing name.
+    fn missing_field(&self) -> Option<&'static str> {
+        match self {
+            // An image is what a container is. Without one there is nothing to
+            // run, and `docker run` would fail three minutes later saying so
+            // about a name the King never typed.
+            ResourceKind::Docker(docker) if docker.image.trim().is_empty() => Some("image"),
+            ResourceKind::Docker(_) => None,
+        }
+    }
+}
+
+/// One `[[service]]` block exactly as it appears in the file.
+///
+/// # Why parsing goes through a flat shape and then converts
+///
+/// The file's shape is flat -- `type`, `name`, `image`, `port`, `volume` all at
+/// one level -- and it must stay that way: every manifest already written, the
+/// `shopfront` fixture and both documents are flat, and a nested
+/// `[service.docker]` table would make the tag honest and every existing file
+/// wrong.
+///
+/// Serde *can* read a flat internally-tagged enum, but what it says when it
+/// cannot is the problem. An unknown `type` becomes "unknown variant `podman`,
+/// expected `docker`" and a missing `image` becomes "missing field `image`",
+/// neither naming the service at fault -- in a file with four services that is
+/// a search rather than a fix, which is precisely what [`ManifestError`] exists
+/// to avoid. So the raw form takes everything as optional and
+/// [`RawService::into_spec`] is where a fault becomes a sentence with a name in
+/// it.
+#[derive(Debug, Clone, Deserialize)]
+struct RawService {
+    /// Which kind this is. Absent means `docker`: every manifest written before
+    /// there were kinds is a container, and re-typing them is work the King
+    /// gets nothing for.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    port: u16,
+    /// Docker's, and read only for that kind.
+    #[serde(default)]
+    image: Option<String>,
+    /// Docker's, and read only for that kind.
+    #[serde(default)]
+    volume: Option<String>,
+}
+
+impl RawService {
+    /// The typed spec, or the reason this block cannot be one.
+    ///
+    /// The name is resolved first and used in every message, because a fault
+    /// that does not say which service it is about is a fault the King has to
+    /// go looking for.
+    fn into_spec(self) -> Result<ServiceSpec, ManifestError> {
+        let named = || {
+            let name = self.name.trim();
+            if name.is_empty() {
+                "<unnamed>".to_string()
+            } else {
+                name.to_string()
+            }
+        };
+
+        let kind = match self.kind.as_deref().unwrap_or("docker") {
+            // An empty or absent image is **not** refused here: it is a field
+            // fault, and every other field fault is reported by
+            // `ServiceManifest::validate` so that the first one in the file
+            // wins. See `ResourceKind::missing_field`.
+            "docker" => ResourceKind::Docker(DockerSpec {
+                image: self.image.clone().unwrap_or_default(),
+                volume: self.volume.clone(),
+            }),
+            // Refused by name rather than ignored: serde would drop an
+            // unknown `type` without a word, and a project that asked for a
+            // kind Kingdom does not have would get a container instead and
+            // never be told.
+            other => {
+                return Err(ManifestError::UnknownKind {
+                    service: named(),
+                    kind: other.to_string(),
+                })
+            }
+        };
+
+        Ok(ServiceSpec {
+            name: self.name,
+            port: self.port,
+            kind,
+        })
     }
 }
 
@@ -498,6 +383,13 @@ pub enum ManifestError {
     /// namespace that half-built and a `pivot_root` failure naming nothing the
     /// King ever wrote.
     BadMount { path: String, why: &'static str },
+    /// A `type` naming a kind of resource Kingdom does not have.
+    ///
+    /// Refused rather than defaulted to `docker`: a project that asked for
+    /// something Kingdom cannot run and was quietly given a container instead
+    /// would find out from the container's behaviour, an hour later, and read
+    /// it as a bug in its own code.
+    UnknownKind { service: String, kind: String },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -527,6 +419,14 @@ impl std::fmt::Display for ManifestError {
             ManifestError::BadMount { path, why } => {
                 write!(f, "`{path}` cannot be shared with a plan: {why}")
             }
+            // Names the kinds there are, because the King's next move is to
+            // pick one of them -- and today the list is one word long.
+            ManifestError::UnknownKind { service, kind } => write!(
+                f,
+                "service `{service}` is of type `{kind}`, which is not a kind of \
+                 shared resource Kingdom knows. Use one of: {}.",
+                ResourceKind::all().join(", ")
+            ),
         }
     }
 }
@@ -548,14 +448,22 @@ impl ServiceSpec {
     /// The output is round-tripped through [`parse`] before it is written, so
     /// "the form produced something the parser refuses" is caught here rather
     /// than at the next plan's first turn.
+    ///
+    /// # Why the kind is written even though it is the default
+    ///
+    /// What Kingdom *writes* says what it means. A file that omitted `type`
+    /// would still parse as a container -- that is the compatibility rule for
+    /// manifests written before there were kinds -- but a King reading back
+    /// what the form produced deserves to see the decision it made on his
+    /// behalf, and it is the line he edits when there is a second kind.
     pub fn render(&self) -> String {
         let mut out = String::from("[[service]]\n");
+        let _ = writeln!(out, "type  = {}", toml_string(self.kind.wire_name()));
         let _ = writeln!(out, "name  = {}", toml_string(&self.name));
-        let _ = writeln!(out, "image = {}", toml_string(&self.image));
         let _ = writeln!(out, "port  = {}", self.port);
-        if let Some(volume) = &self.volume {
-            let _ = writeln!(out, "volume = {}", toml_string(volume));
-        }
+        // Whatever only this kind has, asked of the kind: a renderer here that
+        // reached for an image would be the exact coupling this change removes.
+        out.push_str(&self.kind.render_fields());
         out
     }
 }
@@ -613,10 +521,12 @@ impl ServiceManifest {
             if !is_safe_name(&service.name) {
                 return Err(ManifestError::BadName(service.name.clone()));
             }
-            if service.image.trim().is_empty() {
+            // Whatever this kind of resource must have and does not. Asked of
+            // the kind, so a kind with no image is not judged against one.
+            if let Some(field) = service.kind.missing_field() {
                 return Err(ManifestError::Empty {
                     service: service.name.clone(),
-                    field: "image",
+                    field,
                 });
             }
             if seen.contains(&service.name.as_str()) {
@@ -678,9 +588,24 @@ impl ServiceManifest {
 /// Validation happens here rather than at container-start time on purpose: a
 /// bad name is worth reporting when the file is read, not three minutes into a
 /// plan when a `docker run` fails with a message about something else.
+///
+/// Three steps, in this order and for a reason each: the TOML is read into the
+/// flat [`RawManifest`] the file actually is, each block is **converted** into
+/// a typed [`ServiceSpec`] -- where an unrecognised `type` is refused by name --
+/// and only then is the whole thing validated, so that field faults are
+/// reported in the order they appear in the file.
 pub fn parse(text: &str) -> Result<ServiceManifest, ManifestError> {
-    let manifest: ServiceManifest =
+    let raw: RawManifest =
         toml::from_str(text).map_err(|e| ManifestError::Syntax(e.to_string()))?;
+
+    let manifest = ServiceManifest {
+        services: raw
+            .services
+            .into_iter()
+            .map(RawService::into_spec)
+            .collect::<Result<Vec<_>, _>>()?,
+        mounts: raw.mounts,
+    };
     manifest.validate()?;
     Ok(manifest)
 }
@@ -769,9 +694,21 @@ pub struct SharedResource {
     pub state: ServiceState,
     /// Where to reach it, as `host:port`, once it is up.
     pub address: Option<String>,
-    /// The container's name, for `docker logs`. Known even when it is not
-    /// running, because the name is derived rather than allocated.
-    pub container: String,
+    /// What the runtime calls this resource -- a container's name, today.
+    ///
+    /// Known even when it is not running, because it is derived rather than
+    /// allocated. Named `handle` rather than `container` because the browser
+    /// draws this field and the browser has no business knowing what a
+    /// container is; what it *is* for a given kind is the runtime's word, and
+    /// [`Self::hint`] is the sentence that makes it useful.
+    pub handle: String,
+    /// How the King looks at this resource himself: `docker logs kingdom-...`.
+    ///
+    /// Built by the runtime that owns the resource rather than formatted by the
+    /// screen. The screen used to write `format!("docker logs {container}")` in
+    /// the browser, which is a Docker command composed by a component that
+    /// cannot run one and would be wrong for any other kind.
+    pub hint: String,
     /// The titles of the plans drawing from it right now.
     ///
     /// Titles rather than ids: "who else is in here?" is a question about
@@ -814,12 +751,15 @@ pub struct ResourceInventory {
     pub resources: Vec<SharedResource>,
     /// Every manifest that could not be read.
     pub troubles: Vec<ManifestTrouble>,
-    /// Why nothing can be running, when that is the case: no Docker on `PATH`,
-    /// or a daemon that is not answering.
+    /// Why nothing can be running, when that is the case -- no runtime
+    /// installed, or one that is not answering.
     ///
-    /// Asked once for the whole screen rather than once per row. `None` means
-    /// Docker answered, so an idle resource is genuinely just idle.
-    pub docker_trouble: Option<String>,
+    /// Asked once for the whole screen rather than once per row, and only of
+    /// the runtimes some manifest actually declares: a machine that shares
+    /// nothing does not shell out to `docker` to draw an empty screen. `None`
+    /// means every runtime that matters answered, so an idle resource is
+    /// genuinely just idle.
+    pub runtime_trouble: Option<String>,
 }
 
 impl ResourceInventory {
@@ -833,11 +773,32 @@ impl ResourceInventory {
 mod tests {
     use super::*;
 
+    /// One container declaration, as the tests below all want it.
+    ///
+    /// A helper rather than a literal in each test, because a spec is now two
+    /// nested types and what these tests are *about* is almost never the
+    /// nesting.
+    fn container(name: &str, image: &str, port: u16, volume: Option<&str>) -> ServiceSpec {
+        ServiceSpec {
+            name: name.to_string(),
+            port,
+            kind: ResourceKind::Docker(DockerSpec {
+                image: image.to_string(),
+                volume: volume.map(str::to_string),
+            }),
+        }
+    }
+
     /// The manifest the `shopfront` fixture ships, parsed as written.
     ///
     /// Pinned as a test because it is the one manifest a person will copy, and
     /// a change to the field names that silently made it parse to *nothing*
     /// would leave five agents quietly sharing no database at all.
+    ///
+    /// It names **no `type`**, which is the compatibility rule this change
+    /// rests on: every manifest written before there were kinds is a container,
+    /// and one that quietly parsed to something else would take five agents'
+    /// database away.
     #[test]
     fn the_sample_manifest_parses() {
         let manifest = parse(
@@ -854,9 +815,131 @@ mod tests {
         assert_eq!(manifest.services.len(), 1);
         let db = &manifest.services[0];
         assert_eq!(db.name, "db");
-        assert_eq!(db.image, "mongo:7");
         assert_eq!(db.port, 27017);
-        assert_eq!(db.volume.as_deref(), Some("shopfront-db"));
+        assert_eq!(
+            db.kind,
+            ResourceKind::Docker(DockerSpec {
+                image: "mongo:7".to_string(),
+                volume: Some("shopfront-db".to_string()),
+            }),
+            "a manifest with no `type` is a Docker container"
+        );
+    }
+
+    /// Saying `type = "docker"` out loud means exactly what leaving it out
+    /// means.
+    ///
+    /// The two must not drift: the form now writes the line, and every manifest
+    /// already on disk does not. If these ever parsed differently, half the
+    /// King's declarations would behave unlike the other half for no reason he
+    /// could see.
+    #[test]
+    fn naming_the_kind_is_the_same_as_leaving_it_out() {
+        let with = parse(
+            r#"
+            [[service]]
+            type  = "docker"
+            name  = "db"
+            image = "mongo:7"
+            port  = 27017
+            "#,
+        )
+        .expect("an explicit kind must parse");
+        let without = parse(
+            r#"
+            [[service]]
+            name  = "db"
+            image = "mongo:7"
+            port  = 27017
+            "#,
+        )
+        .expect("an implicit kind must parse");
+
+        assert_eq!(with.services, without.services);
+    }
+
+    /// A kind Kingdom does not have is refused **by name**, not defaulted.
+    ///
+    /// The same judgement `env` gets, and for the same reason: a project that
+    /// asked for a runtime Kingdom cannot drive and was quietly given a
+    /// container instead would discover it from the container's behaviour, an
+    /// hour later, and read it as a bug in its own code.
+    #[test]
+    fn a_kind_kingdom_does_not_have_is_refused() {
+        let error = parse(
+            r#"
+            [[service]]
+            type = "podman"
+            name = "db"
+            port = 27017
+            "#,
+        )
+        .expect_err("an unknown kind must be refused rather than defaulted");
+
+        assert_eq!(
+            error,
+            ManifestError::UnknownKind {
+                service: "db".to_string(),
+                kind: "podman".to_string(),
+            }
+        );
+        // He has to find the block and fix the line, so the message names the
+        // service, what he asked for, and what he could have asked for.
+        let said = error.to_string();
+        assert!(said.contains("db"), "{said}");
+        assert!(said.contains("podman"), "{said}");
+        assert!(said.contains("docker"), "{said}");
+    }
+
+    /// What a kind is called in the file is what it is called on a form.
+    ///
+    /// One list, so a kind cannot be offered by a name the parser will not
+    /// take. `all()` is what a test iterates and what the form would render.
+    #[test]
+    fn every_kind_is_named_the_same_everywhere() {
+        let docker = ResourceKind::Docker(DockerSpec {
+            image: "mongo:7".to_string(),
+            volume: None,
+        });
+        assert_eq!(docker.wire_name(), "docker");
+        assert!(ResourceKind::all().contains(&docker.wire_name()));
+
+        // Every name offered must be one the parser accepts. Today that is one
+        // word; the point is that adding a second cannot skip this.
+        for kind in ResourceKind::all() {
+            let text = format!(
+                "[[service]]\ntype = \"{kind}\"\nname = \"x\"\nimage = \"mongo:7\"\nport = 1\n"
+            );
+            assert!(parse(&text).is_ok(), "`{kind}` is offered but not accepted");
+        }
+    }
+
+    /// The ledger draws a resource from what its kind says, not from fields it
+    /// reached into itself.
+    ///
+    /// `what` is the row and `facts` is the detail pane. Pinned because the
+    /// screen no longer hard-codes "Image" and "Data", and a kind that returned
+    /// nothing would render a blank card rather than fail.
+    #[test]
+    fn a_kind_says_what_it_is_and_what_to_show() {
+        let kept = ResourceKind::Docker(DockerSpec {
+            image: "mongo:7".to_string(),
+            volume: Some("shopfront-db".to_string()),
+        });
+        assert_eq!(kept.what(), "mongo:7");
+        assert_eq!(kept.label(), "Docker container");
+
+        let facts = kept.facts();
+        assert_eq!(facts[0], ("Image", "mongo:7".to_string()));
+        assert!(facts[1].1.contains("shopfront-db"), "{:?}", facts[1]);
+
+        // No volume is a decision with a consequence, and it is stated rather
+        // than left off the card.
+        let ephemeral = ResourceKind::Docker(DockerSpec {
+            image: "redis:7".to_string(),
+            volume: None,
+        });
+        assert!(ephemeral.facts()[1].1.contains("goes when"));
     }
 
     /// A city with no services is a valid city, not an error.
@@ -867,58 +950,6 @@ mod tests {
     fn an_empty_manifest_is_not_an_error() {
         assert!(parse("").expect("empty is valid").is_empty());
         assert!(parse("# nothing here\n").expect("comments only").is_empty());
-    }
-
-    /// What Kingdom knows about an image so the King does not have to.
-    ///
-    /// The port is what the form fills in, the data directory is where a volume
-    /// is mounted, and `boot` is the difference between a Postgres that starts
-    /// and one that exits 1 saying `POSTGRES_PASSWORD` -- measured against a
-    /// real daemon, which is why it is a table rather than a hope.
-    #[test]
-    fn a_well_known_image_brings_its_own_port_and_boot_environment() {
-        let mongo = known_image("mongo:7").expect("mongo is known");
-        assert_eq!(mongo.port, 27017);
-        assert_eq!(mongo.data_dir, "/data/db");
-        assert!(mongo.boot.is_empty(), "mongo starts with nothing set");
-
-        let postgres = known_image("postgres:16").expect("postgres is known");
-        assert_eq!(postgres.port, 5432);
-        assert_eq!(postgres.boot, &[("POSTGRES_PASSWORD", "postgres")]);
-
-        assert_eq!(known_image("redis:7-alpine").map(|k| k.port), Some(6379));
-        assert_eq!(known_image("mysql:8").map(|k| k.port), Some(3306));
-    }
-
-    /// A tag and a registry are not part of the image's identity here.
-    ///
-    /// `docker.io/library/postgres:16-alpine` is still Postgres, and a King who
-    /// pastes a fully qualified name should not lose the port and the password
-    /// for it.
-    #[test]
-    fn an_image_is_recognised_through_its_registry_and_tag() {
-        for image in [
-            "postgres",
-            "postgres:16",
-            "postgres:16-alpine",
-            "library/postgres:16",
-            "docker.io/library/postgres:16",
-        ] {
-            assert_eq!(
-                known_image(image).map(|k| k.port),
-                Some(5432),
-                "{image} should be recognised as postgres"
-            );
-        }
-    }
-
-    /// An unknown image is not a refusal: it runs, it just has to be told its
-    /// port, and a volume on it lands somewhere harmless.
-    #[test]
-    fn an_unknown_image_still_gets_a_data_directory() {
-        assert!(known_image("ghcr.io/acme/thing:1").is_none());
-        assert_eq!(data_dir_for("ghcr.io/acme/thing:1"), "/data");
-        assert_eq!(data_dir_for("mongo:7"), "/data/db");
     }
 
     /// Two services with one name would mean two containers with one name, and
@@ -1010,14 +1041,13 @@ mod tests {
     /// data.
     #[test]
     fn a_rendered_service_parses_back_to_itself() {
-        let spec = ServiceSpec {
-            name: "db".to_string(),
-            image: "mongo:7".to_string(),
-            port: 27017,
-            volume: Some("shopfront-db".to_string()),
-        };
+        let spec = container("db", "mongo:7", 27017, Some("shopfront-db"));
 
-        let manifest = parse(&spec.render()).expect("what the form renders must parse");
+        let rendered = spec.render();
+        // What Kingdom writes says what it means, even where the parser would
+        // have assumed it.
+        assert!(rendered.contains("type"), "rendered: {rendered:?}");
+        let manifest = parse(&rendered).expect("what the form renders must parse");
         assert_eq!(manifest.services, vec![spec]);
     }
 
@@ -1028,12 +1058,7 @@ mod tests {
     /// would be a *different* declaration from "no volume".
     #[test]
     fn a_bare_service_renders_without_empty_lines() {
-        let spec = ServiceSpec {
-            name: "cache".to_string(),
-            image: "redis:7".to_string(),
-            port: 6379,
-            volume: None,
-        };
+        let spec = container("cache", "redis:7", 6379, None);
 
         let rendered = spec.render();
         assert!(!rendered.contains("volume"), "rendered: {rendered:?}");
@@ -1051,15 +1076,10 @@ mod tests {
     /// services in the file with it.
     #[test]
     fn a_quote_in_a_value_does_not_break_the_file() {
-        let spec = ServiceSpec {
-            name: "db".to_string(),
-            image: "postgres:16".to_string(),
-            port: 5432,
-            volume: Some("a\"b\\c".to_string()),
-        };
+        let spec = container("db", "postgres:16", 5432, Some("a\"b\\c"));
 
         let manifest = parse(&spec.render()).expect("an escaped value still parses");
-        assert_eq!(manifest.services[0].volume.as_deref(), Some("a\"b\\c"));
+        assert_eq!(manifest.services, vec![spec]);
     }
 
     /// Appending a rendered block to a manifest that already has one leaves
@@ -1072,12 +1092,7 @@ mod tests {
                         name = \"db\"\n\
                         image = \"mongo:7\"\n\
                         port = 27017\n";
-        let addition = ServiceSpec {
-            name: "cache".to_string(),
-            image: "redis:7".to_string(),
-            port: 6379,
-            volume: None,
-        };
+        let addition = container("cache", "redis:7", 6379, None);
 
         let combined = format!("{existing}\n{}", addition.render());
         let manifest = parse(&combined).expect("both blocks must parse");
@@ -1109,12 +1124,7 @@ mod tests {
     fn the_form_refuses_exactly_what_the_parser_refuses() {
         for name in ["db", "my_db-2"] {
             assert!(is_usable_name(name));
-            let spec = ServiceSpec {
-                name: name.to_string(),
-                image: "mongo:7".to_string(),
-                port: 1,
-                volume: None,
-            };
+            let spec = container(name, "mongo:7", 1, None);
             assert!(parse(&spec.render()).is_ok(), "`{name}` should be usable");
         }
         for name in ["a/b", "with space", "colon:name", ""] {
@@ -1126,12 +1136,7 @@ mod tests {
     /// the ledger groups on exactly that string.
     #[test]
     fn a_resource_says_who_it_belongs_to() {
-        let spec = ServiceSpec {
-            name: "db".to_string(),
-            image: "mongo:7".to_string(),
-            port: 27017,
-            volume: None,
-        };
+        let spec = container("db", "mongo:7", 27017, None);
         let resource = |scope, city_name: Option<&str>| SharedResource {
             spec: spec.clone(),
             scope,
@@ -1140,7 +1145,8 @@ mod tests {
             manifest_path: "/tmp/services.toml".to_string(),
             state: ServiceState::Idle,
             address: None,
-            container: "kingdom-host-db".to_string(),
+            handle: "kingdom-host-db".to_string(),
+            hint: "docker logs kingdom-host-db".to_string(),
             users: Vec::new(),
         };
 
@@ -1152,174 +1158,5 @@ mod tests {
             resource(ServiceScope::City, Some("shopfront")).owner(),
             "shopfront"
         );
-    }
-}
-
-#[cfg(test)]
-mod mount_tests {
-    use super::*;
-
-    /// A manifest can declare folders as well as containers, and the two do not
-    /// interfere.
-    #[test]
-    fn a_manifest_holds_both_kinds() {
-        let manifest = parse(
-            r#"
-[[service]]
-name  = "db"
-image = "mongo:7"
-port  = 27017
-
-[[mount]]
-path = "~/.cargo"
-mode = "rw"
-
-[[mount]]
-path = "/opt/toolchain"
-"#,
-        )
-        .expect("both kinds must parse together");
-
-        assert_eq!(manifest.services.len(), 1);
-        assert_eq!(manifest.mounts.len(), 2);
-        assert_eq!(manifest.mounts[0].path, "~/.cargo");
-        assert!(manifest.mounts[0].mode.is_writable());
-        // Read-only unless it says otherwise: the default that makes declaring
-        // a toolchain safe.
-        assert!(!manifest.mounts[1].mode.is_writable());
-    }
-
-    /// A manifest with only folders needs no Docker daemon.
-    ///
-    /// The distinction `has_services` exists for. Treating such a manifest as
-    /// non-empty would refuse to open a project whose only declaration is a
-    /// folder, over a daemon it never needed.
-    #[test]
-    fn folders_alone_do_not_ask_for_a_daemon() {
-        let manifest = parse("[[mount]]\npath = \"~/.cargo\"\n").expect("mounts alone must parse");
-
-        assert!(!manifest.is_empty(), "it declares something");
-        assert!(
-            !manifest.has_services(),
-            "but nothing that needs a container"
-        );
-    }
-
-    /// Every manifest written before mounts existed still parses, with none.
-    #[test]
-    fn a_manifest_without_mounts_is_unchanged() {
-        let manifest =
-            parse("[[service]]\nname = \"db\"\nimage = \"mongo:7\"\nport = 27017\n").unwrap();
-
-        assert!(manifest.mounts.is_empty());
-        assert!(manifest.has_services());
-    }
-
-    /// The paths that cannot be allowed, each refused with a reason the King
-    /// can act on.
-    ///
-    /// `/` is the one that matters most: sharing it would put his whole disk
-    /// back inside a plan whose entire purpose is not to have it -- isolation
-    /// that silently isolates nothing.
-    #[test]
-    fn a_path_that_would_undo_the_sealing_is_refused() {
-        for (path, expected) in [
-            ("/", "undo the sealing"),
-            ("relative/path", "absolute path"),
-            ("~someone/else", "not `~someone-else`"),
-            ("/etc/../root", "`..` is not allowed"),
-            ("", "it is empty"),
-        ] {
-            let text = format!("[[mount]]\npath = {}\n", toml_string(path));
-            let error = parse(&text).expect_err("{path} must be refused");
-
-            let shown = error.to_string();
-            assert!(
-                shown.contains(expected),
-                "`{path}` should say {expected:?}, said {shown:?}"
-            );
-        }
-    }
-
-    /// `~` is expanded where it is used, not where it is parsed.
-    ///
-    /// What the King wrote is what he reads back, and a project manifest that
-    /// travels between machines still means "this user's home" wherever it
-    /// lands.
-    #[test]
-    fn a_home_relative_path_is_expanded_at_use() {
-        let mount = MountSpec {
-            path: "~/.cargo".to_string(),
-            mode: MountMode::Rw,
-        };
-
-        assert_eq!(mount.path, "~/.cargo", "the file keeps what he typed");
-        assert_eq!(mount.expanded("/home/king"), "/home/king/.cargo");
-        // A trailing slash on the home directory must not double up.
-        assert_eq!(mount.expanded("/home/king/"), "/home/king/.cargo");
-
-        // An absolute path is untouched.
-        let absolute = MountSpec {
-            path: "/opt/tools".to_string(),
-            mode: MountMode::Ro,
-        };
-        assert_eq!(absolute.expanded("/home/king"), "/opt/tools");
-    }
-
-    /// A rendered mount parses back, which is what the quick-add writer relies
-    /// on.
-    #[test]
-    fn a_rendered_mount_round_trips() {
-        for mode in [MountMode::Ro, MountMode::Rw] {
-            let mount = MountSpec {
-                path: "~/.cargo".to_string(),
-                mode,
-            };
-            let parsed = parse(&mount.render()).expect("what we render, we must parse");
-            assert_eq!(parsed.mounts, vec![mount]);
-        }
-    }
-
-    /// A Rust toolchain is more than the folder `cargo` sits in.
-    ///
-    /// The measurement this table exists for: `~/.cargo/bin` alone gives a
-    /// `cargo` that runs and then re-downloads the toolchain, because
-    /// `~/.rustup` is not there. Both are writable, because both are written
-    /// to as a build runs.
-    #[test]
-    fn a_path_entry_brings_the_folders_its_tool_needs() {
-        let rust = known_path("/home/anyone/.cargo/bin").expect("cargo is known");
-        let folders: Vec<&str> = rust.folders.iter().map(|(p, _)| *p).collect();
-
-        assert!(folders.contains(&"~/.cargo"));
-        assert!(
-            folders.contains(&"~/.rustup"),
-            "without it every build re-downloads the toolchain"
-        );
-        assert!(
-            rust.folders.iter().all(|(_, mode)| mode.is_writable()),
-            "a read-only registry means re-downloading it every time"
-        );
-    }
-
-    /// An unrecognised `PATH` entry is not refused, merely unadorned.
-    ///
-    /// A tool Kingdom has never heard of is still a tool the King has.
-    #[test]
-    fn an_unknown_path_entry_is_simply_unknown() {
-        assert!(known_path("/home/anyone/.config/some-tool/bin").is_none());
-        assert!(known_path("/opt/vendor/bin").is_none());
-    }
-
-    /// The table recognises a folder wherever the King's home happens to be.
-    #[test]
-    fn a_known_folder_is_recognised_under_any_home() {
-        for home in ["/home/omarchy", "/Users/king", "/var/home/someone"] {
-            assert!(
-                known_path(&format!("{home}/.cargo/bin")).is_some(),
-                "cargo under {home} must be recognised"
-            );
-            assert!(known_path(&format!("{home}/.local/share/pnpm")).is_some());
-        }
     }
 }

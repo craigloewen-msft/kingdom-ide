@@ -829,7 +829,7 @@ mod tests {
                 .iter()
                 .map(|name| SharedService {
                     name: (*name).to_string(),
-                    image: "mongo:7".into(),
+                    what: "mongo:7".into(),
                     address: "172.31.4.10:27017".into(),
                     users: 2,
                     // A wellhead stands on a town's square, so everything the

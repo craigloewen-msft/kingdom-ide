@@ -91,53 +91,26 @@
 //! `docker` itself and do as it likes. Like [`crate::namespaces`], this is
 //! coordination, not containment, and saying so plainly is worth more than a
 //! guarantee that does not hold.
+//!
+//! # Where the runtime lives
+//!
+//! Not here. This module holds what is true of *sharing* -- the reference
+//! count, the two scopes, [`reconcile`]'s invariant, the ledger, the writer --
+//! and [`docker`] holds the conversation with a daemon. A resource declares its
+//! [`kingdom_core::services::ResourceKind`] and this module matches on it,
+//! which is how [`raise`], [`stop`] and [`trouble_with_runtimes`] each reach a
+//! runtime without knowing what a container is.
+
+pub mod docker;
 
 use kingdom_core::services::{
-    data_dir_for, known_image, ManifestTrouble, ResourceInventory, ServiceManifest, ServiceScope,
-    ServiceSpec, ServiceState, SharedResource,
+    ManifestTrouble, ResourceInventory, ResourceKind, ServiceManifest, ServiceScope, ServiceSpec,
+    ServiceState, SharedResource,
 };
 use kingdom_core::{Kingdom, PlanId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-
-/// The private range Kingdom draws city subnets from.
-///
-/// `172.31.0.0/16`, carved into `/24`s. Docker's own default pool starts at
-/// `172.17` and grows upwards, so starting at the top of the same block keeps
-/// Kingdom's networks clear of it for a long time while staying inside the
-/// address space Docker users already expect to be busy.
-const SUBNET_PREFIX: (u8, u8) = (172, 31);
-
-/// How many `/24`s are tried before giving up on a free one.
-///
-/// A collision is possible -- another Docker network, a VPN, a route the King
-/// added himself -- so the subnet is *tried* rather than assumed, in the manner
-/// of `namespaces::net::add_forward`'s port draw.
-const SUBNET_ATTEMPTS: u8 = 32;
-
-/// The last octet of the first service's address.
-///
-/// Services are numbered upwards from here. Above Docker's own gateway at `.1`,
-/// and clear of the low addresses with enough room that a person reading
-/// `172.31.4.10` can tell it was assigned rather than allocated.
-const FIRST_HOST_OCTET: u8 = 10;
-
-/// How long a service is given to start answering on its port.
-///
-/// Generous, because the first run of an image includes pulling it. A plan
-/// handed an address for a container that is not listening yet fails in a way
-/// that reads as a bug in the plan's own code, so waiting is worth the delay.
-const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
-
-/// How often the port is tried while waiting.
-const READY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// The label carrying the scope a container belongs to: a city's key, or
-/// `host`.
-const LABEL_CITY: &str = "kingdom.city";
-/// The label carrying the service's name within that city.
-const LABEL_SERVICE: &str = "kingdom.service";
 
 /// The name a plan reaches its own wells by, once they are relayed onto its
 /// loopback.
@@ -150,27 +123,42 @@ const LABEL_SERVICE: &str = "kingdom.service";
 /// reaches for, which is the whole point of putting the service there.
 const LOOPBACK: &str = "localhost";
 
-/// One service that is up, and where to reach it.
+/// One resource that is up, and where to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningService {
     /// The service's name from the manifest.
     pub name: String,
-    /// The image it is running.
-    pub image: String,
-    /// Its address on the city's network -- an IP, because neither the host nor
-    /// a plan's namespace can resolve Docker's service names.
+    /// The one line saying what is running -- an image, for a container.
+    ///
+    /// Taken from the kind at raise time rather than looked up again, so every
+    /// surface that prints it -- the badge, the prompt, the map -- says the
+    /// same thing without knowing what kind of thing this is.
+    pub what: String,
+    /// Its address on the runtime's network -- an IP, because neither the host
+    /// nor a plan's namespace can resolve Docker's service names.
     pub host: String,
     /// The port it listens on.
     pub port: u16,
-    /// The container's name, which is also how it is found again.
-    pub container: String,
+    /// What the runtime calls it, which is also how it is found again.
+    ///
+    /// A container's name today. Named for what it *does* -- the string the
+    /// runtime is handed to identify this thing -- rather than for the one kind
+    /// there is.
+    pub handle: String,
+    /// Which kind of resource this is, as its wire name.
+    ///
+    /// Carried so that a resource can be stopped, or asked about, without
+    /// re-reading the manifest that declared it: [`stop`] matches on this. A
+    /// `&'static str` rather than a `ResourceKind` because the payload is the
+    /// *declaration*, and what is running has already consumed it.
+    pub kind: &'static str,
     /// Which level it was declared at.
     ///
     /// Carried on the running service rather than looked up again, because the
     /// two places that show a well to the King -- the badge and the ledger --
     /// both have to say whether it is this project's or the machine's, and
-    /// re-deriving it from the container name would be reading a string back
-    /// out of a string.
+    /// re-deriving it from the handle would be reading a string back out of a
+    /// string.
     pub scope: ServiceScope,
     /// The registry key it is filed under: `host`, or the city's key.
     pub key: String,
@@ -244,9 +232,9 @@ impl Scope {
 }
 
 #[derive(Default)]
-struct Registry {
+pub(super) struct Registry {
     /// `(scope key, service name)` -> the running service.
-    running: HashMap<(String, String), RunningService>,
+    pub(super) running: HashMap<(String, String), RunningService>,
     /// `(scope key, service name)` -> the plans using it.
     ///
     /// This is the reference count, kept as the set of plan ids rather than an
@@ -256,10 +244,10 @@ struct Registry {
     /// A host service's set spans **every** city, which is the whole difference
     /// the scope makes: it is stopped when the last plan anywhere lets go, not
     /// when the last plan in one project does.
-    users: HashMap<(String, String), HashSet<PlanId>>,
+    pub(super) users: HashMap<(String, String), HashSet<PlanId>>,
 }
 
-fn registry() -> std::sync::MutexGuard<'static, Registry> {
+pub(super) fn registry() -> std::sync::MutexGuard<'static, Registry> {
     let cell = SERVICES.get_or_init(|| Mutex::new(Registry::default()));
     match cell.lock() {
         Ok(guard) => guard,
@@ -298,21 +286,17 @@ async fn raising() -> tokio::sync::MutexGuard<'static, ()> {
 /// Why a city's services could not be raised.
 ///
 /// Every variant is written for the King, because he is the one who acts on it.
+///
+/// The two that used to name Docker no longer do: which runtime is missing, and
+/// what to do about it, is a sentence the runtime writes -- see
+/// [`docker::unavailable`]. The variants here carry it rather than composing
+/// it, so a second kind cannot produce an error advising the King to start a
+/// daemon it does not use.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ServiceError {
-    #[error(
-        "this project declares shared services in `{path}`, but Docker is not \
-         installed -- so there is nothing to run them. Install Docker, or \
-         remove that file if the project no longer needs it.",
-        path = kingdom_core::services::MANIFEST_PATH
-    )]
-    DockerMissing,
-
-    #[error(
-        "Docker is installed but not answering ({0}). It is usually the daemon \
-         not running: try `sudo systemctl start docker`."
-    )]
-    DockerUnreachable(String),
+    /// The runtime a declared resource needs is missing, or not answering.
+    #[error("{0}")]
+    Unavailable(String),
 
     #[error("{0}")]
     Manifest(String),
@@ -320,14 +304,19 @@ pub enum ServiceError {
     #[error("the shared service `{name}` could not be started: {detail}")]
     Failed { name: String, detail: String },
 
+    /// Started, but never answered on its port.
+    ///
+    /// `hint` is how the King looks at it himself -- `docker logs kingdom-...`
+    /// for a container -- and comes from the runtime for the same reason the
+    /// sentence above does.
     #[error(
         "the shared service `{name}` started but never answered on port \
-         {port}. Its log may say why: `docker logs {container}`."
+         {port}. Its log may say why: `{hint}`."
     )]
     NeverReady {
         name: String,
         port: u16,
-        container: String,
+        hint: String,
     },
 }
 
@@ -447,40 +436,58 @@ async fn raise(
 ) -> Result<Vec<RunningService>, ServiceError> {
     let manifest = manifest_in(scope)?;
     // `has_services`, not `is_empty`: a manifest that declares only folders for
-    // a sealed plan needs no Docker daemon, and asking for one here would
+    // a sealed plan needs no runtime at all, and asking for one here would
     // refuse to raise a project whose only declaration is a mount.
     if !manifest.has_services() {
         return Ok(Vec::new());
     }
 
-    if which("docker").is_none() {
-        return Err(ServiceError::DockerMissing);
-    }
-
     let key = scope.key();
-    let network = network_name(&key);
-    let subnet = ensure_network(&network).await?;
+
+    // Grouped by kind, each keeping its **position in the manifest**. The
+    // position is load-bearing: an address is assigned from it, so a service
+    // that moved group would silently change address and a plan would be handed
+    // a database that is not its own. Grouping rather than looping one at a
+    // time because a runtime's setup -- for Docker, creating the network and
+    // choosing the `/24` -- is one thought for the whole scope, and doing it
+    // per service would put that arithmetic in this function.
+    let mut containers: Vec<(usize, &ServiceSpec)> = Vec::new();
+    for (index, spec) in manifest.services.iter().enumerate() {
+        match spec.kind {
+            ResourceKind::Docker(_) => containers.push((index, spec)),
+        }
+    }
 
     let mut up = Vec::new();
-    for (index, spec) in manifest.services.iter().enumerate() {
-        let service = ensure_one(scope, &key, &network, subnet, index, spec).await?;
-        {
-            // Taken and dropped around the record, never held across the await
-            // above. See `RAISING`.
-            let mut registry = registry();
-            let id = (key.clone(), spec.name.clone());
-            registry.running.insert(id.clone(), service.clone());
-            // **Replaced, not extended.** `reconcile` hands down the whole live
-            // population for this scope, so that set is the answer rather than
-            // an addition to it. Extending was a real bug while this was being
-            // written: a plan that finished stayed in the count forever, and
-            // `users_of` reported a database as busy that nobody was in.
-            registry.users.insert(id, drawers.clone());
-        }
-        up.push(service);
+    let mut failure = None;
+    if !containers.is_empty() {
+        let raised = docker::raise(scope, &key, &containers).await;
+        up.extend(raised.up);
+        failure = raised.failure;
     }
 
-    Ok(up)
+    // Recorded **before** any failure is returned. A resource that came up
+    // before its neighbour failed is standing whether or not this call
+    // succeeded, and one the registry never heard of would never be swept: the
+    // sweep only stops what this process knows it raised.
+    for service in &up {
+        // Taken and dropped around each record, never held across an await.
+        // See `RAISING`.
+        let mut registry = registry();
+        let id = (key.clone(), service.name.clone());
+        registry.running.insert(id.clone(), service.clone());
+        // **Replaced, not extended.** `reconcile` hands down the whole live
+        // population for this scope, so that set is the answer rather than
+        // an addition to it. Extending was a real bug while this was being
+        // written: a plan that finished stayed in the count forever, and
+        // `users_of` reported a database as busy that nobody was in.
+        registry.users.insert(id, drawers.clone());
+    }
+
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(up),
+    }
 }
 
 /// Brings the kingdom's wells into line with the agents that are actually
@@ -571,9 +578,30 @@ pub async fn reconcile(agents: Vec<(PlanId, PathBuf)>) {
     };
 
     for service in orphaned {
-        // Stopped, never removed, and the named volume left alone: the King's
-        // data is the whole reason the service existed.
-        let _ = docker(&["stop", &service.container]).await;
+        stop(&service).await;
+    }
+}
+
+/// Stops one resource nobody is drawing from any more.
+///
+/// Stopped, never removed, and any stored data left exactly where it is: the
+/// King's data is the whole reason the resource existed. The runtime is chosen
+/// by the kind the resource was raised as, so this cannot stop a container
+/// belonging to a resource that is not one.
+///
+/// Failures are ignored on purpose, as they were before this was its own
+/// function: a resource that is already gone, or a daemon that has since
+/// stopped answering, are both "it is not running", which is what was wanted.
+async fn stop(service: &RunningService) {
+    match service.kind {
+        "docker" => docker::stop(service).await,
+        // Not reachable while there is one kind, and deliberately not a panic:
+        // a resource nobody can stop is a container left standing, which is far
+        // better than a server that falls over holding five agents' databases.
+        other => leptos::logging::warn!(
+            "the shared resource `{}` is of kind `{other}`, which nothing here can stop",
+            service.name
+        ),
     }
 }
 
@@ -768,15 +796,12 @@ pub fn address_of(city_root: &Path, service: &str) -> Option<String> {
 /// browser.
 ///
 /// Cheap. It reads at most one small file per city plus one for the host, and
-/// asks Docker exactly one question for the whole screen -- see
-/// [`docker_trouble`]. No `docker inspect` per row: the registry already knows
-/// what this server started, and a container some *other* server started is not
-/// this ledger's business.
+/// asks each runtime **at most one** question for the whole screen -- see
+/// [`trouble_with_runtimes`]. No `docker inspect` per row: the registry already
+/// knows what this server started, and a container some *other* server started
+/// is not this ledger's business.
 pub async fn inventory(kingdom: &Kingdom) -> ResourceInventory {
-    let mut out = ResourceInventory {
-        docker_trouble: docker_trouble().await,
-        ..ResourceInventory::default()
-    };
+    let mut out = ResourceInventory::default();
 
     // Host first, so the machine's own wells head the list -- they are the ones
     // shared furthest, and so the ones a change to is most consequential.
@@ -785,6 +810,14 @@ pub async fn inventory(kingdom: &Kingdom) -> ResourceInventory {
     for city in &kingdom.cities {
         scopes.push((Scope::City(root.join(&city.path)), Some(city)));
     }
+
+    // The manifests are read **before** any runtime is asked anything, so that
+    // the question can be asked only of the runtimes something actually
+    // declares. A machine that shares nothing now costs no subprocess at all --
+    // it used to shell out to `docker version` to draw an empty screen.
+    let mut declared: Vec<(Scope, Option<&kingdom_core::City>, String, ServiceManifest)> =
+        Vec::new();
+    let mut kinds: Vec<&'static str> = Vec::new();
 
     for (scope, city) in scopes {
         let path = scope.manifest_path();
@@ -807,22 +840,61 @@ pub async fn inventory(kingdom: &Kingdom) -> ResourceInventory {
         if !manifest.has_services() {
             continue;
         }
+        for spec in &manifest.services {
+            let kind = spec.kind.wire_name();
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        declared.push((scope, city, shown_path, manifest));
+    }
 
+    out.runtime_trouble = trouble_with_runtimes(&kinds).await;
+
+    for (scope, city, shown_path, manifest) in &declared {
         let key = scope.key();
         for spec in &manifest.services {
             out.resources.push(describe(
                 kingdom,
-                &scope,
+                scope,
                 &key,
-                city,
-                &shown_path,
+                *city,
+                shown_path,
                 spec,
-                out.docker_trouble.is_some(),
+                out.runtime_trouble.is_some(),
             ));
         }
     }
 
     out
+}
+
+/// Why nothing of the declared kinds could be running, or `None` if every
+/// runtime that matters answered.
+///
+/// Asked once for the whole ledger rather than once per row: the answer is the
+/// same for every one of them, and it is the difference between a screen of
+/// confusing "not started"s and one banner saying the daemon is down.
+///
+/// Asked only of the kinds something actually declares, which is the whole
+/// reason it takes a list. A King whose projects share nothing but a Postgres
+/// should not be told that some other runtime he has never used is missing.
+async fn trouble_with_runtimes(kinds: &[&'static str]) -> Option<String> {
+    for kind in kinds {
+        let trouble = match *kind {
+            "docker" => docker::trouble().await,
+            // A kind with no runtime behind it cannot be running, and saying so
+            // is better than a row that reads "not started" forever.
+            other => Some(format!(
+                "a shared resource is declared as `{other}`, which Kingdom does \
+                 not know how to run."
+            )),
+        };
+        if trouble.is_some() {
+            return trouble;
+        }
+    }
+    None
 }
 
 /// One declared service, joined against what is actually running.
@@ -834,7 +906,7 @@ fn describe(
     city: Option<&kingdom_core::City>,
     manifest_path: &str,
     spec: &ServiceSpec,
-    docker_is_out: bool,
+    runtime_is_out: bool,
 ) -> SharedResource {
     let id = (key.to_string(), spec.name.clone());
     let (running, drawing) = {
@@ -859,17 +931,29 @@ fn describe(
         .collect();
     users.sort();
 
-    let state = match (&running, docker_is_out) {
+    let state = match (&running, runtime_is_out) {
         (Some(_), _) => ServiceState::Running,
-        // Not "idle": with no daemon answering, Kingdom genuinely does not know
+        // Not "idle": with no runtime answering, Kingdom genuinely does not know
         // whether this is up, and saying "not started" would be a guess dressed
         // as a fact.
         (None, true) => ServiceState::Unknown,
         (None, false) => ServiceState::Idle,
     };
 
-    // Filled in when the address is known. The container's own address, which
-    // is what the King reaches it at from his own machine -- a plan is told
+    // What the runtime calls this thing, and how the King looks at it himself.
+    // Derived rather than allocated, so both are known even for a resource that
+    // has never run -- which is what makes `docker logs <name>` printable on a
+    // row that is not up.
+    let (handle, hint) = match &spec.kind {
+        ResourceKind::Docker(_) => {
+            let handle = docker::container_name(key, &spec.name);
+            let hint = docker::log_hint(&handle);
+            (handle, hint)
+        }
+    };
+
+    // Filled in when the address is known. The resource's own address, which is
+    // what the King reaches it at from his own machine -- a plan is told
     // `localhost` instead, per `address_for`, and the screen says both.
     SharedResource {
         spec: spec.clone(),
@@ -879,26 +963,9 @@ fn describe(
         manifest_path: manifest_path.to_string(),
         state,
         address: running.as_ref().map(RunningService::address),
-        // Derived rather than allocated, so it is known even for a service that
-        // has never run -- which is what makes `docker logs <name>` printable
-        // on a row that is not up.
-        container: container_name(key, &spec.name),
+        handle,
+        hint,
         users,
-    }
-}
-
-/// Why nothing could be running, or `None` if Docker answered.
-///
-/// Asked once for the whole ledger rather than once per row: the answer is the
-/// same for every one of them, and it is the difference between a screen of
-/// confusing "not started"s and one banner saying the daemon is down.
-async fn docker_trouble() -> Option<String> {
-    if which("docker").is_none() {
-        return Some(ServiceError::DockerMissing.to_string());
-    }
-    match docker(&["version", "--format", "{{.Server.Version}}"]).await {
-        Ok(_) => None,
-        Err(e) => Some(ServiceError::DockerUnreachable(e).to_string()),
     }
 }
 
@@ -1485,288 +1552,13 @@ pub fn city_key(city_root: &Path) -> String {
 /// FNV-1a, written out rather than pulled in: `DefaultHasher` is explicitly not
 /// guaranteed stable across Rust releases, and this value names containers that
 /// must be findable again after an upgrade.
-fn path_hash(path: &Path) -> u32 {
+pub(super) fn path_hash(path: &Path) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in path.to_string_lossy().as_bytes() {
         hash ^= *byte as u32;
         hash = hash.wrapping_mul(0x0100_0193);
     }
     hash
-}
-
-/// The Docker network for a city.
-fn network_name(city_key: &str) -> String {
-    format!("kingdom-{city_key}")
-}
-
-/// The container name for one service.
-fn container_name(city_key: &str, service: &str) -> String {
-    format!("kingdom-{city_key}-{service}")
-}
-
-/// The address a service gets on its city's network.
-///
-/// Assigned from its position in the manifest rather than allocated by Docker,
-/// which is what makes the address knowable before the container exists -- and
-/// therefore printable, and substitutable into an environment variable.
-fn service_address(subnet: u8, index: usize) -> String {
-    let (a, b) = SUBNET_PREFIX;
-    format!("{a}.{b}.{subnet}.{}", FIRST_HOST_OCTET as usize + index)
-}
-
-/// The third octet a city's `/24` starts from.
-///
-/// Hashed rather than counted so that a city keeps the same subnet across
-/// restarts and across the order plans happen to be opened in.
-fn preferred_subnet(city_key: &str) -> u8 {
-    (path_hash(Path::new(city_key)) % 256) as u8
-}
-
-/// Runs a `docker` command, returning its stdout.
-///
-/// Shelling out rather than taking on `bollard`, for the reason `namespaces/`
-/// shells out to `unshare` and `slirp4netns`: the surface used here is a
-/// handful of subcommands, and the CLI is the interface Docker documents and
-/// the King can reproduce by hand when something goes wrong.
-async fn docker(args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::new("docker")
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if message.is_empty() {
-            format!("`docker {}` failed", args.join(" "))
-        } else {
-            message
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Makes sure the city's network exists, and returns the `/24` it is on.
-///
-/// Adopts an existing network rather than recreating it -- containers are
-/// attached to it, and recreating would strand them.
-async fn ensure_network(network: &str) -> Result<u8, ServiceError> {
-    // Already there from an earlier plan, or an earlier run of the server.
-    if let Ok(existing) = docker(&[
-        "network",
-        "inspect",
-        network,
-        "--format",
-        "{{range .IPAM.Config}}{{.Subnet}}{{end}}",
-    ])
-    .await
-    {
-        if let Some(subnet) = third_octet(&existing) {
-            return Ok(subnet);
-        }
-    }
-
-    // Not there. `docker network inspect` failing could also mean the daemon is
-    // down, which is a different problem with a different fix -- so ask.
-    docker(&["version", "--format", "{{.Server.Version}}"])
-        .await
-        .map_err(ServiceError::DockerUnreachable)?;
-
-    let preferred = preferred_subnet(network);
-    let mut last = String::new();
-    for attempt in 0..SUBNET_ATTEMPTS {
-        let third = preferred.wrapping_add(attempt);
-        let (a, b) = SUBNET_PREFIX;
-        let subnet = format!("{a}.{b}.{third}.0/24");
-        match docker(&["network", "create", "--subnet", &subnet, network]).await {
-            Ok(_) => return Ok(third),
-            Err(e) => {
-                // Another plan created it while we were asking. Not a failure:
-                // re-inspect and take whatever it settled on.
-                if let Ok(existing) = docker(&[
-                    "network",
-                    "inspect",
-                    network,
-                    "--format",
-                    "{{range .IPAM.Config}}{{.Subnet}}{{end}}",
-                ])
-                .await
-                {
-                    if let Some(third) = third_octet(&existing) {
-                        return Ok(third);
-                    }
-                }
-                last = e;
-            }
-        }
-    }
-
-    Err(ServiceError::Failed {
-        name: network.to_string(),
-        detail: format!(
-            "no free subnet in {}.{}.0.0/16: {last}",
-            SUBNET_PREFIX.0, SUBNET_PREFIX.1
-        ),
-    })
-}
-
-/// The third octet of a `172.31.N.0/24`, or `None` if it is not one of ours.
-fn third_octet(subnet: &str) -> Option<u8> {
-    let address = subnet.split('/').next()?;
-    let mut parts = address.split('.');
-    let a: u8 = parts.next()?.parse().ok()?;
-    let b: u8 = parts.next()?.parse().ok()?;
-    let c: u8 = parts.next()?.parse().ok()?;
-    if (a, b) != SUBNET_PREFIX {
-        return None;
-    }
-    Some(c)
-}
-
-/// Brings one service up, or adopts it if it is already up.
-async fn ensure_one(
-    scope: &Scope,
-    key: &str,
-    network: &str,
-    subnet: u8,
-    index: usize,
-    spec: &ServiceSpec,
-) -> Result<RunningService, ServiceError> {
-    let container = container_name(key, &spec.name);
-    let host = service_address(subnet, index);
-
-    let service = RunningService {
-        name: spec.name.clone(),
-        image: spec.image.clone(),
-        host: host.clone(),
-        port: spec.port,
-        container: container.clone(),
-        scope: scope.kind(),
-        key: key.to_string(),
-    };
-
-    match container_state(&container).await {
-        // Up already: this is a plan two-through-five, or a server restart
-        // finding what the last one left. Adopted, deliberately -- see the
-        // module docs on why this differs from `namespaces::net::reclaim_previous`.
-        ContainerState::Running => {
-            wait_until_ready(&service).await?;
-            return Ok(service);
-        }
-        // There but stopped: the last plan released it, and a new one wants it
-        // again. Starting it keeps the volume and everything in it.
-        ContainerState::Stopped => {
-            docker(&["start", &container])
-                .await
-                .map_err(|detail| ServiceError::Failed {
-                    name: spec.name.clone(),
-                    detail,
-                })?;
-            wait_until_ready(&service).await?;
-            return Ok(service);
-        }
-        ContainerState::Absent => {}
-    }
-
-    let mut args: Vec<String> = vec![
-        "run".into(),
-        "--detach".into(),
-        "--name".into(),
-        container.clone(),
-        "--network".into(),
-        network.into(),
-        "--ip".into(),
-        host.clone(),
-        "--label".into(),
-        format!("{LABEL_CITY}={key}"),
-        "--label".into(),
-        format!("{LABEL_SERVICE}={}", spec.name),
-        // Deliberately no `-p`. Nothing is published on the King's loopback, so
-        // the service cannot take a port from him; he reaches it at the address
-        // above, which Docker's own bridge route makes reachable.
-    ];
-    if let Some(volume) = &spec.volume {
-        args.push("--volume".into());
-        args.push(format!("{volume}:{}", data_dir_for(&spec.image)));
-    }
-    // What the image needs in its **own** environment simply to start. Nothing
-    // here is ever shown to an agent. Without it `postgres:16` exits 1 on
-    // first boot complaining about POSTGRES_PASSWORD, and all the King sees is
-    // "never answered on port 5432".
-    if let Some(known) = known_image(&spec.image) {
-        for (key, value) in known.boot {
-            args.push("--env".into());
-            args.push(format!("{key}={value}"));
-        }
-    }
-    args.push(spec.image.clone());
-
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    docker(&argv).await.map_err(|detail| ServiceError::Failed {
-        name: spec.name.clone(),
-        detail,
-    })?;
-
-    wait_until_ready(&service).await?;
-    Ok(service)
-}
-
-/// Whether a container exists, and whether it is running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContainerState {
-    Running,
-    Stopped,
-    Absent,
-}
-
-async fn container_state(container: &str) -> ContainerState {
-    match docker(&["inspect", "-f", "{{.State.Running}}", container]).await {
-        Ok(answer) if answer.trim() == "true" => ContainerState::Running,
-        Ok(_) => ContainerState::Stopped,
-        Err(_) => ContainerState::Absent,
-    }
-}
-
-/// Waits until the service answers on its port.
-///
-/// A TCP connect rather than a health check: it is the same question every
-/// client asks, needs nothing installed in the image, and is true exactly when
-/// a plan handed the address would succeed. `docker run` returns as soon as the
-/// container is *created*, which for a database is well before it can be used.
-async fn wait_until_ready(service: &RunningService) -> Result<(), ServiceError> {
-    let deadline = std::time::Instant::now() + READY_TIMEOUT;
-    let address = service.address();
-
-    while std::time::Instant::now() < deadline {
-        // The container dying is a settled answer -- keep waiting and the King
-        // gets a timeout describing the wrong problem.
-        if container_state(&service.container).await != ContainerState::Running {
-            return Err(ServiceError::Failed {
-                name: service.name.clone(),
-                detail: format!(
-                    "the container stopped while starting; `docker logs {}` may say why",
-                    service.container
-                ),
-            });
-        }
-
-        let connected = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            tokio::net::TcpStream::connect(&address),
-        )
-        .await;
-        if matches!(connected, Ok(Ok(_))) {
-            return Ok(());
-        }
-
-        tokio::time::sleep(READY_POLL).await;
-    }
-
-    Err(ServiceError::NeverReady {
-        name: service.name.clone(),
-        port: service.port,
-        container: service.container.clone(),
-    })
 }
 
 /// Records one running service, and writes the manifest that declares it.
@@ -1810,10 +1602,11 @@ pub(crate) fn pretend_a_named_well_is_running(
     let key = city_key(city_root);
     let service = RunningService {
         name: name.to_string(),
-        image: "mongo:7".to_string(),
+        what: "mongo:7".to_string(),
         host: host.to_string(),
         port,
-        container: format!("kingdom-{key}-{name}"),
+        handle: format!("kingdom-{key}-{name}"),
+        kind: "docker",
         scope: ServiceScope::City,
         key: key.clone(),
     };
@@ -2238,6 +2031,22 @@ mode = "ro"
 mod tests {
     use super::*;
 
+    /// One container declaration, as the tests below want it.
+    ///
+    /// A helper rather than a literal in each test: a spec is two nested types
+    /// now, and what these tests are about is the scope and the reference
+    /// count, never the nesting.
+    fn container(name: &str, image: &str, port: u16, volume: Option<&str>) -> ServiceSpec {
+        ServiceSpec {
+            name: name.to_string(),
+            port,
+            kind: ResourceKind::Docker(kingdom_core::services::DockerSpec {
+                image: image.to_string(),
+                volume: volume.map(str::to_string),
+            }),
+        }
+    }
+
     /// Two projects with the same folder name must not share a database.
     ///
     /// The realistic case is `~/work/api` and `~/scratch/api`, and quietly
@@ -2262,69 +2071,6 @@ mod tests {
         assert_eq!(city_key(path), city_key(path));
     }
 
-    /// A path with spaces or dots still yields a name Docker will take.
-    #[test]
-    fn an_awkward_path_still_makes_a_usable_name() {
-        let key = city_key(Path::new("/home/king/my project (v2)"));
-        assert!(
-            key.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-            "{key} is not a usable container name fragment"
-        );
-        // And it is still a legal container name once wrapped.
-        let container = container_name(&key, "db");
-        assert!(container.starts_with("kingdom-"), "{container}");
-    }
-
-    /// Addresses are assigned from manifest order, which is what makes them
-    /// knowable *before* the container exists -- and therefore substitutable
-    /// into an environment variable.
-    #[test]
-    fn addresses_come_from_manifest_order() {
-        assert_eq!(service_address(77, 0), "172.31.77.10");
-        assert_eq!(service_address(77, 1), "172.31.77.11");
-        // Clear of Docker's own gateway at .1, which it takes for itself on
-        // every network it creates -- asked of a generated address rather than
-        // of the constant, so this still holds if the numbering changes.
-        let first = service_address(77, 0);
-        let last_octet: u8 = first.rsplit('.').next().unwrap().parse().unwrap();
-        assert!(last_octet > 1, "{first} collides with the bridge gateway");
-    }
-
-    /// A city's subnet is derived, not counted, so it survives a restart and
-    /// does not depend on the order plans were opened in.
-    #[test]
-    fn a_citys_subnet_is_stable() {
-        let key = city_key(Path::new("/home/king/work/shopfront"));
-        assert_eq!(preferred_subnet(&key), preferred_subnet(&key));
-    }
-
-    /// Only Kingdom's own subnets are recognised.
-    ///
-    /// A city whose network someone recreated on `172.17.x` must not be read as
-    /// ours, or services would be assigned addresses on a subnet the network
-    /// does not actually cover.
-    #[test]
-    fn only_our_own_subnets_are_recognised() {
-        assert_eq!(third_octet("172.31.77.0/24"), Some(77));
-        assert_eq!(third_octet("172.31.0.0/24"), Some(0));
-        assert_eq!(third_octet("172.17.0.0/16"), None);
-        assert_eq!(third_octet("10.0.0.0/8"), None);
-        assert_eq!(third_octet("nonsense"), None);
-    }
-
-    /// The data directory is looked up per image, so a manifest does not have
-    /// to know where MongoDB keeps its files.
-    #[test]
-    fn a_volume_lands_where_the_image_keeps_its_data() {
-        assert_eq!(data_dir_for("mongo:7"), "/data/db");
-        assert_eq!(data_dir_for("postgres:16"), "/var/lib/postgresql/data");
-        // Registry-qualified names resolve to the same answer.
-        assert_eq!(data_dir_for("docker.io/library/mongo:7"), "/data/db");
-        // An unknown image still gets something rather than failing.
-        assert_eq!(data_dir_for("ghcr.io/someone/thing:1"), "/data");
-    }
-
     /// A plan closed twice must not decrement the count twice.
     ///
     /// The failure this prevents is the bad one: a double release stopping a
@@ -2343,10 +2089,11 @@ mod tests {
                 id.clone(),
                 RunningService {
                     name: "db".to_string(),
-                    image: "mongo:7".to_string(),
+                    what: "mongo:7".to_string(),
                     host: "172.31.9.10".to_string(),
                     port: 27017,
-                    container: "kingdom-double-release-test-db".to_string(),
+                    handle: "kingdom-double-release-test-db".to_string(),
+                    kind: "docker",
                     scope: ServiceScope::City,
                     key: city.clone(),
                 },
@@ -2538,10 +2285,11 @@ mod tests {
                 id.clone(),
                 RunningService {
                     name: "db".to_string(),
-                    image: "mongo:7".to_string(),
+                    what: "mongo:7".to_string(),
                     host: "172.31.9.10".to_string(),
                     port: 27017,
-                    container: "kingdom-leaving-test-db".to_string(),
+                    handle: "kingdom-leaving-test-db".to_string(),
+                    kind: "docker",
                     scope: ServiceScope::City,
                     key: key.clone(),
                 },
@@ -2561,23 +2309,6 @@ mod tests {
         assert!(
             running_in(city.path()).is_empty(),
             "and the well is no longer held by this server"
-        );
-    }
-
-    /// A container is never published to the host.
-    ///
-    /// Pinned as a test because the temptation to add `-p` is exactly what the
-    /// measurement in the module docs rules out: a published port is on the
-    /// King's loopback, which is the one address a plan's namespace provably
-    /// cannot reach.
-    #[test]
-    fn nothing_is_published_to_the_kings_loopback() {
-        let source = include_str!("services.rs");
-        // The run arguments are built in `ensure_one`; no `-p`/`--publish`
-        // anywhere in this module.
-        assert!(
-            !source.contains("\"--publish\""),
-            "a published port cannot be reached from a plan's namespace"
         );
     }
 
@@ -2616,7 +2347,7 @@ mod tests {
     fn a_host_well_has_a_key_no_project_can_take() {
         assert_eq!(Scope::Host.key(), "host");
         assert_eq!(
-            container_name(&Scope::Host.key(), "cache"),
+            docker::container_name(&Scope::Host.key(), "cache"),
             "kingdom-host-cache"
         );
 
@@ -2633,12 +2364,7 @@ mod tests {
     async fn declaring_a_resource_writes_a_manifest_that_parses() {
         let dir = tempfile::tempdir().expect("a temporary city");
         let scope = Scope::City(dir.path().to_path_buf());
-        let spec = ServiceSpec {
-            name: "db".to_string(),
-            image: "postgres:16".to_string(),
-            port: 5432,
-            volume: Some("app-db".to_string()),
-        };
+        let spec = container("db", "postgres:16", 5432, Some("app-db"));
 
         let path = declare(&scope, &spec).expect("a first declaration must land");
         assert_eq!(path, dir.path().join(kingdom_core::services::MANIFEST_PATH));
@@ -2670,16 +2396,8 @@ mod tests {
         )
         .unwrap();
 
-        declare(
-            &scope,
-            &ServiceSpec {
-                name: "cache".to_string(),
-                image: "redis:7".to_string(),
-                port: 6379,
-                volume: None,
-            },
-        )
-        .expect("the second must land beside the first");
+        declare(&scope, &container("cache", "redis:7", 6379, None))
+            .expect("the second must land beside the first");
 
         let text = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(
@@ -2705,12 +2423,7 @@ mod tests {
     async fn a_duplicate_name_is_refused_before_anything_is_written() {
         let dir = tempfile::tempdir().expect("a temporary city");
         let scope = Scope::City(dir.path().to_path_buf());
-        let spec = ServiceSpec {
-            name: "db".to_string(),
-            image: "mongo:7".to_string(),
-            port: 27017,
-            volume: None,
-        };
+        let spec = container("db", "mongo:7", 27017, None);
 
         declare(&scope, &spec).expect("the first lands");
         let before = std::fs::read_to_string(scope.manifest_path()).unwrap();
@@ -2789,9 +2502,14 @@ mod tests {
             cache.manifest_path,
             home.path().join("services.toml").to_string_lossy()
         );
-        // Known even though nothing is running, because the name is derived
-        // rather than allocated -- which is what makes `docker logs` printable.
-        assert_eq!(cache.container, "kingdom-host-cache");
+        // Known even though nothing is running, because both are derived
+        // rather than allocated -- which is what makes `docker logs` printable
+        // on a row that is not up.
+        assert_eq!(cache.handle, "kingdom-host-cache");
+        assert_eq!(cache.hint, "docker logs kingdom-host-cache");
+        // And the row says what kind of thing it is, which is what the screen
+        // labels it with instead of assuming "container".
+        assert_eq!(cache.spec.kind.wire_name(), "docker");
 
         let db = &inventory.resources[1];
         assert_eq!(db.city_name.as_deref(), Some("shopfront"));
@@ -2832,6 +2550,62 @@ mod tests {
         assert!(inventory(&kingdom).await.is_empty());
     }
 
+    /// A kingdom that shares nothing asks no runtime whether it is healthy.
+    ///
+    /// The manifests are read first, and the question is put only to the kinds
+    /// something actually declares -- so the overwhelmingly common case, a
+    /// machine with no manifest anywhere, costs no subprocess at all. It used
+    /// to shell out to `docker version` to draw an empty screen, on a timer,
+    /// while the screen was open.
+    ///
+    /// Asserted through `runtime_trouble` because that is the field the answer
+    /// lands in: with nothing declared there is nothing to be troubled about,
+    /// **whether or not** this machine has Docker. That is what makes this test
+    /// true on a developer's laptop and in CI alike.
+    #[tokio::test]
+    async fn a_kingdom_that_shares_nothing_asks_no_runtime_anything() {
+        let home = tempfile::tempdir().expect("a temporary profile");
+        let _profile = crate::profile::testing::Profile::at(home.path());
+        let root = tempfile::tempdir().expect("a temporary kingdom");
+
+        let mut kingdom = Kingdom::unopened();
+        kingdom.root = root.path().to_string_lossy().to_string();
+        kingdom.cities = vec![a_city("quiet")];
+
+        assert_eq!(
+            inventory(&kingdom).await.runtime_trouble,
+            None,
+            "nothing is declared, so no runtime is asked and none can be at fault"
+        );
+    }
+
+    /// Every kind Kingdom offers can actually be run.
+    ///
+    /// The seam this change is for, pinned from the runtime side.
+    /// `ResourceKind::all` is what a manifest may name and what a form would
+    /// offer; this asserts that each of those words reaches something that
+    /// knows how to raise, stop and diagnose it.
+    ///
+    /// Without it, adding a variant to `ResourceKind` and forgetting the match
+    /// arms here would compile -- `stop` and `trouble_with_runtimes` both have
+    /// a catch-all, deliberately, because falling over in front of five working
+    /// agents is worse than logging -- and fail at the moment a King first
+    /// declared one.
+    #[tokio::test]
+    async fn every_kind_offered_has_a_runtime_behind_it() {
+        for kind in kingdom_core::ResourceKind::all() {
+            let unknown = trouble_with_runtimes(&[kind]).await;
+            // The catch-all in `trouble_with_runtimes` says this exact thing,
+            // and no kind that is genuinely wired up may produce it.
+            if let Some(said) = &unknown {
+                assert!(
+                    !said.contains("does not know how to run"),
+                    "`{kind}` is offered but nothing runs it: {said}"
+                );
+            }
+        }
+    }
+
     /// `running_in` answers with both scopes, and every caller that places a
     /// well *somewhere* has to know which is which.
     ///
@@ -2861,10 +2635,11 @@ mod tests {
                     (filed_under.clone(), name.to_string()),
                     RunningService {
                         name: name.to_string(),
-                        image: "mongo:7".to_string(),
+                        what: "mongo:7".to_string(),
                         host: "172.31.9.10".to_string(),
                         port: 27017,
-                        container: container_name(&filed_under, name),
+                        handle: docker::container_name(&filed_under, name),
+                        kind: "docker",
                         scope,
                         key: filed_under,
                     },
@@ -2917,513 +2692,5 @@ mod tests {
             dirty_files: 0,
             structure: None,
         }
-    }
-}
-
-/// Against a real Docker daemon. `cargo test -p kingdom-app --features ssr \
-/// --no-default-features -- --ignored a_host_well_serves_two_projects`
-///
-/// The claim the host scope makes, and the one that cannot be checked without
-/// a daemon: **one** container, reached by plans working in two different
-/// projects, released only when the last of them is done. Every other test of
-/// the scope is about which file is read; this is about what actually runs.
-#[cfg(test)]
-mod host_scope {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore = "needs a running Docker daemon"]
-    async fn a_host_well_serves_two_projects() {
-        let home = tempfile::tempdir().expect("a temporary profile");
-        let _profile = crate::profile::testing::Profile::at(home.path());
-
-        // Declared through the same path the form uses, so this proves the
-        // write and the read together rather than one against a hand-made file.
-        declare(
-            &Scope::Host,
-            &ServiceSpec {
-                name: "scopecache".to_string(),
-                image: "redis:7-alpine".to_string(),
-                port: 6379,
-                volume: None,
-            },
-        )
-        .expect("the King's own manifest must be writable");
-
-        // Two projects that declare nothing of their own. Whatever they reach
-        // is the machine's, which is the point.
-        let one = tempfile::tempdir().expect("project one");
-        let two = tempfile::tempdir().expect("project two");
-        let alice = PlanId::new("host-scope-alice");
-        let bob = PlanId::new("host-scope-bob");
-
-        let raised = raise(&Scope::Host, &[alice.clone()].into_iter().collect())
-            .await
-            .expect("the first plan raises it");
-        assert_eq!(raised.len(), 1);
-        assert_eq!(raised[0].scope, ServiceScope::Host);
-        let container = raised[0].container.clone();
-        assert_eq!(container, "kingdom-host-scopecache");
-
-        // A plan in a *different* project finds the same container standing.
-        // Through `reconcile`, because that is what a second plan opening
-        // actually does, and it must hand down *both* drawers -- the whole
-        // population, not an increment.
-        reconcile(vec![
-            (alice.clone(), one.path().to_path_buf()),
-            (bob.clone(), two.path().to_path_buf()),
-        ])
-        .await;
-        let adopted = running_in(two.path());
-        assert_eq!(
-            adopted[0].address(),
-            raised[0].address(),
-            "two projects must reach one address, or the scope means nothing"
-        );
-        assert_eq!(users_of_key("host", "scopecache"), 2);
-
-        // And both are told the same address. Neither plan has a namespace
-        // here, so both get the container's own address; an isolated plan would
-        // be told its own loopback instead.
-        for plan in [&alice, &bob] {
-            assert_eq!(
-                address_for(plan, &raised[0]),
-                raised[0].address(),
-                "a plan on the machine's network reaches the container directly"
-            );
-        }
-
-        // One project finishing does not take it from the other. This is the
-        // reference count spanning cities, which is the whole difference
-        // between a host well and a city one. Alice finishing means she is no
-        // longer in the population; Bob still is.
-        reconcile(vec![(bob.clone(), two.path().to_path_buf())]).await;
-        assert_eq!(users_of_key("host", "scopecache"), 1);
-        assert_eq!(
-            container_state(&container).await,
-            ContainerState::Running,
-            "another project is still using it"
-        );
-
-        // And the last one out stops it: an empty population, which is also
-        // what closing the kingdom hands down.
-        reconcile(Vec::new()).await;
-        assert_eq!(users_of_key("host", "scopecache"), 0);
-        assert_eq!(container_state(&container).await, ContainerState::Stopped);
-
-        let _ = docker(&["rm", "-f", &container]).await;
-        let _ = docker(&["network", "rm", &network_name("host")]).await;
-    }
-}
-
-/// Against a real Docker daemon. `cargo test -p kingdom-app --features ssr \
-/// --no-default-features -- --ignored services_against_real_docker`
-///
-/// Ignored by default, the rule `kingdom-browser` follows for Chrome: the suite
-/// has to run on a bare machine, and nothing in CI has a daemon. But the
-/// interesting half of this module *is* the conversation with Docker, so it is
-/// worth being able to run for real.
-#[cfg(test)]
-mod real_docker {
-    use super::*;
-
-    /// The whole lifecycle: start, adopt, share, release, and keep the data.
-    ///
-    /// One test rather than five because each step needs the previous one's
-    /// container, and five tests would either serialise by luck or fight over
-    /// the same name.
-    #[tokio::test]
-    #[ignore = "needs a running Docker daemon"]
-    async fn services_against_real_docker() {
-        let root = std::env::temp_dir().join("kingdom-services-real-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".kingdom")).expect("make the city");
-        std::fs::write(
-            root.join(kingdom_core::services::MANIFEST_PATH),
-            r#"
-            [[service]]
-            name  = "cache"
-            image = "redis:7-alpine"
-            port  = 6379
-            volume = "kingdom-services-real-test-data"
-
-            # Declared exactly as the form now writes one: an image, a name and
-            # nothing else. Postgres exits 1 on first boot without a password,
-            # so this service comes up only if `known_image`'s boot environment
-            # is actually passed to `docker run` -- which is the whole point of
-            # the table. Its port is left out too, because the form fills that
-            # in from the image.
-            [[service]]
-            name  = "pg"
-            image = "postgres:16"
-            port  = 5432
-            "#,
-        )
-        .expect("write the manifest");
-
-        let one = PlanId::new("real-plan-1");
-        let two = PlanId::new("real-plan-2");
-
-        // First plan starts the services.
-        reconcile(vec![(one.clone(), root.clone())]).await;
-        let up = running_in(&root);
-        assert_eq!(up.len(), 2, "the manifest declares a cache and a postgres");
-        let service = up[0].clone();
-        assert!(
-            service.host.starts_with("172.31."),
-            "expected a Kingdom subnet, got {}",
-            service.host
-        );
-
-        // The address actually answers -- the whole claim, tested rather than
-        // trusted.
-        tokio::net::TcpStream::connect(service.address())
-            .await
-            .expect("the service must answer at the address we hand to plans");
-
-        // And so does the Postgres, which is the case that could not start
-        // before: nothing in the manifest gives it a password, so it comes up
-        // only because `known_image` hands one to `docker run`.
-        let postgres = up[1].clone();
-        assert_eq!(postgres.name, "pg");
-        tokio::net::TcpStream::connect(postgres.address())
-            .await
-            .expect("postgres must boot from the image's own defaults");
-
-        // And that address is what a plan is told. `one` has no namespace here,
-        // so it is told the container's address -- the shared-network answer,
-        // and the fallback an isolated plan gets if its loopback relay could
-        // not be raised.
-        assert_eq!(address_for(&one, &service), service.address());
-
-        // Second plan finds it standing rather than starting another.
-        reconcile(vec![
-            (one.clone(), root.clone()),
-            (two.clone(), root.clone()),
-        ])
-        .await;
-        let again = running_in(&root);
-        assert_eq!(
-            again[0].container, service.container,
-            "adopted, not restarted"
-        );
-        assert_eq!(users_of(&root, "cache"), 2);
-
-        // Leave something behind, to prove the volume outlives the container.
-        let written = docker(&[
-            "exec",
-            &service.container,
-            "redis-cli",
-            "set",
-            "kingdom-probe",
-            "survived",
-        ])
-        .await;
-        assert!(
-            written.is_ok(),
-            "could not write to the service: {written:?}"
-        );
-        let _ = docker(&["exec", &service.container, "redis-cli", "save"]).await;
-
-        // One plan leaving does not stop it.
-        reconcile(vec![(two.clone(), root.clone())]).await;
-        assert_eq!(users_of(&root, "cache"), 1);
-        assert_eq!(
-            container_state(&service.container).await,
-            ContainerState::Running
-        );
-
-        // The last plan leaving does.
-        reconcile(Vec::new()).await;
-        assert_eq!(users_of(&root, "cache"), 0);
-        assert_eq!(
-            container_state(&service.container).await,
-            ContainerState::Stopped
-        );
-
-        // A later plan gets it back, with its data.
-        let three = PlanId::new("real-plan-3");
-        reconcile(vec![(three.clone(), root.clone())]).await;
-        let restarted = running_in(&root);
-        assert_eq!(restarted[0].container, service.container);
-        let read = docker(&[
-            "exec",
-            &service.container,
-            "redis-cli",
-            "get",
-            "kingdom-probe",
-        ])
-        .await
-        .expect("read back");
-        assert_eq!(
-            read.trim(),
-            "survived",
-            "the volume must outlive the container -- that is the King's data"
-        );
-
-        // Tidy up: this test owns every name it used.
-        reconcile(Vec::new()).await;
-        let _ = docker(&["rm", "-f", &service.container]).await;
-        let _ = docker(&["rm", "-f", &postgres.container]).await;
-        let _ = docker(&["volume", "rm", "kingdom-services-real-test-data"]).await;
-        let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A restart brings the well back to the agents that had it.
-    ///
-    /// The failure this whole change exists to fix. A container does not live
-    /// in the server process but the registry does, so a restart -- which
-    /// `cargo leptos watch` performs on every save -- used to leave five live
-    /// agents with no database and every surface reporting "not started", until
-    /// one of them happened to take a turn.
-    ///
-    /// Simulates the restart honestly: the registry is emptied **and** the
-    /// container stopped, which is the state the previous server's last release
-    /// leaves behind. What must come back is the *same* container with the
-    /// *same* data, because adopt-rather-than-recreate is what the King's data
-    /// depends on.
-    #[tokio::test]
-    #[ignore = "needs a running Docker daemon"]
-    async fn a_restart_brings_the_well_back_to_the_agents_that_had_it() {
-        let root = std::env::temp_dir().join("kingdom-services-restart-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".kingdom")).expect("make the city");
-        std::fs::write(
-            root.join(kingdom_core::services::MANIFEST_PATH),
-            r#"
-            [[service]]
-            name  = "cache"
-            image = "redis:7-alpine"
-            port  = 6379
-            env   = { REDIS_URL = "redis://{host}:{port}" }
-            volume = "kingdom-services-restart-test-data"
-            "#,
-        )
-        .expect("write the manifest");
-
-        let alice = PlanId::new("restart-alice");
-        let bob = PlanId::new("restart-bob");
-        let population = vec![(alice.clone(), root.clone()), (bob.clone(), root.clone())];
-
-        // A session in which two agents are working with a database up.
-        reconcile(population.clone()).await;
-        let before = running_in(&root);
-        assert_eq!(before.len(), 1);
-        let service = before[0].clone();
-        assert_eq!(users_of(&root, "cache"), 2);
-
-        let written = docker(&[
-            "exec",
-            &service.container,
-            "redis-cli",
-            "set",
-            "kingdom-restart-probe",
-            "survived",
-        ])
-        .await;
-        assert!(written.is_ok(), "could not write: {written:?}");
-        let _ = docker(&["exec", &service.container, "redis-cli", "save"]).await;
-
-        // The server stops. The registry goes with the process; the container
-        // is left stopped, as the last release would have left it.
-        let _ = docker(&["stop", &service.container]).await;
-        {
-            let mut registry = registry();
-            registry.running.clear();
-            registry.users.clear();
-        }
-        assert!(
-            running_in(&root).is_empty(),
-            "the fixture must start from a server that knows nothing"
-        );
-
-        // The server starts again and opens the kingdom, which is the one call
-        // this change adds.
-        reconcile(population).await;
-
-        let after = running_in(&root);
-        assert_eq!(after.len(), 1, "the well is standing again");
-        assert_eq!(
-            after[0].container, service.container,
-            "adopted, not recreated"
-        );
-        assert_eq!(
-            after[0].address(),
-            service.address(),
-            "the address must survive a restart, or every agent's env is stale"
-        );
-        assert_eq!(
-            users_of(&root, "cache"),
-            2,
-            "both agents that had it must be counted again, not one and not none"
-        );
-
-        // It answers, and the King's data is where he left it.
-        tokio::net::TcpStream::connect(after[0].address())
-            .await
-            .expect("the service must answer at the address handed to plans");
-        let read = docker(&[
-            "exec",
-            &service.container,
-            "redis-cli",
-            "get",
-            "kingdom-restart-probe",
-        ])
-        .await
-        .expect("read back");
-        assert_eq!(
-            read.trim(),
-            "survived",
-            "a restart must not cost the King his data"
-        );
-
-        reconcile(Vec::new()).await;
-        let _ = docker(&["rm", "-f", &service.container]).await;
-        let _ = docker(&["volume", "rm", "kingdom-services-restart-test-data"]).await;
-        let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Two reconciles at once raise one container, not two.
-    ///
-    /// A kingdom opening, a plan opening and a turn beginning can all land
-    /// within a second of each other. Without the `RAISING` guard two of them
-    /// reach `docker run` for the same container name and the loser takes a
-    /// bare "name already in use", which reads as a Kingdom bug rather than a
-    /// race. Fired concurrently rather than in sequence, because in sequence
-    /// this passes with no guard at all.
-    #[tokio::test]
-    #[ignore = "needs a running Docker daemon"]
-    async fn concurrent_reconciles_raise_one_container() {
-        let root = std::env::temp_dir().join("kingdom-services-race-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".kingdom")).expect("make the city");
-        std::fs::write(
-            root.join(kingdom_core::services::MANIFEST_PATH),
-            r#"
-            [[service]]
-            name  = "cache"
-            image = "redis:7-alpine"
-            port  = 6379
-            "#,
-        )
-        .expect("write the manifest");
-
-        let container = container_name(&city_key(&root), "cache");
-        let _ = docker(&["rm", "-f", &container]).await;
-
-        let running: Vec<_> = (1..=4)
-            .map(|n| {
-                let plan = PlanId::new(format!("race-plan-{n}"));
-                let root = root.clone();
-                tokio::spawn(async move { reconcile(vec![(plan, root)]).await })
-            })
-            .collect();
-        for handle in running {
-            handle.await.expect("no reconcile may panic");
-        }
-
-        // One container by that name, and it is up.
-        let found = docker(&[
-            "ps",
-            "--all",
-            "--filter",
-            &format!("name=^{container}$"),
-            "--format",
-            "{{.Names}}",
-        ])
-        .await
-        .expect("docker must answer");
-        assert_eq!(
-            found.lines().filter(|l| !l.trim().is_empty()).count(),
-            1,
-            "four concurrent reconciles must leave exactly one container: {found}"
-        );
-        assert_eq!(container_state(&container).await, ContainerState::Running);
-
-        reconcile(Vec::new()).await;
-        let _ = docker(&["rm", "-f", &container]).await;
-        let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
-        let _ = std::fs::remove_dir_all(&root);
-    }
-}
-
-/// The five-agent rehearsal, driven end to end against real Docker.
-///
-/// `cargo test -p kingdom-app --features ssr --no-default-features -- \
-///  --ignored five_agents_share_one_database`
-///
-/// Separate from the lifecycle test above because it proves a different claim:
-/// not that one service starts and stops correctly, but that *five plans at
-/// once* get one database and can see each other's writes. That is the whole
-/// feature, and it is the one thing a unit test cannot reach.
-#[cfg(test)]
-mod five_agents {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore = "needs a running Docker daemon and the seeded `shopfront` realm"]
-    async fn five_agents_share_one_database() {
-        let Ok(city) = std::env::var("SHOPFRONT_CITY") else {
-            eprintln!("set SHOPFRONT_CITY to the seeded shopfront city directory");
-            return;
-        };
-        let root = std::path::PathBuf::from(city);
-
-        // Five plans, opened one after another as the King would -- each open
-        // reconciling against the population so far, which is exactly what
-        // `begin_plan` does.
-        let plans: Vec<PlanId> = (1..=5).map(|n| PlanId::new(format!("agent-{n}"))).collect();
-
-        let mut addresses = Vec::new();
-        for open_so_far in 1..=plans.len() {
-            let population: Vec<(PlanId, PathBuf)> = plans[..open_so_far]
-                .iter()
-                .map(|plan| (plan.clone(), root.clone()))
-                .collect();
-            reconcile(population).await;
-            let up = running_in(&root);
-            assert_eq!(up.len(), 1, "the manifest declares exactly one service");
-            addresses.push(up[0].address());
-        }
-
-        // One address, five plans. If this fails, each agent got its own
-        // database and the entire feature is decorative.
-        assert!(
-            addresses.windows(2).all(|w| w[0] == w[1]),
-            "all five agents must be handed the SAME address, got {addresses:?}"
-        );
-        assert_eq!(users_of(&root, "db"), 5, "five plans must be counted");
-
-        // And they are all counted against one container.
-        let running = running_in(&root);
-        assert_eq!(running.len(), 1);
-        println!(
-            "five agents sharing {} at {}",
-            running[0].image,
-            running[0].address()
-        );
-
-        // Four leaving does not take the database away from the fifth.
-        reconcile(vec![(plans[4].clone(), root.clone())]).await;
-        assert_eq!(users_of(&root, "db"), 1);
-        assert_eq!(
-            container_state(&running[0].container).await,
-            ContainerState::Running,
-            "the last agent is still working -- the database must still be up"
-        );
-
-        // The last one out stops it.
-        reconcile(Vec::new()).await;
-        assert_eq!(users_of(&root, "db"), 0);
-        assert_eq!(
-            container_state(&running[0].container).await,
-            ContainerState::Stopped
-        );
-
-        let _ = docker(&["rm", "-f", &running[0].container]).await;
-        let _ = docker(&["volume", "rm", "shopfront-db"]).await;
-        let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
     }
 }

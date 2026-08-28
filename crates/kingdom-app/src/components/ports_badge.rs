@@ -101,7 +101,7 @@ pub fn PortsBadge(
                                         // address is copied out of is the
                                         // honest affordance.
                                         <code class="wells-address">{service.address.clone()}</code>
-                                        <span class="wells-image">{service.image.clone()}</span>
+                                        <span class="wells-image">{service.what.clone()}</span>
                                         // Which level it is shared at, because
                                         // it changes what the count beside it
                                         // means: three plans on this project is

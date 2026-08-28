@@ -12,7 +12,10 @@ agents fighting over `:3000`. This is for the resources where sharing is the
 *point*: five plans on a project that needs MongoDB should reach one MongoDB,
 started once and stopped once.
 
-Today a shared resource is always a **Docker container**.
+Today a shared resource is always a **Docker container** — that is the one
+*kind* Kingdom knows how to run. What it is, and what runs it, are now separate
+things in the code, so a second kind is a variant rather than a rewrite: see
+[what kind of thing it is](#what-kind-of-thing-it-is-type).
 
 ## How an agent reaches one
 
@@ -31,17 +34,19 @@ address possible rather than what forbids it.
 ### What a declaration may say
 
 The form writes TOML and the file is the source of truth. A `[[service]]` block
-takes exactly four keys — there is no fifth:
+takes five keys, and only four of them are ever required:
 
 | Property | Required | Type | What is allowed | What it does |
 |---|---|---|---|---|
+| `type` | no | string | a kind Kingdom has; today only `docker` | What kind of thing it is. `docker` when omitted, which is what every manifest written before kinds existed means |
 | `name` | yes | string | letters, digits, `-` and `_`; unique within the file | What you call it, and half the container's name |
-| `image` | yes | string | any Docker image, **tag included** (`mongo:7`, not `mongo`) | What is run |
+| `image` | yes | string | any Docker image, **tag included** (`mongo:7`, not `mongo`) | What is run. Docker's |
 | `port` | yes | integer | 1–65535 | Where the service listens — *and* where an agent reaches it |
-| `volume` | no | string | a Docker volume name | Keeps the data when the container stops, mounted at the image's data directory. Without one, the data goes with the container |
+| `volume` | no | string | a Docker volume name | Keeps the data when the container stops, mounted at the image's data directory. Without one, the data goes with the container. Docker's |
 
 ```toml
 [[service]]
+type   = "docker"
 name   = "db"
 image  = "mongo:7"
 port   = 27017
@@ -70,6 +75,49 @@ A tag and a registry are not part of the identity: `docker.io/library/postgres:1
 is still Postgres. An image outside the table works fine — name the port it
 listens on. Without the boot column, declaring `postgres:16` produced a resource
 that never started, and all you saw was "never answered on port 5432".
+
+### What kind of thing it is (`type`)
+
+`type` names the kind. There is one, `docker`, and leaving the line out means
+exactly that — so **no existing manifest changes**, and the form writes the line
+anyway because what Kingdom writes should say what it means.
+
+A `type` Kingdom does not have is **refused by name**, not quietly treated as a
+container:
+
+```
+service `db` is of type `podman`, which is not a kind of shared resource
+Kingdom knows. Use one of: docker.
+```
+
+Refused, because a project that asked for a runtime Kingdom cannot drive and
+silently got a different one would find out from the container's behaviour an
+hour later, and read it as a bug in its own code.
+
+`name` and `port` are asked of every kind: the port is what an agent is told,
+and a kind with no port would be a resource nobody could reach. Everything else
+belongs to the kind — `image` and `volume` are Docker's, and a kind without
+containers would neither have them nor be asked for them.
+
+#### What adding a kind costs
+
+The division in the code is between what is true of **sharing** — the reference
+count, the two levels, raising once and stopping when the last agent is done —
+and what is true of a **runtime**. The first is `services/mod.rs` in both
+crates; the second is `services/docker.rs`.
+
+So a second kind is: a variant on `ResourceKind` carrying what that kind needs,
+a module beside `docker.rs` that raises, stops and diagnoses it, and the match
+arms the compiler then demands. Nothing about the reference count, the scopes or
+the ledger is touched.
+
+Deliberately **not** a trait. With one runtime a trait is one implementation
+behind a `dyn`, and an exhaustive `match` is the stronger guarantee anyway: it
+makes the compiler name every place that has to decide something, where a driver
+shaped wrongly for a new kind would compile and be wrong at run time. Two of
+those places keep a catch-all on purpose — stopping and diagnosing — because
+falling over in front of five working agents is worse than logging and carrying
+on. A test walks every kind Kingdom offers and asserts something can run it.
 
 ### Folders, for a sealed plan (`[[mount]]`)
 
@@ -275,8 +323,8 @@ work is merged.
 
 | What you see | What it means |
 |---|---|
-| An orange banner across the screen | Docker is not installed, or the daemon is not answering. Try `sudo systemctl start docker`. |
-| A yellow row with a file path | That manifest does not parse. The message says why and which file. **Nothing else in that file works either** until it is fixed. |
+| An orange banner across the screen | The runtime a declared resource needs is missing, or not answering — for Docker, try `sudo systemctl start docker`. Asked only of the kinds something actually declares, so a machine that shares nothing never sees it. |
+| A yellow row with a file path | That manifest does not parse — bad TOML, a duplicate name, or a `type` naming a kind Kingdom does not have. The message says why and which file. **Nothing else in that file works either** until it is fixed. |
 | `not started` | Ordinary. Nothing needs it — a project with no live agent open. |
 | `unknown` | It is declared, but with no daemon answering Kingdom cannot tell. |
 
@@ -307,7 +355,10 @@ needs no daemon, and almost every project declares nothing.
 
 | File | What it holds |
 |---|---|
-| `crates/kingdom-core/src/services.rs` | The manifest, its validation, the scopes, and rendering a block back out. Pure and wasm-safe, so all of it is tested without a disk or a daemon. |
-| `crates/kingdom-app/src/services.rs` | The registry, the conversation with Docker, the ledger, and the writer. |
+| `crates/kingdom-core/src/services/mod.rs` | The manifest, its validation, the scopes, `ResourceKind`, and rendering a block back out. Pure and wasm-safe, so all of it is tested without a disk or a daemon. |
+| `crates/kingdom-core/src/services/docker.rs` | What a container *is*: `DockerSpec`, and the table of well-known images. |
+| `crates/kingdom-core/src/services/mounts.rs` | Folders a sealed plan may see. Shares the file with the services because both answer "what does this project need in order to run?", while reaching no runtime at all. |
+| `crates/kingdom-app/src/services/mod.rs` | The registry, the reference count, `reconcile`, the ledger, and the writer. Everything that is about *sharing*. |
+| `crates/kingdom-app/src/services/docker.rs` | The conversation with the daemon: `docker run`, the network per scope, the `/24`, the wait for a port. Also the tests that need a real daemon. |
 | `crates/kingdom-app/src/components/wells.rs` | The screen. |
 | `crates/kingdom-app/src/components/ports_badge.rs` | The badge in a chamber. |
