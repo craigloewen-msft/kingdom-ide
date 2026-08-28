@@ -1100,6 +1100,35 @@ mod live {
             "a sealed plan should see only its own processes, saw {processes}"
         );
 
+        // Something written into the plan's browser profile *from the host,
+        // after the namespace is up* must be executable inside it. That is
+        // exactly the shape of a browser launch: `cpu_shim` writes
+        // `chrome-confined.sh` into the profile out here, and the `nsenter`
+        // wrapper runs it in there.
+        //
+        // The bind alone is not enough, which is what this pins. A bind holds
+        // an inode, so a host that *replaces* the profile directory -- as
+        // `BrowserSession::launch` did, with `remove_dir_all` before
+        // `create_dir_all` -- leaves this mount pointing at something nothing
+        // can reach, and every `browser_*` tool in a sealed plan dies with
+        // `nsenter: failed to execute ...: No such file or directory`. Reported
+        // from a real sealed plan; nothing else in this suite saw it.
+        use std::os::unix::fs::PermissionsExt as _;
+        let profile = kingdom_browser::profile_dir(plan.as_str());
+        // Through the real function, not a copy of it: this is a launch, and a
+        // launch clears the profile before `cpu_shim` writes into it. A version
+        // that skipped this step would pass against the broken code too.
+        kingdom_browser::clear_profile(&profile);
+        let shim = profile.join("chrome-confined.sh");
+        std::fs::write(&shim, "#!/bin/sh\necho shim-ran\n").expect("the host writes the shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            run(&shim.display().to_string()),
+            "shim-ran",
+            "the profile is bound in, but the host cut the mount out from under \
+             it -- a sealed plan's browser cannot launch"
+        );
+
         crate::namespaces::shutdown(&plan);
 
         // Shutting a sealed plan down takes its scratch root with it. Left
