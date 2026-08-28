@@ -343,7 +343,7 @@ because a box was clicked. A folder shared by hand is listed too, even if its
 tool has left `PATH` or the folder is gone: a stale line is the one most worth
 clearing.
 
-Six things about the mount namespace that were measured rather than assumed,
+Seven things about the mount namespace that were measured rather than assumed,
 each a silent wrong answer rather than an error:
 
 - **`nsenter --wdns`, not `--wd` and not `current_dir`.** Every caller sets the
@@ -361,6 +361,16 @@ each a silent wrong answer rather than an error:
   It is also the one bind whose source may not exist yet — a profile is created
   when a browser first launches, long after the holder built its root — so it is
   created before it is mounted rather than assumed.
+- **And binding it was only half the answer: the host must never *replace* that
+  directory.** A bind holds an inode, not a path, so `remove_dir_all` followed
+  by `create_dir_all` — which is what every browser launch did, to clear a
+  stale `SingletonLock` — leaves the plan's mount pointing at an unlinked inode
+  and gives back the *identical* `nsenter` error with the bind perfectly in
+  place. Measured both ways on a namespace built by hand: deleted and recreated,
+  the shim is not found and nothing inside can even write to the profile;
+  emptied in place, the shim runs and Chrome starts. `clear_profile` is that
+  rule, and its test asserts the profile's inode rather than its emptiness —
+  emptiness alone is true of the broken version too.
 - **A resolver of our own, installed *after* the pivot**: `/etc/resolv.conf` is
   an **absolute** symlink to somewhere unmounted on both WSL and
   systemd-resolved machines, so DNS fails while the network is perfectly up.

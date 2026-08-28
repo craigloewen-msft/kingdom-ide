@@ -423,8 +423,11 @@ impl BrowserSession {
         self.handler.abort();
 
         // The profile is this session's alone -- named from the plan id -- so
-        // it goes with it. This is the reclaim that keeps /tmp from filling.
-        let _ = std::fs::remove_dir_all(&self.profile);
+        // its contents go with it. This is the reclaim that keeps /tmp from
+        // filling. Emptied rather than removed: see [`clear_profile`]. The
+        // reaper can fire in the middle of a live sealed plan, and unlinking
+        // the directory here would break that plan's *next* browser call.
+        clear_profile(&self.profile);
         // And the shim that put it in a namespace, for the same reason.
         if let Some(wrapper) = &self.namespace_wrapper {
             let _ = std::fs::remove_file(wrapper);
@@ -508,9 +511,13 @@ impl BrowserSession {
         // Profiles persist between Tool calls because the Chrome process
         // persists. Reusing one after a server crash leaves Chromium's
         // SingletonLock behind and turns every future launch into a false
-        // "Chrome missing".
+        // "Chrome missing" -- so the profile is cleared before every launch.
+        //
+        // Cleared, not removed. See [`clear_profile`]: a sealed plan has this
+        // exact directory bind-mounted into its private /tmp, and unlinking it
+        // leaves that mount pointing at an inode nothing can reach.
         let profile = profile_dir(plan);
-        let _ = std::fs::remove_dir_all(&profile);
+        clear_profile(&profile);
         let (width, height) = configured_viewport();
 
         // A fixed CDP port, only for a plan with a namespace of its own. See
@@ -1429,10 +1436,86 @@ fn cached_chrome() -> Option<PathBuf> {
 /// execute ...: No such file or directory`. Measured from inside a sealed
 /// plan. Exported rather than re-derived there because the hash has to agree
 /// between the two crates, and two copies of a hash drift.
+///
+/// **And the bind is only half of it: this directory must never be replaced.**
+/// A bind holds an inode, so deleting and recreating the profile gives exactly
+/// the same failure with the mount still perfectly in place. Nothing here may
+/// `remove_dir_all` a live plan's profile; [`clear_profile`] empties it
+/// instead, and says why.
 pub fn profile_dir(plan: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     plan.hash(&mut hasher);
     Path::new("/tmp").join(format!("{PROFILE_PREFIX}{:016x}", hasher.finish()))
+}
+
+/// Empties a profile directory **without replacing it**.
+///
+/// # Why this is not `remove_dir_all` followed by `create_dir_all`
+///
+/// It was, and that was the whole of "the browser fails to run for a project
+/// with an isolated file system".
+///
+/// A sealed plan's holder bind-mounts [`profile_dir`] into its private `/tmp`
+/// when it builds its root -- long before any browser launches. A bind points
+/// at an **inode**, not at a path. `remove_dir_all` unlinks that inode, so the
+/// `create_dir_all` a moment later makes a *different* directory at the same
+/// path: the host writes `chrome-confined.sh` into the new one while the
+/// namespace still holds the old, unreachable one. Every `browser_*` tool then
+/// dies with
+///
+/// ```text
+/// nsenter: failed to execute /tmp/kingdom-chrome-<hash>/chrome-confined.sh: No such file or directory
+/// ```
+///
+/// Measured, on a namespace built by hand with the same flags
+/// `namespaces::enter_prefix` uses: with the directory deleted and recreated
+/// the shim is not found *and* nothing inside can write to the profile at all;
+/// with it emptied in place, the shim runs and Chrome starts. The stale mount
+/// cannot be repaired from the host, and the plan lasts far longer than one
+/// browser session, so the rule is simply that the directory is created once
+/// and never unlinked while a plan is alive.
+///
+/// Everything the deletion was *for* is kept: the contents go, including the
+/// `SingletonLock` a crashed server leaves behind and the hundreds of megabytes
+/// of code cache a session accumulates.
+///
+/// [`sweep_orphans`] is deliberately **not** built on this. It runs at startup
+/// against profiles whose owning server is gone, where no live namespace can be
+/// holding the mount and the directory itself is what should go.
+///
+/// Best effort throughout, like everything else on these paths: a profile that
+/// cannot be emptied is a browser that may fail to launch, which is already
+/// reported, and is not worth a second failure mode of its own.
+///
+/// **Public** for the same reason [`profile_dir`] is: `kingdom-app`'s live
+/// sealed-namespace test drives this exact function across the boundary, so
+/// that the regression is pinned against what a browser really does rather
+/// than against a copy of it.
+pub fn clear_profile(profile: &Path) {
+    // Created if it is not there, so the one caller that needs a directory to
+    // write into does not have to ask twice -- and so the first clear of a
+    // sealed plan's profile is the *only* time the inode is ever chosen.
+    if std::fs::create_dir_all(profile).is_err() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(profile) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        // `file_type` rather than `path.is_dir()`: it does not follow a
+        // symlink, so a link pointing out of the profile is unlinked rather
+        // than followed and its target emptied.
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            _ => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// The prefix every Kingdom profile directory carries.
@@ -2133,6 +2216,67 @@ mod tests {
 
         let _ = holder.kill();
         let _ = holder.wait();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clearing a profile keeps the very same directory.
+    ///
+    /// This is the whole of the sealed-plan browser fix, in the one property a
+    /// test can check on a bare machine. A sealed plan's holder bind-mounts the
+    /// profile into its private `/tmp` *before* any browser exists, and a bind
+    /// holds an inode rather than a path -- so a profile that is deleted and
+    /// recreated leaves the plan's mount pointing at something nothing can
+    /// reach, and every `browser_*` tool fails with `nsenter: failed to execute
+    /// .../chrome-confined.sh: No such file or directory`.
+    ///
+    /// The inode is therefore asserted, not just the emptiness. Emptiness alone
+    /// passes for `remove_dir_all` + `create_dir_all`, which is exactly the bug.
+    #[test]
+    fn clearing_a_profile_empties_it_without_replacing_it() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = test_dir("clearing");
+        let profile = root.join(format!("{PROFILE_PREFIX}000000000000000c"));
+        std::fs::create_dir_all(profile.join("Default/Code Cache"))
+            .expect("the test needs a profile with something in it");
+        std::fs::write(profile.join("SingletonLock"), "stale").unwrap();
+        std::fs::write(profile.join("Default/Code Cache/blob"), "cached").unwrap();
+
+        let before = std::fs::metadata(&profile)
+            .expect("the profile exists")
+            .ino();
+        clear_profile(&profile);
+        let after = std::fs::metadata(&profile)
+            .expect("the profile must still be there")
+            .ino();
+
+        assert_eq!(
+            before, after,
+            "the profile directory was replaced; a sealed plan's bind mount is \
+             now stale and its browser cannot launch"
+        );
+        assert_eq!(
+            std::fs::read_dir(&profile).unwrap().count(),
+            0,
+            "a stale SingletonLock or code cache left behind defeats the clear"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A profile that is not there yet is created rather than refused.
+    ///
+    /// `cpu_shim` writes into the directory immediately afterwards, and the
+    /// first launch of a plan is always this case.
+    #[test]
+    fn clearing_a_profile_that_does_not_exist_creates_it() {
+        let root = test_dir("clearing-fresh");
+        let profile = root.join(format!("{PROFILE_PREFIX}000000000000000d"));
+
+        clear_profile(&profile);
+
+        assert!(profile.is_dir(), "the first launch has nowhere to write");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
