@@ -8,14 +8,38 @@ reports its own loading.
 Every file on the map is a building, and its dimensions are measured from the
 file itself. The two axes carry two different facts.
 
-**The base is how much code there is.** A folder's ground is divided among its
-contents by weight — `20 + √bytes` for a file — so a big file gets a visibly
-bigger plot than its neighbours: 64 KB buys about five times the lot area of
-1 KB. What stays fixed is the *average* plot per file (`LAND_PER_FILE`), which
-is why a 2,000-file repository grows a larger island rather than cramming the
-same ground into smaller houses. One consequence worth knowing: a plot is a
-*share of its folder*, so the same file looks bigger among small siblings than
-among large ones.
+**The base is how much content there is, in proportion.** A folder's ground is
+divided among its contents by **line count**, linearly: a file with twice as
+much in it gets twice the lot, and a hundred times as much gets a hundred times
+the lot. The house standing on that lot covers a fixed share of it
+(`LOT_COVERAGE`), so the proportion survives all the way to what the eye
+actually sees. What stays fixed is the *average* plot per file
+(`LAND_PER_FILE`), which is why a 2,000-file repository grows a larger island
+rather than cramming the same ground into smaller houses. One consequence worth
+knowing: a plot is a *share of its folder*, so the same file looks bigger among
+small siblings than among large ones.
+
+It was `20 + √bytes`, and the square root was the fault the King reported: the
+curve spent most of its range before the files that matter began, so 64 KB
+bought about five times the lot of 1 KB rather than sixty-four. Measured over
+this repository's own 235 files, only **33%** of holdings stood within ±43% of
+their proportional share, and a file with exactly twice a neighbour's content
+drew a median **0.66×** the area — less than the smaller file's own share, let
+alone twice it. Linearly the same figure is **87%**.
+
+Two floors keep the rule drawable rather than absolute:
+
+- **`MIN_HOLDING_LINES` (60).** Taken literally a three-line `mod.rs` earns a
+  three-line lot, and the house on it would be under a world unit across with a
+  height ceiling below the 11-unit floor every archetype is modelled against.
+  The proportion is honoured down to about a screenful of code and no further;
+  that costs about a tenth of the files here their exact share.
+- **`UNREAD_HOLDING_LINES` (120).** Binary assets, and anything over 2 MB, are
+  never opened, so their line count is zero because nobody counted — not
+  because they are empty. They get a fixed nominal lot. Sizing them by bytes
+  instead would hand one 3.5 MB bundled `.min.js` a quarter of the town, which
+  is exactly the claim the linear rule does not make: **it is a rule about
+  text.**
 
 **The height is how tangled it is** — branches per line of code, not length.
 Length is already the base, and measured across this repository lines and total
