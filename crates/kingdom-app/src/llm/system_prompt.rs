@@ -18,9 +18,10 @@
 //! Phoenix sends none of them and does better regardless, and a prompt that is
 //! *nearly* Phoenix's plus four house paragraphs is neither.
 //!
-//! **Phoenix wins on wording, never on facts about Kingdom.** [`SHARED_MACHINE`]
-//! has no Phoenix counterpart and is kept anyway, because sharing one machine
-//! between agents is Kingdom's own subject. [`MERMAID`] is the other way round:
+//! **Phoenix wins on wording, never on facts about Kingdom.**
+//! [`shared_machine_block`] has no Phoenix counterpart and is kept anyway,
+//! because sharing one machine between agents is Kingdom's own subject.
+//! [`MERMAID`] is the other way round:
 //! it is Phoenix's sentence, deleted from Kingdom for years because it was false
 //! here, and restored the day `components/markdown.rs` made it true. A
 //! description is a promise about behaviour; matching prose that promises
@@ -75,6 +76,9 @@ pub struct SystemPrompt {
     /// Every skill the workspace can reach, as a catalogue of names and
     /// descriptions. Bodies are fetched on demand by the `skill` tool.
     pub skills: Vec<Skill>,
+    /// That the machine has other tenants -- worded for how far this plan is
+    /// walled off from them. See [`shared_machine_block`].
+    pub shared_machine: String,
     /// The city's shared services and where **this plan** reaches them, or
     /// empty when it declares none.
     ///
@@ -132,6 +136,7 @@ impl SystemPrompt {
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
+            shared_machine: shared_machine_block(isolation),
             services: services_block(plan, city_root),
         }
     }
@@ -151,8 +156,10 @@ impl SystemPrompt {
         out.push_str("\n\n");
         out.push_str(BATCHING);
 
-        out.push_str("\n\n");
-        out.push_str(SHARED_MACHINE);
+        if !self.shared_machine.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&self.shared_machine);
+        }
 
         if !self.guidance.is_empty() {
             out.push_str("\n\n<project_guidance>\n");
@@ -236,7 +243,7 @@ const MERMAID: &str = "The chamber renders Markdown mermaid code fences as diagr
 
 /// That a round is the unit of cost, so independent calls belong together.
 ///
-/// No Phoenix counterpart, kept for the same reason [`SHARED_MACHINE`] is: it
+/// No Phoenix counterpart, kept for the same reason [`shared_machine_block`] is: it
 /// states a fact about *Kingdom's* transport rather than improving on Phoenix's
 /// wording. `copilot::armed` sets `parallel_tool_calls` and its comment already
 /// says what that buys -- "(N-1) round trips whenever the model recognises a
@@ -267,29 +274,50 @@ const BATCHING: &str = "If you intend to call several tools and there are no dep
      cost a fraction of the same four asked for one at a time. When a call needs the result of \
      an earlier one, wait for it -- correctness first.";
 
-/// That the machine has other tenants, the King's own server among them.
-///
-/// Kingdom arbitrates no resources yet, so nothing detects two
-/// plans binding one port -- or a plan binding the port the user is reading the
-/// chamber on. That last one is observed, not hypothetical: a plan ran `cargo
-/// leptos serve` with no override and collided with the King's own server on
-/// 3000. It recovered unaided, having reasoned that the occupant was probably
-/// the user's and should not be killed, which is the right instinct and one
-/// nothing had told it to have.
-///
-/// Saying it costs a sentence and is not a substitute for arbitration. It only
-/// makes the good outcome the likely one instead of the lucky one.
+/// That the machine has other tenants -- said differently depending on whether
+/// this plan actually shares it.
 ///
 /// Kept through the Phoenix port when its neighbours were dropped: Phoenix has
 /// no equivalent because Phoenix does not have several agents sharing one
 /// machine as its whole subject. This is Kingdom's own problem, and the one
 /// place where having no Phoenix counterpart is a reason to keep something
 /// rather than to delete it.
-const SHARED_MACHINE: &str = "On ports and long-running processes. This machine is shared -- \
-     the user's own Kingdom server is very likely on port 3000, and other plans may be \
-     working alongside you. Never kill a process you did not start. If you need to run a \
-     server, pick an unusual free port explicitly rather than taking a project's default, \
-     and stop it when you are done with it.";
+///
+/// This block used to end with "pick an unusual free port explicitly rather than
+/// taking a project's default". That was honest when Kingdom could only *watch*
+/// two plans collide on 3000, and it is no longer true of the product:
+/// [`crate::namespaces::net`] gives an isolated or sealed plan its own loopback,
+/// its own port space and forwarding back to the host, precisely so that "no
+/// agent has to be told to pick another port".
+///
+/// So for a walled-off plan the advice is now *false*, and a false sentence in a
+/// prompt is followed as diligently as a true one -- it would put a dev server
+/// on some invented port instead of the `:3000` that the forwarding, the
+/// spyglass and the project's own config all expect.
+///
+/// For a plan on the machine's own network the port advice is gone too, but the
+/// half that was never about port numbers stays: other tenants' processes are
+/// not yours to kill, and what you start you stop. A model that finds 3000 taken
+/// should say so -- which is what a real plan reasoned its way to unaided,
+/// having collided with the King's own server on 3000.
+fn shared_machine_block(isolation: kingdom_core::Isolation) -> String {
+    if isolation.is_isolated() {
+        "On ports and long-running processes. This plan has a network of its own: \
+         its loopback is yours alone, so bind whatever port the project expects \
+         -- :3000 here is not the user's :3000, and the ports you open are \
+         forwarded back to him. Nothing you start can collide with another plan, \
+         so do not invent an unusual port. Stop long-running processes when you \
+         are done with them."
+            .to_string()
+    } else {
+        "On ports and long-running processes. This machine is shared -- the \
+         user's own Kingdom server and other plans may be running alongside \
+         you. Never kill a process you did not start, and stop what you start. \
+         If a port you need is already taken, say so rather than working \
+         around it."
+            .to_string()
+    }
+}
 
 /// Phoenix's catalogue preamble, verbatim.
 ///
@@ -688,13 +716,20 @@ mod tests {
         dir
     }
 
-    fn prompt_with(permissions: Permissions, approved: bool) -> SystemPrompt {
+    /// `isolation` is an argument rather than a default because the shared
+    /// machine block now says different things on either side of it.
+    fn prompt_with(
+        permissions: Permissions,
+        approved: bool,
+        isolation: kingdom_core::Isolation,
+    ) -> SystemPrompt {
         SystemPrompt {
             city: CityBrief::default(),
             workspace: String::new(),
             permissions: permissions_block(permissions, approved),
             guidance: Vec::new(),
             skills: Vec::new(),
+            shared_machine: shared_machine_block(isolation),
             services: String::new(),
         }
     }
@@ -830,7 +865,7 @@ mod tests {
             Permissions::Propose,
             Permissions::Full,
         ] {
-            let mut prompt = prompt_with(permissions, false);
+            let mut prompt = prompt_with(permissions, false, kingdom_core::Isolation::Shared);
             prompt.guidance = vec![Guidance {
                 path: "/somewhere/AGENTS.md".to_string(),
                 body: "project rules".to_string(),
@@ -863,7 +898,7 @@ mod tests {
     /// pins that carrying it does not put it back in the prompt.
     #[test]
     fn the_project_file_listing_is_not_sent() {
-        let mut prompt = prompt_with(Permissions::Full, false);
+        let mut prompt = prompt_with(Permissions::Full, false, kingdom_core::Isolation::Shared);
         prompt.city = CityBrief {
             name: "somewhere".to_string(),
             path: "/somewhere".to_string(),
@@ -889,10 +924,10 @@ mod tests {
     /// would be a claim that there are skills.
     #[test]
     fn skills_are_catalogued_only_when_there_are_some() {
-        let bare = prompt_with(Permissions::Full, false);
+        let bare = prompt_with(Permissions::Full, false, kingdom_core::Isolation::Shared);
         assert!(!bare.render().contains("<available_skills>"));
 
-        let mut with_skill = prompt_with(Permissions::Full, false);
+        let mut with_skill = prompt_with(Permissions::Full, false, kingdom_core::Isolation::Shared);
         with_skill.skills = vec![Skill {
             name: "build".to_string(),
             description: "Builds the thing.".to_string(),
@@ -924,7 +959,8 @@ mod tests {
     /// goes, this test and the sentence it pins go with it.
     #[test]
     fn the_court_is_told_its_diagrams_are_drawn() {
-        let rendered = prompt_with(Permissions::Full, false).render();
+        let rendered =
+            prompt_with(Permissions::Full, false, kingdom_core::Isolation::Shared).render();
 
         assert!(
             rendered.to_lowercase().contains("mermaid"),
@@ -941,16 +977,49 @@ mod tests {
     /// lacks -- would have dropped it. It is kept because Kingdom's whole
     /// subject is several agents on one machine, and this is observed rather
     /// than hypothetical: a plan took the King's own port 3000.
+    ///
+    /// What is *not* said any more is the port advice. A plan on the host
+    /// network must still leave other people's processes alone; it must not be
+    /// told to invent a port number, because a taken port is now news for the
+    /// King rather than a puzzle for the model.
     #[test]
     fn the_court_is_warned_about_the_shared_machine() {
-        let rendered = prompt_with(Permissions::Full, false).render();
+        let rendered =
+            prompt_with(Permissions::Full, false, kingdom_core::Isolation::Shared).render();
         assert!(rendered.contains("Never kill a process you did not start"));
-        assert!(rendered.contains("3000"));
+        assert!(
+            !rendered.contains("unusual"),
+            "nothing should ask for an unusual port: {rendered}"
+        );
+    }
+
+    /// A walled-off plan is told its ports are its own, not warned off them.
+    ///
+    /// `namespaces::net` gives an isolated or sealed plan its own loopback so
+    /// that no agent has to be told to pick another port. Telling one to avoid
+    /// a project's default would be a false sentence, and would put its dev
+    /// server somewhere the forwarding and the spyglass do not expect.
+    #[test]
+    fn a_walled_off_plan_is_told_its_ports_are_its_own() {
+        for isolation in [
+            kingdom_core::Isolation::Isolated,
+            kingdom_core::Isolation::Sealed,
+        ] {
+            let rendered = prompt_with(Permissions::Full, false, isolation).render();
+            assert!(
+                rendered.contains("bind whatever port the project expects"),
+                "{isolation:?} has a loopback of its own and should be told so: {rendered}"
+            );
+            assert!(
+                !rendered.contains("Never kill a process you did not start"),
+                "{isolation:?} shares no process table with the King"
+            );
+        }
     }
 
     /// The court is asked to batch calls that do not depend on each other.
     ///
-    /// The [`SHARED_MACHINE`] case rather than the `label`/`since` case: no
+    /// The [`shared_machine_block`] case rather than the `label`/`since` case: no
     /// Phoenix counterpart, kept because it states a fact about Kingdom's own
     /// transport. `copilot::armed` sets `parallel_tool_calls` and nothing had
     /// ever asked a model to use it -- four real plans averaged 1.20 tool calls
@@ -966,7 +1035,8 @@ mod tests {
     /// place because it reads like a closing instruction.
     #[test]
     fn the_court_is_asked_to_batch_independent_calls() {
-        let rendered = prompt_with(Permissions::Full, false).render();
+        let rendered =
+            prompt_with(Permissions::Full, false, kingdom_core::Isolation::Shared).render();
 
         assert!(
             rendered.contains("make all of the independent calls in the same reply"),
