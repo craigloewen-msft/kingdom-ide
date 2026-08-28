@@ -11,7 +11,7 @@
 
 </div>
 
-<!-- Screenshot goes here: public/screenshot.png, once one is captured. -->
+[Watch the video deep dive](https://www.youtube.com/watch?v=M9V98lRt9J8) or read on below for the highlights.
 
 ## What it is
 
@@ -29,21 +29,63 @@ It exists to answer three questions at a glance:
 > Question 2 is the goal, not the state of play — resource arbitration is **not
 > built yet**.
 
-## Features
+## Key features
 
-- **Many plans at once** — every plan gets its own git worktree, so agents never
-  edit the same file underneath each other.
-- **Isolation you choose per plan** — on this machine, with a network of its own,
-  or on a machine of its own, so two agents can both bind `:3000`.
-- **A map of your dev folder** — projects drawn as towns, rendered in Bevy.
-- **Review and approve** — proposals arrive as annotated diffs, not as commits
-  already made.
-- **A browser the agent can drive** — headless Chrome over CDP, so a plan can
-  check its own work.
-- **Shared services** — Docker containers declared once and handed to every plan
-  that reaches them.
-- **The Proving Grounds** — a synthetic dev folder, generated on demand, for
-  rehearsing against nothing real.
+### Workspace and changes visualization
+
+<img src="docs/img/visualization.gif" alt="Workspace and changes visualization">
+
+Your whole project folder is visualized for you in a town. Each agent acts as an
+architect, making plans of how they'd like to change the town. The size of
+buildings corresponds to the lines of the file, and the size of the roads
+correspond to how connected that file is to others in the project. Any changes
+made by the agents is also visualized.
+
+The end result is you can have 10 agents working at once on the same project,
+and at a glance get a view of where the changes are concentrated, and whether
+they are touching any crucial files or rarely used ones.
+
+Like a [mind palace](https://en.wikipedia.org/wiki/Method_of_loci), it's easier
+to explore and gauge how severe (or not) a set of changes is without reading
+all of the code in detail. Also, it has that Dwarf Fortress / Age of Empires
+feel to it.
+
+### Isolation only for what matters
+
+<img src="docs/img/isolation-comparison.png" alt="Side by side isolation comparison">
+
+Agents get isolated file access and network, but still get access to the tools
+already installed on your machine — no need to manage a bunch of Linux
+container images. Containers work great, but they're heavy: each one has its
+own file system, when really you just want to share what's already on your
+file system while restricting access to the important bits.
+
+Kingdom IDE does this with Linux namespaces to share sane defaults, so each
+plan can use the tools you already have on your host machine (like `ss` in the
+screenshot above) without being able to find or touch other projects on your
+file system. Network isolation makes it easy to run 10 agents at once who are
+all convinced they own port 3000, and still reach them from the host for
+testing.
+
+### Better shared resources
+
+<img src="docs/img/shared-resources.png" alt="Shared resources example">
+
+Kingdom IDE uses a 'Resource' metaphor to quickly understand what's being
+asked for. Make one database and share it across multiple agents, letting
+them do things like read each other's logs or implementations without
+impacting each other's actual files or changes — one Docker container as a
+test database, instead of one per agent.
+
+### Review tools and processes
+
+<img src="docs/img/review-process.png" alt="Review tools and process">
+
+<img src="docs/img/browser-tool.png" alt="Agent browser tool in Kingdom IDE">
+
+Add comments to specific sections of files, merge or archive chats, and give
+your agent a browser tool to do some quick testing — all directly in
+Kingdom IDE.
 
 ## Quick start
 
@@ -98,6 +140,12 @@ cargo check -p kingdom-app --target wasm32-unknown-unknown --features hydrate --
 the crate map and the invariants. [`docs/`](docs) holds the references —
 [architecture](docs/architecture.md), the [agent loop](docs/agent-loop.md),
 [the map](docs/citymap.md) and [shared resources](docs/shared-resources.md).
+
+## Acknowledgements
+
+This was hugely based upon
+[Scott Opell's `phoenix-ide`](https://github.com/scottopell/phoenix-ide/), which
+was an amazing starting point. Thank you Scott!
 
 ## License
 
