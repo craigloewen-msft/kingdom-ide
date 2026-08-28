@@ -76,8 +76,10 @@ crates/
                     slirp to forward each to a host port. ssr only, and Linux
                     only at runtime -- availability() refuses elsewhere
     terminal.rs     The King's own shell, over a socket, in a plan's workspace
-                    and its network — the door into an isolated plan (route +
-                    URL on both targets via `terminal_route`; the pty ssr only)
+                    and its network — the door into an isolated plan. One shell
+                    per plan, outliving any socket: panels attach and detach,
+                    and closing one only detaches (route + URL on both targets
+                    via `terminal_route`; the pty ssr only)
     artifact.rs     Serving a file a plan's work left behind, e.g. a
                     screenshot the chamber renders (route + URL on both
                     targets; the handler ssr only)
