@@ -6,7 +6,7 @@
 //! a sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
-use crate::api::{begin_plan, list_branches, list_models, network_available};
+use crate::api::{begin_plan, list_branches, list_models, network_available, shared_resources};
 use crate::app::KingdomState;
 use kingdom_core::{
     City, CredentialState, ModelCatalogue, ModelChoice, ModelEffort, ModelOption, NetworkMode,
@@ -697,6 +697,36 @@ fn NetworkTab(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoVi
     // should not have to restart the server to be believed.
     let available = Resource::new(|| (), |_| network_available());
 
+    // What the selected project shares, so the isolated option can say what it
+    // actually buys here. Read from the ledger the resources screen already
+    // uses rather than through a new endpoint, and only the resources this
+    // project's plans can reach: its own and the machine's.
+    let selected = Memo::new(move |_| state.selected.get());
+    let ledger = Resource::new(
+        move || selected.get(),
+        |_| async move { shared_resources().await.ok() },
+    );
+    let reachable = Memo::new(move |_| {
+        let Some(inventory) = ledger.get().flatten() else {
+            return Vec::new();
+        };
+        let city = selected.get();
+        inventory
+            .resources
+            .into_iter()
+            .filter(|resource| match resource.scope {
+                kingdom_core::ServiceScope::Host => true,
+                kingdom_core::ServiceScope::City => resource.city == city,
+            })
+            .map(|resource| {
+                format!(
+                    "{} ({}) at localhost:{}",
+                    resource.spec.name, resource.spec.image, resource.spec.port,
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+
     let current = Memo::new(move |_| state.network.get());
     let choose = move |mode: NetworkMode| {
         state.choose_network(mode);
@@ -745,6 +775,29 @@ fn NetworkTab(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoVi
                          yours. Ports it opens are forwarded back to you."
                     </span>
                 </button>
+
+                // What isolation buys on *this* project, when it shares
+                // anything. The friendly `localhost` address for a shared
+                // resource exists only inside a plan's own network -- a plan on
+                // the machine's network is given the container's IP instead --
+                // so this is the moment that choice is actually being made.
+                <Show when=move || !reachable.get().is_empty()>
+                    <ul class="network-wells">
+                        <For
+                            each=move || reachable.get()
+                            key=|line: &String| line.clone()
+                            let:line
+                        >
+                            <li>{line}</li>
+                        </For>
+                    </ul>
+                    <p class="network-wells-note">
+                        "This project shares the above. With a network of its own \
+                         the plan reaches each at `localhost`, as if it were \
+                         running there; on the machine's network it is given the \
+                         container's address instead."
+                    </p>
+                </Show>
 
                 // The reason, and the command that fixes it. Kingdom does
                 // not install anything on the King's machine; it says what

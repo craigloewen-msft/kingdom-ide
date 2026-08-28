@@ -208,6 +208,18 @@ pub fn SharedResourcesView() -> impl IntoView {
                                                                         <span class="wells-entry-image">
                                                                             {resource.spec.image.clone()}
                                                                         </span>
+                                                                        // The address an agent uses,
+                                                                        // on the row rather than only
+                                                                        // in the detail: it is the one
+                                                                        // fact the King is scanning
+                                                                        // for, and it is the same for
+                                                                        // every agent on the project.
+                                                                        <code class="wells-entry-address">
+                                                                            {format!(
+                                                                                "localhost:{}",
+                                                                                resource.spec.port,
+                                                                            )}
+                                                                        </code>
                                                                         <span
                                                                             class="wells-state"
                                                                             class:running=matches!(
@@ -272,19 +284,37 @@ fn Detail(resource: SharedResource) -> impl IntoView {
         address,
         container,
         users,
-        environment,
         city_name,
         ..
     } = resource;
 
     let running = matches!(state, ServiceState::Running);
     let logs = format!("docker logs {container}");
+    // The address an agent actually types. True whatever the state: it is a
+    // property of the declaration -- the service's own port -- rather than of
+    // the container, which is the entire point of relaying it onto the plan's
+    // loopback.
+    let local = format!("localhost:{}", spec.port);
 
     view! {
         <div class="well-card">
             <div class="well-title">
                 <span class="well-name">{spec.name.clone()}</span>
                 <span class="wells-state" class:running=running>{state.label()}</span>
+            </div>
+
+            // The thing the King came here to know, said first and said plainly.
+            // Everything below is detail behind it.
+            <div class="well-reach">
+                <p class="well-reach-label">"Every agent reaches it at"</p>
+                <code class="well-reach-address">{local.clone()}</code>
+                <p class="well-reach-note">
+                    "A plan with a network of its own has this service on its own \
+                     loopback, at the port above \u{2014} so it connects the \
+                     ordinary way, with nothing to configure. A plan on the \
+                     machine's network is given the container address below \
+                     instead, because a relay there would take the port from you."
+                </p>
             </div>
 
             <dl class="well-facts">
@@ -304,7 +334,7 @@ fn Detail(resource: SharedResource) -> impl IntoView {
                     }}
                 </dd>
 
-                <dt>"Address"</dt>
+                <dt>"From your own machine"</dt>
                 <dd>
                     {match &address {
                         // Not a link: this is Mongo or Postgres as often as it
@@ -314,11 +344,9 @@ fn Detail(resource: SharedResource) -> impl IntoView {
                         Some(address) => view! { <code>{address.clone()}</code> }.into_any(),
                         None => view! {
                             <span class="well-absent">
-                                {format!(
-                                    "Assigned when it first starts \u{2014} port {} inside \
-                                     the container.",
-                                    spec.port,
-                                )}
+                                "Assigned when it first starts. Nothing is published \
+                                 on your localhost, so it can never take a port \
+                                 from you."
                             </span>
                         }
                         .into_any(),
@@ -368,27 +396,6 @@ fn Detail(resource: SharedResource) -> impl IntoView {
                 </dd>
             </dl>
 
-            <Show when={
-                let environment = environment.clone();
-                move || !environment.is_empty()
-            }>
-                <p class="well-section">"What every command here is given"</p>
-                <ul class="well-env">
-                    <For each={
-                        let environment = environment.clone();
-                        move || environment.clone()
-                    } key=|(k, v): &(String, String)| format!("{k}={v}") let:pair>
-                        <li><code>{format!("{}={}", pair.0, pair.1)}</code></li>
-                    </For>
-                </ul>
-                <Show when=move || !running>
-                    <p class="well-note">
-                        "Shown as written. `{host}` and `{port}` are filled in with \
-                         the real address once it starts."
-                    </p>
-                </Show>
-            </Show>
-
             // The thing this screen exists to print. The manifest is the source
             // of truth: changing or removing a resource is done by editing this
             // file, and Kingdom picks the change up next time the service is
@@ -405,6 +412,14 @@ fn Detail(resource: SharedResource) -> impl IntoView {
 }
 
 /// The form: declare one more, and say what level it runs at.
+///
+/// # Why it asks for so little
+///
+/// Image, name, and where it is shared. A resource is reached at `localhost` on
+/// its own port, so there is no address to plumb and no variable to name -- and
+/// a well-known image brings its own port and its own data directory, so those
+/// are filled in rather than asked for. What is left is the two facts Kingdom
+/// genuinely cannot infer: what to run, and how far to share it.
 #[component]
 fn NewResource(
     /// Called once the manifest has actually been written.
@@ -417,12 +432,13 @@ fn NewResource(
     let city = RwSignal::new(String::new());
     let name = RwSignal::new(String::new());
     let image = RwSignal::new(String::new());
-    let port = RwSignal::new(String::new());
-    let volume = RwSignal::new(String::new());
-    // One `KEY=value` per line rather than a grid of paired inputs. It is the
-    // shape the file itself has, it is what the King will read back in the
-    // preview, and it costs no add/remove-row machinery to edit.
-    let env = RwSignal::new(String::new());
+    // Both are filled in from the image when it is one Kingdom knows, and both
+    // stay editable. `None` means "he has not touched this", which is different
+    // from `Some("")` -- a box he deliberately emptied. Without that
+    // distinction a cleared volume would refill itself from the name and the
+    // King could never ask for data that goes with the container.
+    let typed_port = RwSignal::new(Option::<String>::None);
+    let typed_volume = RwSignal::new(Option::<String>::None);
     let error = RwSignal::new(Option::<String>::None);
     let written = RwSignal::new(Option::<String>::None);
 
@@ -436,18 +452,50 @@ fn NewResource(
         }
     });
 
+    // What Kingdom knows about the image, which is what saves the King two
+    // fields. `None` for anything unrecognised, which simply means he is asked
+    // for the port.
+    let known = Memo::new(move |_| kingdom_core::services::known_image(image.get().trim()));
+
+    // The port: his if he has typed in the box, the image's otherwise.
+    let port = Memo::new(move |_| match typed_port.get() {
+        Some(typed) => typed.trim().to_string(),
+        None => known.get().map(|k| k.port.to_string()).unwrap_or_default(),
+    });
+
+    // The volume: his if he has touched the box -- including emptying it, which
+    // is how "let the data go with the container" is asked for -- and otherwise
+    // one derived from the resource itself. Named by default rather than left
+    // empty, which is the opposite of what this form used to do: losing a
+    // database because the King did not fill in an optional box is the worse of
+    // the two mistakes, and a volume on a cache costs nothing.
+    let volume = Memo::new(move |_| {
+        if let Some(typed) = typed_volume.get() {
+            return typed.trim().to_string();
+        }
+        let name = name.get().trim().to_string();
+        if name.is_empty() {
+            return String::new();
+        }
+        let where_ = match scope.get() {
+            ServiceScope::Host => "host",
+            ServiceScope::City => "project",
+        };
+        format!("kingdom-{where_}-{name}-data")
+    });
+
     // What is about to be written, exactly. Built through the same `render`
     // the server appends, so the preview cannot show one thing and the file
     // receive another.
     let spec = Memo::new(move |_| ServiceSpec {
         name: name.get().trim().to_string(),
         image: image.get().trim().to_string(),
-        port: port.get().trim().parse().unwrap_or(0),
-        env: kingdom_core::services::parse_env(&env.get()),
+        port: port.get().parse().unwrap_or(0),
         volume: {
-            let v = volume.get().trim().to_string();
+            let v = volume.get();
             (!v.is_empty()).then_some(v)
         },
+        retired_env: None,
     });
 
     // Said while he types rather than after the write, and asked of
@@ -464,7 +512,10 @@ fn NewResource(
             return Some("Name an image to run, tag included \u{2014} `postgres:16`.");
         }
         if spec.port == 0 {
-            return Some("Give the port the service listens on inside its container.");
+            return Some(
+                "Give the port this service listens on \u{2014} that is the port \
+                 agents will reach it at.",
+            );
         }
         if scope.get() == ServiceScope::City && city.get().is_empty() {
             return Some("Pick the project this belongs to.");
@@ -476,12 +527,6 @@ fn NewResource(
         let spec = spec.get_untracked();
         let scope = scope.get_untracked();
         let city = city.get_untracked();
-        // The raw text rather than the parsed pairs. An empty `Vec` does not
-        // survive a server function's argument encoding -- measured, as a form
-        // with no environment failing with "missing field `env`" -- and a
-        // service with no environment is the ordinary case. The server parses
-        // it with the same function the preview above used.
-        let env = env.get_untracked();
         let volume = volume.get_untracked();
         async move {
             error.set(None);
@@ -491,7 +536,6 @@ fn NewResource(
                 spec.name.clone(),
                 spec.image.clone(),
                 spec.port,
-                env,
                 volume,
             )
             .await;
@@ -517,7 +561,7 @@ fn NewResource(
             }
         >
             <div class="well-field well-scope">
-                <label>"Runs at"</label>
+                <label>"Shared with"</label>
                 <div class="scope-toggle">
                     <button
                         type="button"
@@ -525,10 +569,10 @@ fn NewResource(
                         class:active=move || scope.get() == ServiceScope::City
                         on:click=move |_| scope.set(ServiceScope::City)
                     >
-                        <span class="scope-name">"One project"</span>
+                        <span class="scope-name">"This project"</span>
                         <span class="scope-detail">
-                            "Declared in that project's own repository and committed \
-                             with it. Shared by every plan working on it."
+                            "Declared in the project's own repository, so every \
+                             clone of it gets the same one."
                         </span>
                     </button>
                     <button
@@ -537,10 +581,9 @@ fn NewResource(
                         class:active=move || scope.get() == ServiceScope::Host
                         on:click=move |_| scope.set(ServiceScope::Host)
                     >
-                        <span class="scope-name">"The whole machine"</span>
+                        <span class="scope-name">"Every project on this machine"</span>
                         <span class="scope-detail">
-                            "Declared in your own profile, never committed anywhere. \
-                             Offered to every project you open."
+                            "Declared in your own profile, never committed anywhere."
                         </span>
                     </button>
                 </div>
@@ -562,16 +605,9 @@ fn NewResource(
                 </div>
             </Show>
 
+            // Image first: it is the decision, and it is what fills in the two
+            // fields beside it.
             <div class="well-row">
-                <div class="well-field">
-                    <label for="well-name">"Name"</label>
-                    <input
-                        id="well-name"
-                        placeholder="db"
-                        on:input=move |ev| name.set(event_target_value(&ev))
-                        prop:value=move || name.get()
-                    />
-                </div>
                 <div class="well-field">
                     <label for="well-image">"Image"</label>
                     <input
@@ -581,50 +617,62 @@ fn NewResource(
                         prop:value=move || image.get()
                     />
                 </div>
+                <div class="well-field">
+                    <label for="well-name">"Name"</label>
+                    <input
+                        id="well-name"
+                        placeholder="db"
+                        on:input=move |ev| name.set(event_target_value(&ev))
+                        prop:value=move || name.get()
+                    />
+                </div>
                 <div class="well-field well-narrow">
                     <label for="well-port">"Port"</label>
                     <input
                         id="well-port"
                         placeholder="5432"
                         inputmode="numeric"
-                        on:input=move |ev| port.set(event_target_value(&ev))
+                        // Filled in from the image, and overwritable. Bound to
+                        // the effective port rather than to what he typed, so a
+                        // recognised image visibly answers the question.
+                        on:input=move |ev| typed_port.set(Some(event_target_value(&ev)))
                         prop:value=move || port.get()
                     />
                 </div>
             </div>
-            <p class="well-hint">
-                "The port the service listens on *inside* its container. Nothing is \
-                 published on your localhost, so it cannot collide with anything you \
-                 are running."
-            </p>
 
-            <div class="well-field">
-                <label for="well-env">"Environment handed to every agent"</label>
-                <textarea
-                    id="well-env"
-                    rows="3"
-                    placeholder="DATABASE_URL=postgres://postgres@{host}:{port}/app"
-                    on:input=move |ev| env.set(event_target_value(&ev))
-                    prop:value=move || env.get()
-                ></textarea>
-                <p class="well-hint">
-                    "One `KEY=value` per line. `{host}` and `{port}` are replaced with \
-                     the real address once the container is up \u{2014} which is how an \
-                     agent finds it, since the address does not exist until then."
+            // The outcome, stated while he is still deciding. This is the whole
+            // promise of the feature and the reason the form is this short.
+            <Show
+                when=move || spec.get().port != 0
+                fallback=|| view! {
+                    <p class="well-hint">
+                        "Kingdom knows the port for `postgres`, `mongo`, `mysql`, \
+                         `mariadb` and `redis`. For anything else, name the port it \
+                         listens on."
+                    </p>
+                }
+            >
+                <p class="well-outcome">
+                    "Agents will reach it at "
+                    <code>{move || format!("localhost:{}", spec.get().port)}</code>
+                    ". Nothing is published on your own localhost, so it cannot take \
+                     a port from you."
                 </p>
-            </div>
+            </Show>
 
             <div class="well-field">
-                <label for="well-volume">"Named volume (optional)"</label>
+                <label for="well-volume">"Where its data is kept"</label>
                 <input
                     id="well-volume"
-                    placeholder="app-db"
-                    on:input=move |ev| volume.set(event_target_value(&ev))
+                    placeholder="named automatically"
+                    on:input=move |ev| typed_volume.set(Some(event_target_value(&ev)))
                     prop:value=move || volume.get()
                 />
                 <p class="well-hint">
-                    "Leave empty and the data goes with the container. Right for a \
-                     cache, wrong for a database."
+                    "A named Docker volume, so the data outlives the container. \
+                     Named for you from the resource; clear it and the data goes \
+                     when the container does."
                 </p>
             </div>
 
@@ -677,7 +725,6 @@ fn plainly(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     /// The King reads the sentence written for him, not the plumbing wrapped
     /// around it.
@@ -700,8 +747,8 @@ mod tests {
             name: "db".to_string(),
             image: "mongo:7".to_string(),
             port: 27017,
-            env: BTreeMap::new(),
             volume: None,
+            retired_env: None,
         };
         let row = |city: Option<&str>, scope| SharedResource {
             spec: spec.clone(),
@@ -713,7 +760,6 @@ mod tests {
             address: None,
             container: String::new(),
             users: Vec::new(),
-            environment: Vec::new(),
         };
 
         assert_ne!(

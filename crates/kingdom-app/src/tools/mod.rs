@@ -457,19 +457,14 @@ fn normalise(path: &Path) -> PathBuf {
 /// The environment a plan's child processes run under, beyond what this
 /// server inherited.
 ///
-/// # The city's shared services
+/// # The city's shared services set nothing here
 ///
-/// A project that declares a well in `<city>/.kingdom/services.toml` has its
-/// address handed to every command the plan runs, under the names the manifest
-/// chose -- `MONGODB_URI` and the like. This is **the** way a plan finds the
-/// database, because a plan's namespace cannot resolve Docker's service names;
-/// an address is the only thing that works, and it is not knowable until the
-/// container exists.
-///
-/// It is applied here rather than in each tool for the reason
-/// `netns::enter_prefix` is applied there: `bash`, `tmux` and the King's own
-/// terminal already route through this one function, and a call site that had
-/// to *remember* to add the database address is one that will forget.
+/// Deliberately, and this is where that decision is most visible. A plan finds
+/// a shared resource at `localhost` on the resource's own port -- see
+/// `services::address_for` -- so there is no variable to inject and nothing for
+/// a command to read. Kingdom used to set `MONGODB_URI` and its kind from the
+/// manifest; that was a second way to learn one address, and the two could
+/// disagree.
 ///
 /// # A Kingdom checking out Kingdom
 ///
@@ -495,17 +490,12 @@ fn normalise(path: &Path) -> PathBuf {
 ///   choose one or override this in the command it runs.
 ///
 /// None of it is forced: these are applied to the child before it runs, so a
-/// command that names its own `MONGODB_URI` inline still wins.
+/// command that names its own value inline still wins.
 pub fn child_environment(shop: &Sandbox) -> Vec<(String, String)> {
-    // The city's shared services first, so the Kingdom-specific pair below is the
-    // one that survives a duplicate key -- a rehearsal server's `KINGDOM_HOME`
-    // is Kingdom's own business and a manifest must not be able to move it.
-    let mut environment = service_environment(shop);
-
     if !runs_a_kingdom(shop.root()) {
-        return environment;
+        return Vec::new();
     }
-    environment.extend([
+    vec![
         (
             crate::profile::HOME_VAR.to_string(),
             shop.root()
@@ -515,29 +505,7 @@ pub fn child_environment(shop: &Sandbox) -> Vec<(String, String)> {
                 .to_string(),
         ),
         ("KINGDOM_MODEL".to_string(), "mock".to_string()),
-    ]);
-    environment
-}
-
-/// The address of every service this plan's city has standing.
-///
-/// Read from the running registry rather than from the manifest alone: a
-/// service that is declared but not up has no address, and inventing one would
-/// hand the plan a URI that fails to connect for no visible reason.
-///
-/// The city is resolved through `api::city_root_of` rather than from the
-/// sandbox's own path, because the sandbox points at the plan's *worktree* and
-/// the well belongs to the project. Five worktrees, one city, one address.
-///
-/// The *plan* is passed on as well as the city, because the two plans sharing
-/// one database are not necessarily told the same address: an isolated plan has
-/// it on its own loopback and one on the machine's network does not. See
-/// `services::environment`.
-fn service_environment(shop: &Sandbox) -> Vec<(String, String)> {
-    let Some(city_root) = crate::api::city_root_of(shop.plan()) else {
-        return Vec::new();
-    };
-    crate::services::environment(shop.plan(), &city_root)
+    ]
 }
 
 /// Whether this workspace is a checkout of Kingdom itself.

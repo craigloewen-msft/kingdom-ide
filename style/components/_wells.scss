@@ -301,6 +301,17 @@
   font-size: 10px;
 }
 
+// The address an agent uses. Monospace and in the ink the rest of the row is
+// not: it is the one thing on the row the King is scanning for, and the reason
+// the screen exists.
+.wells-entry-address {
+  grid-column: 1 / -1;
+  color: t.$gold-dim;
+  font-family: t.$font-mono;
+  font-size: 10px;
+  user-select: all;
+}
+
 // Running or not. The one state on the row, and green only when it is actually
 // up -- "not started" is the ordinary condition of a project with no plan open
 // and must not read as a fault.
@@ -385,25 +396,47 @@
   }
 }
 
-.well-section {
-  margin: 16px 0 6px;
+// The address, said first and said loudest. The whole promise of a shared
+// resource is that an agent reaches it here, so it leads the card rather than
+// sitting as one row of the definition list below.
+.well-reach {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: t.$panel-2;
+  border: 1px solid t.$gold-dim;
+  border-radius: t.$radius;
+}
+
+.well-reach-label {
+  margin: 0 0 4px;
   color: t.$ink-faint;
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
-.well-env {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.well-reach-address {
+  display: block;
+  color: t.$gold;
+  font-family: t.$font-mono;
+  font-size: 15px;
+  user-select: all;
+}
 
-  code {
-    color: t.$ink;
-    font-family: t.$font-mono;
-    font-size: 11px;
-    user-select: all;
-  }
+.well-reach-note {
+  max-width: 66ch;
+  margin: 8px 0 0;
+  color: t.$ink-faint;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.well-section {
+  margin: 16px 0 6px;
+  color: t.$ink-faint;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .well-note,
@@ -413,6 +446,23 @@
   color: t.$ink-faint;
   font-size: 11px;
   line-height: 1.5;
+}
+
+// What the King will get, said while he is still typing. The counterpart of
+// `.well-reach` on the form side, and deliberately the same gold: the thing
+// promised here is the thing printed there.
+.well-outcome {
+  max-width: 66ch;
+  margin: 8px 0 0;
+  color: t.$ink-dim;
+  font-size: 11px;
+  line-height: 1.6;
+
+  code {
+    color: t.$gold;
+    font-family: t.$font-mono;
+    user-select: all;
+  }
 }
 
 // --- The form ----------------------------------------------------------------

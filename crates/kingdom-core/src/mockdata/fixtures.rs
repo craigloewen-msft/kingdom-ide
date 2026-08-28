@@ -255,21 +255,21 @@ fn monorepo() -> FixtureSpec {
 /// - **shared mutable state**, so "another agent wrote this" is visible rather
 ///   than argued about.
 fn shopfront() -> FixtureSpec {
-    // The manifest. `{host}` and `{port}` are filled in with the container's
-    // real address at the moment a plan runs a command -- see
-    // `kingdom_core::services::ServiceSpec::environment`.
+    // The manifest. Four fields and no environment: an agent reaches this
+    // database at `localhost:27017`, which is what `server.js` below connects
+    // to with nothing configured.
     let manifest = "\
 # What this project needs standing in order to run.
 #
 # Kingdom starts these once for the whole project, shares them between every
-# agent working on it, and stops them when the last one is done. The address is
-# handed to your commands as the environment variables below.
+# agent working on it, and stops them when the last one is done. Each agent
+# reaches this database at `localhost:27017` -- its own loopback, spliced
+# through to the one shared container -- so there is nothing to configure.
 
 [[service]]
 name  = \"db\"
 image = \"mongo:7\"
 port  = 27017
-env   = { MONGODB_URI = \"mongodb://{host}:{port}/shopfront\", MONGO_DB = \"shopfront\" }
 # A named volume, so the data outlives the container.
 volume = \"shopfront-db\"
 ";
@@ -303,9 +303,9 @@ volume = \"shopfront-db\"
 import { createServer } from "node:http";
 import { MongoClient } from "mongodb";
 
-// Kingdom puts the database on this plan's own localhost, and sets
-// MONGODB_URI to the same thing. Either works; no setup either way.
-const uri = process.env.MONGODB_URI || "mongodb://localhost:27017";
+// Kingdom puts the shared database on this plan's own localhost, at MongoDB's
+// usual port. Nothing to configure and nothing to read from the environment.
+const uri = "mongodb://localhost:27017";
 
 // Who is writing. Each agent should set this to something recognisable so the
 // ledger shows whose entry is whose.
@@ -313,7 +313,7 @@ const agent = process.env.AGENT_NAME || `agent-${process.pid}`;
 
 const client = new MongoClient(uri);
 await client.connect();
-const entries = client.db(process.env.MONGO_DB || "shopfront").collection("entries");
+const entries = client.db("shopfront").collection("entries");
 
 const server = createServer(async (request, response) => {
   const json = (code, body) => {
@@ -377,8 +377,8 @@ entries the other agents wrote.
 
 - starts **one** container for the whole project, when the first plan needs it;
 - relays it onto **your own `localhost`**, at its usual port, so
-  `mongodb://localhost:27017` works here with nothing to set up;
-- sets `$MONGODB_URI` to the same address, for every command any plan runs;
+  `mongodb://localhost:27017` works here with nothing to set up and nothing to
+  read from the environment;
 - shows the container's own address in the ports badge, so you can connect to
   it from your machine too;
 - stops it when the **last** plan working on this project is done, keeping the

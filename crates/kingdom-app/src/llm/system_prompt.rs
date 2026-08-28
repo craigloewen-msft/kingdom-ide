@@ -103,6 +103,13 @@ impl SystemPrompt {
     /// The `plan` is here for one reason: two plans on one project are not
     /// necessarily told the same address for its database. See
     /// [`services_block`].
+    ///
+    /// `city_root` is separate from `city.path` and must be: a
+    /// [`CityBrief`]'s path is the **plan's workspace**, which for an isolated
+    /// plan is a worktree under `.kingdom/`, while a shared resource belongs to
+    /// the *project*. Passing the workspace here silently matched no city key,
+    /// and the block came out empty -- so a plan whose project shares a
+    /// database was never told it had one.
     pub fn assemble(
         plan: &kingdom_core::PlanId,
         city: &CityBrief,
@@ -110,6 +117,7 @@ impl SystemPrompt {
         permissions: Permissions,
         approved: bool,
         kingdom_root: &Path,
+        city_root: &Path,
     ) -> Self {
         let root = Path::new(&workspace.path);
         Self {
@@ -118,7 +126,7 @@ impl SystemPrompt {
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
-            services: services_block(plan, Path::new(&city.path)),
+            services: services_block(plan, city_root),
         }
     }
 
@@ -353,23 +361,31 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
 /// Telling an isolated plan the old warning would be worse than saying nothing:
 /// a model that believes `localhost` will fail writes code to avoid it, and a
 /// false sentence in a prompt is followed as diligently as a true one.
+///
+/// # And why no environment variable is mentioned
+///
+/// Because none is set. There is one way to reach a shared resource and this is
+/// it. A prompt that offered `$MONGODB_URI` as an alternative would send a model
+/// looking for a variable that does not exist, and reading an empty one is a
+/// failure that reads as a broken database.
 fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
     let running = crate::services::running_in(city_root);
     if running.is_empty() {
         return String::new();
     }
 
-    // The ports this plan reaches on its own loopback. Read from the registry
-    // rather than assumed from the plan's network mode: a relay that failed to
-    // bind means `localhost` is not true here, and the prompt must not promise
-    // what the environment does not deliver.
-    let on_the_loopback = crate::netns::wells_of(plan);
-
     let mut out = String::from(
         "This project has shared services running -- one set, shared by every \
          agent working on it, not one per agent. Reach them at these addresses:\n",
     );
-    for service in &running {
+    // The address as *this plan* reaches it, decided in one place for every
+    // surface that says it. See `services::address_for`.
+    let addresses: Vec<String> = running
+        .iter()
+        .map(|service| crate::services::address_for(plan, service))
+        .collect();
+
+    for (service, address) in running.iter().zip(&addresses) {
         // The scope is named because it changes what "shared" means. A city's
         // well is shared with the other agents on this project; the King's is
         // shared with every agent on every project he has open, and an agent
@@ -378,13 +394,6 @@ fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
             kingdom_core::ServiceScope::Host => "shared across every project on this machine",
             kingdom_core::ServiceScope::City => "shared by this project",
         };
-        // The address as *this plan* reaches it. An isolated plan is given the
-        // loopback one, which is the address it should actually type.
-        let address = if on_the_loopback.contains(&service.port) {
-            format!("localhost:{}", service.port)
-        } else {
-            service.address()
-        };
         let _ = writeln!(
             out,
             "\n- **{}** ({}) at `{address}` -- {shared_with}",
@@ -392,9 +401,9 @@ fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
         );
     }
 
-    let everything_local = running
+    let everything_local = addresses
         .iter()
-        .all(|service| on_the_loopback.contains(&service.port));
+        .all(|address| address.starts_with("localhost:"));
 
     if everything_local {
         out.push_str(
@@ -402,20 +411,17 @@ fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
              own, and Kingdom has put each service on `localhost` at its usual \
              port inside it. So connect the ordinary way -- \
              `mongodb://localhost:27017`, `postgres://localhost:5432` -- and it \
-             works. You do not need to set anything up, read any environment \
-             variable, or configure an address before running the project: the \
-             usual variables (for example `$MONGODB_URI`) are set too, and they \
-             say the same thing.\n\nYour `localhost` is yours alone -- it is not \
-             the user's, and not another agent's -- so nothing you bind here can \
-             collide with them.",
+             works. There is nothing to set up, no environment variable to read, \
+             and no address to configure before running the project.\n\nYour \
+             `localhost` is yours alone -- it is not the user's, and not another \
+             agent's -- so nothing you bind here can collide with them.",
         );
     } else {
         out.push_str(
-            "\nUse those addresses, not `localhost` -- the services are not on this \
-             machine's loopback, and a connection to `127.0.0.1` will fail. The \
-             usual environment variables are already set for every command you run, \
-             so prefer reading them (for example `$MONGODB_URI`) over writing an \
-             address by hand.",
+            "\nUse exactly the addresses above. Any that is not `localhost` is a \
+             container this plan reaches directly, and connecting to `127.0.0.1` \
+             for it will fail. No environment variable holds these; the addresses \
+             here are the whole answer.",
         );
     }
 
@@ -969,7 +975,7 @@ mod tests {
         let city = temp().join("agora");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-told-localhost");
-        crate::netns::pretend_wells_are_open(&plan, &[27017]);
+        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
 
         let block = services_block(&plan, &city);
 
@@ -988,9 +994,16 @@ mod tests {
         // The point of the whole change, said plainly enough that a model
         // reaching for a config step does not take one.
         assert!(
-            block.contains("do not need to set anything up"),
+            block.contains("nothing to set up"),
             "an agent that thinks it must configure an address will configure \
              one: {block}"
+        );
+        // No variable is set any more, so the prompt must not send a model
+        // looking for one. Reading an empty `$MONGODB_URI` and connecting to
+        // nothing reads as a broken database.
+        assert!(
+            !block.contains("MONGODB_URI") && !block.contains('$'),
+            "nothing sets a variable now, so the prompt must not mention one: {block}"
         );
         // Easier to reach is easier to clobber, so this must survive.
         assert!(
@@ -1021,8 +1034,75 @@ mod tests {
             "the container's address is the only one that works here: {block}"
         );
         assert!(
-            block.contains("not `localhost`"),
+            block.contains("will fail"),
             "this plan's 127.0.0.1 is the user's own, and reaches nothing: {block}"
+        );
+    }
+
+    /// Two services on one port, one relayed: the prompt says a different
+    /// address for each.
+    ///
+    /// The prompt and the plan's own environment must agree, and this is the
+    /// case where agreeing is hard -- see
+    /// `services::a_second_service_on_the_same_port_is_not_told_it_is_local`.
+    /// Both go through `services::address_for` for exactly that reason, and
+    /// this pins that the prompt really does.
+    #[test]
+    fn only_the_relayed_one_of_two_services_on_a_port_is_called_local() {
+        let city = temp().join("agora-crowded");
+        crate::services::pretend_a_named_well_is_running(&city, "cache", "172.31.4.10", 6379);
+        crate::services::pretend_a_named_well_is_running(&city, "other", "172.31.9.10", 6379);
+        let plan = kingdom_core::PlanId::new("plan-told-about-two-caches");
+        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
+
+        let block = services_block(&plan, &city);
+
+        assert!(
+            block.contains("localhost:6379"),
+            "the relayed service is on the loopback: {block}"
+        );
+        assert!(
+            block.contains("172.31.9.10:6379"),
+            "the other service is a different database and must be named as one: \
+             {block}"
+        );
+
+        crate::netns::forget_namespace(&plan);
+    }
+
+    /// The block is built from the **project's** root, not the plan's
+    /// workspace.
+    ///
+    /// The bug this pins, found by reading a real plan's prompt in a browser
+    /// rather than by any test: `assemble` passed `CityBrief::path`, which is
+    /// the plan's *worktree* (`<city>/.kingdom/<uuid>/` for an isolated plan).
+    /// A shared resource is filed under the city's key, so the lookup matched
+    /// nothing and the block came out **empty** -- a plan whose project shares
+    /// a database was never told it had one.
+    ///
+    /// It was survivable while Kingdom also set `$MONGODB_URI`. Now that the
+    /// prompt is the only channel, an empty block means an agent that cannot
+    /// find its database at all.
+    #[test]
+    fn the_block_follows_the_project_not_the_plans_worktree() {
+        let city = temp().join("agora-with-a-worktree");
+        crate::services::pretend_a_well_is_running(&city, 27017);
+        let plan = kingdom_core::PlanId::new("plan-in-a-worktree");
+        crate::netns::forget_namespace(&plan);
+
+        // Where an isolated plan actually works: inside the city, under
+        // `.kingdom/`. Asking about *this* path must not be mistaken for the
+        // project itself.
+        let worktree = city.join(".kingdom").join("a-plan-id");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        assert!(
+            services_block(&plan, &worktree).is_empty(),
+            "a worktree is not a city, and must not be mistaken for one"
+        );
+        assert!(
+            services_block(&plan, &city).contains("27017"),
+            "the project's own root is what carries its shared resources"
         );
     }
 

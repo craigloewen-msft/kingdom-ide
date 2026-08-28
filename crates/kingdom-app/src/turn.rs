@@ -202,8 +202,14 @@ pub(crate) async fn converse(
     //
     // A city with no manifest costs nothing here -- `ensure` reads one absent
     // file and returns.
-    if let Some(city_root) = city_root_of(&plan_id) {
-        if let Err(e) = crate::services::ensure(&plan_id, &city_root).await {
+    // The *project's* root, as distinct from this plan's workspace. Read once
+    // here because two things below need it and they must agree: the services
+    // are raised for the city, and the prompt is told where they are. A
+    // `CityBrief`'s own path is the plan's worktree, so it cannot answer this.
+    let city_root = city_root_of(&plan_id);
+
+    if let Some(city_root) = &city_root {
+        if let Err(e) = crate::services::ensure(&plan_id, city_root).await {
             // `Refused` for the same reason as above: a missing Docker daemon
             // is a settled answer, and retrying the turn would only be told it
             // again.
@@ -298,6 +304,13 @@ pub(crate) async fn converse(
                 permissions,
                 approved,
                 &kingdom_root,
+                // The project, not the worktree. A plan with no resolvable city
+                // has no shared resources either, so the workspace is a
+                // harmless fallback -- `services_block` finds nothing under it
+                // and says nothing, which is the truth for such a plan.
+                city_root
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new(&workspace.path)),
             ),
             turns,
             // Set only on the first round of a turn that follows a silent one.

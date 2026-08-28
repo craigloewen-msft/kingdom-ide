@@ -272,7 +272,12 @@ pub(crate) fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> P
                         }
                     };
                     kingdom_core::SharedService {
-                        address: service.address(),
+                        // The address **this plan** reaches it at, not the
+                        // container's: an isolated plan has it on its own
+                        // loopback, and the badge must say what the agent
+                        // beside it is actually typing. See
+                        // `services::address_for`.
+                        address: crate::services::address_for(&plan.id, &service),
                         // By the service's own registry key, not by city root:
                         // a host well is filed under `host`, so asking for it
                         // by city would report a database five agents share as

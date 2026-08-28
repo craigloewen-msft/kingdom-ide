@@ -143,7 +143,29 @@ pub struct Namespace {
     /// plan's own server *out* to the King, where a well carries a container
     /// *in* to the plan. [`Namespace::listeners`] is where that distinction
     /// earns its keep.
-    wells: HashMap<u16, u32>,
+    wells: HashMap<u16, Well>,
+}
+
+/// One shared service standing on a plan's own loopback.
+///
+/// # Why the target is kept and not just the pid
+///
+/// A plan's loopback has one socket per port, so only the **first** service on
+/// a given port can be relayed -- and the King's own Redis and a project's are
+/// both `:6379` by default, which makes that an ordinary case rather than a
+/// corner. Recording only the port, as this once did, meant a second Redis was
+/// told `127.0.0.1:6379` as well, and every read and write it made landed
+/// silently in the *first* one's data.
+///
+/// So a well remembers which container it actually reaches, and
+/// [`crate::services::address_for`] asks about that container rather than about
+/// the number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Well {
+    /// The relay's pid inside the namespace, so it can be killed with the rest.
+    pid: u32,
+    /// The container address it forwards to, as `host:port`.
+    target: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,7 +333,7 @@ impl Namespace {
 /// A well port that slipped through here would be forwarded to the King's
 /// loopback and offered on his ports badge as something to open in a browser --
 /// where it would answer his click in the MongoDB wire protocol.
-fn forwardable(mut ports: Vec<u16>, wells: &HashMap<u16, u32>) -> Vec<u16> {
+fn forwardable(mut ports: Vec<u16>, wells: &HashMap<u16, Well>) -> Vec<u16> {
     ports.retain(|p| !NEVER_FORWARD.contains(p) && !wells.contains_key(p));
     ports
 }
@@ -783,8 +805,8 @@ impl Namespace {
         // The well relays are relays too, and leak in exactly the same way if
         // they are missed -- one process per shared service per plan, holding
         // an open socket to a database, for the life of the server.
-        for pid in self.wells.values() {
-            kill(*pid);
+        for well in self.wells.values() {
+            kill(well.pid);
         }
         // slirp next: it holds a descriptor on the namespace, and killing the
         // holder while it watches produces a noisy log for no benefit.
@@ -1092,11 +1114,11 @@ pub async fn run_relay(bind: &str, target: &str) {
 /// against our own relay, and the second process would exit having achieved
 /// nothing while looking like a failure.
 ///
-/// Returns the ports that are now answering on the loopback, which is what
-/// [`crate::services::environment`] needs in order to promise `localhost` only
-/// where it is true.
-pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<u16> {
-    let (holder, already) = {
+/// Returns the container addresses that are now answering on the loopback,
+/// which is what [`crate::services::address_for`] needs in order to promise
+/// `localhost` only where it is true.
+pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<String> {
+    let (holder, mut standing) = {
         let registry = lock();
         let Some(namespace) = registry.get(plan) else {
             // No namespace: a shared-network plan, deliberately left with the
@@ -1105,17 +1127,26 @@ pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<u16> {
         };
         (
             namespace.holder,
-            namespace.wells.keys().copied().collect::<Vec<_>>(),
+            namespace
+                .wells
+                .iter()
+                .map(|(port, well)| (*port, well.target.clone()))
+                .collect::<Vec<_>>(),
         )
     };
 
-    let mut open = already.clone();
     for (host, port) in services {
-        if already.contains(port) {
+        let target = format!("{host}:{port}");
+        // Already relayed -- either this very container, in which case there is
+        // nothing to do, or a *different* one holding the port. Both are the
+        // same decision here: do not spawn a second relay onto a socket that is
+        // taken. The second service keeps the container address, which is the
+        // honest answer rather than a `localhost` pointing into the first
+        // service's data.
+        if standing.iter().any(|(taken, _)| taken == port) {
             continue;
         }
         let bind = format!("127.0.0.1:{port}");
-        let target = format!("{host}:{port}");
         let Some(pid) = spawn_relay_between(holder, &bind, &target).await else {
             // The bind was refused, so this port is *not* answering on the
             // loopback and must not be recorded as if it were. The caller
@@ -1130,41 +1161,60 @@ pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<u16> {
             kill(pid);
             continue;
         };
-        namespace.wells.insert(*port, pid);
-        open.push(*port);
+        namespace.wells.insert(
+            *port,
+            Well {
+                pid,
+                target: target.clone(),
+            },
+        );
+        standing.push((*port, target));
     }
 
-    open.sort_unstable();
+    let mut open: Vec<String> = standing.into_iter().map(|(_, target)| target).collect();
+    open.sort();
     open.dedup();
     open
 }
 
-/// Which service ports are answering on this plan's own loopback.
+/// Which shared services are answering on this plan's own loopback, by the
+/// container address each one reaches.
 ///
-/// Asked by [`crate::services::environment`] on every command a plan runs, so
+/// Asked by [`crate::services::address_for`] on every command a plan runs, so
 /// it is a map lookup rather than anything that touches the network: the
 /// question is "did the relay come up", and the registry is where that was
 /// recorded.
-pub fn wells_of(plan: &PlanId) -> Vec<u16> {
+///
+/// Answers with **targets** rather than ports because a port is not unique --
+/// see [`Well`]. Two services on `:6379` are two different databases, and only
+/// one of them is on the loopback.
+pub fn wells_of(plan: &PlanId) -> Vec<String> {
     let registry = lock();
     let Some(namespace) = registry.get(plan) else {
         return Vec::new();
     };
-    let mut ports: Vec<u16> = namespace.wells.keys().copied().collect();
-    ports.sort_unstable();
-    ports
+    let mut targets: Vec<String> = namespace
+        .wells
+        .values()
+        .map(|well| well.target.clone())
+        .collect();
+    targets.sort();
+    targets
 }
 
 /// Records a plan as having wells on its loopback, without a kernel.
 ///
 /// Test-only, and deliberately in this module rather than reached for through a
-/// public field: what [`crate::services::environment`] and the system prompt
+/// public field: what [`crate::services::address_for`] and the system prompt
 /// need to be told is exactly what [`open_wells`] records, and a test that
 /// built its own idea of that state would pass while the real pair drifted.
 /// The pids are fictional and nothing ever signals them -- `tear_down` is not
 /// reached, because no namespace is really created here.
+///
+/// Takes the **targets** the relays reach, in `host:port` form, for the reason
+/// [`Well`] gives: a port alone cannot distinguish two services that share one.
 #[cfg(test)]
-pub(crate) fn pretend_wells_are_open(plan: &PlanId, ports: &[u16]) {
+pub(crate) fn pretend_wells_are_open(plan: &PlanId, targets: &[&str]) {
     let mut registry = lock();
     let namespace = registry.entry(plan.clone()).or_insert_with(|| Namespace {
         holder: 0,
@@ -1174,8 +1224,19 @@ pub(crate) fn pretend_wells_are_open(plan: &PlanId, ports: &[u16]) {
         cdp_port: None,
         wells: HashMap::new(),
     });
-    for (index, port) in ports.iter().enumerate() {
-        namespace.wells.insert(*port, 900_000 + index as u32);
+    for (index, target) in targets.iter().enumerate() {
+        let port = target
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .expect("a well target is `host:port`");
+        namespace.wells.insert(
+            port,
+            Well {
+                pid: 900_000 + index as u32,
+                target: (*target).to_string(),
+            },
+        );
     }
 }
 
@@ -1425,7 +1486,13 @@ mod tests {
     #[test]
     fn a_wells_port_is_never_forwarded_as_a_server_of_the_plans_own() {
         let mut wells = HashMap::new();
-        wells.insert(27017, 5555);
+        wells.insert(
+            27017,
+            Well {
+                pid: 5555,
+                target: "172.31.4.10:27017".to_string(),
+            },
+        );
 
         // What `/proc` would report inside a plan running a server with a well
         // open: its own :3000, and the relay carrying the database.

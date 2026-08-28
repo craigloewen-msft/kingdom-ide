@@ -2551,14 +2551,11 @@ pub async fn shared_resources() -> Result<kingdom_core::ResourceInventory, Serve
 /// only paths this can write to are a city of the kingdom he opened, or his own
 /// profile.
 ///
-/// # Why `env` is a string
+/// # Four fields, and no environment
 ///
-/// It arrives as the `KEY=value` text the King typed, and is parsed by
-/// [`kingdom_core::services::parse_env`] here. Not cosmetic: a `Vec` of pairs
-/// that happens to be **empty** does not survive a server function's argument
-/// encoding at all, and a service with no environment is the ordinary case.
-/// Measured against a running server, where the form failed with "missing
-/// field `env`" for exactly that input.
+/// A resource is reached at `localhost` on its own port, so there is nothing to
+/// plumb and nothing for this to carry. The `env` argument that used to be here
+/// is gone with the field it wrote.
 #[server(DeclareSharedResource, "/api")]
 pub async fn declare_shared_resource(
     scope: String,
@@ -2566,7 +2563,6 @@ pub async fn declare_shared_resource(
     name: String,
     image: String,
     port: u16,
-    env: String,
     volume: String,
 ) -> Result<String, ServerFnError> {
     use kingdom_core::services::ServiceScope;
@@ -2598,10 +2594,10 @@ pub async fn declare_shared_resource(
         name: name.trim().to_string(),
         image: image.trim().to_string(),
         port,
-        env: kingdom_core::services::parse_env(&env),
         // An empty box is "no volume", which is a different declaration from a
         // volume named "" -- and the one the parser would refuse.
         volume: Some(volume.trim().to_string()).filter(|v| !v.is_empty()),
+        retired_env: None,
     };
 
     let path =
@@ -2655,6 +2651,12 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
     // viewer showing the city's checkout instead would be quietly wrong.
     let brief = CityBrief::from_city(city, &plan.workspace);
     let root = std::path::PathBuf::from(&kingdom.root);
+    // The project's own root. `brief.path` is the plan's *workspace*, which for
+    // an isolated plan is a worktree under `.kingdom/` -- and a shared resource
+    // belongs to the project, so looking one up under the worktree finds
+    // nothing. This viewer must render what `turn::converse` sends, so it
+    // resolves the city root the same way.
+    let city_root = root.join(&city.path);
 
     Ok(SystemPrompt::assemble(
         &plan_id,
@@ -2663,6 +2665,7 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
         plan.permissions,
         plan.approved_proposal().is_some(),
         &root,
+        &city_root,
     )
     .render())
 }
@@ -2964,6 +2967,33 @@ pub(crate) mod tests {
         assert!(
             plan_briefing("plan-nowhere".into()).await.is_err(),
             "an unknown plan is an error, not an empty prompt"
+        );
+
+        // A plan working in a **worktree** is still told about its project's
+        // shared resources.
+        //
+        // The bug this pins was found by reading a real plan's prompt in a
+        // browser: `assemble` was handed `CityBrief::path`, which is the
+        // plan's workspace, and a shared resource is filed under the *city's*
+        // key -- so the block came out empty and the agent was never told its
+        // database existed. Survivable while `$MONGODB_URI` was also set;
+        // since the prompt became the only channel, it is the whole feature
+        // silently missing.
+        crate::services::pretend_a_well_is_running(&city_path, 27017);
+        let worktree = city_path.join(".kingdom").join("some-plan-id");
+        std::fs::create_dir_all(&worktree).unwrap();
+        {
+            let mut kingdom = lock().unwrap();
+            let mut in_a_worktree = kingdom.plan(&PlanId::new("plan-briefing")).unwrap().clone();
+            in_a_worktree.workspace = Workspace::in_place(worktree.to_string_lossy());
+            kingdom.insert(in_a_worktree);
+        }
+
+        let briefed = plan_briefing("plan-briefing".into()).await.unwrap();
+        assert!(
+            briefed.contains("27017"),
+            "a plan in a worktree must still be told where its project's \
+             database is -- the prompt is the only place it is said: {briefed}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

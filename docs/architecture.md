@@ -488,7 +488,6 @@ A city declares what it needs in `<city>/.kingdom/services.toml`, committed:
 name  = "db"
 image = "mongo:7"
 port  = 27017
-env   = { MONGODB_URI = "mongodb://{host}:{port}/shopfront" }
 volume = "shopfront-db"
 ```
 
@@ -530,24 +529,27 @@ Seven things worth knowing:
 
 - **The address is assigned, not allocated.** A service's IP comes from its
   position in the manifest, which is what makes it knowable *before* the
-  container exists — and therefore substitutable into `MONGODB_URI` and
-  printable in the badge.
+  container exists — and therefore printable in the badge and reachable by the
+  relay that puts it on a plan's loopback.
 - **It is an IP, not a name.** Docker's DNS resolves service names only between
   containers on the same network; neither the host nor a plan's namespace can
   resolve `db`. That is why the address is pinned rather than left to Docker.
-- **Plans find it through `tools::child_environment`**, which `bash`, `tmux` and
-  the King's terminal already route through — the same reasoning that makes
-  `netns::enter_prefix` a no-op rather than a thing each call site remembers.
+- **Plans find it at `localhost`, and nowhere else.** No environment variable is
+  set for a shared resource: one address, learned one way. `services::address_for`
+  is the single place that decides what that address is, and the system prompt,
+  the ports badge and the resources screen all read it.
 - **An isolated plan is given `localhost`, not the IP.** `netns::open_wells`
   stands a relay on `127.0.0.1:<port>` *inside that plan's namespace* and
   splices it to the container, so the address every model reaches for first is
   simply correct there. This does not contradict the measurement above — the
   loopback that cannot be reached is the *host's*, and the one being bound is
-  the plan's own, which is empty precisely because it is isolated. The
-  substitution is per plan, and only where the relay actually bound: a plan on
+  the plan's own, which is empty precisely because it is isolated. The choice is
+  per plan, and only where the relay actually bound: a plan on
   the machine's network keeps the IP, because binding its `127.0.0.1` would
   take the King's real port. The system prompt says whichever is true for that
   plan, since a false sentence there is followed as diligently as a true one.
+  Matched by **container**, not by port number: two resources can want `:6379`,
+  only one gets the loopback, and the other must not be sent into its data.
 - **A well's port is never forwarded back to the King.** Its relay listens
   inside the namespace, so `/proc/<holder>/net/tcp` reports it like any dev
   server; `netns::forwardable` drops it, or the ports badge would offer him a

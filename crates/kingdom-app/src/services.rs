@@ -65,11 +65,11 @@
 //! guarantee that does not hold.
 
 use kingdom_core::services::{
-    ManifestTrouble, ResourceInventory, ServiceManifest, ServiceScope, ServiceSpec, ServiceState,
-    SharedResource,
+    data_dir_for, known_image, ManifestTrouble, ResourceInventory, ServiceManifest, ServiceScope,
+    ServiceSpec, ServiceState, SharedResource,
 };
 use kingdom_core::{Kingdom, PlanId};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -111,13 +111,16 @@ const LABEL_CITY: &str = "kingdom.city";
 /// The label carrying the service's name within that city.
 const LABEL_SERVICE: &str = "kingdom.service";
 
-/// The address a plan reaches its own wells at, once they are relayed onto its
+/// The name a plan reaches its own wells by, once they are relayed onto its
 /// loopback.
 ///
-/// Spelled as an address rather than as `localhost` because it is substituted
-/// into a connection string, and a name would put the plan at the mercy of
-/// whatever its `/etc/hosts` and resolver do with it.
-const LOOPBACK: &str = "127.0.0.1";
+/// Spelled `localhost` rather than `127.0.0.1` because every consumer of it is
+/// now **prose**: a system prompt, the ports badge, the ledger. It used to be
+/// substituted into a connection string in a manifest, where a name would have
+/// put the plan at the mercy of its resolver -- that substitution is gone, and
+/// with it the reason. `localhost` is the word every model and every person
+/// reaches for, which is the whole point of putting the service there.
+const LOOPBACK: &str = "localhost";
 
 /// One service that is up, and where to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,8 +289,13 @@ pub fn manifest_in(scope: &Scope) -> Result<ServiceManifest, ServiceError> {
     // this is the only layer that knows which of the two manifests was being
     // read. `kingdom-core` does no I/O and cannot say, and a message that
     // guessed named a project's file for a fault in the King's profile.
+    //
+    // Joined with a colon rather than "is": the errors now begin with a subject
+    // of their own -- "service `db` sets `env`..." -- and "<path> is service
+    // `db` sets `env`" is not a sentence. A colon reads correctly before both
+    // that and the older "not valid TOML: ...".
     kingdom_core::services::parse(&text)
-        .map_err(|e| ServiceError::Manifest(format!("{} is {e}", path.display())))
+        .map_err(|e| ServiceError::Manifest(format!("{}: {e}", path.display())))
 }
 
 /// Reads a city's manifest, if it has one.
@@ -379,56 +387,38 @@ pub async fn ensure(plan: &PlanId, city_root: &Path) -> Result<Vec<RunningServic
     Ok(up)
 }
 
-/// The environment a plan's tools get for the services it can reach.
+/// The address a plan reaches a shared service at.
 ///
-/// Read from the registry rather than started here, so this is cheap enough to
-/// call on every command. A city with nothing running yields nothing, which is
-/// what makes it safe to apply unconditionally in `tools::child_environment`.
+/// # The whole promise, in one function
 ///
-/// Host first and the city second, so a project that sets `DATABASE_URL` for
-/// its own database wins over a machine-wide one of the same name. Collected
-/// through a map rather than a `Vec` for that reason -- the last writer has to
-/// be the only one left.
+/// `localhost:<the service's own port>` when [`crate::netns::open_wells`] has a
+/// relay standing for **that container** inside this plan's namespace, and the
+/// container's own address otherwise. Every surface that tells anyone where a
+/// shared resource is -- the system prompt, the ports badge, the ledger -- goes
+/// through here, so none of them can promise something a different one denies.
 ///
-/// # Which address the plan is told
+/// # Why the plan decides and not the city
 ///
-/// `127.0.0.1` when [`crate::netns::open_wells`] has a relay standing for that
-/// service, and the container's address otherwise. The plan asked for is the
-/// one that decides, not the city: five plans on one project can have four
-/// isolated and one on the machine's network, and each must be told the address
-/// that is true where it is standing.
+/// Five plans on one project can have four isolated and one on the machine's
+/// network, and each must be told the address that is true where it is
+/// standing. A plan with no namespace of its own gets the container address
+/// because a relay for it would bind the King's *real* `127.0.0.1:5432` -- the
+/// port collision this product exists to prevent, committed by the product.
 ///
-/// **Only when the relay is actually up.** A relay that failed to bind means
-/// `localhost` reaches nothing, and handing out an address that fails to
-/// connect for no visible reason is worse than handing out an awkward one that
-/// works. The fallback is exactly what every plan had before wells reached the
-/// loopback.
-pub fn environment(plan: &PlanId, city_root: &Path) -> Vec<(String, String)> {
-    let on_the_loopback = crate::netns::wells_of(plan);
-    let registry = registry();
-    let mut merged: BTreeMap<String, String> = BTreeMap::new();
-
-    for scope in scopes_for(city_root) {
-        let Ok(manifest) = manifest_in(&scope) else {
-            continue;
-        };
-        if manifest.is_empty() {
-            continue;
-        }
-        let key = scope.key();
-        for spec in &manifest.services {
-            if let Some(running) = registry.running.get(&(key.clone(), spec.name.clone())) {
-                let host = if on_the_loopback.contains(&running.port) {
-                    LOOPBACK
-                } else {
-                    running.host.as_str()
-                };
-                merged.extend(spec.environment(host, running.port));
-            }
-        }
+/// # Why the container is matched and not the port
+///
+/// A loopback has one socket per port, and two services can want the same one:
+/// the King's own Redis and a project's are both `:6379` by default. Only the
+/// first gets the relay. Matching on the port alone -- which this once did --
+/// told the second one `localhost:6379` as well, and sent its every read and
+/// write into the first one's data. See [`crate::netns::Well`].
+pub fn address_for(plan: &PlanId, service: &RunningService) -> String {
+    let container = service.address();
+    if crate::netns::wells_of(plan).contains(&container) {
+        format!("{LOOPBACK}:{}", service.port)
+    } else {
+        container
     }
-
-    merged.into_iter().collect()
 }
 
 /// What a plan in this city has standing, for the badge and the system prompt.
@@ -654,18 +644,9 @@ fn describe(
         (None, false) => ServiceState::Idle,
     };
 
-    // Filled in when the address is known, and left as written when it is not.
-    // A `{host}` the King can see is the honest answer for a service that has
-    // never run -- the address does not exist yet.
-    let environment = match &running {
-        Some(running) => spec.environment(&running.host, running.port),
-        None => spec
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    };
-
+    // Filled in when the address is known. The container's own address, which
+    // is what the King reaches it at from his own machine -- a plan is told
+    // `localhost` instead, per `address_for`, and the screen says both.
     SharedResource {
         spec: spec.clone(),
         scope: scope.kind(),
@@ -679,7 +660,6 @@ fn describe(
         // on a row that is not up.
         container: container_name(key, &spec.name),
         users,
-        environment,
     }
 }
 
@@ -1021,6 +1001,17 @@ async fn ensure_one(
         args.push("--volume".into());
         args.push(format!("{volume}:{}", data_dir_for(&spec.image)));
     }
+    // What the image needs in its **own** environment simply to start. Nothing
+    // here is ever shown to an agent -- it is the opposite direction of travel
+    // from the manifest's retired `env`. Without it `postgres:16` exits 1 on
+    // first boot complaining about POSTGRES_PASSWORD, and all the King sees is
+    // "never answered on port 5432".
+    if let Some(known) = known_image(&spec.image) {
+        for (key, value) in known.boot {
+            args.push("--env".into());
+            args.push(format!("{key}={value}"));
+        }
+    }
     args.push(spec.image.clone());
 
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1046,23 +1037,6 @@ async fn container_state(container: &str) -> ContainerState {
         Ok(answer) if answer.trim() == "true" => ContainerState::Running,
         Ok(_) => ContainerState::Stopped,
         Err(_) => ContainerState::Absent,
-    }
-}
-
-/// Where a well-known image keeps its data.
-///
-/// A small table rather than a manifest field, because the King should not have
-/// to know MongoDB's data path to share a database. An image not in the table
-/// gets `/data`, and a project that needs otherwise can set the volume to a
-/// path itself -- which is the escape hatch, not the common case.
-fn data_dir_for(image: &str) -> &'static str {
-    let name = image.split(':').next().unwrap_or(image);
-    match name.rsplit('/').next().unwrap_or(name) {
-        "mongo" => "/data/db",
-        "postgres" => "/var/lib/postgresql/data",
-        "mysql" | "mariadb" => "/var/lib/mysql",
-        "redis" => "/data",
-        _ => "/data",
     }
 }
 
@@ -1117,31 +1091,49 @@ async fn wait_until_ready(service: &RunningService) -> Result<(), ServiceError> 
 ///
 /// Nothing here touches Docker: the container named does not exist, which is
 /// exactly right for testing the half that decides what an address says.
+///
+/// Returns the running service, so a caller can ask [`address_for`] about the
+/// very thing it just stood up rather than rebuilding it.
 #[cfg(test)]
-pub(crate) fn pretend_a_well_is_running(city_root: &Path, port: u16) {
+pub(crate) fn pretend_a_well_is_running(city_root: &Path, port: u16) -> RunningService {
+    pretend_a_named_well_is_running(city_root, "db", "172.31.4.10", port)
+}
+
+/// [`pretend_a_well_is_running`] with the name and container address chosen.
+///
+/// Two services can want one port -- the King's Redis and a project's are both
+/// `:6379` -- and telling them apart is the whole reason a relay records what
+/// it reaches. That case needs two wells on one port at two addresses.
+#[cfg(test)]
+pub(crate) fn pretend_a_named_well_is_running(
+    city_root: &Path,
+    name: &str,
+    host: &str,
+    port: u16,
+) -> RunningService {
     std::fs::create_dir_all(city_root.join(".kingdom")).expect("the city's folder");
+    let existing = std::fs::read_to_string(city_root.join(kingdom_core::services::MANIFEST_PATH))
+        .unwrap_or_default();
     std::fs::write(
         city_root.join(kingdom_core::services::MANIFEST_PATH),
-        format!(
-            "[[service]]\nname = \"db\"\nimage = \"mongo:7\"\nport = {port}\n\
-             env = {{ MONGODB_URI = \"mongodb://{{host}}:{{port}}/app\" }}\n"
-        ),
+        format!("{existing}[[service]]\nname = \"{name}\"\nimage = \"mongo:7\"\nport = {port}\n\n"),
     )
     .expect("the manifest");
 
     let key = city_key(city_root);
-    registry().running.insert(
-        (key.clone(), "db".to_string()),
-        RunningService {
-            name: "db".to_string(),
-            image: "mongo:7".to_string(),
-            host: "172.31.4.10".to_string(),
-            port,
-            container: format!("kingdom-{key}-db"),
-            scope: ServiceScope::City,
-            key,
-        },
-    );
+    let service = RunningService {
+        name: name.to_string(),
+        image: "mongo:7".to_string(),
+        host: host.to_string(),
+        port,
+        container: format!("kingdom-{key}-{name}"),
+        scope: ServiceScope::City,
+        key: key.clone(),
+    };
+    registry()
+        .running
+        .insert((key, name.to_string()), service.clone());
+    service
 }
 
 #[cfg(test)]
@@ -1293,7 +1285,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&empty);
         let manifest = manifest_of(&empty).expect("a missing manifest is not a failure");
         assert!(manifest.is_empty());
-        assert!(environment(&PlanId::new("any-plan"), &empty).is_empty());
+        assert!(running_in(&empty).is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1307,30 +1299,25 @@ mod tests {
     ///
     /// Returns the city root it is filed under. Named for the city so two
     /// tests cannot collide in the process-global registry.
-    fn a_running_well(city: &str, port: u16) -> PathBuf {
+    fn a_running_well(city: &str, port: u16) -> (PathBuf, RunningService) {
         let root = std::env::temp_dir().join(city);
-        pretend_a_well_is_running(&root, port);
-        root
+        let _ = std::fs::remove_dir_all(&root);
+        let service = pretend_a_well_is_running(&root, port);
+        (root, service)
     }
 
     /// A plan with the well on its own loopback is told to use it.
     ///
-    /// This is the whole feature seen from the one place that decides it: the
-    /// agent never reads this code, it reads `$MONGODB_URI`, and what that
-    /// variable says is what it will type.
+    /// This is the whole feature seen from the one place that decides it. The
+    /// agent never reads this code -- it reads the address in its prompt, and
+    /// what that says is what it will type.
     #[test]
     fn a_plan_with_the_well_on_its_loopback_is_given_localhost() {
-        let root = a_running_well("kingdom-loopback-well-test", 27017);
+        let (_root, service) = a_running_well("kingdom-loopback-well-test", 27017);
         let plan = PlanId::new("plan-with-its-own-network");
-        crate::netns::pretend_wells_are_open(&plan, &[27017]);
+        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
 
-        assert_eq!(
-            environment(&plan, &root),
-            vec![(
-                "MONGODB_URI".to_string(),
-                "mongodb://127.0.0.1:27017/app".to_string()
-            )]
-        );
+        assert_eq!(address_for(&plan, &service), "localhost:27017");
 
         crate::netns::forget_namespace(&plan);
     }
@@ -1343,17 +1330,11 @@ mod tests {
     /// answer for this plan, and the fallback if an isolated plan's relay fails.
     #[test]
     fn a_plan_on_the_machines_network_keeps_the_containers_address() {
-        let root = a_running_well("kingdom-shared-network-well-test", 27017);
+        let (_root, service) = a_running_well("kingdom-shared-network-well-test", 27017);
         let plan = PlanId::new("plan-on-the-shared-network");
         crate::netns::forget_namespace(&plan);
 
-        assert_eq!(
-            environment(&plan, &root),
-            vec![(
-                "MONGODB_URI".to_string(),
-                "mongodb://172.31.4.10:27017/app".to_string()
-            )]
-        );
+        assert_eq!(address_for(&plan, &service), "172.31.4.10:27017");
     }
 
     /// A relay that did not come up must not be described as if it had.
@@ -1364,18 +1345,51 @@ mod tests {
     /// address that needed reading is a far smaller cost.
     #[test]
     fn a_well_whose_relay_never_bound_is_still_given_its_real_address() {
-        let root = a_running_well("kingdom-half-open-well-test", 27017);
+        let (_root, service) = a_running_well("kingdom-half-open-well-test", 27017);
         let plan = PlanId::new("plan-whose-relay-failed");
-        // A namespace, and some *other* port relayed -- but not the well's.
-        crate::netns::pretend_wells_are_open(&plan, &[6379]);
+        // A namespace, and some *other* service relayed -- but not this well.
+        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.11:6379"]);
 
         assert_eq!(
-            environment(&plan, &root),
-            vec![(
-                "MONGODB_URI".to_string(),
-                "mongodb://172.31.4.10:27017/app".to_string()
-            )],
+            address_for(&plan, &service),
+            "172.31.4.10:27017",
             "promising localhost where nothing is listening is worse than the IP"
+        );
+
+        crate::netns::forget_namespace(&plan);
+    }
+
+    /// Two services on one port: only the one actually relayed gets
+    /// `localhost`.
+    ///
+    /// The ordinary shape of it is the King's own Redis and a project's, both
+    /// `:6379` by default. A plan's loopback has one socket per port, so only
+    /// the first can be relayed -- and this used to be decided by comparing
+    /// *port numbers*, which told the second one `localhost:6379` as well. Its
+    /// every read and write then landed silently in the first one's data, which
+    /// is the worst failure this module can produce: not an error, a wrong
+    /// database.
+    #[test]
+    fn a_second_service_on_the_same_port_is_not_told_it_is_local() {
+        let root = std::env::temp_dir().join("kingdom-two-on-one-port-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let relayed = pretend_a_named_well_is_running(&root, "cache", "172.31.4.10", 6379);
+        let crowded_out = pretend_a_named_well_is_running(&root, "other", "172.31.9.10", 6379);
+
+        let plan = PlanId::new("plan-with-two-caches");
+        // Exactly what `open_wells` records: one relay, for one container.
+        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
+
+        assert_eq!(
+            address_for(&plan, &relayed),
+            "localhost:6379",
+            "the relayed service is on the loopback and must say so"
+        );
+        assert_eq!(
+            address_for(&plan, &crowded_out),
+            "172.31.9.10:6379",
+            "the other service is a different database -- localhost would reach \
+             the first one's data"
         );
 
         crate::netns::forget_namespace(&plan);
@@ -1454,13 +1468,8 @@ mod tests {
             name: "db".to_string(),
             image: "postgres:16".to_string(),
             port: 5432,
-            env: [(
-                "DATABASE_URL".to_string(),
-                "postgres://postgres@{host}:{port}/app".to_string(),
-            )]
-            .into_iter()
-            .collect(),
             volume: Some("app-db".to_string()),
+            retired_env: None,
         };
 
         let path = declare(&scope, &spec).expect("a first declaration must land");
@@ -1499,8 +1508,8 @@ mod tests {
                 name: "cache".to_string(),
                 image: "redis:7".to_string(),
                 port: 6379,
-                env: std::collections::BTreeMap::new(),
                 volume: None,
+                retired_env: None,
             },
         )
         .expect("the second must land beside the first");
@@ -1533,8 +1542,8 @@ mod tests {
             name: "db".to_string(),
             image: "mongo:7".to_string(),
             port: 27017,
-            env: std::collections::BTreeMap::new(),
             volume: None,
+            retired_env: None,
         };
 
         declare(&scope, &spec).expect("the first lands");
@@ -1770,10 +1779,8 @@ mod host_scope {
                 name: "scopecache".to_string(),
                 image: "redis:7-alpine".to_string(),
                 port: 6379,
-                env: [("REDIS_URL".to_string(), "redis://{host}:{port}".to_string())]
-                    .into_iter()
-                    .collect(),
                 volume: None,
+                retired_env: None,
             },
         )
         .expect("the King's own manifest must be writable");
@@ -1804,18 +1811,15 @@ mod host_scope {
         );
         assert_eq!(users_of_key("host", "scopecache"), 2);
 
-        // And both are handed it as an environment variable, with the real
-        // address substituted -- the only way an agent finds it. Neither plan
-        // has a namespace here, so both get the container's own address; an
-        // isolated plan would be told its loopback instead.
-        for (plan, root) in [(&alice, one.path()), (&bob, two.path())] {
-            let env = environment(plan, root);
-            let url = env
-                .iter()
-                .find(|(k, _)| k == "REDIS_URL")
-                .map(|(_, v)| v.clone())
-                .expect("every project gets the machine's wells");
-            assert_eq!(url, format!("redis://{}", raised[0].address()));
+        // And both are told the same address. Neither plan has a namespace
+        // here, so both get the container's own address; an isolated plan would
+        // be told its own loopback instead.
+        for plan in [&alice, &bob] {
+            assert_eq!(
+                address_for(plan, &raised[0]),
+                raised[0].address(),
+                "a plan on the machine's network reaches the container directly"
+            );
         }
 
         // One project finishing does not take it from the other. This is the
@@ -1867,8 +1871,18 @@ mod real_docker {
             name  = "cache"
             image = "redis:7-alpine"
             port  = 6379
-            env   = { REDIS_URL = "redis://{host}:{port}" }
             volume = "kingdom-services-real-test-data"
+
+            # Declared exactly as the form now writes one: an image, a name and
+            # nothing else. Postgres exits 1 on first boot without a password,
+            # so this service comes up only if `known_image`'s boot environment
+            # is actually passed to `docker run` -- which is the whole point of
+            # the table. Its port is left out too, because the form fills that
+            # in from the image.
+            [[service]]
+            name  = "pg"
+            image = "postgres:16"
+            port  = 5432
             "#,
         )
         .expect("write the manifest");
@@ -1876,9 +1890,9 @@ mod real_docker {
         let one = PlanId::new("real-plan-1");
         let two = PlanId::new("real-plan-2");
 
-        // First plan starts the service.
+        // First plan starts the services.
         let up = ensure(&one, &root).await.expect("the service must come up");
-        assert_eq!(up.len(), 1);
+        assert_eq!(up.len(), 2);
         let service = up[0].clone();
         assert!(
             service.host.starts_with("172.31."),
@@ -1892,18 +1906,20 @@ mod real_docker {
             .await
             .expect("the service must answer at the address we hand to plans");
 
-        // And that address is what a plan's tools would be given. `one` has no
-        // namespace here, so it is told the container's address -- the
-        // shared-network answer, and the fallback an isolated plan gets if its
-        // loopback relay could not be raised.
-        let environment = environment(&one, &root);
-        assert_eq!(
-            environment,
-            vec![(
-                "REDIS_URL".to_string(),
-                format!("redis://{}", service.address())
-            )]
-        );
+        // And so does the Postgres, which is the case that could not start
+        // before: nothing in the manifest gives it a password, so it comes up
+        // only because `known_image` hands one to `docker run`.
+        let postgres = up[1].clone();
+        assert_eq!(postgres.name, "pg");
+        tokio::net::TcpStream::connect(postgres.address())
+            .await
+            .expect("postgres must boot from the image's own defaults");
+
+        // And that address is what a plan is told. `one` has no namespace here,
+        // so it is told the container's address -- the shared-network answer,
+        // and the fallback an isolated plan gets if its loopback relay could
+        // not be raised.
+        assert_eq!(address_for(&one, &service), service.address());
 
         // Second plan finds it standing rather than starting another.
         let again = ensure(&two, &root)
@@ -1969,6 +1985,7 @@ mod real_docker {
         // Tidy up: this test owns every name it used.
         release(&three, &root).await;
         let _ = docker(&["rm", "-f", &service.container]).await;
+        let _ = docker(&["rm", "-f", &postgres.container]).await;
         let _ = docker(&["volume", "rm", "kingdom-services-real-test-data"]).await;
         let _ = docker(&["network", "rm", &network_name(&city_key(&root))]).await;
         let _ = std::fs::remove_dir_all(&root);

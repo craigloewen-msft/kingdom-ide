@@ -32,7 +32,7 @@
 
 use crate::ids::CityId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+
 use std::fmt::Write as _;
 
 /// Where a city's manifest sits, relative to its root.
@@ -113,17 +113,10 @@ pub struct ServiceSpec {
     pub name: String,
     /// The image to run, tag included.
     pub image: String,
-    /// The port the service listens on *inside* the container.
+    /// The port the service listens on *inside* the container -- and the port
+    /// an agent reaches it on, because that is the whole promise: a relay puts
+    /// the container on the plan's own loopback at this same number.
     pub port: u16,
-    /// Variables handed to every plan's tools, with `{host}` and `{port}`
-    /// replaced by the running container's address.
-    ///
-    /// This is how a plan finds the well. A plan's namespace cannot resolve
-    /// Docker's service names -- Docker's DNS answers only between containers
-    /// on the same network -- so an address is the only thing that works, and
-    /// the address is not known until the container exists.
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
     /// A named Docker volume for the service's data, kept when the container is
     /// stopped.
     ///
@@ -132,6 +125,109 @@ pub struct ServiceSpec {
     /// assumed either way.
     #[serde(default)]
     pub volume: Option<String>,
+    /// `env`, kept only so that a manifest still carrying it can be **refused**
+    /// by name rather than silently ignored.
+    ///
+    /// Serde drops an unknown key without a word. Kingdom used to hand these
+    /// variables to every command a plan ran, so a project that still declares
+    /// them would otherwise believe its agents get `$DATABASE_URL` while
+    /// nothing sets it. Never read for its contents -- only for whether it is
+    /// there. See [`ManifestError::Retired`].
+    ///
+    /// Skipped when serialising, so nothing Kingdom writes can ever contain it.
+    #[serde(default, rename = "env", skip_serializing)]
+    pub retired_env: Option<RetiredField>,
+}
+
+/// A field that is accepted by the parser only so it can be rejected by name.
+///
+/// Deserialises from **any** TOML value and keeps none of it: the only question
+/// asked of it is whether the key was present. A marker rather than a
+/// `toml::Value` for two reasons -- a `Value` holds floats and so is not `Eq`,
+/// which every type in this module is, and keeping the contents would invite
+/// somebody to start honouring them again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct RetiredField;
+
+impl<'de> Deserialize<'de> for RetiredField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(RetiredField)
+    }
+}
+
+/// What Kingdom knows about a well-known image without being told.
+///
+/// # Why a table rather than more fields on the form
+///
+/// The King should not have to know Postgres's port, where Mongo keeps its
+/// files, or that `postgres:16` refuses to boot without a password, in order to
+/// share a database. Every one of those is a fact about the image rather than a
+/// decision about his project, and a form that asks for facts it could look up
+/// is a form that can be got wrong.
+///
+/// Deliberately small and deliberately here: `kingdom-core` does no I/O, so the
+/// whole table is tested without a daemon, and one table means the port the
+/// form fills in and the data directory the volume is mounted at cannot
+/// disagree about what `mongo` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownImage {
+    /// The port it listens on, which the form offers and an agent reaches it
+    /// on.
+    pub port: u16,
+    /// Where it keeps its data, so a named volume is mounted somewhere useful.
+    pub data_dir: &'static str,
+    /// What it needs in its **own** environment in order to start at all.
+    ///
+    /// Container-facing, and the opposite direction of travel from the `env`
+    /// this change deletes: nothing here is ever shown to an agent. `postgres`
+    /// exits 1 without a password -- measured, not assumed -- so a King who
+    /// typed `postgres:16` and nothing else would otherwise get a resource that
+    /// never comes up.
+    pub boot: &'static [(&'static str, &'static str)],
+}
+
+/// What is known about an image, by its name with any tag and registry
+/// stripped.
+///
+/// `None` for anything unrecognised, which is not a refusal: such an image runs
+/// perfectly well, it just has to be told its port, and gets `/data` if it is
+/// given a volume.
+pub fn known_image(image: &str) -> Option<KnownImage> {
+    let name = image.split(':').next().unwrap_or(image);
+    let name = name.rsplit('/').next().unwrap_or(name);
+    let known = |port, data_dir, boot| {
+        Some(KnownImage {
+            port,
+            data_dir,
+            boot,
+        })
+    };
+    match name {
+        "mongo" => known(27017, "/data/db", &[]),
+        // Without this it exits 1 on first boot with a message about
+        // POSTGRES_PASSWORD, and the King sees only "never answered on port
+        // 5432". A fixed password is right here: nothing is published on his
+        // loopback, and the container is reachable only from his own machine
+        // and the plans he opens.
+        "postgres" => known(
+            5432,
+            "/var/lib/postgresql/data",
+            &[("POSTGRES_PASSWORD", "postgres")],
+        ),
+        "mysql" | "mariadb" => known(3306, "/var/lib/mysql", &[("MYSQL_ROOT_PASSWORD", "root")]),
+        "redis" => known(6379, "/data", &[]),
+        _ => None,
+    }
+}
+
+/// Where an image keeps its data, for a named volume to be mounted at.
+///
+/// `/data` for anything unrecognised -- a guess, but a harmless one: a volume
+/// mounted at the wrong path costs an empty directory, where no volume at all
+/// costs the King his data.
+pub fn data_dir_for(image: &str) -> &'static str {
+    known_image(image).map_or("/data", |known| known.data_dir)
 }
 
 /// Why a manifest could not be used.
@@ -152,8 +248,17 @@ pub enum ManifestError {
     DuplicateName(String),
     /// A name that cannot safely be part of a container name.
     BadName(String),
-    /// An env value interpolated something that is not `{host}` or `{port}`.
-    UnknownPlaceholder { service: String, key: String },
+    /// A field Kingdom used to honour and no longer does.
+    ///
+    /// Refused rather than ignored, which is the whole reason this variant
+    /// exists. Serde drops an unknown key without a word, so a manifest still
+    /// carrying `env` would leave a project believing it sets `$DATABASE_URL`
+    /// for its agents while nothing does -- a silence that reads as a broken
+    /// database an hour later. One line to delete, said once, is cheaper.
+    Retired {
+        service: String,
+        field: &'static str,
+    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -180,10 +285,12 @@ impl std::fmt::Display for ManifestError {
                 "`{name}` cannot be a service name: use letters, digits, `-` \
                  and `_` only"
             ),
-            ManifestError::UnknownPlaceholder { service, key } => write!(
+            ManifestError::Retired { service, field } => write!(
                 f,
-                "service `{service}` sets `{key}` with a placeholder that is \
-                 not `{{host}}` or `{{port}}`"
+                "service `{service}` sets `{field}`, which Kingdom no longer \
+                 uses -- an agent reaches a shared resource at `localhost` on \
+                 the service's own port, with nothing to configure. Remove \
+                 that line."
             ),
         }
     }
@@ -192,23 +299,6 @@ impl std::fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 impl ServiceSpec {
-    /// The env vars for this service once its address is known.
-    ///
-    /// Substitution rather than a format string, so a value with no placeholder
-    /// passes through untouched -- a service may want a plain
-    /// `MONGO_DB=shopfront` beside its URI.
-    pub fn environment(&self, host: &str, port: u16) -> Vec<(String, String)> {
-        self.env
-            .iter()
-            .map(|(key, value)| {
-                let filled = value
-                    .replace("{host}", host)
-                    .replace("{port}", &port.to_string());
-                (key.clone(), filled)
-            })
-            .collect()
-    }
-
     /// This service as the `[[service]]` block a person would have typed.
     ///
     /// # Why the UI writes text rather than a document
@@ -228,14 +318,6 @@ impl ServiceSpec {
         let _ = writeln!(out, "name  = {}", toml_string(&self.name));
         let _ = writeln!(out, "image = {}", toml_string(&self.image));
         let _ = writeln!(out, "port  = {}", self.port);
-        if !self.env.is_empty() {
-            let pairs: Vec<String> = self
-                .env
-                .iter()
-                .map(|(key, value)| format!("{key} = {}", toml_string(value)))
-                .collect();
-            let _ = writeln!(out, "env   = {{ {} }}", pairs.join(", "));
-        }
         if let Some(volume) = &self.volume {
             let _ = writeln!(out, "volume = {}", toml_string(volume));
         }
@@ -297,13 +379,13 @@ impl ServiceManifest {
             }
             seen.push(&service.name);
 
-            for (key, value) in &service.env {
-                if unknown_placeholder(value).is_some() {
-                    return Err(ManifestError::UnknownPlaceholder {
-                        service: service.name.clone(),
-                        key: key.clone(),
-                    });
-                }
+            // Retired fields, refused by name. See [`ManifestError::Retired`]:
+            // ignoring one would be a silent promise nothing keeps.
+            if service.retired_env.is_some() {
+                return Err(ManifestError::Retired {
+                    service: service.name.clone(),
+                    field: "env",
+                });
             }
         }
         Ok(())
@@ -343,30 +425,6 @@ fn is_safe_name(name: &str) -> bool {
 /// would show up as a form that accepts what the parser then rejects.
 pub fn is_usable_name(name: &str) -> bool {
     is_safe_name(name)
-}
-
-/// `KEY=value` lines as the map a manifest holds.
-///
-/// # Why the form sends text rather than pairs
-///
-/// It is the shape the file itself has, so what the King types is what he sees
-/// in the preview and what lands in the manifest -- one representation instead
-/// of three. It also closes a real hole: a `Vec<(String, String)>` that happens
-/// to be **empty** does not survive a server function's argument encoding at
-/// all, and a service with no environment is the ordinary case rather than a
-/// corner. Measured, not guessed: the form failed with "missing field `env`"
-/// for exactly that input.
-///
-/// Forgiving in the two ways a person is: blank lines are skipped, and a line
-/// with no `=` is dropped rather than becoming a variable with an empty name --
-/// which [`parse`] would then refuse, blaming the whole file for one unfinished
-/// line.
-pub fn parse_env(text: &str) -> BTreeMap<String, String> {
-    text.lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
-        .filter(|(key, _)| !key.is_empty())
-        .collect()
 }
 
 /// What a declared service is actually doing.
@@ -438,9 +496,6 @@ pub struct SharedResource {
     /// Titles rather than ids: "who else is in here?" is a question about
     /// people's work, and a UUID does not answer it.
     pub users: Vec<String>,
-    /// The environment a plan actually receives, with `{host}` and `{port}`
-    /// filled in when the address is known and left as written when it is not.
-    pub environment: Vec<(String, String)>,
 }
 
 impl SharedResource {
@@ -493,26 +548,6 @@ impl ResourceInventory {
     }
 }
 
-/// The first `{...}` in a value that is not one we substitute.
-///
-/// Catches `{hosts}` and `{HOST}`, which would otherwise reach a plan verbatim
-/// and fail as a connection to a host literally called `{hosts}`.
-fn unknown_placeholder(value: &str) -> Option<String> {
-    let mut rest = value;
-    while let Some(open) = rest.find('{') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('}') else {
-            return Some("{".to_string());
-        };
-        let name = &after[..close];
-        if name != "host" && name != "port" {
-            return Some(name.to_string());
-        }
-        rest = &after[close + 1..];
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,7 +565,6 @@ mod tests {
             name  = "db"
             image = "mongo:7"
             port  = 27017
-            env   = { MONGODB_URI = "mongodb://{host}:{port}/shopfront" }
             volume = "shopfront-db"
             "#,
         )
@@ -554,50 +588,91 @@ mod tests {
         assert!(parse("# nothing here\n").expect("comments only").is_empty());
     }
 
-    /// The address is substituted, and everything else is left alone.
+    /// A manifest still setting `env` is refused **by name**, not ignored.
     ///
-    /// The second half matters as much as the first: a manifest may set a plain
-    /// value beside its URI, and rewriting that would be a surprise.
+    /// The failure this prevents is the quiet one. Serde drops an unknown key
+    /// without a word, so a project that still declares `MONGODB_URI` would go
+    /// on believing its agents are handed it while nothing sets it -- and the
+    /// agent's connection failure would read as a bug in the project's own
+    /// code. The message names the service and says what to do instead.
     #[test]
-    fn the_address_is_filled_in_and_nothing_else_is() {
-        let manifest = parse(
+    fn a_manifest_still_setting_env_is_refused_by_name() {
+        let error = parse(
             r#"
             [[service]]
             name = "db"
             image = "mongo:7"
             port = 27017
-            env = { MONGODB_URI = "mongodb://{host}:{port}/shop", MONGO_DB = "shop" }
+            env = { MONGODB_URI = "mongodb://{host}:{port}/shop" }
             "#,
         )
-        .expect("valid");
-
-        let environment = manifest.services[0].environment("172.31.4.10", 27017);
-        let lookup: std::collections::BTreeMap<_, _> = environment.into_iter().collect();
+        .expect_err("a retired field must be refused rather than dropped");
 
         assert_eq!(
-            lookup.get("MONGODB_URI").map(String::as_str),
-            Some("mongodb://172.31.4.10:27017/shop")
+            error,
+            ManifestError::Retired {
+                service: "db".to_string(),
+                field: "env",
+            }
         );
-        assert_eq!(lookup.get("MONGO_DB").map(String::as_str), Some("shop"));
+        // The King has to find the line and delete it, so both the service and
+        // the field are named, and the replacement is stated.
+        let said = error.to_string();
+        assert!(said.contains("db"), "{said}");
+        assert!(said.contains("env"), "{said}");
+        assert!(said.contains("localhost"), "{said}");
     }
 
-    /// `{port}` uses the container's real port, which need not be the declared
-    /// one forever -- so it is passed in rather than read off the spec.
+    /// What Kingdom knows about an image so the King does not have to.
+    ///
+    /// The port is what the form fills in, the data directory is where a volume
+    /// is mounted, and `boot` is the difference between a Postgres that starts
+    /// and one that exits 1 saying `POSTGRES_PASSWORD` -- measured against a
+    /// real daemon, which is why it is a table rather than a hope.
     #[test]
-    fn the_port_placeholder_takes_the_port_it_is_given() {
-        let spec = ServiceSpec {
-            name: "cache".to_string(),
-            image: "redis:7".to_string(),
-            port: 6379,
-            env: [("URL".to_string(), "redis://{host}:{port}".to_string())]
-                .into_iter()
-                .collect(),
-            volume: None,
-        };
-        assert_eq!(
-            spec.environment("10.0.0.5", 6380),
-            vec![("URL".to_string(), "redis://10.0.0.5:6380".to_string())]
-        );
+    fn a_well_known_image_brings_its_own_port_and_boot_environment() {
+        let mongo = known_image("mongo:7").expect("mongo is known");
+        assert_eq!(mongo.port, 27017);
+        assert_eq!(mongo.data_dir, "/data/db");
+        assert!(mongo.boot.is_empty(), "mongo starts with nothing set");
+
+        let postgres = known_image("postgres:16").expect("postgres is known");
+        assert_eq!(postgres.port, 5432);
+        assert_eq!(postgres.boot, &[("POSTGRES_PASSWORD", "postgres")]);
+
+        assert_eq!(known_image("redis:7-alpine").map(|k| k.port), Some(6379));
+        assert_eq!(known_image("mysql:8").map(|k| k.port), Some(3306));
+    }
+
+    /// A tag and a registry are not part of the image's identity here.
+    ///
+    /// `docker.io/library/postgres:16-alpine` is still Postgres, and a King who
+    /// pastes a fully qualified name should not lose the port and the password
+    /// for it.
+    #[test]
+    fn an_image_is_recognised_through_its_registry_and_tag() {
+        for image in [
+            "postgres",
+            "postgres:16",
+            "postgres:16-alpine",
+            "library/postgres:16",
+            "docker.io/library/postgres:16",
+        ] {
+            assert_eq!(
+                known_image(image).map(|k| k.port),
+                Some(5432),
+                "{image} should be recognised as postgres"
+            );
+        }
+    }
+
+    /// An unknown image is not a refusal: it runs, it just has to be told its
+    /// port, and a volume on it lands somewhere harmless.
+    #[test]
+    fn an_unknown_image_still_gets_a_data_directory() {
+        assert!(known_image("ghcr.io/acme/thing:1").is_none());
+        assert_eq!(data_dir_for("ghcr.io/acme/thing:1"), "/data");
+        assert_eq!(data_dir_for("mongo:7"), "/data/db");
     }
 
     /// Two services with one name would mean two containers with one name, and
@@ -652,31 +727,6 @@ mod tests {
         );
     }
 
-    /// A misspelled placeholder reaches the plan verbatim and fails as a
-    /// connection to a host called `{hosts}` -- which is a genuinely baffling
-    /// error an hour later. Caught here instead.
-    #[test]
-    fn a_misspelled_placeholder_is_caught_at_parse_time() {
-        let error = parse(
-            r#"
-            [[service]]
-            name = "db"
-            image = "mongo:7"
-            port = 27017
-            env = { URI = "mongodb://{hosts}:{port}" }
-            "#,
-        )
-        .expect_err("an unknown placeholder must be refused");
-
-        assert_eq!(
-            error,
-            ManifestError::UnknownPlaceholder {
-                service: "db".to_string(),
-                key: "URI".to_string(),
-            }
-        );
-    }
-
     /// Broken TOML says so, and says what was wrong, rather than reporting as
     /// an empty manifest -- which would look exactly like "this project has no
     /// services" and hide the typo.
@@ -709,23 +759,17 @@ mod tests {
     /// The form writes text and the parser reads it, so the only thing that
     /// makes the pair trustworthy is that the trip closes.
     ///
-    /// Every field at once, including the two that are optional and the one
-    /// that carries placeholders -- a `render` that dropped `volume` would be
-    /// invisible until somebody's database lost its data.
+    /// Every field at once, including the optional one -- a `render` that
+    /// dropped `volume` would be invisible until somebody's database lost its
+    /// data.
     #[test]
     fn a_rendered_service_parses_back_to_itself() {
         let spec = ServiceSpec {
             name: "db".to_string(),
             image: "mongo:7".to_string(),
             port: 27017,
-            env: BTreeMap::from([
-                (
-                    "MONGODB_URI".to_string(),
-                    "mongodb://{host}:{port}/shopfront".to_string(),
-                ),
-                ("MONGO_DB".to_string(), "shopfront".to_string()),
-            ]),
             volume: Some("shopfront-db".to_string()),
+            retired_env: None,
         };
 
         let manifest = parse(&spec.render()).expect("what the form renders must parse");
@@ -735,17 +779,18 @@ mod tests {
     /// A service with nothing optional set renders the minimum, and that
     /// minimum still parses.
     ///
-    /// The `env` and `volume` lines are omitted rather than written empty:
-    /// `env = {  }` is noise in a file a person reads, and `volume = ""` would
-    /// be a *different* declaration from "no volume".
+    /// The `volume` line is omitted rather than written empty: `volume = ""`
+    /// would be a *different* declaration from "no volume". `env` must never
+    /// appear at all -- a rendered block that carried one would be refused by
+    /// the parser it was written for.
     #[test]
     fn a_bare_service_renders_without_empty_lines() {
         let spec = ServiceSpec {
             name: "cache".to_string(),
             image: "redis:7".to_string(),
             port: 6379,
-            env: BTreeMap::new(),
             volume: None,
+            retired_env: None,
         };
 
         let rendered = spec.render();
@@ -757,23 +802,24 @@ mod tests {
         );
     }
 
-    /// A value with a quote in it must not break out of its string.
+    /// A quote in a value must not break out of its string.
     ///
-    /// A URI with a password in it is the realistic way this arrives, and an
-    /// unescaped quote would turn one bad password into a manifest that no
-    /// longer parses at all -- taking the *other* services in the file with it.
+    /// An image or a volume is where one can now arrive -- a private registry
+    /// path, most plausibly -- and an unescaped quote would turn one odd name
+    /// into a manifest that no longer parses at all, taking the *other*
+    /// services in the file with it.
     #[test]
     fn a_quote_in_a_value_does_not_break_the_file() {
         let spec = ServiceSpec {
             name: "db".to_string(),
             image: "postgres:16".to_string(),
             port: 5432,
-            env: BTreeMap::from([("PASSWORD".to_string(), "a\"b\\c".to_string())]),
-            volume: None,
+            volume: Some("a\"b\\c".to_string()),
+            retired_env: None,
         };
 
         let manifest = parse(&spec.render()).expect("an escaped value still parses");
-        assert_eq!(manifest.services[0].env["PASSWORD"], "a\"b\\c");
+        assert_eq!(manifest.services[0].volume.as_deref(), Some("a\"b\\c"));
     }
 
     /// Appending a rendered block to a manifest that already has one leaves
@@ -790,8 +836,8 @@ mod tests {
             name: "cache".to_string(),
             image: "redis:7".to_string(),
             port: 6379,
-            env: BTreeMap::new(),
             volume: None,
+            retired_env: None,
         };
 
         let combined = format!("{existing}\n{}", addition.render());
@@ -828,71 +874,14 @@ mod tests {
                 name: name.to_string(),
                 image: "mongo:7".to_string(),
                 port: 1,
-                env: BTreeMap::new(),
                 volume: None,
+                retired_env: None,
             };
             assert!(parse(&spec.render()).is_ok(), "`{name}` should be usable");
         }
         for name in ["a/b", "with space", "colon:name", ""] {
             assert!(!is_usable_name(name), "`{name}` should be refused");
         }
-    }
-
-    /// The form's text box and the manifest's map are the same thing, so the
-    /// trip between them has to close.
-    #[test]
-    fn env_lines_become_the_map_a_manifest_holds() {
-        let parsed = parse_env("URI = mongodb://{host}:{port}/app\nMONGO_DB=app");
-        assert_eq!(parsed["URI"], "mongodb://{host}:{port}/app");
-        assert_eq!(parsed["MONGO_DB"], "app");
-    }
-
-    /// A half-typed line must not become a variable with no name.
-    ///
-    /// It would be refused by [`parse`] at write time with an error about the
-    /// whole file, which reads as "your manifest is broken" rather than "line
-    /// three is not finished".
-    #[test]
-    fn a_line_without_an_equals_is_dropped_rather_than_half_kept() {
-        let parsed = parse_env("GOOD=1\n\njust typing\n  =2\n");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed["GOOD"], "1");
-    }
-
-    /// A value may contain `=` -- a Postgres DSN routinely does -- so only the
-    /// first one separates.
-    #[test]
-    fn only_the_first_equals_separates() {
-        let parsed = parse_env("DSN=host=db user=app");
-        assert_eq!(parsed["DSN"], "host=db user=app");
-    }
-
-    /// An empty box is an empty map, and the resulting service still renders
-    /// and parses.
-    ///
-    /// The case that actually broke: a `Vec` of pairs that happened to be empty
-    /// did not survive a server function's argument encoding at all, and
-    /// "declare a Redis with no environment" is the ordinary case rather than a
-    /// corner. Sending the text instead is what fixed it, so the empty text is
-    /// worth a test of its own.
-    #[test]
-    fn no_environment_at_all_is_a_service_that_still_works() {
-        assert!(parse_env("").is_empty());
-        assert!(parse_env("\n  \n").is_empty());
-
-        let spec = ServiceSpec {
-            name: "cache".to_string(),
-            image: "redis:7".to_string(),
-            port: 6379,
-            env: parse_env(""),
-            volume: None,
-        };
-        assert_eq!(
-            parse(&spec.render())
-                .expect("a service with no environment must parse")
-                .services,
-            vec![spec]
-        );
     }
 
     /// A host resource is owned by the machine and a city's by its city, and
@@ -903,8 +892,8 @@ mod tests {
             name: "db".to_string(),
             image: "mongo:7".to_string(),
             port: 27017,
-            env: BTreeMap::new(),
             volume: None,
+            retired_env: None,
         };
         let resource = |scope, city_name: Option<&str>| SharedResource {
             spec: spec.clone(),
@@ -916,7 +905,6 @@ mod tests {
             address: None,
             container: "kingdom-host-db".to_string(),
             users: Vec::new(),
-            environment: Vec::new(),
         };
 
         assert_eq!(
