@@ -753,6 +753,37 @@ pub struct Plan {
     /// area exists to prevent.
     #[serde(default, alias = "network")]
     pub isolation: Isolation,
+    /// Exactly which folders this plan was opened with, when the King chose
+    /// them.
+    ///
+    /// Only meaningful for a sealed plan; nothing else looks at it.
+    ///
+    /// # Why this is on the plan rather than read from a manifest
+    ///
+    /// It used to be neither: the isolation panel wrote every tick straight
+    /// into `~/.kingdom/services.toml`, and the fence was re-read from that
+    /// file on **every turn**. Two things followed, both wrong. Ticking a box
+    /// for one plan silently changed what every *later* sealed plan could see;
+    /// and editing that file while a plan ran moved the walls of a plan already
+    /// running, which is precisely what [`Plan::workspace`] and
+    /// [`Plan::isolation`] are settled-at-open to prevent.
+    ///
+    /// So the choice is recorded here, once, when the plan opens.
+    ///
+    /// # Why `Option` and not a bare `Vec`
+    ///
+    /// The two empty cases are different questions and a vector answers only
+    /// one. `None` means "this plan never recorded a choice" -- every record
+    /// written before this field existed, and every plan that is not sealed --
+    /// and the manifests are read as they always were. `Some(vec![])` means the
+    /// King looked at the list and unticked all of it, which must give a plan
+    /// with nothing but its workspace and a read-only system.
+    ///
+    /// A project's own `<city>/.kingdom/services.toml` still applies either
+    /// way: that is the project stating what it needs to run, not a preference
+    /// this panel may overrule.
+    #[serde(default)]
+    pub mounts: Option<Vec<crate::services::MountSpec>>,
     /// Which of this plan's ports are reachable from the host right now.
     ///
     /// **Never persisted meaningfully and never read back from disk as truth.**
@@ -1189,6 +1220,10 @@ impl Plan {
             outcome: None,
             workspace,
             isolation,
+            // Filled in by `begin_plan` when the King chose folders in the
+            // isolation panel. `None` here rather than an empty vector: see the
+            // field, where the two are deliberately different answers.
+            mounts: None,
             ports: Vec::new(),
             shared_services: Vec::new(),
             working_on: None,
@@ -1251,6 +1286,11 @@ impl Plan {
             // started would be unable to answer most of what it is sent to
             // answer.
             isolation: parent.isolation,
+            // And the parent's folders, for the third time the same reason: a
+            // subagent enters the namespace its parent already built, so a
+            // different set here would describe a fence that is not the one it
+            // is standing behind.
+            mounts: parent.mounts.clone(),
             ports: Vec::new(),
             shared_services: Vec::new(),
             working_on: None,
@@ -5230,6 +5270,68 @@ mod isolation_tests {
 
         assert_eq!(plan.isolation, Isolation::Shared);
         assert!(!plan.isolation.is_isolated());
+    }
+
+    /// "Never chose" and "chose nothing" are different answers, and the record
+    /// has to keep them apart.
+    ///
+    /// This is why [`Plan::mounts`] is an `Option` rather than a `Vec`. A plan
+    /// written before the isolation panel recorded anything must fall back to
+    /// reading the King's manifests, exactly as it always did. A plan whose
+    /// King looked at the list and unticked every row must get **nothing** --
+    /// and if the two collapsed into one empty vector, that second plan would
+    /// silently be handed his whole toolchain instead.
+    #[test]
+    fn a_plan_that_chose_nothing_is_not_a_plan_that_never_chose() {
+        let never: Plan = serde_json::from_value(older_record(serde_json::json!({})))
+            .expect("an older plan must still load");
+        assert_eq!(
+            never.mounts, None,
+            "a record predating the choice must read the manifests as before"
+        );
+
+        let emptied: Plan =
+            serde_json::from_value(older_record(serde_json::json!({ "mounts": [] })))
+                .expect("a plan with an explicit empty choice must load");
+        assert_eq!(
+            emptied.mounts,
+            Some(Vec::new()),
+            "unticking everything must survive as an explicit empty list"
+        );
+    }
+
+    /// What the King ticked survives a round trip, mode and all.
+    ///
+    /// The mode is the half worth pinning: a folder that comes back read-only
+    /// when he asked for writable is a build that fails deep inside a turn,
+    /// naming a permission error rather than a setting.
+    #[test]
+    fn the_chosen_folders_survive_a_round_trip() {
+        use crate::services::{MountMode, MountSpec};
+
+        let mut plan: Plan = serde_json::from_value(older_record(serde_json::json!({})))
+            .expect("an older plan must still load");
+        plan.mounts = Some(vec![
+            MountSpec {
+                path: "~/.cargo".to_string(),
+                mode: MountMode::Rw,
+            },
+            MountSpec {
+                path: "/srv/fixtures".to_string(),
+                mode: MountMode::Ro,
+            },
+        ]);
+
+        let text = serde_json::to_string(&plan).expect("a plan must serialise");
+        let back: Plan = serde_json::from_str(&text).expect("and load again");
+
+        assert_eq!(back.mounts, plan.mounts);
+        let chosen = back.mounts.expect("the choice is recorded");
+        assert!(
+            chosen[0].mode.is_writable(),
+            "a cache the King made writable must come back writable"
+        );
+        assert!(!chosen[1].mode.is_writable());
     }
 
     /// The ladder holds: `is_isolated` is the question ~100 existing call sites

@@ -51,7 +51,10 @@ pub mod docker;
 pub mod mounts;
 
 pub use docker::{data_dir_for, known_image, DockerSpec, KnownImage};
-pub use mounts::{known_extras, known_path, KnownPath, MountCandidate, MountMode, MountSpec};
+pub use mounts::{
+    always_included, known_extras, known_path, off_by_default, KnownPath, MountCandidate,
+    MountMode, MountSpec, KINGDOM_PROFILE,
+};
 
 use crate::ids::CityId;
 use serde::{Deserialize, Serialize};

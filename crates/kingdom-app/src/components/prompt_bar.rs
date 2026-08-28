@@ -6,10 +6,7 @@
 //! a sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
-use crate::api::{
-    begin_plan, declare_mount, list_branches, list_models, mount_offers, network_available,
-    withdraw_mount,
-};
+use crate::api::{begin_plan, list_branches, list_models, mount_offers, network_available};
 use crate::app::KingdomState;
 use kingdom_core::{
     City, CredentialState, Isolation, ModelCatalogue, ModelChoice, ModelEffort, ModelOption,
@@ -64,10 +61,23 @@ pub fn PromptBar() -> impl IntoView {
         let chosen = choice.get_untracked();
         let workspace = state.workspace.get_untracked();
         let isolation = state.isolation.get_untracked();
+        // What the isolation panel holds, sent with the prompt rather than
+        // written to a manifest as it was ticked. Only a sealed plan has a
+        // fence for it to describe; the server drops it otherwise.
+        let mounts = state.mounts.get_untracked();
         let navigate = navigate.clone();
 
         async move {
-            match begin_plan(prompt, city, chosen, Some(workspace), Some(isolation)).await {
+            match begin_plan(
+                prompt,
+                city,
+                chosen,
+                Some(workspace),
+                Some(isolation),
+                mounts,
+            )
+            .await
+            {
                 // Opening makes no model call, so the user
                 // lands in the conversation while the model is still thinking.
                 // The conversation itself kicks off the drafting.
@@ -676,11 +686,15 @@ fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
     // reached, so switching tabs shows a list instead of a spinner. It is a
     // `PATH` walk and a handful of `stat`s -- cheap enough to pay for eagerly,
     // unlike the Docker call this panel used to make.
+    //
+    // Keyed on the city alone. It used to carry a `revision` a checkbox bumped
+    // to force a refetch after writing to a manifest; nothing writes now, so
+    // re-reading the machine would only throw the list away and draw the
+    // spinner again -- which was the reset the King was complaining about.
     let city = Memo::new(move |_| state.selected.get());
-    let revision = RwSignal::new(0_u32);
     let offers = Resource::new(
-        move || (city.get(), revision.get()),
-        |(city, _)| async move { mount_offers(city.map(|c| c.to_string())).await.ok() },
+        move || city.get(),
+        |city| async move { mount_offers(city.map(|c| c.to_string())).await.ok() },
     );
 
     let is_network = Memo::new(move |_| tab.get() == IsolationTab::Network);
@@ -734,7 +748,6 @@ fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
                     fallback=move || view! {
                         <FileChoices
                             offers=offers
-                            revision=revision
                             refusal=refusal
                             barred=barred
                         />
@@ -836,7 +849,6 @@ fn NetworkChoices(refusal: Signal<Option<String>>, barred: Signal<bool>) -> impl
 #[component]
 fn FileChoices(
     offers: Resource<Option<Vec<kingdom_core::services::MountCandidate>>>,
-    revision: RwSignal<u32>,
     refusal: Signal<Option<String>>,
     barred: Signal<bool>,
 ) -> impl IntoView {
@@ -884,7 +896,7 @@ fn FileChoices(
                 </button>
 
                 <Show when=move || sealed.get()>
-                    <MountChecklist offers=offers revision=revision/>
+                    <MountChecklist offers=offers/>
                 </Show>
             </li>
 
@@ -894,6 +906,42 @@ fn FileChoices(
             </Show>
         </ul>
     }
+}
+
+/// What is ticked when the King first opens the Files tab.
+///
+/// **Everything, bar one.** A sealed plan that cannot build is a sealed plan
+/// nobody uses, and the old default -- nothing, assemble your toolchain by hand
+/// each time -- made the mode expensive enough to avoid. So every offer the
+/// machine actually has starts ticked.
+///
+/// The exception is [`kingdom_core::services::off_by_default`], which today
+/// means `~/.ssh`. Ticking that by default would hand every agent the King's
+/// private key -- the means to push as him, and to reach anything that trusts
+/// that key -- because it was convenient. `known_extras` has always said
+/// Kingdom will not do that, and a default is exactly where such a promise is
+/// kept or broken. It is one click away for the plan that genuinely needs it.
+///
+/// An offer the *project* declared is included whether or not it would
+/// otherwise be: it is part of what that project needs in order to run.
+fn default_selection(
+    offers: &[kingdom_core::services::MountCandidate],
+) -> Vec<kingdom_core::services::MountSpec> {
+    let mut out: Vec<kingdom_core::services::MountSpec> = Vec::new();
+    for offer in offers {
+        // A project's own declaration is not the King's to opt out of here.
+        let required = offer.already() && !offer.removable();
+        for folder in &offer.folders {
+            if !required && kingdom_core::services::off_by_default(&folder.path) {
+                continue;
+            }
+            if out.iter().any(|held| held.path == folder.path) {
+                continue;
+            }
+            out.push(folder.clone());
+        }
+    }
+    out
 }
 
 /// The folders a sealed plan may see, as boxes that tick and untick.
@@ -906,53 +954,104 @@ fn FileChoices(
 /// is how a feature goes unused. The screen remains the place to review every
 /// project's at once; this is the place to say yes and no.
 ///
-/// # Why a box writes to his profile
+/// # Why a tick writes nothing
 ///
-/// A box ticked here always declares at the **host** scope. A toolchain is a
-/// fact about his machine, not about one project: `~/.cargo` is where cargo
-/// lives whatever he is working on, and writing that into a project's committed
-/// manifest would put his home directory's layout into somebody else's
-/// repository.
+/// It used to write. Every box called `declare_mount` or `withdraw_mount`,
+/// which edited `~/.kingdom/services.toml` and then bumped a revision the
+/// offers resource was keyed on -- so the whole list fell back to "Looking..."
+/// and redrew on every single click. That was the jarring reset, and it was the
+/// visible half of a worse problem: a tick meant for *this* plan silently
+/// changed what every **later** sealed plan would see, and a plan's fence was
+/// re-read from that mutable file on every turn.
 ///
-/// The converse is why a folder the *project* declared is shown ticked and
-/// **fixed**: it lives in a file belonging to whoever else works on that
-/// repository, and Kingdom will not edit that because a box was clicked. It is
-/// shown all the same, because it is part of what the plan will see.
+/// So the selection lives in a signal, nothing is written, and the whole list
+/// is sent once when the King presses Start -- see
+/// [`kingdom_core::Plan::mounts`]. The manifests keep their own job: a
+/// project's `<city>/.kingdom/services.toml` still says what that project needs
+/// in order to run, and is shown here ticked and fixed because it is part of
+/// what the plan will get and is not this panel's to overrule.
 #[component]
 fn MountChecklist(
     offers: Resource<Option<Vec<kingdom_core::services::MountCandidate>>>,
-    revision: RwSignal<u32>,
 ) -> impl IntoView {
-    let failure = RwSignal::new(Option::<String>::None);
-    // One flag for the whole list rather than one per row: these are writes to
-    // a single file, and two in flight at once is a manifest whose contents
-    // depend on which landed first.
-    let writing = RwSignal::new(false);
+    let state = expect_context::<KingdomState>();
 
-    let toggle = move |folders: Vec<kingdom_core::services::MountSpec>, on: bool| {
-        if writing.get_untracked() {
+    // Seeded from the offers the moment they land, and only then: this reads
+    // `mounts` without tracking it, so ticking a box cannot re-run the seed and
+    // undo the tick.
+    Effect::new(move |_| {
+        let Some(found) = offers.get().flatten() else {
+            return;
+        };
+        if state.mounts.get_untracked().is_some() {
             return;
         }
-        writing.set(true);
-        failure.set(None);
-        leptos::task::spawn_local(async move {
-            let done = match on {
-                true => declare_mount("host".to_string(), None, folders).await,
-                false => withdraw_mount("host".to_string(), None, folders).await,
-            };
-            if let Err(e) = done {
-                failure.set(Some(e.to_string()));
+        state.mounts.set(Some(default_selection(&found)));
+    });
+
+    // What is ticked right now, as paths, for drawing the boxes.
+    let chosen = Memo::new(move |_| {
+        state
+            .mounts
+            .get()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.path)
+            .collect::<Vec<_>>()
+    });
+
+    // Adding and removing a whole offer at once: a toolchain is several folders
+    // and half of one is a toolchain that does not work -- `~/.cargo` without
+    // `~/.rustup` is a cargo that re-downloads the toolchain on every build.
+    let toggle = move |folders: Vec<kingdom_core::services::MountSpec>, on: bool| {
+        state.mounts.update(|held| {
+            let list = held.get_or_insert_with(Vec::new);
+            for folder in folders {
+                let at = list.iter().position(|m| m.path == folder.path);
+                match (on, at) {
+                    (true, None) => list.push(folder),
+                    // Already there: keep the more permissive mode, the same
+                    // rule `services::mounts_for` follows.
+                    (true, Some(i)) => {
+                        if folder.mode.is_writable() {
+                            list[i].mode = folder.mode;
+                        }
+                    }
+                    (false, Some(i)) => {
+                        list.remove(i);
+                    }
+                    (false, None) => {}
+                }
             }
-            writing.set(false);
-            // Bumped either way, which is what puts a box that failed back
-            // where it was: what the list draws is the manifest, never the
-            // click.
-            revision.update(|r| *r += 1);
         });
     };
 
     view! {
         <div class="quick-add">
+            // What a sealed plan has before any of this is considered. Drawn
+            // because its absence was read as a lack: the offer list is built
+            // from PATH and deliberately skips everything under /usr, /etc,
+            // /dev and /proc -- so the panel never mentioned /usr/bin and it
+            // looked as though a sealed plan had no tools at all. It has all of
+            // them.
+            <p class="quick-add-head">"Always included:"</p>
+            <ul class="quick-add-list always-list">
+                {kingdom_core::services::always_included()
+                    .iter()
+                    .map(|(what, why)| {
+                        view! {
+                            <li>
+                                <span class="mount-row fixed always-row">
+                                    <span class="always-mark">"\u{2713}"</span>
+                                    <span class="quick-add-why">{*what}</span>
+                                    <span class="quick-add-paths">{*why}</span>
+                                </span>
+                            </li>
+                        }
+                    })
+                    .collect_view()}
+            </ul>
+
             <p class="quick-add-head">"Also let it see:"</p>
 
             <Suspense fallback=|| view! { <p class="quick-add-empty">"Looking\u{2026}"</p> }>
@@ -981,21 +1080,37 @@ fn MountChecklist(
                                     // Said per offer, because "it can write
                                     // there" is the part worth being sure of.
                                     let writable = folders.iter().any(|f| f.mode.is_writable());
-                                    let on = offer.already();
                                     // Declared by the project rather than by
-                                    // him: shown, and not this panel's to undo.
-                                    let fixed = on && !offer.removable();
+                                    // him: always in, and not his to untick.
+                                    let fixed = offer.already() && !offer.removable();
+                                    let paths: Vec<String> =
+                                        folders.iter().map(|f| f.path.clone()).collect();
+                                    let on = Memo::new({
+                                        let paths = paths.clone();
+                                        move |_| {
+                                            fixed
+                                                || chosen
+                                                    .get()
+                                                    .iter()
+                                                    .any(|p| paths.contains(p))
+                                        }
+                                    });
                                     view! {
                                         <li>
                                             <label class="mount-row" class:fixed=fixed>
                                                 <input
                                                     class="mount-box"
                                                     type="checkbox"
-                                                    prop:checked=on
-                                                    disabled={move || fixed || writing.get()}
+                                                    prop:checked=move || on.get()
+                                                    disabled=fixed
                                                     on:change={
                                                         let folders = folders.clone();
-                                                        move |_| toggle(folders.clone(), !on)
+                                                        move |_| {
+                                                            toggle(
+                                                                folders.clone(),
+                                                                !on.get_untracked(),
+                                                            )
+                                                        }
                                                     }
                                                 />
                                                 <span class="quick-add-why">{offer.why.clone()}</span>
@@ -1020,9 +1135,163 @@ fn MountChecklist(
                 }}
             </Suspense>
 
-            <Show when=move || failure.get().is_some()>
-                <p class="network-unavailable">{move || failure.get().unwrap_or_default()}</p>
+            <CustomMount offers=offers/>
+        </div>
+    }
+}
+
+/// A folder of the King's own naming, added to the list.
+///
+/// # Why this exists
+///
+/// Everything above is discovered -- read off `PATH`, or one of the well-known
+/// extras. That covers toolchains and misses the thing a particular job needs:
+/// a data directory, a sibling checkout, a folder of fixtures. Without this the
+/// only way to lend one to a plan is to find `services.toml` and write TOML by
+/// hand, which is a thing nobody does, so the answer in practice was "you
+/// cannot".
+///
+/// Validated here to the same rule the manifest parser applies -- absolute, or
+/// `~`-rooted -- because a relative path has no meaning: there is no working
+/// directory a mount is resolved against, and guessing one would silently share
+/// the wrong folder. Saying so here costs a sentence; finding out at `pivot_root`
+/// costs a plan that will not open.
+#[component]
+fn CustomMount(
+    offers: Resource<Option<Vec<kingdom_core::services::MountCandidate>>>,
+) -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let (draft, set_draft) = signal(String::new());
+    let (writable, set_writable) = signal(false);
+    let (complaint, set_complaint) = signal(Option::<String>::None);
+
+    let add = move || {
+        let path = draft.get_untracked().trim().to_string();
+        if path.is_empty() {
+            return;
+        }
+        if !path.starts_with('/') && !path.starts_with('~') {
+            set_complaint.set(Some(
+                "A folder must be an absolute path, or start with `~` for your \
+                 home directory."
+                    .to_string(),
+            ));
+            return;
+        }
+        set_complaint.set(None);
+        state.mounts.update(|held| {
+            let list = held.get_or_insert_with(Vec::new);
+            let mode = match writable.get_untracked() {
+                true => kingdom_core::services::MountMode::Rw,
+                false => kingdom_core::services::MountMode::Ro,
+            };
+            match list.iter_mut().find(|m| m.path == path) {
+                // Named twice. Keep the more permissive of the two rather than
+                // adding a second block for one folder.
+                Some(held) => held.mode = mode,
+                None => list.push(kingdom_core::services::MountSpec { path, mode }),
+            }
+        });
+        set_draft.set(String::new());
+    };
+
+    // Everything the King added by hand, which is exactly what is selected
+    // and not named by any offer above. Derived rather than flagged on the
+    // mount itself: a `MountSpec` is what goes into a manifest, and "a person
+    // typed this one" is a fact about this panel rather than about the folder.
+    let mine = Memo::new(move |_| {
+        let discovered: Vec<String> = offers
+            .get()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|offer| offer.folders)
+            .map(|f| f.path)
+            .collect();
+        state
+            .mounts
+            .get()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| !discovered.contains(&m.path))
+            .collect::<Vec<_>>()
+    });
+
+    view! {
+        <div class="custom-mount">
+            <div class="custom-mount-row">
+                <input
+                    class="custom-mount-path"
+                    type="text"
+                    placeholder="/a/folder, or ~/somewhere"
+                    prop:value=move || draft.get()
+                    on:input=move |ev| set_draft.set(event_target_value(&ev))
+                    on:keydown=move |ev| {
+                        if ev.key() == "Enter" {
+                            ev.prevent_default();
+                            add();
+                        }
+                    }
+                />
+                <label class="custom-mount-rw" title="Let the plan write there">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || writable.get()
+                        on:change=move |_| set_writable.update(|w| *w = !*w)
+                    />
+                    "rw"
+                </label>
+                <button class="custom-mount-add" on:click=move |_| add()>"Add"</button>
+            </div>
+
+            <Show when=move || complaint.get().is_some()>
+                <p class="network-unavailable">{move || complaint.get().unwrap_or_default()}</p>
             </Show>
+
+            <ul class="quick-add-list">
+                {move || {
+                    mine.get()
+                        .into_iter()
+                        .map(|spec| {
+                            let path = spec.path.clone();
+                            let writable = spec.mode.is_writable();
+                            view! {
+                                <li>
+                                    <span class="mount-row">
+                                        <button
+                                            class="custom-mount-drop"
+                                            title="Stop sharing this"
+                                            on:click={
+                                                let path = path.clone();
+                                                move |_| {
+                                                    let path = path.clone();
+                                                    state
+                                                        .mounts
+                                                        .update(move |held| {
+                                                            if let Some(list) = held.as_mut() {
+                                                                list.retain(|m| m.path != path);
+                                                            }
+                                                        })
+                                                }
+                                            }
+                                        >
+                                            "\u{2715}"
+                                        </button>
+                                        <span class="quick-add-why">"Yours"</span>
+                                        <span class="quick-add-paths">{path}</span>
+                                        <span class="quick-add-mark">
+                                            {match writable {
+                                                true => "writable",
+                                                false => "",
+                                            }}
+                                        </span>
+                                    </span>
+                                </li>
+                            }
+                        })
+                        .collect_view()
+                }}
+            </ul>
         </div>
     }
 }

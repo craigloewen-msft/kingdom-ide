@@ -359,6 +359,24 @@ fn workspace_block(
              than working around it. `ps` shows only this plan's own processes.",
         );
 
+        // Where it is actually standing. The workspace is bound at `/app` as
+        // well as at the path named above, and `/app` is where commands start
+        // -- so `pwd` disagrees with the working directory this prompt opens
+        // with, and a model that was not told reads that as having been moved
+        // somewhere unexpected and starts investigating the machine. Both
+        // paths are the same directory, which is the part worth saying.
+        let _ = write!(
+            out,
+            "\n\nYour commands start at `{}`, which is this same workspace under a \
+             shorter name: `{}` and {} are one directory, and a file written \
+             through either is visible through the other. Both work; `{}` is \
+             simply what `pwd` will tell you.",
+            crate::namespaces::mount::WORKSPACE_AT,
+            crate::namespaces::mount::WORKSPACE_AT,
+            workspace.path,
+            crate::namespaces::mount::WORKSPACE_AT,
+        );
+
         // The folders themselves, named. Without this the model knows it is
         // fenced in but not where the fence is, which is the difference between
         // "I cannot see ~/.ssh, so I will say so" and a turn spent hunting for

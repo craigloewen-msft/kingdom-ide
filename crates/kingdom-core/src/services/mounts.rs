@@ -205,6 +205,77 @@ pub fn known_extras() -> &'static [(&'static str, &'static str, MountMode)] {
         ),
         ("~/.config/uv", "uv's configuration", MountMode::Ro),
         ("~/.cache/uv", "uv's package cache", MountMode::Rw),
+        (
+            KINGDOM_PROFILE,
+            "Kingdom's own records, so a plan can read what other plans are doing",
+            // **Read-only, deliberately.** This is where every plan's record
+            // lives, so a writable mount lets one agent rewrite another's
+            // transcript -- and "see what the others are doing" is a read.
+            MountMode::Ro,
+        ),
+    ]
+}
+
+/// Kingdom's own profile directory, as an offer.
+///
+/// Written as `~/.kingdom` rather than resolved here because `kingdom-core`
+/// does no I/O and cannot read `KINGDOM_HOME`. The server substitutes the real
+/// profile path when it builds the offer -- see `services::mount_candidates` --
+/// so a rehearsal session pointed elsewhere shares the drawer it is actually
+/// using rather than one it never writes to.
+pub const KINGDOM_PROFILE: &str = "~/.kingdom";
+
+/// Folders whose offer is **not** ticked by default.
+///
+/// Everything a sealed plan is offered starts ticked, because a plan that
+/// cannot build is useless and the King asked not to assemble his toolchain by
+/// hand every time. This is the exception list, and it has exactly one member
+/// for exactly one reason: `~/.ssh` is the King's private key. Handing an agent
+/// the means to push as him, or to reach any host that trusts that key, is not
+/// a convenience worth defaulting to -- see [`known_extras`], which has always
+/// said so.
+///
+/// Matched on the declared path rather than the expanded one, which is what the
+/// offer carries.
+pub fn off_by_default(path: &str) -> bool {
+    matches!(path.trim_end_matches('/'), "~/.ssh")
+}
+
+/// What every sealed plan is given before any box is ticked.
+///
+/// # Why this is stated rather than left implicit
+///
+/// The checklist is built from `PATH`, and `services::built_in_covers` drops
+/// anything under `/usr`, `/etc`, `/dev` or `/proc` -- because a sealed plan
+/// already has them. The effect is that the panel never mentions `/usr/bin`,
+/// and a King reading it concludes his plan has no tools at all. It has
+/// hundreds of them.
+///
+/// So the list is named here, in the one crate both sides read, and drawn at the
+/// top of the panel as rows that cannot be unticked. The alternative -- offering
+/// `/usr/bin` as a checkbox -- would be offering a folder that is already there
+/// and that unticking would not remove.
+///
+/// Kept beside [`known_extras`] so the two cannot drift: this says what is
+/// always in, that says what may be added.
+pub fn always_included() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "This plan's workspace",
+            "its work, writable, at /app and at its own path",
+        ),
+        (
+            "The project's git directory",
+            "without which `git` cannot work in a worktree",
+        ),
+        ("/usr", "the whole system and every tool in it, read-only"),
+        ("/etc", "so name resolution and users work, read-only"),
+        ("/dev", "a plan needs /dev/null and /dev/urandom"),
+        ("/tmp", "private and empty, so scratch files cannot collide"),
+        (
+            "/proc",
+            "fresh, so `ps` shows this plan and not the machine",
+        ),
     ]
 }
 
@@ -443,5 +514,74 @@ path = "/opt/toolchain"
             );
             assert!(known_path(&format!("{home}/.local/share/pnpm")).is_some());
         }
+    }
+
+    /// Kingdom's own records are offered, and offered **read-only**.
+    ///
+    /// The King asked for this so an agent can see what other agents are
+    /// doing. The mode is the part worth pinning: this directory is where every
+    /// plan's record lives, so a writable mount would let one agent rewrite
+    /// another's transcript, and "see what the others are doing" is a read.
+    #[test]
+    fn kingdoms_own_records_are_offered_read_only() {
+        let found = known_extras()
+            .iter()
+            .find(|(path, _, _)| *path == KINGDOM_PROFILE)
+            .expect("Kingdom's own profile must be offered");
+        assert_eq!(
+            found.2,
+            MountMode::Ro,
+            "a writable mount lets one agent rewrite another's transcript"
+        );
+    }
+
+    /// Everything is ticked by default except the King's private key.
+    ///
+    /// The default is "everything" because a sealed plan that cannot build is
+    /// one nobody uses. `~/.ssh` is the one exception, and it is a promise
+    /// [`known_extras`] has always made in prose -- this is where it is either
+    /// kept or quietly broken.
+    #[test]
+    fn only_the_private_key_is_off_by_default() {
+        assert!(off_by_default("~/.ssh"), "never hand over a key by default");
+        assert!(
+            off_by_default("~/.ssh/"),
+            "a trailing slash is the same folder"
+        );
+
+        for (path, _, _) in known_extras() {
+            if *path == "~/.ssh" {
+                continue;
+            }
+            assert!(
+                !off_by_default(path),
+                "{path} should start ticked: a plan that cannot build is one \
+                 nobody uses"
+            );
+        }
+        assert!(!off_by_default("~/.cargo"));
+    }
+
+    /// What is always included names the things the offer list deliberately
+    /// omits.
+    ///
+    /// This list exists because `services::built_in_covers` drops every `PATH`
+    /// entry under `/usr`, so the panel never mentioned `/usr/bin` and a King
+    /// reading it concluded his plan had no tools. If the two ever disagree,
+    /// the panel is lying about what a plan gets.
+    #[test]
+    fn what_is_always_included_names_the_system() {
+        let shown: Vec<&str> = always_included().iter().map(|(what, _)| *what).collect();
+        for expected in ["/usr", "/etc", "/dev", "/proc", "/tmp"] {
+            assert!(
+                shown.contains(&expected),
+                "{expected} is mounted for every sealed plan and must be shown \
+                 as such, or its absence from the offers reads as a lack"
+            );
+        }
+        assert!(
+            always_included().iter().all(|(_, why)| !why.is_empty()),
+            "every row has to say what it is for"
+        );
     }
 }
