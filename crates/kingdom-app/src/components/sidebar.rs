@@ -13,7 +13,7 @@
 use crate::app::{KingdomState, DEFAULT_MAP_HEIGHT, DEFAULT_SIDEBAR_WIDTH};
 use crate::components::conversation::clock;
 use crate::components::resizer::{restore_width, Bounds, Grows, Resizer};
-use kingdom_core::{Attention, City, CityId, Plan, PlanStatus, Timestamp};
+use kingdom_core::{Attention, City, CityId, Permissions, Plan, PlanStatus, Timestamp};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -399,6 +399,13 @@ fn CityBranch(
                     // The model stays in the key even though the row no longer
                     // draws it: it is in the tooltip, which is drawn text like
                     // any other.
+                    //
+                    // The remit is the fourth instance, and it is the one this
+                    // list was extended for: accepting a proposal widens a
+                    // plan's permissions *and moves nothing else* -- the status
+                    // is `Drafting` on both sides of the grant -- so without it
+                    // an approved plan would read "Exploring" for the whole
+                    // life of the work the King just started.
                     <For
                         each={move || plans.get()}
                         key=move |p: &Plan| {
@@ -408,6 +415,7 @@ fn CityBranch(
                                 p.title.clone(),
                                 p.choice().label(),
                                 state.attention_of(p),
+                                p.permissions,
                             )
                         }
                         let:plan
@@ -440,7 +448,8 @@ fn CityBranch(
                                 lines.push(plan.choice().label());
                                 lines.join("\n\n")
                             };
-                            let (badge, tint) = badge_for(plan.status, state.attention_of(&plan));
+                            let (badge, tint) =
+                                badge_for(plan.status, state.attention_of(&plan), plan.permissions);
                             // When this plan last moved, as the row will draw
                             // it. Two halves, because they are known at
                             // different times: the plan's own transcript is read
@@ -636,10 +645,26 @@ fn rail_clock() -> Memo<Option<Timestamp>> {
 /// [`Attention`] describes whose move it is. They are genuinely independent: a
 /// plan parked on a question is `Drafting` and blocked, and painting it the
 /// working green says the opposite of the truth.
-fn badge_for(status: PlanStatus, needs: Option<Attention>) -> (&'static str, &'static str) {
-    match needs {
-        Some(needs) => (needs.label(), needs.css_suffix()),
-        None => (status.label(), status.css_suffix()),
+///
+/// Under both of those sits a third question, and it is the one a live plan is
+/// most often asked: *what stage is this agent at?* An agent reading the code
+/// to draw a plan up and an agent changing files under an accepted one are both
+/// `PlanStatus::Drafting` -- the status cannot tell them apart and never will,
+/// because approval moves [`Permissions`] and nothing else. So a working plan
+/// that wants nothing is badged by its remit rather than its status, and
+/// `Drafting` no longer reaches the rail as a word at all.
+///
+/// The order is deliberate and is the whole of the ranking: whose move it is
+/// first, then what stage the work is at, then where the plan is in its life.
+pub(crate) fn badge_for(
+    status: PlanStatus,
+    needs: Option<Attention>,
+    permissions: Permissions,
+) -> (&'static str, &'static str) {
+    match (needs, status) {
+        (Some(needs), _) => (needs.label(), needs.css_suffix()),
+        (None, PlanStatus::Drafting) => (permissions.label(), permissions.css_suffix()),
+        (None, status) => (status.label(), status.css_suffix()),
     }
 }
 
@@ -654,14 +679,69 @@ mod tests {
     #[test]
     fn a_plan_waiting_on_the_king_says_so_rather_than_drafting() {
         assert_eq!(
-            badge_for(PlanStatus::Drafting, Some(Attention::Question)),
+            badge_for(
+                PlanStatus::Drafting,
+                Some(Attention::Question),
+                Permissions::Propose
+            ),
             ("Question", "asking"),
         );
         assert_eq!(
-            badge_for(PlanStatus::Drafting, None),
-            ("Drafting", "drafting"),
-            "a plan actually working must keep reading as work in progress"
+            badge_for(
+                PlanStatus::Drafting,
+                Some(Attention::Question),
+                Permissions::Full
+            ),
+            ("Question", "asking"),
+            "a question outranks the stage as well as the status -- an agent \
+             with hands that stops to ask is still blocked on the King"
         );
+    }
+
+    /// The two halves of the product's stance, told apart.
+    ///
+    /// Both of these plans are `PlanStatus::Drafting` and always will be: one
+    /// is reading the code to draw a plan up, the other is changing files under
+    /// a plan the King accepted. The status is identical, the remit is not, and
+    /// the remit is the thing he actually wants to know at a glance.
+    #[test]
+    fn a_live_plan_is_badged_by_its_stage_rather_than_by_drafting() {
+        assert_eq!(
+            badge_for(PlanStatus::Drafting, None, Permissions::Propose),
+            ("Exploring", "exploring"),
+        );
+        assert_eq!(
+            badge_for(PlanStatus::Drafting, None, Permissions::Full),
+            ("Working", "working"),
+        );
+
+        assert_ne!(
+            badge_for(PlanStatus::Drafting, None, Permissions::Propose),
+            badge_for(PlanStatus::Drafting, None, Permissions::Full),
+            "an agent still exploring and one carrying out an accepted plan \
+             must never read alike -- that identity is the whole fault here"
+        );
+    }
+
+    /// The stage is read only where it is true. A settled plan's remit is
+    /// whatever it happened to hold when it stopped, and badging "Working" over
+    /// a merged plan would report finished work as still running.
+    #[test]
+    fn a_settled_plan_is_never_badged_by_its_remit() {
+        for permissions in [
+            Permissions::ReadOnly,
+            Permissions::Propose,
+            Permissions::Full,
+        ] {
+            assert_eq!(
+                badge_for(PlanStatus::Merged, None, permissions),
+                ("Merged", "merged"),
+            );
+            assert_eq!(
+                badge_for(PlanStatus::AwaitingReview, None, permissions),
+                ("Awaiting review", "review"),
+            );
+        }
     }
 
     /// The distinction the rail already drew, kept: "Awaiting review" is true
@@ -670,11 +750,15 @@ mod tests {
     #[test]
     fn a_standing_proposal_still_reads_as_a_proposal() {
         assert_eq!(
-            badge_for(PlanStatus::AwaitingReview, Some(Attention::Proposal)),
+            badge_for(
+                PlanStatus::AwaitingReview,
+                Some(Attention::Proposal),
+                Permissions::Propose
+            ),
             ("Proposal", "review"),
         );
         assert_eq!(
-            badge_for(PlanStatus::AwaitingReview, None),
+            badge_for(PlanStatus::AwaitingReview, None, Permissions::Propose),
             ("Awaiting review", "review"),
         );
     }
@@ -682,8 +766,14 @@ mod tests {
     /// Settled history wants nothing and must not be tinted as though it did.
     #[test]
     fn a_settled_plan_asks_for_nothing() {
-        assert_eq!(badge_for(PlanStatus::Merged, None), ("Merged", "merged"));
-        assert_eq!(badge_for(PlanStatus::Failed, None), ("Failed", "failed"));
+        assert_eq!(
+            badge_for(PlanStatus::Merged, None, Permissions::Full),
+            ("Merged", "merged")
+        );
+        assert_eq!(
+            badge_for(PlanStatus::Failed, None, Permissions::Full),
+            ("Failed", "failed")
+        );
     }
 
     /// The four bands, at each boundary.

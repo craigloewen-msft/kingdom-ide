@@ -14,6 +14,10 @@ use crate::api::{
 use crate::app::KingdomState;
 use crate::components::prompt_bar::autogrow;
 use crate::components::resizer::{restore_flag, restore_width, store_flag, Bounds, Grows, Resizer};
+// The rail's badge, shared rather than restated. The chamber and the rail draw
+// the same plan from the same three facts, and two matches over them drifted
+// apart once already.
+use crate::components::sidebar::badge_for;
 use crate::components::BrowserView;
 use crate::components::CityRail;
 use crate::components::DiffView;
@@ -1301,39 +1305,30 @@ fn ConversationBody(
                                 </Show>
                             </div>
                         </div>
-                        // Colour follows what the plan *wants* where it wants something,
-                        // and its status otherwise -- the same rule and the same helper
-                        // shape the rail's `badge_for` uses, so the two surfaces cannot
-                        // disagree about a plan the King is looking at from both.
+                        // The badge, drawn by the rail's own `badge_for` so the two
+                        // surfaces the King reads one plan from cannot disagree about
+                        // it. Colour and words come from the same call for the same
+                        // reason: they were two matches over the same three facts, and
+                        // a fourth fact would have had to be added to both.
+                        //
+                        // A subagent is the one thing that does not go through it. It
+                        // is never reviewed, never merged and never asks the user for
+                        // anything -- it reports to the model that sent it -- so it
+                        // keeps its own honest words. See `subagent_status`.
                         <span class=move || {
-                            let tint = match (is_subagent, wants.get()) {
-                                // A subagent asks nobody for anything, so its badge is
-                                // purely a status. See `subagent_status`.
-                                (true, _) => status.get().css_suffix(),
-                                (false, Some(needs)) => needs.css_suffix(),
-                                (false, None) => status.get().css_suffix(),
+                            let tint = if is_subagent {
+                                status.get().css_suffix()
+                            } else {
+                                badge_for(status.get(), wants.get(), permissions.get()).1
                             };
                             format!("plan-badge plan-{tint}")
                         }>
                             {move || {
-                                // A subagent is never reviewed and never merged: it reports
-                                // to the model that sent it. Same states, honest words.
-                                //
-                                // A plan with something in front of the user is the other
-                                // case where "Awaiting review" is too vague to be useful --
-                                // it does not say that the wait is on *them*, or that there
-                                // is a button. A label, deliberately, and not a sixth
-                                // `PlanStatus`: nothing about the state machine changed.
-                                //
-                                // "Question" arrives through the same door and is the one
-                                // that could not be said any other way: a plan parked on a
-                                // question is `Drafting` throughout, so the status alone
-                                // reports it as working when it is in fact blocked on him.
-                                match (is_subagent, wants.get(), status.get()) {
-                                    (true, _, PlanStatus::AwaitingReview) => "Reported",
-                                    (true, _, PlanStatus::Drafting) => "Working",
-                                    (false, Some(needs), _) => needs.label(),
-                                    (_, _, s) => s.label(),
+                                match (is_subagent, status.get()) {
+                                    (true, PlanStatus::AwaitingReview) => "Reported",
+                                    (true, PlanStatus::Drafting) => "Working",
+                                    (true, s) => s.label(),
+                                    (false, s) => badge_for(s, wants.get(), permissions.get()).0,
                                 }
                             }}
                         </span>

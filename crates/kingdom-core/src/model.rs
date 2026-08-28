@@ -125,6 +125,11 @@ impl Kingdom {
                 plan.title = pulse.title.clone();
                 plan.status = pulse.status;
                 plan.working_on = pulse.working_on.clone();
+                // The stage the rail badges. It moves exactly once, on
+                // approval, and it moves *without* the status moving -- so a
+                // plan accepted in another tab would go on reading "Exploring"
+                // here until a full refetch if this line were missing.
+                plan.permissions = pulse.permissions;
                 true
             }
             None => false,
@@ -1718,6 +1723,7 @@ impl Plan {
             title: self.title.clone(),
             status: self.status,
             working_on: self.working_on.clone(),
+            permissions: self.permissions,
             needs: self.wants_attention(),
             is_subagent: self.is_subagent(),
             last_activity: self.last_activity(),
@@ -2796,6 +2802,18 @@ pub struct PlanPulse {
     pub status: PlanStatus,
     /// What the plan is doing right now, in the words `api::describe` chose.
     pub working_on: Option<String>,
+    /// What stage of the work it is at. See [`Permissions::label`].
+    ///
+    /// Here because it is the one thing separating an agent still exploring
+    /// from one carrying out an accepted plan, and both are
+    /// [`PlanStatus::Drafting`]. It rides along rather than being derived by
+    /// the browser for the reason `last_activity` does: this channel is all a
+    /// rail ever hears about a plan whose chamber is shut.
+    ///
+    /// Defaulted for a pulse from an older server, on the same terms as the
+    /// field it copies -- a plan whose stage is unknown has always had hands.
+    #[serde(default = "Permissions::full")]
+    pub permissions: Permissions,
     /// What it wants of the user, if anything. See [`Attention`].
     pub needs: Option<Attention>,
     /// Subagents are excluded from the rail, so a pulse says which it is rather
@@ -4940,7 +4958,38 @@ mod attention_tests {
         assert_eq!(pulse.id, plan.id);
         assert_eq!(pulse.needs, Some(Attention::Question));
         assert_eq!(pulse.working_on.as_deref(), Some("Waiting on the King"));
+        assert_eq!(pulse.permissions, plan.permissions);
         assert!(!pulse.is_subagent);
+    }
+
+    /// The stage rides the pulse, because it is the one fact the rail badges a
+    /// live plan with and the status cannot carry it.
+    ///
+    /// A plan is `Drafting` on both sides of an approval -- that is the whole
+    /// reason the badge reads permissions -- so a pulse without this field
+    /// would say precisely nothing had changed when the King granted his agent
+    /// hands in another tab.
+    #[test]
+    fn a_pulse_carries_the_stage_across_an_approval() {
+        let mut plan = plan();
+        plan.propose("A plan", "What I would do");
+
+        let before = plan.pulse();
+        assert_eq!(before.permissions, Permissions::Propose);
+
+        assert!(plan.approve());
+        let after = plan.pulse();
+        assert_eq!(after.permissions, Permissions::Full);
+        assert_eq!(
+            after.status, before.status,
+            "the status is unmoved by an approval, which is exactly why the \
+             stage has to travel on its own"
+        );
+        assert_ne!(
+            after, before,
+            "a pulse that compared equal here would be swallowed by the dedupe \
+             in events.rs and the rail would never hear about the grant"
+        );
     }
 
     /// The half that makes two sockets safe on one plan: a pulse touches only
@@ -4956,11 +5005,19 @@ mod attention_tests {
         let mut moved = plan.clone();
         moved.working_on = Some("bash: cargo test".into());
         moved.status = PlanStatus::AwaitingReview;
+        // Granted elsewhere -- another tab, most likely. This channel is the
+        // only thing that would ever say so about a plan whose chamber is shut.
+        moved.permissions = Permissions::Full;
 
         assert!(kingdom.apply(&moved.pulse()));
         let stored = kingdom.plan(&plan.id).expect("the plan is still there");
         assert_eq!(stored.status, PlanStatus::AwaitingReview);
         assert_eq!(stored.working_on.as_deref(), Some("bash: cargo test"));
+        assert_eq!(
+            stored.permissions,
+            Permissions::Full,
+            "a plan approved in another tab must stop reading as exploring here"
+        );
         assert_eq!(
             stored.transcript.len(),
             plan.transcript.len(),

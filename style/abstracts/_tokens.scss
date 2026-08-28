@@ -38,6 +38,14 @@ $palette: (
   "idle":        #64748b,
   "failed":      #f97316,
   "merged":      #38bdf8,
+
+  // The stage an agent is at, which is NOT a `PlanStatus` and has no
+  // counterpart in `PlanStatus::color` -- see `Permissions` in kingdom-core.
+  // An agent still reading the code to draw a plan up and one changing files
+  // under an accepted plan are both `Drafting`, so without a second colour the
+  // rail paints them identically. Teal against the working green: green keeps
+  // meaning hands on the code, teal is reading and not touching yet.
+  "exploring":   #2dd4bf,
 );
 
 @function colour($name) {
@@ -67,6 +75,7 @@ $blocked:     colour("blocked");
 $idle:        colour("idle");
 $failed:      colour("failed");
 $merged:      colour("merged");
+$exploring:   colour("exploring");
 
 // Every state a plan can be in, keyed by the `.status-*` / `.plan-*` class
 // suffix that `PlanStatus::css_suffix` emits. Stating them once here is what
@@ -81,6 +90,18 @@ $statuses: (
   "failed":   $failed,
   "merged":   $merged,
   "archived": $idle,
+
+  // Not a `PlanStatus` either -- see `Permissions::css_suffix` in kingdom-core.
+  // These are what a *live* plan is actually badged with, because "Drafting" is
+  // true of an agent exploring and an agent working alike and so tells the King
+  // nothing. `drafting` above stays: `PlanStatus::css_suffix` still emits it,
+  // and the errand dots in the chamber still read it.
+  "exploring": $exploring,
+  "working":   $working,
+  // A subagent's remit. No rail draws it -- subagents are excluded -- but the
+  // suffix exists, and a class the stylesheet does not know would be invisible
+  // text rather than a visible mistake.
+  "surveying": $working,
 
   // Not a `PlanStatus` — see `Attention` in kingdom-core. A plan that has
   // stopped to ask something is still `Drafting`, so without an entry of its own

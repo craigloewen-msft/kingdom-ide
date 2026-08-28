@@ -300,14 +300,37 @@ its life, and a sixth variant would ripple through `ALL`, the map legend,
 `Plan::wants_attention` is the single definition, read by the rail, the chamber
 header and the pulse alike.
 
+**The same argument runs a second time, one question lower down.** "Drafting"
+was also the same word for an agent reading the code to draw a plan up and an
+agent changing files under a plan the King accepted — the two halves this
+product's whole stance rests on. That distinction is `Permissions`, which is
+`Propose` from the moment a decree opens a plan and widens to `Full` exactly
+once, in `api::approve_plan`. So a live plan is badged **Exploring** or
+**Working** by its remit, and `PlanStatus::Drafting` no longer reaches the rail
+as a word at all. Attention still outranks it: an agent with hands that stops to
+ask still reads "Question", because whose move it is beats what stage the work
+is at.
+
+The ranking, in `sidebar::badge_for` and nowhere else — whose move it is, then
+what stage, then where the plan is in its life. The chamber header calls the
+same function, so the two surfaces the King reads one plan from cannot drift.
+
+Two traps came with it, both of the same shape: **approval moves the permissions
+and nothing else.** The status is `Drafting` on both sides of the grant. So the
+remit had to join the rail's `<For>` key — a row reused on an unchanged key would
+have read "Exploring" for the whole life of the accepted work — and it had to
+join `PlanPulse`, or a plan approved in another tab would never have been heard
+about, the pulses being deduped on a digest that had not changed.
+
 **A second socket carries it, and it carries a digest.** `events.rs` argues at
 length that whole plans on the wire are free — and that argument holds only for a
 channel keyed *per plan*, where one watcher is looking at exactly what is sent.
 The rail asks "which of my thirty plans needs me?", and answering it the same way
 would wake every open tab with every transcript on every round to repaint a
 badge. So `/watch/kingdom` carries `PlanPulse` — id, city, title, status, what it
-is doing, what it wants, and when it last moved — and is **deduped** against the
-last pulse sent for that plan. The digest makes a message cheap; the dedupe makes
+is doing, what stage it is at, what it wants, and when it last moved — and is
+**deduped** against the last pulse sent for that plan. The digest makes a message
+cheap; the dedupe makes
 most rounds send nothing at all. Dedupe narrows what is *sent*, never what a
 message *says*: a pulse is a whole digest, so a listener that falls behind has
 still missed only intermediate states, which is the same property that makes lag
