@@ -101,4 +101,4 @@ the crate map and the invariants. [`docs/`](docs) holds the references —
 
 ## License
 
-MIT.
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
