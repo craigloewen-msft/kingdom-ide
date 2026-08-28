@@ -265,7 +265,7 @@ const BATCHING: &str = "If you intend to call several tools and there are no dep
 
 /// That the machine has other tenants, the King's own server among them.
 ///
-/// Kingdom arbitrates no resources yet (docs/roadmap.md), so nothing detects two
+/// Kingdom arbitrates no resources yet, so nothing detects two
 /// plans binding one port -- or a plan binding the port the user is reading the
 /// chamber on. That last one is observed, not hypothetical: a plan ran `cargo
 /// leptos serve` with no override and collided with the King's own server on

@@ -14,7 +14,7 @@ glance:
 3. What are they proposing that I need to decide on?
 
 Question 2 is the goal, not the state of play: resource arbitration is **not
-built yet**. [`docs/roadmap.md`](docs/roadmap.md) is the honest ledger.
+built yet**.
 
 ## Running it
 
@@ -47,65 +47,10 @@ KINGDOM_REALM=kingdom-mirror KINGDOM_SANDBOX=1 cargo leptos watch
 The fake data is plain Rust in `crates/kingdom-core/src/mockdata/fixtures.rs`;
 edit it and re-seed with `--force`.
 
-## Stack
-
-Rust end to end — Axum on the server, Leptos (WASM) in the browser, with one
-shared domain crate compiled into both. A `#[server]` function is a typed HTTP
-call on the client and a direct call on the server from a single signature, so
-there is no API client to hand-write and no schema to keep in sync.
-
-```
-crates/kingdom-core     domain model (no I/O; compiles to native + wasm)
-crates/kingdom-app      Axum server + Leptos UI, split by feature flag
-crates/kingdom-citymap  the map: projects drawn as towns, in Bevy
-crates/kingdom-browser  headless Chrome over CDP (native only)
-style/main.scss         styling
-```
-
-## Status
-
-Early, and honest about it. Project scanning, the map and the client/server
-round trip are real. So are plans: a plan works in its own git worktree with
-hands — reading and searching files, patching them, `bash` and `tmux`, a
-headless browser, profiling and subagents. It puts a proposal to you, you
-approve or annotate it, and the work is merged or archived.
-
-Every model is chosen from one list in the decree bar. With a credential the
-picker opens on a real model; with none it offers the offline **mock**, so a
-fresh clone drafts with no network. To reach real models, copy
-`.kingdom.env.example` to `.kingdom.env` and set either `KINGDOM_API_KEY` or a
-command that prints one (`KINGDOM_API_KEY_HELPER`). A configured clone spends
-tokens on its first decree — pick `mock` to work offline.
-
-Still placeholder: the court a kingdom opens with is fabricated data, and
-resource arbitration — question 2 above — is **not built**.
-
-## Tests
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --features ssr --no-default-features
-cargo test -p kingdom-core
-cargo test -p kingdom-app --features ssr --no-default-features
-cargo test -p kingdom-citymap
-cargo test -p kingdom-browser
-
-# The client half is a separate target and a separate compile, so it is only
-# ever proven by building it:
-cargo check -p kingdom-app --target wasm32-unknown-unknown \
-    --features hydrate --no-default-features
-```
-
-No test launches a browser, so the suite needs nothing installed. Kingdom finds
-Chrome itself at runtime — `PATH`, the usual install locations, or a Chromium
-Playwright or Puppeteer already downloaded. Set `KINGDOM_CHROME_EXECUTABLE` only
-to override a wrong guess.
-
 ## Documentation
 
 [`AGENTS.md`](./AGENTS.md) is the working guide: the product, the naming rule,
 the crate map, the invariants and the commands. [`docs/`](docs) holds the
-long-form references — [architecture](docs/architecture.md), the
-[agent loop](docs/agent-loop.md),
-[review and editing](docs/review-and-editing.md), [the map](docs/citymap.md) and
-the [roadmap](docs/roadmap.md). [`tasks/`](tasks) holds one file per past change.
+references behind it — [architecture](docs/architecture.md), the
+[agent loop](docs/agent-loop.md), [the map](docs/citymap.md) and
+[shared resources](docs/shared-resources.md).

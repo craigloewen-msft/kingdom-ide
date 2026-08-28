@@ -664,8 +664,7 @@ fn ConversationBody(
     // `api::say` -- rather than a second route that re-drafts directly. The
     // whole reason a prod can rescue a court that answered with silence is that
     // the King's words land in the transcript and change the next request; see
-    // `turn::follows_silence`, and `tasks/00200` for the bug a quieter retry
-    // brought back.
+    // `turn::follows_silence`, and the bug a quieter retry brought back.
     let decree = move |text: String| {
         // Sending is an act that says "show me what happens next", exactly as in
         // `submit`.
