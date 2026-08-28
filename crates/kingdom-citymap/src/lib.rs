@@ -5,9 +5,10 @@
 //! This crate replaced a hand-written SVG map (`kingdom_core::{layout, terrain,
 //! skyline}` and `kingdom_app::components::map`, all deleted). It is **Repo
 //! City** — <https://github.com/craigloewen-msft/repo-city-visualizer> by Craig
-//! Loewen, MIT — copied in wholesale at commit `449f090` rather than depended
-//! on, so that there is one project to maintain rather than two. See the
-//! `LICENSE` at this crate's root.
+//! Loewen, copied in wholesale at commit `449f090` rather than depended on, so
+//! that there is one project to maintain rather than two.
+//!
+//! > Repo City, Copyright (c) 2025 Craig Loewen, MIT licensed.
 //!
 //! # The shape of it
 //!

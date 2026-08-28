@@ -1463,8 +1463,7 @@ async fn ensure_one(
         args.push(format!("{volume}:{}", data_dir_for(&spec.image)));
     }
     // What the image needs in its **own** environment simply to start. Nothing
-    // here is ever shown to an agent -- it is the opposite direction of travel
-    // from the manifest's retired `env`. Without it `postgres:16` exits 1 on
+    // here is ever shown to an agent. Without it `postgres:16` exits 1 on
     // first boot complaining about POSTGRES_PASSWORD, and all the King sees is
     // "never answered on port 5432".
     if let Some(known) = known_image(&spec.image) {
@@ -2112,7 +2111,6 @@ mod tests {
             image: "postgres:16".to_string(),
             port: 5432,
             volume: Some("app-db".to_string()),
-            retired_env: None,
         };
 
         let path = declare(&scope, &spec).expect("a first declaration must land");
@@ -2152,7 +2150,6 @@ mod tests {
                 image: "redis:7".to_string(),
                 port: 6379,
                 volume: None,
-                retired_env: None,
             },
         )
         .expect("the second must land beside the first");
@@ -2186,7 +2183,6 @@ mod tests {
             image: "mongo:7".to_string(),
             port: 27017,
             volume: None,
-            retired_env: None,
         };
 
         declare(&scope, &spec).expect("the first lands");
@@ -2423,7 +2419,6 @@ mod host_scope {
                 image: "redis:7-alpine".to_string(),
                 port: 6379,
                 volume: None,
-                retired_env: None,
             },
         )
         .expect("the King's own manifest must be writable");

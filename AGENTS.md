@@ -1,8 +1,7 @@
 # AGENTS.md
 
 Guidance for any agent (or human) working on **Kingdom IDE**. Read this before
-writing code here. The long-form references live in [`docs/`](docs); the
-blow-by-blow of each past change lives in [`tasks/`](tasks).
+writing code here. The references behind it live in [`docs/`](docs).
 
 > Keep this file well under **64 KB**. `MOST_GUIDANCE` in
 > `crates/kingdom-app/src/llm/system_prompt.rs` discards a guidance file that
@@ -104,6 +103,11 @@ style/main.scss         All styling.
 ```
 
 Module-by-module detail is in [`docs/architecture.md`](docs/architecture.md).
+How the agent loop works is in [`docs/agent-loop.md`](docs/agent-loop.md); a
+plan can be given a network or a machine of its own
+([`architecture.md`](docs/architecture.md#how-far-a-plan-is-walled-off)) and a
+project or the King can declare shared resources it reaches
+([`shared-resources.md`](docs/shared-resources.md)).
 
 **Why one crate builds two targets.** `kingdom-app` compiles twice: natively
 with `--features ssr` into the Axum server, and to `wasm32` with
@@ -139,39 +143,7 @@ orphans real work. `store.rs` is the seam. The full reasoning, including the
 `<city>/.kingdom/` division, is in
 [`docs/architecture.md`](docs/architecture.md#where-state-lives).
 
-## 4. What is real and what is not
-
-**Real:** project scanning, the map, the client/server round trip, and plans
-that act — a plan works in its own git worktree with tools for reading,
-searching, patching, `bash`, `tmux`, a headless browser, profiling and
-subagents. It drafts to `.kingdom/draft.md`, calls `propose_plan`, and waits;
-the King approves or annotates, and the work is merged or archived. A plan can
-also be given a **network of its own** — its own `:3000`, forwarded back to a
-host port the chamber shows — with a terminal into it. Off by default, chosen
-per plan; see [`docs/architecture.md`](docs/architecture.md#a-network-of-a-plans-own).
-A project can also declare **shared services** it needs standing — a database,
-say — which Kingdom starts once for the whole city and every plan reaches at one
-address; the King can also keep his own, shared by every project he opens. There
-is a screen for seeing and declaring both:
-[`docs/shared-resources.md`](docs/shared-resources.md).
-
-**Faked:** the *opening* court — the plans a kingdom starts with, before any
-decree (`kingdom_core::sample::starter_plans`). Plans the King opens are real.
-The sample deliberately includes a failed plan, one mid-draft and one with a
-standing proposal; do not "clean up" those states away. A test pins it.
-
-**Not built:** resource arbitration beyond ports — question 2 above is only
-half-answered, because a network namespace *avoids* a port clash rather than
-detecting or reporting one, and a shared `target/` still blocks. Also:
-subagents with tools, subagents while proposing, restoring an archived plan, and
-live updates on the map. See [`docs/roadmap.md`](docs/roadmap.md) for why each
-gap is its own decision.
-
-How the loop actually works, and every failure it has been taught to survive, is
-in [`docs/agent-loop.md`](docs/agent-loop.md). The review and editing surfaces
-are in [`docs/review-and-editing.md`](docs/review-and-editing.md).
-
-## 5. Running it
+## 4. Running it
 
 ```bash
 cargo leptos serve      # build + serve at http://127.0.0.1:3000

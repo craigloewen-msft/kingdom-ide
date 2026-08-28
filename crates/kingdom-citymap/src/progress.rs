@@ -25,8 +25,8 @@
 /// [`Wait::fraction`] still reaches exactly 1.0 whatever this says.
 ///
 /// Measured on the `kingdom-ide` dev folder (6 towns, 3,028 holdings): a 3.3 s
-/// fetch against a 2.5--3 s raise. `tasks/00220` measured 1.9--4.0 s against
-/// ~4.6 s on a larger one. The two straddle a half, and this leans slightly
+/// fetch against a 2.5--3 s raise; a larger folder, 1.9--4.0 s against ~4.6 s.
+/// The two straddle a half, and this leans slightly
 /// towards the raise, because the raise is the half that grows with the
 /// kingdom.
 pub const FETCH_SHARE: f32 = 0.45;

@@ -585,7 +585,6 @@ fn NewResource(
             let v = volume.get();
             (!v.is_empty()).then_some(v)
         },
-        retired_env: None,
     });
 
     // Said while he types rather than after the write, and asked of
@@ -838,7 +837,6 @@ mod tests {
             image: "mongo:7".to_string(),
             port: 27017,
             volume: None,
-            retired_env: None,
         };
         let row = |city: Option<&str>, scope| SharedResource {
             spec: spec.clone(),
