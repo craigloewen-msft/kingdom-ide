@@ -352,7 +352,7 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
 /// loopback, and a plan with a network of its own reaches `127.0.0.1` inside
 /// its *own* namespace where nothing was listening.
 ///
-/// `netns::open_wells` makes something listen there. So for an isolated plan
+/// `namespaces::net::open_wells` makes something listen there. So for an isolated plan
 /// the prior is now simply *correct*, and the block says so instead of warning
 /// against it -- the shortest possible instruction, which is the one most
 /// likely to be followed. For a plan on the machine's network nothing has
@@ -975,7 +975,7 @@ mod tests {
         let city = temp().join("agora");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-told-localhost");
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
 
         let block = services_block(&plan, &city);
 
@@ -1011,7 +1011,7 @@ mod tests {
             "a shared database is still shared: {block}"
         );
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// A plan on the machine's network is still warned, because for it the
@@ -1025,7 +1025,7 @@ mod tests {
         let city = temp().join("agora-shared");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-on-the-machines-network");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         let block = services_block(&plan, &city);
 
@@ -1053,7 +1053,7 @@ mod tests {
         crate::services::pretend_a_named_well_is_running(&city, "cache", "172.31.4.10", 6379);
         crate::services::pretend_a_named_well_is_running(&city, "other", "172.31.9.10", 6379);
         let plan = kingdom_core::PlanId::new("plan-told-about-two-caches");
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
 
         let block = services_block(&plan, &city);
 
@@ -1067,7 +1067,7 @@ mod tests {
              {block}"
         );
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// The block is built from the **project's** root, not the plan's
@@ -1088,7 +1088,7 @@ mod tests {
         let city = temp().join("agora-with-a-worktree");
         crate::services::pretend_a_well_is_running(&city, 27017);
         let plan = kingdom_core::PlanId::new("plan-in-a-worktree");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         // Where an isolated plan actually works: inside the city, under
         // `.kingdom/`. Asking about *this* path must not be mistaken for the
@@ -1117,7 +1117,7 @@ mod tests {
         let city = temp().join("no-wells");
         std::fs::create_dir_all(&city).unwrap();
         let plan = kingdom_core::PlanId::new("plan-in-an-ordinary-project");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         assert!(services_block(&plan, &city).is_empty());
     }

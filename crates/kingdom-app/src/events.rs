@@ -249,7 +249,7 @@ pub(crate) fn fitted(
 /// The city is given rather than looked up: see [`publish_within`].
 pub(crate) fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> Plan {
     let ports = if plan.network.is_isolated() {
-        crate::netns::forwards_of(&plan.id)
+        crate::namespaces::net::forwards_of(&plan.id)
             .into_iter()
             .map(|(guest, host)| kingdom_core::PortForward { guest, host })
             .collect()

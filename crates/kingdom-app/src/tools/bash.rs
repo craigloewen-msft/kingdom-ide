@@ -319,7 +319,7 @@ async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
         .into();
     };
 
-    let enter = crate::netns::enter_prefix(shop.plan());
+    let enter = crate::namespaces::enter_prefix(shop.plan());
     // Adopted from `terminal.rs`'s own guard: an isolated plan whose prefix
     // comes back empty must refuse rather than run on the host network with a
     // straight face about being isolated. A silent fallback there is what once
@@ -445,7 +445,7 @@ impl Job {
     /// a command naming its own value inline still overrides it.
     ///
     /// `enter` puts the command inside the plan's own network namespace, and is
-    /// **empty for the ordinary plan** -- see [`crate::netns::enter_prefix`].
+    /// **empty for the ordinary plan** -- see [`crate::namespaces::enter_prefix`].
     /// Prepended unconditionally rather than behind a branch here, because a
     /// call site that has to remember to check is one that will eventually
     /// forget, and forgetting means an agent binding the King's own port.

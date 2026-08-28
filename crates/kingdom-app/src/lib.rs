@@ -36,7 +36,7 @@ pub mod mock;
 // A network of a plan's own. Server-only and Linux-only: it spawns `unshare`
 // and `slirp4netns`, neither of which has any meaning in a browser.
 #[cfg(feature = "ssr")]
-pub mod netns;
+pub mod namespaces;
 #[cfg(feature = "ssr")]
 pub mod profile;
 #[cfg(feature = "ssr")]
@@ -46,7 +46,7 @@ pub mod scan;
 #[cfg(feature = "ssr")]
 pub mod screencast;
 // The well: containers a whole city shares. Server-only, for the same reason
-// `netns` is -- it spawns `docker`, which has no meaning in a browser.
+// `namespaces` is -- it spawns `docker`, which has no meaning in a browser.
 #[cfg(feature = "ssr")]
 pub mod services;
 #[cfg(feature = "ssr")]

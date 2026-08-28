@@ -655,7 +655,7 @@ pub async fn begin_plan(
     // exactly the invisible isolation this feature exists to end -- and the
     // King would only find out when two agents collided on 3000 anyway.
     if network.is_isolated() {
-        crate::netns::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
+        crate::namespaces::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
     }
 
     let mut plan = Plan::opened(
@@ -712,7 +712,9 @@ pub async fn begin_plan(
 /// after he has typed his prompt.
 #[server(NetworkAvailable, "/api")]
 pub async fn network_available() -> Result<Option<String>, ServerFnError> {
-    Ok(crate::netns::availability().err().map(|e| e.to_string()))
+    Ok(crate::namespaces::availability()
+        .err()
+        .map(|e| e.to_string()))
 }
 
 /// Local branches in a city's repository, for the workspace picker.
@@ -1149,7 +1151,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
             // has none is answered with an empty list anyway -- the guard is
             // here to say so rather than to avoid a fault.
             let ports = if network.is_isolated() {
-                crate::netns::forwards_of(&plan)
+                crate::namespaces::net::forwards_of(&plan)
                     .into_iter()
                     .map(|(guest, host)| kingdom_core::PortForward { guest, host })
                     .collect()
@@ -2518,7 +2520,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     //
     // Unconditional, like the draft read above: a plan on the shared network
     // has no namespace and this does nothing at all.
-    crate::netns::shutdown(&plan_id);
+    crate::namespaces::shutdown(&plan_id);
 
     // The city's shared services are **not** touched here. They are reconciled
     // once the plan has actually been settled below -- see the call after

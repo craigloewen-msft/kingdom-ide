@@ -87,7 +87,7 @@ const SESSION: &str = "main";
 /// such a pane would bind the King's own `:3000` and answer for a project it
 /// was never given.
 fn isolated_enter_prefix(shop: &Sandbox) -> Result<Vec<String>, Refusal> {
-    let enter = crate::netns::enter_prefix(shop.plan());
+    let enter = crate::namespaces::enter_prefix(shop.plan());
     let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.network.is_isolated());
     if isolated && enter.is_empty() {
         return Err(Refusal::Refused(
@@ -545,7 +545,7 @@ fn fingerprint(s: &str) -> u64 {
 /// on the next window instead of a silent recovery.
 ///
 /// **The mismatch this exists to catch.** A namespace lives in a process, not
-/// on disk (see `netns::reclaim_previous`), so a server restart gives the plan
+/// on disk (see `namespaces::net::reclaim_previous`), so a server restart gives the plan
 /// a *fresh* namespace while this daemon -- named from the plan id alone, and
 /// found again on disk regardless of restarts -- is still the one from before.
 /// `has-session` succeeding said nothing about which namespace answered.
@@ -618,7 +618,7 @@ async fn ensure_server(
 /// this returns `true` without asking tmux anything more. Only an isolated
 /// plan can have a daemon that has fallen behind a server restart.
 async fn daemon_belongs_here(socket: &Path, plan: &kingdom_core::PlanId) -> bool {
-    let Some(current) = crate::netns::holder_ns(plan) else {
+    let Some(current) = crate::namespaces::holder_ns(plan) else {
         // Not isolated, or isolation not yet (re-)established for this call --
         // either way there is no namespace of the plan's own to disagree with.
         return true;

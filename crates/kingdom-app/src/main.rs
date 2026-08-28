@@ -29,7 +29,7 @@ async fn main() {
                 eprintln!("--relay needs <bind> <target>");
                 std::process::exit(2);
             };
-            kingdom_app::netns::run_relay(bind, target).await;
+            kingdom_app::namespaces::net::run_relay(bind, target).await;
             return;
         }
     }

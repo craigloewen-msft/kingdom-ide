@@ -181,14 +181,14 @@ pub(crate) async fn converse(
     // isolation, which is the one outcome this feature must never produce
     // silently: he would find out when it took the port he was using.
     if snapshot(&plan_id).is_some_and(|p| p.network.is_isolated()) {
-        if let Err(e) = crate::netns::ensure(&plan_id).await {
+        if let Err(e) = crate::namespaces::ensure(&plan_id).await {
             // `Refused` rather than `Transport`: a missing slirp4netns or a
             // kernel that forbids namespaces is a settled answer, and
             // `is_transient` must not send the turn round again to be told the
             // same thing. The message names the package to install.
             return settle(plan_id, Err(crate::llm::ModelError::Refused(e.to_string())));
         }
-        crate::netns::watch(&plan_id);
+        crate::namespaces::net::watch(&plan_id);
     }
 
     // The shared services this city declares. **Not raised here** -- a well is

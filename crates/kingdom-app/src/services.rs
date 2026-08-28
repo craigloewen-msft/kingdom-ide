@@ -5,7 +5,7 @@
 //!
 //! # The problem
 //!
-//! [`crate::netns`] answers *"stop these agents colliding on a port"*. This
+//! [`crate::namespaces`] answers *"stop these agents colliding on a port"*. This
 //! answers the question immediately behind it: **some resources are meant to be
 //! shared.** Five plans on a project that needs MongoDB should reach one
 //! MongoDB -- started once when the first plan wants it, stopped once when the
@@ -61,9 +61,9 @@
 //! the UI tells him where. An in-process TCP proxy was drafted for this and
 //! deleted: it would have re-solved a problem the kernel had already solved.
 //!
-//! # Why it differs from `netns.rs` in one important way
+//! # Why it differs from `namespaces/` in one important way
 //!
-//! `netns::reclaim_previous` **kills** what a previous server left behind,
+//! `namespaces::net::reclaim_previous` **kills** what a previous server left behind,
 //! because a namespace with no server attached is worthless. A database is not:
 //! it holds state. So on a restart this module **adopts** the containers it
 //! finds still carrying its labels rather than killing them, and a plan that
@@ -88,7 +88,7 @@
 //!
 //! **Not a sandbox.** A container Kingdom starts is an ordinary container,
 //! visible to the whole machine and to `docker ps`, and a plan can still run
-//! `docker` itself and do as it likes. Like [`crate::netns`], this is
+//! `docker` itself and do as it likes. Like [`crate::namespaces`], this is
 //! coordination, not containment, and saying so plainly is worth more than a
 //! guarantee that does not hold.
 
@@ -113,7 +113,7 @@ const SUBNET_PREFIX: (u8, u8) = (172, 31);
 ///
 /// A collision is possible -- another Docker network, a VPN, a route the King
 /// added himself -- so the subnet is *tried* rather than assumed, in the manner
-/// of `netns::add_forward`'s port draw.
+/// of `namespaces::net::add_forward`'s port draw.
 const SUBNET_ATTEMPTS: u8 = 32;
 
 /// The last octet of the first service's address.
@@ -185,7 +185,7 @@ impl RunningService {
 
 /// Every service this server has standing, and which plans are using it.
 ///
-/// Process-global for the reason `netns::NAMESPACES` is: a container must
+/// Process-global for the reason `namespaces::NAMESPACES` is: a container must
 /// outlive the tool call that started it, because the point is that the *next*
 /// plan finds it already up.
 static SERVICES: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -390,7 +390,7 @@ fn scopes_for(city_root: &Path) -> [Scope; 2] {
 /// that plan's namespace, which does not exist until the plan takes a turn or
 /// the King opens a shell in it. This runs when a *kingdom* opens, where no
 /// namespace has been raised yet. [`require`] is the per-plan path and is
-/// where [`crate::netns::open_wells`] is called from.
+/// where [`crate::namespaces::net::open_wells`] is called from.
 async fn raise(
     scope: &Scope,
     drawers: &HashSet<PlanId>,
@@ -596,8 +596,8 @@ pub async fn require(plan: &PlanId, city_root: &Path) -> Result<(), ServiceError
     // function nobody has to remember" argument that put it in `ensure`.
     //
     // Idempotent and a no-op for a shared-network plan, which has no loopback
-    // of its own to put anything on -- see `netns::open_wells`.
-    crate::netns::open_wells(plan, &standing).await;
+    // of its own to put anything on -- see `namespaces::net::open_wells`.
+    crate::namespaces::net::open_wells(plan, &standing).await;
 
     Ok(())
 }
@@ -606,7 +606,7 @@ pub async fn require(plan: &PlanId, city_root: &Path) -> Result<(), ServiceError
 ///
 /// # The whole promise, in one function
 ///
-/// `localhost:<the service's own port>` when [`crate::netns::open_wells`] has a
+/// `localhost:<the service's own port>` when [`crate::namespaces::net::open_wells`] has a
 /// relay standing for **that container** inside this plan's namespace, and the
 /// container's own address otherwise. Every surface that tells anyone where a
 /// shared resource is -- the system prompt, the ports badge, the ledger -- goes
@@ -626,10 +626,10 @@ pub async fn require(plan: &PlanId, city_root: &Path) -> Result<(), ServiceError
 /// the King's own Redis and a project's are both `:6379` by default. Only the
 /// first gets the relay. Matching on the port alone -- which this once did --
 /// told the second one `localhost:6379` as well, and sent its every read and
-/// write into the first one's data. See [`crate::netns::Well`].
+/// write into the first one's data. See [`crate::namespaces::net::Well`].
 pub fn address_for(plan: &PlanId, service: &RunningService) -> String {
     let container = service.address();
-    if crate::netns::wells_of(plan).contains(&container) {
+    if crate::namespaces::net::wells_of(plan).contains(&container) {
         format!("{LOOPBACK}:{}", service.port)
     } else {
         container
@@ -927,7 +927,7 @@ pub fn declare(scope: &Scope, spec: &ServiceSpec) -> Result<PathBuf, DeclareErro
 
 /// Finds an executable on `PATH`.
 ///
-/// A copy of `netns::which` rather than a shared helper: it is four lines, and
+/// A copy of `namespaces::which` rather than a shared helper: it is four lines, and
 /// the alternative is a utility module that exists to hold four lines.
 fn which(program: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -1005,7 +1005,7 @@ fn preferred_subnet(city_key: &str) -> u8 {
 
 /// Runs a `docker` command, returning its stdout.
 ///
-/// Shelling out rather than taking on `bollard`, for the reason `netns.rs`
+/// Shelling out rather than taking on `bollard`, for the reason `namespaces/`
 /// shells out to `unshare` and `slirp4netns`: the surface used here is a
 /// handful of subcommands, and the CLI is the interface Docker documents and
 /// the King can reproduce by hand when something goes wrong.
@@ -1129,7 +1129,7 @@ async fn ensure_one(
     match container_state(&container).await {
         // Up already: this is a plan two-through-five, or a server restart
         // finding what the last one left. Adopted, deliberately -- see the
-        // module docs on why this differs from `netns::reclaim_previous`.
+        // module docs on why this differs from `namespaces::net::reclaim_previous`.
         ContainerState::Running => {
             wait_until_ready(&service).await?;
             return Ok(service);
@@ -1484,11 +1484,11 @@ mod tests {
     fn a_plan_with_the_well_on_its_loopback_is_given_localhost() {
         let (_root, service) = a_running_well("kingdom-loopback-well-test", 27017);
         let plan = PlanId::new("plan-with-its-own-network");
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.10:27017"]);
 
         assert_eq!(address_for(&plan, &service), "localhost:27017");
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// A plan on the machine's network is told the container's address, exactly
@@ -1501,7 +1501,7 @@ mod tests {
     fn a_plan_on_the_machines_network_keeps_the_containers_address() {
         let (_root, service) = a_running_well("kingdom-shared-network-well-test", 27017);
         let plan = PlanId::new("plan-on-the-shared-network");
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
 
         assert_eq!(address_for(&plan, &service), "172.31.4.10:27017");
     }
@@ -1517,7 +1517,7 @@ mod tests {
         let (_root, service) = a_running_well("kingdom-half-open-well-test", 27017);
         let plan = PlanId::new("plan-whose-relay-failed");
         // A namespace, and some *other* service relayed -- but not this well.
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.11:6379"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.11:6379"]);
 
         assert_eq!(
             address_for(&plan, &service),
@@ -1525,7 +1525,7 @@ mod tests {
             "promising localhost where nothing is listening is worse than the IP"
         );
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// Two services on one port: only the one actually relayed gets
@@ -1547,7 +1547,7 @@ mod tests {
 
         let plan = PlanId::new("plan-with-two-caches");
         // Exactly what `open_wells` records: one relay, for one container.
-        crate::netns::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["172.31.4.10:6379"]);
 
         assert_eq!(
             address_for(&plan, &relayed),
@@ -1561,7 +1561,7 @@ mod tests {
              the first one's data"
         );
 
-        crate::netns::forget_namespace(&plan);
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// Reconciling a city that declares nothing touches nothing.
