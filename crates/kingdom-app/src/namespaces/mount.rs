@@ -183,6 +183,20 @@ impl MountPlan {
     /// lives back in the city. Both are needed, and the city's git directory is
     /// the one that is easy to forget and fatal to omit.
     pub fn built_in(plan: &str, workspace: &Path, city_root: Option<&Path>) -> Self {
+        Self::with_allowed(plan, workspace, city_root, &[])
+    }
+
+    /// The same, plus the folders the King has declared.
+    ///
+    /// Declared folders are added **last**, so one naming a path under
+    /// something already mounted lands on top of it rather than under it -- the
+    /// same ordering rule the private `/tmp` obeys, for the same reason.
+    pub fn with_allowed(
+        plan: &str,
+        workspace: &Path,
+        city_root: Option<&Path>,
+        allowed: &[kingdom_core::services::MountSpec],
+    ) -> Self {
         let mut binds = vec![
             Bind::read_only("/usr"),
             Bind::read_only("/etc"),
@@ -218,6 +232,25 @@ impl MountPlan {
             binds.push(Bind::writable(shared));
         }
 
+        // What the King allows in, expanded against his own home. A folder
+        // that is not there is dropped rather than mounted: `mount --rbind` of
+        // a missing source fails, and `set -e` would take the whole holder down
+        // over one stale line in a manifest.
+        let home = home_directory();
+        for mount in allowed {
+            let source = PathBuf::from(mount.expanded(&home));
+            if !source.exists() {
+                continue;
+            }
+            if binds.iter().any(|held| held.source == source) {
+                continue;
+            }
+            binds.push(Bind {
+                source,
+                writable: mount.mode.is_writable(),
+            });
+        }
+
         Self {
             root: scratch_root(plan),
             layout,
@@ -225,6 +258,20 @@ impl MountPlan {
             workdir: workspace.to_path_buf(),
         }
     }
+}
+
+/// The King's home directory, for expanding a `~` in a declared mount.
+///
+/// `$HOME`, falling back to the passwd entry's own idea. Both can be wrong in
+/// odd setups, and neither being right costs only that a `~`-rooted mount is
+/// not found and so is skipped -- which is the same outcome as naming a folder
+/// that is not there.
+fn home_directory() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| {
+        std::env::var("USER")
+            .map(|user| format!("/home/{user}"))
+            .unwrap_or_default()
+    })
 }
 
 /// Directories under the temp directory that both sides must see.
@@ -531,6 +578,69 @@ mod tests {
         );
     }
 
+    /// A declared folder is mounted, in the mode it asked for.
+    #[test]
+    fn a_declared_folder_is_let_in() {
+        use kingdom_core::services::{MountMode, MountSpec};
+
+        // Real directories, because a mount whose source is absent is dropped
+        // -- `mount --rbind` of a missing path fails, and `set -e` would take
+        // the whole holder down over one stale line in a manifest.
+        let root = std::env::temp_dir().join("kingdom-mount-test-allowed");
+        let readable = root.join("toolchain");
+        let writable = root.join("cache");
+        std::fs::create_dir_all(&readable).unwrap();
+        std::fs::create_dir_all(&writable).unwrap();
+
+        let allowed = vec![
+            MountSpec {
+                path: readable.display().to_string(),
+                mode: MountMode::Ro,
+            },
+            MountSpec {
+                path: writable.display().to_string(),
+                mode: MountMode::Rw,
+            },
+            MountSpec {
+                path: root.join("not-there").display().to_string(),
+                mode: MountMode::Ro,
+            },
+        ];
+
+        let plan = MountPlan::with_allowed("plan-8", Path::new("/tmp/work"), None, &allowed);
+
+        let bind = |p: &Path| plan.binds.iter().find(|b| b.source == p);
+        assert!(
+            !bind(&readable)
+                .expect("declared folders are mounted")
+                .writable
+        );
+        assert!(bind(&writable).expect("and in the mode asked for").writable);
+        assert!(
+            bind(&root.join("not-there")).is_none(),
+            "a folder that is not there must be skipped, not mounted: \
+             `set -e` would otherwise kill the holder over a stale line"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `built_in` is `with_allowed` with nothing allowed.
+    ///
+    /// Cheap, and it pins the seam a real bug slipped through: `net::create`
+    /// called `built_in` and so silently dropped every folder the King had
+    /// declared. Nothing failed -- the namespace came up perfectly, and `cargo`
+    /// simply was not in it. Only the live test caught it, and only because it
+    /// ran a real toolchain.
+    #[test]
+    fn the_built_in_set_is_the_allowed_set_with_nothing_allowed() {
+        let workspace = Path::new("/tmp/work");
+        assert_eq!(
+            MountPlan::built_in("plan-9", workspace, None).binds,
+            MountPlan::with_allowed("plan-9", workspace, None, &[]).binds,
+        );
+    }
+
     /// DNS is given a resolver that exists.
     ///
     /// `/etc/resolv.conf` is a symlink to somewhere unmounted on both WSL and
@@ -613,6 +723,7 @@ mod live {
             isolation: Isolation::Sealed,
             workspace: workspace.clone(),
             city_root: None,
+            allowed: Vec::new(),
         };
 
         crate::namespaces::ensure(&plan, &request)
@@ -665,6 +776,76 @@ mod live {
 
         crate::namespaces::shutdown(&plan);
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("kingdom-sealed-live"));
+    }
+
+    /// The whole point, end to end: a declared toolchain works inside.
+    ///
+    /// `cargo --version` from a sealed namespace, using the King's own
+    /// `~/.cargo` and `~/.rustup` mounted in by declaration. This is the claim
+    /// the entire feature rests on -- that a sealed plan can still build -- and
+    /// it is the one that cannot be checked without a real kernel.
+    ///
+    /// Skipped rather than failed where there is no cargo to find: the point is
+    /// that a *declared* toolchain works, not that this machine has Rust.
+    #[tokio::test]
+    #[ignore = "creates a real namespace; needs unshare, nsenter and user namespaces"]
+    async fn a_declared_toolchain_works_inside_a_sealed_plan() {
+        use kingdom_core::services::{MountMode, MountSpec};
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !std::path::Path::new(&home)
+            .join(".cargo/bin/cargo")
+            .exists()
+        {
+            eprintln!("no cargo under {home}; nothing to prove here");
+            return;
+        }
+
+        let plan = PlanId::new("plan-sealed-toolchain-test");
+        let workspace = std::env::temp_dir().join("kingdom-sealed-toolchain/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let allowed = vec![
+            MountSpec {
+                path: "~/.cargo".to_string(),
+                mode: MountMode::Rw,
+            },
+            MountSpec {
+                path: "~/.rustup".to_string(),
+                mode: MountMode::Rw,
+            },
+        ];
+
+        crate::namespaces::ensure(
+            &plan,
+            &crate::namespaces::Request {
+                isolation: Isolation::Sealed,
+                workspace: workspace.clone(),
+                city_root: None,
+                allowed,
+            },
+        )
+        .await
+        .expect("a sealed namespace must come up");
+
+        let mut argv = crate::namespaces::enter_prefix(&plan);
+        argv.push("sh".to_string());
+        argv.push("-c".to_string());
+        argv.push(format!("PATH={home}/.cargo/bin:/usr/bin cargo --version"));
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("the namespace must be enterable");
+        let said = String::from_utf8_lossy(&out.stdout);
+
+        assert!(
+            said.starts_with("cargo "),
+            "a declared toolchain must actually run: {said:?} / {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        crate::namespaces::shutdown(&plan);
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("kingdom-sealed-toolchain"));
     }
 
     /// A plan with only a network of its own still has the King's filesystem.

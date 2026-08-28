@@ -119,11 +119,12 @@ impl SystemPrompt {
         kingdom_root: &Path,
         city_root: &Path,
         isolation: kingdom_core::Isolation,
+        allowed: Vec<kingdom_core::services::MountSpec>,
     ) -> Self {
         let root = Path::new(&workspace.path);
         Self {
             city: city.clone(),
-            workspace: workspace_block(workspace, isolation),
+            workspace: workspace_block(workspace, isolation, &allowed),
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
@@ -312,6 +313,7 @@ const SKILLS_PREAMBLE: &str = "The following skills are available. Invoke them w
 fn workspace_block(
     workspace: &kingdom_core::Workspace,
     isolation: kingdom_core::Isolation,
+    allowed: &[kingdom_core::services::MountSpec],
 ) -> String {
     let mut out = format!(
         "Working directory: {}\nEvery command runs here, and every relative path is \
@@ -356,6 +358,31 @@ fn workspace_block(
              those is not missing, it is simply not shared with you; say so rather \
              than working around it. `ps` shows only this plan's own processes.",
         );
+
+        // The folders themselves, named. Without this the model knows it is
+        // fenced in but not where the fence is, which is the difference between
+        // "I cannot see ~/.ssh, so I will say so" and a turn spent hunting for
+        // a toolchain that was never shared.
+        if !allowed.is_empty() {
+            out.push_str("\n\nFolders shared with you, beyond the system:\n");
+            for mount in allowed {
+                let _ = write!(
+                    out,
+                    "\n- {} ({})",
+                    mount.path,
+                    if mount.mode.is_writable() {
+                        "you may write here"
+                    } else {
+                        "read-only"
+                    }
+                );
+            }
+            out.push_str(
+                "\n\nThe user adds to this list from the isolation panel when he opens \
+                 a plan. If something you genuinely need is missing, say which folder \
+                 and why rather than trying to work without it.",
+            );
+        }
     }
     out
 }
@@ -795,6 +822,7 @@ mod tests {
             prompt.workspace = workspace_block(
                 &kingdom_core::Workspace::in_place("/somewhere"),
                 kingdom_core::Isolation::Shared,
+                &[],
             );
 
             let rendered = prompt.render();
@@ -961,7 +989,7 @@ mod tests {
         );
 
         for workspace in [isolated, kingdom_core::Workspace::in_place("/dev/city")] {
-            let block = workspace_block(&workspace, kingdom_core::Isolation::Shared);
+            let block = workspace_block(&workspace, kingdom_core::Isolation::Shared, &[]);
 
             assert!(
                 block.contains(&workspace.path),
@@ -984,10 +1012,22 @@ mod tests {
     fn a_sealed_plan_is_told_what_it_can_see() {
         let workspace = kingdom_core::Workspace::in_place("/dev/city");
 
-        let sealed = workspace_block(&workspace, kingdom_core::Isolation::Sealed);
+        let sealed = workspace_block(
+            &workspace,
+            kingdom_core::Isolation::Sealed,
+            &[kingdom_core::services::MountSpec {
+                path: "~/.cargo".to_string(),
+                mode: kingdom_core::services::MountMode::Rw,
+            }],
+        );
         assert!(
             sealed.contains("sealed"),
             "a sealed plan must be told so: {sealed}"
+        );
+        assert!(
+            sealed.contains("~/.cargo") && sealed.contains("you may write here"),
+            "a sealed plan must be told which folders it has, not merely that \
+             it is fenced in: {sealed}"
         );
         assert!(
             sealed.contains("not missing"),
@@ -1001,7 +1041,7 @@ mod tests {
             kingdom_core::Isolation::Shared,
             kingdom_core::Isolation::Isolated,
         ] {
-            let block = workspace_block(&workspace, ordinary);
+            let block = workspace_block(&workspace, ordinary, &[]);
             assert!(
                 !block.contains("sealed"),
                 "{ordinary:?} shares the user's filesystem and must not claim \

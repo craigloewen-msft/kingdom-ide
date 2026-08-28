@@ -6,7 +6,10 @@
 //! a sentence and a chosen city into a plan and then gets out of the way by
 //! navigating there.
 
-use crate::api::{begin_plan, list_branches, list_models, network_available, shared_resources};
+use crate::api::{
+    begin_plan, declare_mount, list_branches, list_models, mount_offers, network_available,
+    shared_resources,
+};
 use crate::app::KingdomState;
 use kingdom_core::{
     City, CredentialState, Isolation, ModelCatalogue, ModelChoice, ModelEffort, ModelOption,
@@ -750,6 +753,13 @@ fn IsolationChoices(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl 
                          tools you allow in -- and nothing else of yours."
                     </span>
                 </button>
+
+                // Only under the row it belongs to: what a sealed plan may see
+                // is a question the other two modes do not raise, and showing
+                // it always would be three lists where one is wanted.
+                <Show when=move || current.get() == Isolation::Sealed>
+                    <QuickAdd/>
+                </Show>
             </li>
 
             // What isolation buys on *this* project, when it shares anything.
@@ -784,5 +794,128 @@ fn IsolationChoices(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl 
                 </p>
             </Show>
         </ul>
+    }
+}
+
+/// The folders a sealed plan may see, and one press to allow another.
+///
+/// # Why this is here and not only on the resources screen
+///
+/// A mount *is* a shared resource and `/resources` is where they live -- but
+/// this is the one moment the King is actually deciding what a plan may see,
+/// and sending him to another screen to make the decision he is already making
+/// is how a feature goes unused. The screen remains the place to review and
+/// remove; this is the place to say yes.
+///
+/// # Why it writes to his profile
+///
+/// Quick-add always declares at the **host** scope. A toolchain is a fact about
+/// his machine, not about one project: `~/.cargo` is where cargo lives whatever
+/// he is working on, and writing that into a project's committed manifest would
+/// put his home directory's layout into somebody else's repository. A folder
+/// genuinely belonging to one project is declared on `/resources`, where the
+/// scope is his to choose.
+#[component]
+fn QuickAdd() -> impl IntoView {
+    let state = expect_context::<KingdomState>();
+    let city = Memo::new(move |_| state.selected.get());
+
+    // Bumped after a successful declaration, which re-runs the fetch: an offer
+    // just taken must come back marked as taken.
+    let revision = RwSignal::new(0_u32);
+    let offers = Resource::new(
+        move || (city.get(), revision.get()),
+        |(city, _)| async move { mount_offers(city.map(|c| c.to_string())).await.ok() },
+    );
+
+    let failure = RwSignal::new(Option::<String>::None);
+    let allow = move |folders: Vec<kingdom_core::services::MountSpec>| {
+        failure.set(None);
+        leptos::task::spawn_local(async move {
+            match declare_mount("host".to_string(), None, folders).await {
+                Ok(_) => revision.update(|r| *r += 1),
+                Err(e) => failure.set(Some(e.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="quick-add">
+            <p class="quick-add-head">
+                "A sealed plan sees its workspace and a read-only system. Allow \
+                 the tools it needs to build:"
+            </p>
+
+            <Suspense fallback=|| view! { <p class="quick-add-empty">"Looking…"</p> }>
+                {move || {
+                    let found = offers.get().flatten().unwrap_or_default();
+                    if found.is_empty() {
+                        return view! {
+                            <p class="quick-add-empty">
+                                "Nothing to add: every tool on your PATH is already \
+                                 part of the read-only system a sealed plan gets."
+                            </p>
+                        }
+                            .into_any();
+                    }
+                    view! {
+                        <ul class="quick-add-list">
+                            <For
+                                each=move || found.clone()
+                                key=|offer: &kingdom_core::services::MountCandidate| {
+                                    (
+                                        offer.folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+                                        offer.already,
+                                    )
+                                }
+                                let:offer
+                            >
+                                {
+                                    let folders = offer.folders.clone();
+                                    let shown = folders
+                                        .iter()
+                                        .map(|f| f.path.clone())
+                                        .collect::<Vec<_>>()
+                                        .join("  ");
+                                    // Said per folder, because "it can write
+                                    // there" is the part worth being sure of.
+                                    let writable = folders.iter().any(|f| f.mode.is_writable());
+                                    view! {
+                                        <li>
+                                            <button
+                                                class="quick-add-row"
+                                                class:already=offer.already
+                                                disabled=offer.already
+                                                on:click={
+                                                    let folders = folders.clone();
+                                                    move |_| allow(folders.clone())
+                                                }
+                                            >
+                                                <span class="quick-add-why">{offer.why.clone()}</span>
+                                                <span class="quick-add-paths">{shown}</span>
+                                                <span class="quick-add-mark">
+                                                    {if offer.already {
+                                                        "shared".to_string()
+                                                    } else if writable {
+                                                        "allow (writable)".to_string()
+                                                    } else {
+                                                        "allow".to_string()
+                                                    }}
+                                                </span>
+                                            </button>
+                                        </li>
+                                    }
+                                }
+                            </For>
+                        </ul>
+                    }
+                        .into_any()
+                }}
+            </Suspense>
+
+            <Show when=move || failure.get().is_some()>
+                <p class="network-unavailable">{move || failure.get().unwrap_or_default()}</p>
+            </Show>
+        </div>
     }
 }

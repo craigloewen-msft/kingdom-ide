@@ -515,10 +515,11 @@ impl Namespace {
         // this way rather than as two `create`s.
         let sealed = request.isolation.is_sealed();
         let mount_plan = sealed.then(|| {
-            super::mount::MountPlan::built_in(
+            super::mount::MountPlan::with_allowed(
                 plan.as_str(),
                 &request.workspace,
                 request.city_root.as_deref(),
+                &request.allowed,
             )
         });
 

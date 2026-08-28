@@ -207,6 +207,72 @@ When the last plan finishes, the container is **stopped, not removed**, and the
 volume is left alone. Losing your data because five agents finished their work
 would be the worst possible reading of "tear down".
 
+## Folders, for a sealed plan
+
+The same manifests declare a second kind. A plan opened with **a machine of its
+own** (`Isolation::Sealed`) has a filesystem of its own: its workspace, its
+project's git directory, and a read-only system. That is enough to read and
+build a great deal, and not enough for a toolchain you keep in your home
+directory.
+
+```toml
+[[mount]]
+path = "~/.cargo"
+mode = "rw"      # "ro" if omitted
+```
+
+| Field | What it is |
+|---|---|
+| `path` | Absolute, or starting with `~`. It appears at **the same path** inside the plan |
+| `mode` | `ro` (the default) or `rw` |
+
+The path is the same inside as outside, and that is not incidental:
+`~/.cargo/bin/cargo` looks for its registry at `~/.cargo/registry`, so a folder
+mounted anywhere else is a folder its own tool cannot find.
+
+**Read-only is the default**, because a toolchain a plan can rewrite is one
+every later plan inherits the damage from. Some folders genuinely need `rw` — a
+package cache fills itself in as a build runs, and `~/.cargo` without write
+access means re-downloading the registry every time.
+
+`~` is expanded when the folder is mounted, not when the file is read, so a
+committed project manifest means "this user's home" wherever it is checked out.
+
+### Quick-add
+
+You rarely need to write these by hand. Opening a plan with **a machine of its
+own** offers a list built from your own `PATH` — the only honest answer to
+"which tools do I have" — and one press writes the block for you, into
+`$KINGDOM_HOME/services.toml`. Always your profile: `~/.cargo` is where cargo
+lives whatever project you are on, and writing your home directory's layout into
+a project's committed manifest would put it in somebody else's repository. A
+folder that genuinely belongs to one project is declared here, by hand, where
+the scope is yours to choose.
+
+An offer names every folder its tool needs, not just the one on `PATH`. Anything
+Kingdom does not recognise is still offered, read-only — a tool it has never
+heard of is still a tool you have.
+
+### What is refused
+
+A mount is checked when the file is read, not when the plan starts:
+
+| Refused | Why |
+|---|---|
+| `/` | It would undo the sealing entirely |
+| a relative path | Nothing resolves it; guessing would share the wrong folder |
+| `..` anywhere | It reaches outside what the line appears to name |
+| `~someone-else` | Only `~/` is expanded, and the wrong home silently would be worse |
+
+A folder that simply is not there is **skipped**, not refused: a stale line in a
+manifest should not stop a plan from opening.
+
+### They need no daemon
+
+Nothing about a mount touches Docker. A manifest that declares only folders
+raises nothing, waits for nothing and is not reference-counted — it is read once
+when the plan's namespace is built and is inert thereafter.
+
 ## The life of a well
 
 A well stands **exactly while at least one live agent that can reach it

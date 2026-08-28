@@ -200,6 +200,10 @@ pub(crate) async fn converse(
             isolation,
             workspace: std::path::PathBuf::from(&workspace.path),
             city_root: city_root.clone(),
+            // The folders the King declared, from his profile and this
+            // project. Empty for a plan that is not sealed, which never looks
+            // at them.
+            allowed: crate::services::mounts_for(city_root.as_deref()),
         };
         if let Err(e) = crate::namespaces::ensure(&plan_id, &request).await {
             // `Refused` rather than `Transport`: a missing slirp4netns or a
@@ -331,6 +335,9 @@ pub(crate) async fn converse(
                 // because a filesystem that is not the user's reads as a broken
                 // machine to a model that was not told.
                 snapshot(&plan_id).map(|p| p.isolation).unwrap_or_default(),
+                // And which folders, so a sealed plan knows where its fence is
+                // rather than only that it has one.
+                crate::services::mounts_for(city_root.as_deref()),
             ),
             turns,
             // Set only on the first round of a turn that follows a silent one.

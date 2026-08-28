@@ -274,6 +274,13 @@ pub struct Request {
     /// isolated plan's workspace is a worktree under `<city>/.kingdom/`, whose
     /// `.git` lives back in the city. See [`mount::MountPlan::built_in`].
     pub city_root: Option<PathBuf>,
+    /// The folders the King has allowed a sealed plan to see, beyond the ones
+    /// every sealed plan gets.
+    ///
+    /// Read from the manifests by `services::mounts_for` and passed in rather
+    /// than read here, so this module does no I/O of its own and the whole of
+    /// what a namespace will be is visible in its argument.
+    pub allowed: Vec<kingdom_core::services::MountSpec>,
 }
 
 impl Request {
@@ -283,6 +290,7 @@ impl Request {
             isolation: kingdom_core::Isolation::Isolated,
             workspace: PathBuf::from("/"),
             city_root: None,
+            allowed: Vec::new(),
         }
     }
 }

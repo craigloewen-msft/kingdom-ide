@@ -65,8 +65,10 @@ The translation, in full:
 | the spyglass | the screencast — `screencast.rs`, `BrowserView` |
 | the herald | the event bus — `events::publish`, `events::subscribe` |
 | a remit | `Permissions::ReadOnly` / `Permissions::Full` |
+| on this machine / a network of its own / a machine of its own | `Isolation::Shared` / `Isolated` / `Sealed` |
 | a workshop | `Sandbox` |
 | a well | a shared container — `ServiceSpec`, `RunningService`, `SharedService` |
+| a folder let in | `MountSpec`, `MountMode`, `namespaces::mount` |
 | shared resources (the screen) | `SharedResource`, `ResourceInventory`, `wells.rs` |
 | a realm (fixture) | `FixtureSpec`, `fixtures.rs` |
 | a ward | `Language` |

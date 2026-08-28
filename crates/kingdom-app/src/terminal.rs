@@ -234,10 +234,16 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
     // tried to bind :3000 and took `Address already in use` from the King's own
     // server. A refusal he can read beats a lie he cannot see.
     if plan.isolation.is_isolated() {
+        let city_root = crate::api::city_root_of(plan_id);
         let request = crate::namespaces::Request {
             isolation: plan.isolation,
             workspace: cwd.clone(),
-            city_root: crate::api::city_root_of(plan_id),
+            // The same folders the agent's own tools get, so the King's shell
+            // and his agent see the same filesystem. A shell that could run
+            // `cargo` where the agent could not -- or the reverse -- would make
+            // every diagnosis he attempts in here misleading.
+            allowed: crate::services::mounts_for(city_root.as_deref()),
+            city_root,
         };
         if let Err(e) = crate::namespaces::ensure(plan_id, &request).await {
             return Err(format!(

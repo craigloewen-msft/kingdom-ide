@@ -363,6 +363,56 @@ pub fn manifest_of(city_root: &Path) -> Result<ServiceManifest, ServiceError> {
     manifest_in(&Scope::City(city_root.to_path_buf()))
 }
 
+/// Every folder a sealed plan working in this city may see, from both scopes.
+///
+/// # Why this reads both manifests and starts nothing
+///
+/// A mount is not a resource in the sense the rest of this module means: there
+/// is no container, no daemon, no reference count and nothing to raise or
+/// release. It is read once, when the plan's namespace is built, and is inert
+/// thereafter -- which is why it does not go anywhere near `reconcile`.
+///
+/// Host first and then the city, the order [`scopes_for`] fixes, so a project's
+/// own declaration comes after the machine's. Duplicates are dropped keeping
+/// the **more permissive** mode: a folder the machine shares read-only and the
+/// project needs to write is one folder, and mounting it twice at the same path
+/// would leave whichever landed second silently on top.
+///
+/// A manifest that cannot be read yields nothing rather than failing. The King
+/// is already told about a broken manifest on the resources screen and by
+/// `require`, and refusing to open a namespace over it would take a working
+/// plan away for a fault it has already been told about twice.
+pub fn mounts_for(city_root: Option<&Path>) -> Vec<kingdom_core::services::MountSpec> {
+    use kingdom_core::services::MountMode;
+
+    let scopes: Vec<Scope> = match city_root {
+        Some(city) => scopes_for(city).to_vec(),
+        // A plan with no resolvable city still gets the machine's own folders:
+        // they are a fact about the King's toolchain, not about his project.
+        None => vec![Scope::Host],
+    };
+
+    let mut out: Vec<kingdom_core::services::MountSpec> = Vec::new();
+    for scope in scopes {
+        let Ok(manifest) = manifest_in(&scope) else {
+            continue;
+        };
+        for mount in manifest.mounts {
+            match out.iter_mut().find(|held| held.path == mount.path) {
+                // Already named. Keep the more permissive of the two, because
+                // the stricter one would break whatever needed to write.
+                Some(held) => {
+                    if mount.mode.is_writable() {
+                        held.mode = MountMode::Rw;
+                    }
+                }
+                None => out.push(mount),
+            }
+        }
+    }
+    out
+}
+
 /// The two scopes a plan working in this city draws from, host first.
 ///
 /// Host first is load-bearing in exactly one place: [`environment`] lets a
@@ -396,7 +446,10 @@ async fn raise(
     drawers: &HashSet<PlanId>,
 ) -> Result<Vec<RunningService>, ServiceError> {
     let manifest = manifest_in(scope)?;
-    if manifest.is_empty() {
+    // `has_services`, not `is_empty`: a manifest that declares only folders for
+    // a sealed plan needs no Docker daemon, and asking for one here would
+    // refuse to raise a project whose only declaration is a mount.
+    if !manifest.has_services() {
         return Ok(Vec::new());
     }
 
@@ -547,7 +600,9 @@ pub async fn require(plan: &PlanId, city_root: &Path) -> Result<(), ServiceError
     let mut declared = Vec::new();
     for scope in scopes_for(city_root) {
         let manifest = manifest_in(&scope)?;
-        if !manifest.is_empty() {
+        // Only containers can be missing in a way this must refuse over; a
+        // mount is not raised and cannot fail to be up.
+        if manifest.has_services() {
             declared.push((scope, manifest));
         }
     }
@@ -749,7 +804,7 @@ pub async fn inventory(kingdom: &Kingdom) -> ResourceInventory {
                 continue;
             }
         };
-        if manifest.is_empty() {
+        if !manifest.has_services() {
             continue;
         }
 
@@ -909,6 +964,243 @@ pub fn declare(scope: &Scope, spec: &ServiceSpec) -> Result<PathBuf, DeclareErro
     next.push_str(&spec.render());
 
     // The whole file, not just the new block. See the doc comment.
+    kingdom_core::services::parse(&next).map_err(|e| DeclareError::Invalid(e.to_string()))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| DeclareError::Unwritable {
+            path: shown.clone(),
+            detail: e.to_string(),
+        })?;
+    }
+    std::fs::write(&path, next).map_err(|e| DeclareError::Unwritable {
+        path: shown,
+        detail: e.to_string(),
+    })?;
+
+    Ok(path)
+}
+
+/// What Kingdom offers to share with a sealed plan on this machine.
+///
+/// # Why this reads `PATH` rather than a list somebody wrote
+///
+/// A sealed plan gets a read-only system, and everything under `/usr` comes
+/// with it -- which on an ordinary machine is `git`, `node`, `python3`, `rg`
+/// and `docker`. What is *missing* is whatever the King installed under his own
+/// home, and `PATH` is the only honest answer to "which tools do I have": it is
+/// the list his own shell uses.
+///
+/// So `PATH` is split into entries already covered by a built-in mount and
+/// entries that are not, and the remainder is offered. A recognised entry
+/// brings the folders its tool actually needs (see
+/// [`kingdom_core::services::known_path`]); an unrecognised one is still
+/// offered, read-only -- a tool Kingdom has never heard of is still a tool he
+/// has.
+///
+/// Folders that do not exist are never offered, so the list is what is really
+/// there rather than a catalogue of what he might have.
+pub fn mount_candidates(city_root: Option<&Path>) -> Vec<kingdom_core::services::MountCandidate> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    candidates_from(
+        &std::env::split_paths(&path).collect::<Vec<_>>(),
+        &home,
+        city_root,
+    )
+}
+
+/// The same decision, with the machine's answers passed in.
+///
+/// Split out so it can be tested **without touching the process environment**.
+/// AGENTS.md gives the rule and `llm::catalogue::default_id` sets the pattern;
+/// the cost of ignoring it was measured here rather than argued about. An
+/// earlier version of this set `PATH` for the duration of its own test, and
+/// because `PATH` is process-global and the suite runs in parallel, an
+/// unrelated test invoking `git` two modules away failed while it did -- a
+/// failure that appeared in the full run, never on its own, and named a file
+/// this change had not touched.
+fn candidates_from(
+    path_entries: &[PathBuf],
+    home: &str,
+    city_root: Option<&Path>,
+) -> Vec<kingdom_core::services::MountCandidate> {
+    use kingdom_core::services::{known_extras, known_path, MountCandidate, MountMode, MountSpec};
+
+    let home = home.to_string();
+    let declared = mounts_for(city_root);
+    let expand = |path: &str| -> String {
+        match path.strip_prefix('~') {
+            Some(rest) => format!("{}{}", home.trim_end_matches('/'), rest),
+            None => path.to_string(),
+        }
+    };
+    // A folder already declared, by the path it actually resolves to -- so
+    // `~/.cargo` in his profile and `/home/him/.cargo` in a project count as
+    // the same folder rather than being offered twice.
+    let is_declared = |path: &str| declared.iter().any(|m| m.expanded(&home) == expand(path));
+
+    let mut out: Vec<MountCandidate> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+
+    let mut offer = |folders: Vec<MountSpec>, why: String| {
+        // Every folder must exist, or the offer is one that would be silently
+        // skipped at mount time and is better not made.
+        let live: Vec<MountSpec> = folders
+            .into_iter()
+            .filter(|m| Path::new(&expand(&m.path)).exists())
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let key = live
+            .iter()
+            .map(|m| m.path.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        if seen.contains(&key) {
+            return;
+        }
+        seen.push(key);
+        out.push(MountCandidate {
+            already: live.iter().all(|m| is_declared(&m.path)),
+            folders: live,
+            why,
+        });
+    };
+
+    for entry in path_entries {
+        let shown = entry.display().to_string();
+        if shown.is_empty() || !entry.is_dir() {
+            continue;
+        }
+        // Already inside something every sealed plan gets. `canonicalize` on
+        // purpose: `/bin` is a symlink into `/usr` on every merged-usr machine,
+        // and comparing the names alone would offer it as though it were
+        // separate.
+        let real = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
+        if built_in_covers(&real) || not_worth_offering(&real) {
+            continue;
+        }
+
+        match known_path(&shown) {
+            Some(known) => offer(
+                known
+                    .folders
+                    .iter()
+                    .map(|(path, mode)| MountSpec {
+                        path: (*path).to_string(),
+                        mode: *mode,
+                    })
+                    .collect(),
+                known.why.to_string(),
+            ),
+            // Unrecognised, and so offered exactly as found: read-only, and
+            // named for itself because nothing more is known about it.
+            None => offer(
+                vec![MountSpec {
+                    path: shown.clone(),
+                    mode: MountMode::Ro,
+                }],
+                format!("On your PATH: {shown}"),
+            ),
+        }
+    }
+
+    // Configuration a binary's own folder never reveals -- a git identity is
+    // not on `PATH` and no amount of reading it will find one.
+    for (path, why, mode) in known_extras() {
+        offer(
+            vec![MountSpec {
+                path: (*path).to_string(),
+                mode: *mode,
+            }],
+            (*why).to_string(),
+        );
+    }
+
+    out
+}
+
+/// Whether a path is already inside what every sealed plan is given.
+///
+/// `/usr` and `/etc` are mounted for every sealed plan, so offering anything
+/// beneath them would be offering a folder the plan already has.
+fn built_in_covers(path: &Path) -> bool {
+    ["/usr", "/etc", "/dev", "/proc"]
+        .iter()
+        .any(|root| path.starts_with(root))
+}
+
+/// Whether a `PATH` entry is not worth offering at all.
+///
+/// # Why this exists, measured rather than imagined
+///
+/// Running the offer on a real machine produced **twenty-five** entries under
+/// `/mnt/c` -- `C:\Windows\system32`, PowerShell, NVIDIA's control panel,
+/// VS Code, two copies of Node -- because WSL appends the whole Windows `PATH`
+/// to the Linux one. Every one was a real directory and technically shareable;
+/// together they buried `~/.cargo` and `~/.local/bin` under a page of noise,
+/// and a list nobody will read is a feature nobody will use.
+///
+/// None of them can help a Linux plan build anything: they hold `.exe` files
+/// that a sealed namespace cannot execute. Dropped rather than sorted lower,
+/// because "lower down a list of thirty" is still unusable.
+///
+/// A folder the King genuinely wants and Kingdom skipped is still available to
+/// him: `/resources` declares any path he names. This decides what to *offer*,
+/// not what is allowed.
+fn not_worth_offering(path: &Path) -> bool {
+    let shown = path.to_string_lossy();
+    // Windows, seen through WSL's drive mounts.
+    shown.starts_with("/mnt/c/") || shown.starts_with("/mnt/") && shown.contains("/Windows")
+}
+
+/// Declares a folder a sealed plan may see, by appending it to a manifest.
+///
+/// The mount counterpart of [`declare`], and it appends text for exactly the
+/// same reason: the manifest is a file people comment, and re-serialising the
+/// document would eat every comment in it.
+///
+/// Idempotent by path. Quick-add offers several folders at once and a King who
+/// presses twice, or who adds `~/.cargo` from one project having already added
+/// it to his profile, should get one line and not two -- a duplicate is not an
+/// error worth stopping him for, it is simply nothing to do.
+pub fn declare_mount(
+    scope: &Scope,
+    spec: &kingdom_core::services::MountSpec,
+) -> Result<PathBuf, DeclareError> {
+    let path = scope.manifest_path();
+    let shown = path.to_string_lossy().to_string();
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    if let Ok(current) = kingdom_core::services::parse(&existing) {
+        if let Some(held) = current.mounts.iter().find(|m| m.path == spec.path) {
+            // Already there in a mode at least as permissive: nothing to do.
+            if held.mode == spec.mode || held.mode.is_writable() {
+                return Ok(path);
+            }
+            // Declared read-only and now wanted writable. Refused rather than
+            // silently appended, because two blocks naming one path is a file
+            // whose meaning depends on which Kingdom read it first.
+            return Err(DeclareError::Duplicate {
+                name: spec.path.clone(),
+                path: shown,
+            });
+        }
+    }
+
+    let mut next = existing.clone();
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    next.push_str(&spec.render());
+
+    // The whole file, not just the new block: the King must be left with a
+    // manifest that still works, rather than one whose new line parses alone.
     kingdom_core::services::parse(&next).map_err(|e| DeclareError::Invalid(e.to_string()))?;
 
     if let Some(parent) = path.parent() {
@@ -1303,6 +1595,117 @@ pub(crate) fn pretend_a_named_well_is_running(
         .running
         .insert((key, name.to_string()), service.clone());
     service
+}
+
+#[cfg(test)]
+mod mount_offer_tests {
+    use super::*;
+
+    /// Nothing under `/usr` is offered, because every sealed plan already has
+    /// it.
+    ///
+    /// This is most of `PATH` on an ordinary machine -- `git`, `node`,
+    /// `python3`, `rg`, `docker` -- and offering it would bury the handful of
+    /// folders that actually matter under a list of ones that do not.
+    #[test]
+    fn the_built_in_system_is_not_offered_again() {
+        assert!(built_in_covers(Path::new("/usr/bin")));
+        assert!(built_in_covers(Path::new("/usr/local/bin")));
+        assert!(built_in_covers(Path::new("/etc/alternatives")));
+        assert!(!built_in_covers(Path::new("/home/anyone/.cargo/bin")));
+        assert!(!built_in_covers(Path::new("/opt/vendor/bin")));
+    }
+
+    /// A folder that is not there is not offered.
+    ///
+    /// An offer Kingdom cannot honour is worse than no offer: the mount would
+    /// be skipped when the namespace is built and the King would be left
+    /// believing a toolchain was shared.
+    ///
+    /// Takes its `PATH` as an argument rather than setting the real one. That
+    /// is not fussiness -- the first version of this test *did* set it, and
+    /// because `PATH` is process-global and the suite runs in parallel, a test
+    /// two modules away that shells out to `git` failed while it did.
+    #[test]
+    fn only_folders_that_exist_are_offered() {
+        let temp = std::env::temp_dir().join("kingdom-offer-test");
+        let real = temp.join("real-bin");
+        std::fs::create_dir_all(&real).unwrap();
+        let absent = temp.join("absent-bin");
+        let _ = std::fs::remove_dir_all(&absent);
+
+        let offered = candidates_from(&[real.clone(), absent.clone()], "/home/nobody", None);
+        let paths: Vec<String> = offered
+            .iter()
+            .flat_map(|c| c.folders.iter().map(|f| f.path.clone()))
+            .collect();
+
+        assert!(paths.contains(&real.display().to_string()));
+        assert!(
+            !paths.contains(&absent.display().to_string()),
+            "an offer Kingdom would silently skip is worse than no offer"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Windows folders are not offered, because a Linux plan cannot use them.
+    ///
+    /// Found by running the offer on this machine rather than by reasoning:
+    /// WSL appends the whole Windows `PATH`, which produced twenty-five entries
+    /// -- system32, PowerShell, NVIDIA's control panel, two copies of Node --
+    /// and buried `~/.cargo` under a page of `.exe` directories a sealed
+    /// namespace cannot execute anyway. A list nobody will read is a feature
+    /// nobody will use.
+    #[test]
+    fn windows_folders_are_not_offered() {
+        assert!(not_worth_offering(Path::new("/mnt/c/Windows/system32")));
+        assert!(not_worth_offering(Path::new("/mnt/c/Program Files/nodejs")));
+        assert!(not_worth_offering(Path::new(
+            "/mnt/d/Windows/System32/OpenSSH"
+        )));
+
+        // And nothing of the King's own Linux toolchain is caught by it.
+        assert!(!not_worth_offering(Path::new("/home/anyone/.cargo/bin")));
+        assert!(!not_worth_offering(Path::new("/opt/vendor/bin")));
+        assert!(!not_worth_offering(Path::new("/mnt/data/projects/bin")));
+    }
+
+    /// A recognised entry brings the folders its tool needs, and an
+    /// unrecognised one is still offered.
+    #[test]
+    fn a_known_toolchain_brings_its_companions() {
+        let home = std::env::temp_dir().join("kingdom-offer-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        let odd = home.join("vendor/bin");
+        std::fs::create_dir_all(&odd).unwrap();
+
+        let offered = candidates_from(
+            &[home.join(".cargo/bin"), odd.clone()],
+            &home.display().to_string(),
+            None,
+        );
+
+        let rust = offered
+            .iter()
+            .find(|c| c.why.contains("Rust"))
+            .expect("cargo on PATH is recognised");
+        let paths: Vec<&str> = rust.folders.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"~/.cargo"));
+        assert!(
+            paths.contains(&"~/.rustup"),
+            "without it every build re-downloads the toolchain"
+        );
+
+        assert!(
+            offered.iter().any(|c| c.why.contains("vendor/bin")),
+            "a tool Kingdom has never heard of is still a tool the King has"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
 
 #[cfg(test)]

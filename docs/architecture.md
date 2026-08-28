@@ -68,13 +68,17 @@ crates/
     watch.rs        The chamber's push socket, and the rail's (the route
                     constants cross to wasm; the handlers are ssr only)
     screencast.rs   The King's live view of a plan's browser (ssr only)
-    netns.rs        A network of a plan's own: an unprivileged user+net
-                    namespace per isolated plan, held open by an `unshare`
-                    process, given a way out by `slirp4netns`, and entered by
-                    everything the plan runs. Also watches
-                    /proc/<holder>/net/tcp for ports the agent opened and asks
-                    slirp to forward each to a host port. ssr only, and Linux
-                    only at runtime -- availability() refuses elsewhere
+    namespaces/     Namespaces of a plan's own. ssr only, and Linux only at
+                    runtime -- availability() refuses elsewhere
+      mod.rs        The holder, the registry, and enter_prefix: what every
+                    isolated plan has whichever namespaces it asked for. ONE
+                    holder process per plan, taking user+net, and mount+pid as
+                    well when sealed
+      net.rs        The network half: slirp4netns for a way out, forwards and
+                    relays, and a watch on /proc/<holder>/net/tcp for ports the
+                    agent opened, each forwarded to a host port
+      mount.rs      The filesystem half: the mount set, a pivot_root into it,
+                    a resolver of its own, and the folders the King allows in
     terminal.rs     The King's own shell, over a socket, in a plan's workspace
                     and its network — the door into an isolated plan. One shell
                     per plan, outliving any socket: panels attach and detach,
@@ -351,16 +355,94 @@ flowchart TB
   Core -.-> Server
 ```
 
-## A network of a plan's own
+## How far a plan is walled off
 
 The first real answer to the product's second question -- *what shared resources
-are these agents holding?* -- for one resource: **ports**. Two agents that both
-run `cargo leptos serve` used to collide on 3000 and the second one died.
+are these agents holding?* -- for two of them: **ports**, and **the disk**. Two
+agents that both run `cargo leptos serve` used to collide on 3000 and the second
+one died; either of them could still delete the King's home directory.
 
-It is **off by default** and chosen per plan, beside the model and workspace
-chips. `NetworkMode` is its own axis rather than a fourth `WorkspaceMode`,
-because "can this agent trample my folder?" and "can it trample my port?" are
-independent questions with independent answers.
+`Isolation` is one axis with three rungs, chosen per plan beside the model and
+workspace chips, and **off by default**:
+
+| Shown as | In code | What it gets |
+|---|---|---|
+| On this machine | `Isolation::Shared` | Nothing of its own. The default. |
+| A network of its own | `Isolation::Isolated` | Its own loopback and ports, forwarded back to the King |
+| A machine of its own | `Isolation::Sealed` | That, plus its own filesystem and process table |
+
+It is its own axis rather than more `WorkspaceMode` variants because "can this
+agent trample my folder?" and "can it trample my port?" are independent
+questions. Within the axis the three are a **ladder**, not a menu: each rung is
+the one below plus more, which is what lets `is_isolated()` stay the single
+question ~100 call sites already ask. A sealed plan answers it exactly as an
+isolated one does, so the third rung cost those call sites nothing.
+
+`Plan::isolation` carries `#[serde(alias = "network")]`: the field was called
+`network` while it only answered about the network, and every plan record
+already on the King's disk says so. A test pins that those load.
+
+### One holder, several namespaces
+
+There is exactly one holder process per plan, taking whichever namespaces that
+plan asked for. Two holders -- one for the network, one for the mounts -- was
+tried and **rejected on a measurement**: two separately created user namespaces
+are siblings, and an unprivileged process may not enter a sibling user
+namespace. It works only when the server happens to run as root, and where it
+fails it fails in the worst way, attaching the network and silently not the
+mounts. Kingdom must not be quietly more capable as root.
+
+### What a sealed plan can see
+
+Its workspace and its project's `.git` (writable), a read-only `/usr` and
+`/etc`, a private `/tmp`, a fresh `/proc` -- and whatever folders the King has
+allowed in, declared as `[[mount]]` blocks in the same manifests that declare
+shared services. `docs/shared-resources.md` has the format.
+
+The isolation panel offers a **quick-add** list built from his own `PATH`,
+because that is the only honest answer to "which tools do I have". A recognised
+entry brings the folders its tool actually needs -- `~/.cargo` without
+`~/.rustup` gives a `cargo` that re-downloads the toolchain, measured -- and an
+unrecognised one is offered read-only, because a tool Kingdom has never heard of
+is still a tool he has. Windows folders under `/mnt/c` are dropped: WSL appends
+the whole Windows `PATH`, which put twenty-five unusable `.exe` directories in
+front of the four that mattered.
+
+Five things about the mount namespace that were measured rather than assumed,
+each of which is a silent wrong answer rather than an error:
+
+- **`nsenter --wdns`, not `--wd` and not `current_dir`.** Every caller sets the
+  working directory host-side, and that path is resolved *before* the mount
+  namespace is entered -- so a sealed plan ran every command in `/`, with no
+  error anywhere.
+- **tmux is stamped with its holder** rather than asked for `#{pid}`, which in a
+  PID namespace is that namespace's numbering and named an unrelated host
+  process. The old check returned "this daemon is fine" on every failure path.
+- **The tmux socket directory crosses the private `/tmp`**, or the daemon is
+  invisible to the 14 host-side calls that drive it.
+- **A resolver of our own**: `/etc/resolv.conf` is a symlink to somewhere
+  unmounted on both WSL and systemd-resolved machines, so DNS fails while the
+  network is perfectly up.
+- **`/bin` is a symlink, and must not be mounted.** Every current distribution
+  is merged-usr; the symlinks are recreated, and only a genuinely split-usr host
+  gets binds.
+
+Two further bugs were found only by running it: the private `/tmp` was mounted
+*after* the binds beneath it, hiding a workspace under `/tmp`; and `/proc` was
+never created in the new root, which killed the holder and surfaced a second
+later as an unrelated `nsenter` error. Both have regression tests.
+
+**It is still not a security boundary.** A sealed plan cannot see the King's
+home directory, so it cannot delete it -- but a mount namespace is not a jail,
+and `Sandbox::root` makes the same admission about paths. What it is: an agent
+that goes wrong damages its own workspace and not the machine.
+
+The live tests that prove all of this are opt-in, because the suite must run on
+a bare machine:
+
+```bash
+cargo test -p kingdom-app --features ssr --no-default-features -- --ignored live::
+```
 
 ```mermaid
 flowchart LR
@@ -373,7 +455,7 @@ flowchart LR
 Three unprivileged processes per isolated plan: an `unshare` **holder** that
 owns the namespace and keeps it alive between tool calls, **slirp4netns** giving
 it a way out, and `nsenter` putting everything else in. `bash`, `tmux`, Chrome
-and the King's terminal all prepend `netns::enter_prefix`, which is **empty for
+and the King's terminal all prepend `namespaces::enter_prefix`, which is **empty for
 a shared-network plan** -- that emptiness is what makes the default path
 behave exactly as it did before this existed.
 
@@ -400,7 +482,7 @@ Five things worth knowing, each learned by running it:
   listed prerequisite in AGENTS.md and would otherwise become one.
 - **The namespace lives in a process, not on disk.** A restarted server has an
   empty registry while plan records still say `Isolated`. Every entry point
-  therefore calls `netns::ensure` before reading the prefix, and
+  therefore calls `namespaces::ensure` before reading the prefix, and
   `reclaim_previous` kills what the last server left -- identified by namespace
   and command line, never by pid alone, because pids are reused; a relay is
   found and reclaimed the same way. Skipping that `ensure` in `terminal.rs` was
@@ -464,7 +546,7 @@ opened, a plan finished, a kingdom closed — which is what makes a server resta
 invisible to five agents that had a database. Taking a turn and opening a shell
 call `services::require`, which waits for a raise in flight and refuses if a
 promised well is missing; it raises no container, but it *is* where
-`netns::open_wells` stands the relay onto an isolated plan's own loopback — that
+`namespaces::net::open_wells` stands the relay onto an isolated plan's own loopback — that
 relay belongs to one plan's namespace, so it cannot be done by the per-scope
 pass that runs when a kingdom opens.
 
@@ -538,7 +620,7 @@ fixed address on a per-city network instead.
 The second line also has a converse, and it is what lets a plan use the
 ordinary address anyway: the loopback that is refused is the **host's**. The
 plan's own is empty and free, so Kingdom relays each service onto it. See
-`netns::open_wells` and the bullet below.
+`namespaces::net::open_wells` and the bullet below.
 
 Seven things worth knowing:
 
@@ -553,7 +635,7 @@ Seven things worth knowing:
   set for a shared resource: one address, learned one way. `services::address_for`
   is the single place that decides what that address is, and the system prompt,
   the ports badge and the resources screen all read it.
-- **An isolated plan is given `localhost`, not the IP.** `netns::open_wells`
+- **An isolated plan is given `localhost`, not the IP.** `namespaces::net::open_wells`
   stands a relay on `127.0.0.1:<port>` *inside that plan's namespace* and
   splices it to the container, so the address every model reaches for first is
   simply correct there. This does not contradict the measurement above — the
@@ -567,13 +649,13 @@ Seven things worth knowing:
   only one gets the loopback, and the other must not be sent into its data.
 - **A well's port is never forwarded back to the King.** Its relay listens
   inside the namespace, so `/proc/<holder>/net/tcp` reports it like any dev
-  server; `netns::forwardable` drops it, or the ports badge would offer him a
+  server; `namespaces::net::forwardable` drops it, or the ports badge would offer him a
   MongoDB socket to open in a browser tab.
 - **Reference counted by plan id, not by an integer.** The last plan out stops
   the container; a plan closed twice cannot decrement twice and strand the four
   still using it. A test pins that.
 - **Adopted on restart, not killed** — the one place this deliberately differs
-  from `netns::reclaim_previous`. A stale namespace is worthless; a stale
+  from `namespaces::net::reclaim_previous`. A stale namespace is worthless; a stale
   database holds state. The container is stopped rather than removed and its
   named volume is kept, because losing the King's data because five agents
   finished would be the worst reading of "tear down".
@@ -584,7 +666,7 @@ Seven things worth knowing:
   so the service takes no port from him — but it *is* routable by anything on
   the machine, which is Docker's behaviour rather than something Kingdom adds.
 
-**Not a sandbox**, and the same admission `netns.rs` makes: a container Kingdom
+**Not a sandbox**, and the same admission `namespaces/` makes: a container Kingdom
 starts is an ordinary container, visible to `docker ps`, and a plan can still
 run `docker` itself.
 

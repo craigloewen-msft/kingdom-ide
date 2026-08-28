@@ -2647,6 +2647,84 @@ pub async fn shared_resources() -> Result<kingdom_core::ResourceInventory, Serve
     Ok(crate::services::inventory(&kingdom).await)
 }
 
+/// The folders Kingdom offers to share with a sealed plan on this machine.
+///
+/// Answered per *city*, because the answer depends on what has already been
+/// declared -- for the machine and for that project -- and an offer already
+/// taken is shown as taken rather than repeated.
+///
+/// Read afresh on each asking rather than cached: the King may install a
+/// toolchain while Kingdom runs, and one who just did should not have to
+/// restart the server to be offered it.
+#[server(MountOffers, "/api")]
+pub async fn mount_offers(
+    city: Option<String>,
+) -> Result<Vec<kingdom_core::services::MountCandidate>, ServerFnError> {
+    let city_root = {
+        let kingdom = lock()?;
+        city.map(kingdom_core::CityId::new)
+            .and_then(|id| kingdom.city(&id).cloned())
+            .map(|c| std::path::Path::new(&kingdom.root).join(&c.path))
+    };
+    Ok(crate::services::mount_candidates(city_root.as_deref()))
+}
+
+/// Shares a folder with sealed plans, by writing it to a manifest.
+///
+/// Takes the folders of **one offer** rather than a single path, because a
+/// toolchain is usually more than one folder and half of one is a toolchain
+/// that does not work -- `~/.cargo` without `~/.rustup` gives a `cargo` that
+/// re-downloads the toolchain on every build.
+///
+/// # Why the city is a `CityId` and not a path
+///
+/// The same reason [`declare_shared_resource`] gives: the browser cannot be
+/// trusted with a filesystem path, so a city id is resolved against the open
+/// kingdom here.
+#[server(DeclareMount, "/api")]
+pub async fn declare_mount(
+    scope: String,
+    city: Option<String>,
+    folders: Vec<kingdom_core::services::MountSpec>,
+) -> Result<String, ServerFnError> {
+    use kingdom_core::services::ServiceScope;
+
+    let Some(kind) = ServiceScope::from_wire(&scope) else {
+        return Err(ServerFnError::new(format!(
+            "`{scope}` is not a level a shared folder can be kept at."
+        )));
+    };
+
+    let scope = match kind {
+        ServiceScope::Host => crate::services::Scope::Host,
+        ServiceScope::City => {
+            let kingdom = lock()?;
+            let Some(city) = city
+                .map(kingdom_core::CityId::new)
+                .and_then(|id| kingdom.city(&id).cloned())
+            else {
+                return Err(ServerFnError::new(
+                    "A folder that belongs to one project needs a project. \
+                     Pick one, or share it with the whole machine instead.",
+                ));
+            };
+            crate::services::Scope::City(std::path::Path::new(&kingdom.root).join(&city.path))
+        }
+    };
+
+    let mut written = None;
+    for spec in &folders {
+        written = Some(
+            crate::services::declare_mount(&scope, spec)
+                .map_err(|e| ServerFnError::new(e.to_string()))?,
+        );
+    }
+
+    written
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| ServerFnError::new("That offer named no folders."))
+}
+
 /// Declares a new shared resource, writing it to the manifest its scope keeps.
 ///
 /// Returns the path written to, which is the thing the King needs next: the
@@ -2792,6 +2870,7 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
         &root,
         &city_root,
         plan.isolation,
+        crate::services::mounts_for(Some(&city_root)),
     )
     .render())
 }
