@@ -622,6 +622,27 @@ impl Namespace {
         // worse than none.
         remember_pids(&api_socket, inner, slirp_pid);
 
+        // A sealed plan is not ready when its holder *exists* -- it is ready
+        // when the holder has finished building its root. Between those two
+        // moments the script is still mounting, and `pivot_root` has not
+        // happened, so anything entering sees a half-built namespace: the old
+        // root, no private `/tmp`, no resolver. Measured as an intermittent
+        // failure of the live test (`/proc/1/comm` answering `sh` rather than
+        // `sleep`), which is exactly that window seen from outside.
+        //
+        // The holder `exec`s `sleep` as the very last thing it does, so pid 1
+        // of the namespace turning into `sleep` is the script's own report
+        // that it finished. Waited for here rather than in each of the ~100
+        // callers of `enter_prefix`.
+        if sealed && !wait_for_sealed_root(inner).await {
+            kill(slirp_pid);
+            kill(holder_pid);
+            let _ = holder.start_kill();
+            return Err(NetworkError::Failed(
+                "the sealed plan's filesystem was never finished".to_string(),
+            ));
+        }
+
         Ok(Self {
             holder: inner,
             slirp: slirp_pid,
@@ -790,6 +811,29 @@ async fn wait_for_socket(path: &std::path::Path) -> bool {
     for _ in 0..100 {
         if path.exists() {
             return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// Waits for a sealed plan's holder to finish building its root.
+///
+/// The holder script ends in `exec sleep infinity`, which replaces the shell
+/// **in place** -- so the moment `/proc/<holder>/comm` reads `sleep`, every
+/// mount is made and the `pivot_root` is done. Before that it reads `sh`, and
+/// anything entering lands in a namespace that is still being assembled.
+///
+/// Read from the host's `/proc`, which is the only side that can see the
+/// holder by its real pid; inside its own PID namespace it is pid 1.
+async fn wait_for_sealed_root(holder: u32) -> bool {
+    for _ in 0..250 {
+        match std::fs::read_to_string(format!("/proc/{holder}/comm")) {
+            Ok(comm) if comm.trim() == "sleep" => return true,
+            // Gone entirely: the script failed -- a refused resolver, most
+            // likely. Nothing to wait for, and the caller reports it.
+            Err(_) => return false,
+            Ok(_) => {}
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }

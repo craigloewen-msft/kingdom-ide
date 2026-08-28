@@ -343,7 +343,7 @@ because a box was clicked. A folder shared by hand is listed too, even if its
 tool has left `PATH` or the folder is gone: a stale line is the one most worth
 clearing.
 
-Five things about the mount namespace that were measured rather than assumed,
+Six things about the mount namespace that were measured rather than assumed,
 each a silent wrong answer rather than an error:
 
 - **`nsenter --wdns`, not `--wd` and not `current_dir`.** Every caller sets the
@@ -354,9 +354,24 @@ each a silent wrong answer rather than an error:
   process.
 - **The tmux socket directory crosses the private `/tmp`**, or the daemon is
   invisible to the 14 host-side calls that drive it.
-- **A resolver of our own**: `/etc/resolv.conf` is a symlink to somewhere
-  unmounted on both WSL and systemd-resolved machines, so DNS fails while the
-  network is perfectly up.
+- **The browser profile crosses it too**, for the same reason and found much
+  later: the CPU shim is written into the profile on the host and executed
+  *inside* by the `nsenter` wrapper, so a private `/tmp` left every `browser_*`
+  tool failing with `nsenter: failed to execute …: No such file or directory`.
+  It is also the one bind whose source may not exist yet — a profile is created
+  when a browser first launches, long after the holder built its root — so it is
+  created before it is mounted rather than assumed.
+- **A resolver of our own, installed *after* the pivot**: `/etc/resolv.conf` is
+  an **absolute** symlink to somewhere unmounted on both WSL and
+  systemd-resolved machines, so DNS fails while the network is perfectly up.
+  Done before `pivot_root` the kernel resolves that symlink against the *host's*
+  root, so the bind lands outside the new root entirely; `/etc` is read-only
+  besides, so there is no binding over the link. What works is filling in the
+  file the link already points at, once inside. This survived a long time
+  because the test only asserted the script *contained* `10.0.2.3` and
+  `/etc/resolv.conf` — true of a script whose bind never worked. The ordering is
+  now what is asserted, and the failure is reported rather than swallowed by
+  `|| true`.
 - **`/bin` is a symlink and must not be mounted.** Every current distribution is
   merged-usr; only a genuinely split-usr host gets binds.
 
@@ -364,6 +379,14 @@ Two further bugs were found only by running it: the private `/tmp` was mounted
 *after* the binds beneath it, hiding a workspace under `/tmp`; and `/proc` was
 never created in the new root, which killed the holder and surfaced a second
 later as an unrelated `nsenter` error. Both have regression tests.
+
+A third was found the same way, and only under parallel load: **a sealed plan is
+ready when its holder has finished building its root, not when the holder
+exists.** `ensure` used to return as soon as slirp's API socket appeared, while
+the script was still mounting and had not yet pivoted — so a caller entering in
+that window saw the old root, no private `/tmp` and no resolver. The holder
+`exec`s `sleep` as its last act, so pid 1 becoming `sleep` is the script's own
+report that it finished, and that is what is now waited for.
 
 The live tests that prove all of this are opt-in, because the suite must run on
 a bare machine:
