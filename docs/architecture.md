@@ -392,7 +392,7 @@ The live tests that prove all of this are opt-in, because the suite must run on
 a bare machine:
 
 ```bash
-cargo test -p kingdom-app --features ssr --no-default-features -- --ignored live::
+cargo test-all -- --ignored live::
 ```
 
 ## A database of the city's own
