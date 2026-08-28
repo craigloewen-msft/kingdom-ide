@@ -233,13 +233,18 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
     // says "in this plan's network". Measured rather than imagined: that shell
     // tried to bind :3000 and took `Address already in use` from the King's own
     // server. A refusal he can read beats a lie he cannot see.
-    if plan.network.is_isolated() {
-        if let Err(e) = crate::namespaces::ensure(plan_id).await {
+    if plan.isolation.is_isolated() {
+        let request = crate::namespaces::Request {
+            isolation: plan.isolation,
+            workspace: cwd.clone(),
+            city_root: crate::api::city_root_of(plan_id),
+        };
+        if let Err(e) = crate::namespaces::ensure(plan_id, &request).await {
             return Err(format!(
-                "This plan has a network of its own, but it could not be \
+                "This plan has isolation of its own, but it could not be \
                  opened -- so no shell was started. A shell on the \
-                 machine's network would be the wrong answer rather than \
-                 a lesser one.\r\n\r\n{e}\r\n"
+                 machine's network and filesystem would be the wrong \
+                 answer rather than a lesser one.\r\n\r\n{e}\r\n"
             ));
         }
         crate::namespaces::net::watch(plan_id);
@@ -270,7 +275,7 @@ async fn start(plan_id: &PlanId) -> Result<Arc<Session>, String> {
     // Belt and braces on the guarantee above. An isolated plan whose prefix came
     // back empty would silently be a host shell, and that is the one outcome
     // worth refusing outright rather than degrading to.
-    if plan.network.is_isolated() && enter.is_empty() {
+    if plan.isolation.is_isolated() && enter.is_empty() {
         return Err(
             "This plan's network could not be entered, so no shell was started.\r\n".to_string(),
         );

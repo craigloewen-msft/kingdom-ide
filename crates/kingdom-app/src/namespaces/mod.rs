@@ -66,6 +66,7 @@
 //! more than a guarantee that does not hold. `tools::Sandbox::root` makes the
 //! same admission about paths.
 
+pub mod mount;
 pub mod net;
 
 use kingdom_core::PlanId;
@@ -99,6 +100,16 @@ pub struct Namespace {
     /// *in* to the plan. [`Namespace::listeners`] is where that distinction
     /// earns its keep.
     wells: HashMap<u16, Well>,
+    /// Where commands start inside this plan's own filesystem -- `Some` only
+    /// for a sealed plan, and the flag that tells the two isolated kinds apart
+    /// throughout this module.
+    ///
+    /// It holds the *working directory* rather than a bare `is_sealed` bool
+    /// because that is what is actually needed at the moment it matters: the
+    /// path has to be handed to `nsenter --wdns`, and a namespace that recorded
+    /// only "sealed" would have to go and ask somebody else where to stand.
+    /// See [`Namespace::enter_prefix`].
+    workdir: Option<PathBuf>,
 }
 
 /// Every namespace this server is holding.
@@ -209,33 +220,96 @@ pub fn holder_ns(plan: &PlanId) -> Option<std::path::PathBuf> {
 
 impl Namespace {
     fn enter_prefix(&self) -> Vec<String> {
-        vec![
+        let mut argv = vec![
             "nsenter".to_string(),
             // Load-bearing. See the module docs: without it, re-entering our
             // own user namespace fails on setgroups.
             "--preserve-credentials".to_string(),
             format!("--user=/proc/{}/ns/user", self.holder),
             format!("--net=/proc/{}/ns/net", self.holder),
-            "--".to_string(),
-        ]
+        ];
+
+        // A sealed plan's filesystem and process table as well.
+        //
+        // `--wdns` is the load-bearing one here, and it took a measurement to
+        // find. Every caller -- `bash`, `tmux`, the King's terminal -- sets the
+        // working directory on the **host** side, with `Command::current_dir`
+        // or tmux's own `-c`. That path is resolved before `nsenter` enters the
+        // mount namespace, so inside a sealed plan it is silently ignored and
+        // the command runs in `/`. Measured: with the workspace bound at its
+        // own path inside, `pwd` still answered `/`. `--wd` does not help --
+        // it resolves on the host too and fails outright. `--wdns` resolves
+        // *in the namespace*, which is the only one of the three that is
+        // correct here.
+        //
+        // An agent quietly running every build in `/` is the failure this
+        // prevents, and nothing about it would look like an error.
+        if let Some(workdir) = &self.workdir {
+            argv.push(format!("--mount=/proc/{}/ns/mnt", self.holder));
+            argv.push(format!("--pid=/proc/{}/ns/pid", self.holder));
+            argv.push(format!("--wdns={}", workdir.display()));
+        }
+
+        argv.push("--".to_string());
+        argv
     }
 }
 
-/// Gives a plan a network of its own.
+/// What a plan is asking for, which is everything its namespaces are built
+/// from.
 ///
-/// Idempotent: a plan that already has one keeps it, because the processes it
-/// has already started are in that namespace and there is no way to move them.
+/// A small struct rather than three arguments because two of the three matter
+/// only for one mode, and a call site passing `(&plan, &workspace, None)` for
+/// an ordinary isolated plan reads as though it forgot something.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    /// How far this plan is walled off.
+    pub isolation: kingdom_core::Isolation,
+    /// Where the plan works, which is both what gets mounted and where
+    /// commands start.
+    pub workspace: PathBuf,
+    /// The project the workspace belongs to, when there is one.
+    ///
+    /// Not the same as the workspace, and the difference is load-bearing: an
+    /// isolated plan's workspace is a worktree under `<city>/.kingdom/`, whose
+    /// `.git` lives back in the city. See [`mount::MountPlan::built_in`].
+    pub city_root: Option<PathBuf>,
+}
+
+impl Request {
+    /// What an ordinary isolated plan asks for: a network, and nothing else.
+    pub fn network_only() -> Self {
+        Self {
+            isolation: kingdom_core::Isolation::Isolated,
+            workspace: PathBuf::from("/"),
+            city_root: None,
+        }
+    }
+}
+
+/// Gives a plan the namespaces it asked for.
+///
+/// Idempotent: a plan that already has them keeps them, because the processes
+/// it has already started are in there and there is no way to move them.
 ///
 /// Called when a plan's first tool runs rather than when it is opened, so a
-/// plan that never executes anything never pays for three processes.
-pub async fn ensure(plan: &PlanId) -> Result<(), NetworkError> {
+/// plan that never executes anything never pays for the processes.
+///
+/// # Why it takes the whole shape of the request
+///
+/// A sealed plan needs to know *what to mount* before its holder exists, and
+/// the answer -- the workspace, the city, the folders the King allows -- is not
+/// derivable from a [`PlanId`]. Passing it in keeps this module free of any
+/// lookup into the plan registry, which is what lets the whole of it be reasoned
+/// about from its arguments.
+pub async fn ensure(plan: &PlanId, request: &Request) -> Result<(), NetworkError> {
     if lock().contains_key(plan) {
         return Ok(());
     }
 
     availability()?;
 
-    let namespace = Namespace::create(plan).await?;
+    let namespace = Namespace::create(plan, request).await?;
 
     let mut registry = lock();
     // Another turn may have raced us here while we were spawning. Keep the one
@@ -328,6 +402,7 @@ mod tests {
             forwards: HashMap::new(),
             cdp_port: None,
             wells: HashMap::new(),
+            workdir: None,
         };
         let prefix = namespace.enter_prefix();
 

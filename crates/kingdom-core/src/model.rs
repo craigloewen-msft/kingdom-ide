@@ -492,40 +492,75 @@ impl Default for WorkspaceMode {
     }
 }
 
-/// Whether a plan gets a network of its own.
+/// How far a plan is walled off from the machine and from its siblings.
 ///
-/// A **separate axis** from [`WorkspaceMode`], deliberately, rather than a
-/// fourth variant of it. The two answer different questions -- "can this agent
+/// A **separate axis** from [`WorkspaceMode`], deliberately, rather than more
+/// variants of it. The two answer different questions -- "can this agent
 /// trample the folder I am in?" and "can this agent trample the port I am
 /// serving on?" -- and the honest answers are independent: a plan can want a
 /// fresh worktree while still talking to the machine's real network, and a
 /// plan working in place can still want its own `:3000`.
 ///
-/// Folding them together would have made four of the six combinations
-/// unsayable.
+/// Folding them together would have made most of the combinations unsayable.
+///
+/// # Why one enum rather than a set of flags
+///
+/// The three are a **ladder**, not a menu: each rung is the one below it plus
+/// more. That is what lets [`Self::is_isolated`] stay a single question every
+/// existing call site already asks, and it is why a plan cannot ask for its own
+/// filesystem while sharing the King's network -- a combination nothing wants
+/// and every caller would have to think about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum NetworkMode {
-    /// The machine's network, as every plan has always had it. Ports are
-    /// shared, so two plans that both bind 3000 collide.
+pub enum Isolation {
+    /// The machine's network and the machine's filesystem, as every plan had
+    /// them before any of this existed. Ports are shared, so two plans that
+    /// both bind 3000 collide.
     #[default]
     Shared,
     /// A network namespace of the plan's own: its own loopback, its own set of
     /// ports, and its listeners forwarded to the host on ports Kingdom picks.
+    ///
+    /// The filesystem is still the King's own, whole and writable.
     Isolated,
+    /// A network namespace **and** a filesystem of the plan's own: its own
+    /// mount and PID namespaces, rooted on a set of folders it is allowed to
+    /// see rather than on the King's whole disk.
+    ///
+    /// Named for what it is from the outside -- nothing gets in or out that was
+    /// not asked for -- rather than for the namespaces it happens to use.
+    Sealed,
 }
 
-impl NetworkMode {
-    /// Short label for the Network tab of the prompt bar's isolation panel.
-    /// The chip itself reads "Isolation" whatever this says.
+impl Isolation {
+    /// Short label for the prompt bar's isolation panel. The chip itself reads
+    /// "Isolation" whatever this says.
     pub fn label(&self) -> &'static str {
         match self {
-            NetworkMode::Shared => "shared network",
-            NetworkMode::Isolated => "own network",
+            Isolation::Shared => "no isolation",
+            Isolation::Isolated => "own network",
+            Isolation::Sealed => "own machine",
         }
     }
 
+    /// Whether this plan has namespaces of its own at all.
+    ///
+    /// **True for both isolated kinds**, and that is the point: every existing
+    /// caller -- the turn loop, the terminal, `bash`, `tmux`, the ports badge,
+    /// the map -- asks exactly this question and means "is there a namespace to
+    /// enter, and are its ports its own?". A sealed plan answers yes to that in
+    /// precisely the way an isolated one does, so adding the third variant left
+    /// every one of those call sites correct without touching it.
     pub fn is_isolated(&self) -> bool {
-        matches!(self, NetworkMode::Isolated)
+        !matches!(self, Isolation::Shared)
+    }
+
+    /// Whether this plan has a filesystem of its own.
+    ///
+    /// The genuinely new question, asked only where the answer changes what
+    /// happens: building the holder, entering it, and telling the model what it
+    /// can see.
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, Isolation::Sealed)
     }
 }
 
@@ -683,15 +718,24 @@ pub struct Plan {
     /// Where on disk this plan works. Settled when the plan opens and never
     /// changed afterwards.
     pub workspace: Workspace,
-    /// Whether this plan has a network of its own. Settled when the plan opens
-    /// and never changed afterwards, for the same reason as `workspace`: the
-    /// processes it started are already in that namespace, and moving them is
-    /// not a thing a namespace lets you do.
+    /// How far this plan is walled off. Settled when the plan opens and never
+    /// changed afterwards, for the same reason as `workspace`: the processes it
+    /// started are already in those namespaces, and moving them is not a thing
+    /// a namespace lets you do.
     ///
-    /// `#[serde(default)]` -- `Shared` -- because every plan record already on
-    /// disk predates the field, and shared is what those plans in fact had.
-    #[serde(default)]
-    pub network: NetworkMode,
+    /// `#[serde(default)]` -- `Shared` -- because the oldest plan records on
+    /// disk predate the field entirely, and shared is what those plans in fact
+    /// had.
+    ///
+    /// `alias = "network"` because this was called `network` while it only
+    /// answered about the network. Every plan record written before the third
+    /// mode existed says `network`, and the two variant names it can hold --
+    /// `Shared` and `Isolated` -- are unchanged, so those records load exactly
+    /// as they did. Dropping the alias would silently reset a live isolated
+    /// plan to shared on the next restart, which is the one failure this whole
+    /// area exists to prevent.
+    #[serde(default, alias = "network")]
+    pub isolation: Isolation,
     /// Which of this plan's ports are reachable from the host right now.
     ///
     /// **Never persisted meaningfully and never read back from disk as truth.**
@@ -1107,7 +1151,7 @@ impl Plan {
         prompt: impl Into<String>,
         choice: &ModelChoice,
         workspace: Workspace,
-        network: NetworkMode,
+        isolation: Isolation,
     ) -> Self {
         let prompt = prompt.into();
         let title = title_from_prompt(&prompt);
@@ -1127,7 +1171,7 @@ impl Plan {
             status: PlanStatus::Drafting,
             outcome: None,
             workspace,
-            network,
+            isolation,
             ports: Vec::new(),
             shared_services: Vec::new(),
             working_on: None,
@@ -1184,11 +1228,12 @@ impl Plan {
             status: PlanStatus::Drafting,
             outcome: None,
             workspace: parent.workspace.clone(),
-            // The parent's network as well as the parent's workspace, and for
-            // the same reason: a subagent is another agent working in the same
-            // place. One that could not see the server its parent just started
-            // would be unable to answer most of what it is sent to answer.
-            network: parent.network,
+            // The parent's isolation as well as the parent's workspace, and
+            // for the same reason: a subagent is another agent working in the
+            // same place. One that could not see the server its parent just
+            // started would be unable to answer most of what it is sent to
+            // answer.
+            isolation: parent.isolation,
             ports: Vec::new(),
             shared_services: Vec::new(),
             working_on: None,
@@ -3400,7 +3445,7 @@ mod proposal_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.propose("Fix the off-by-one", "Change `lex.rs` line 42.");
         plan.status = PlanStatus::AwaitingReview;
@@ -3579,7 +3624,7 @@ mod proposal_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         assert!(
             nothing.annotate(1, "anything", "a note").is_none(),
@@ -3686,7 +3731,7 @@ mod transcript_tests {
             "First question",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.note(
             NoteKind::Workspace,
@@ -3725,7 +3770,7 @@ mod transcript_tests {
             "Run the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.begin_tool_call(ToolCall::started(
             "call-1",
@@ -3891,7 +3936,7 @@ mod transcript_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.begin_tool_call(
             ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
@@ -3942,7 +3987,7 @@ mod transcript_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.begin_tool_call(
             ToolCall::started("call-1", "bash", serde_json::json!({})).in_reply(
@@ -4090,7 +4135,7 @@ mod transcript_tests {
             "Work out what is slow",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
 
         let mut first = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the parser");
@@ -4156,7 +4201,7 @@ mod transcript_tests {
             "Make the build fast",
             &choice,
             Workspace::in_place("/dev/forge"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         working.working_on = Some("Reading the build script".into());
 
@@ -4173,7 +4218,7 @@ mod transcript_tests {
             "Rename the crate",
             &choice,
             Workspace::in_place("/dev/forge"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         waiting.status = PlanStatus::AwaitingReview;
 
@@ -4184,7 +4229,7 @@ mod transcript_tests {
             "Tidy the docs",
             &choice,
             Workspace::in_place("/dev/archive"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         settled.status = PlanStatus::Merged;
 
@@ -4234,7 +4279,7 @@ mod transcript_tests {
             "Run the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
 
         plan.begin_tool_call(ToolCall::started("call-1", "bash", serde_json::json!({})));
@@ -4375,7 +4420,7 @@ mod transcript_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )
     }
 
@@ -4658,7 +4703,7 @@ mod review_note_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )
     }
 
@@ -4848,7 +4893,7 @@ mod attention_tests {
             "Fix the parser",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )
     }
 
@@ -5059,5 +5104,116 @@ mod attention_tests {
         })];
 
         assert_eq!(plan.pulse().last_activity, Some(Timestamp(7_000)));
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+
+    fn older_record(extra: serde_json::Value) -> serde_json::Value {
+        let mut base = serde_json::json!({
+            "id": "plan-from-an-older-kingdom",
+            "city": "shopfront",
+            "slug": "an-older-plan",
+            "title": "An older plan",
+            "summary": "",
+            "transcript": [],
+            "prompt": "do the thing",
+            "model": "mock",
+            "effort": "medium",
+            "status": "Drafting",
+            "workspace": { "mode": "InPlace", "path": "/dev/testburg", "branch": null, "id": null },
+        });
+        if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    /// A plan recorded before the third mode existed still loads, isolation
+    /// intact.
+    ///
+    /// The field was called `network` for as long as it only answered about the
+    /// network, and every plan already on the King's disk says so. Without the
+    /// serde alias this falls to `#[serde(default)]` -- `Shared` -- and a live
+    /// isolated plan silently comes back on the machine's own network after a
+    /// restart. Pinned because nothing else would notice: it compiles, it
+    /// parses, and it is wrong only once something binds a port.
+    #[test]
+    fn a_plan_recorded_before_the_rename_still_loads_isolated() {
+        let json = older_record(serde_json::json!({ "network": "Isolated" }));
+        let plan: Plan = serde_json::from_value(json).expect("an older plan must still load");
+
+        assert_eq!(plan.isolation, Isolation::Isolated);
+        assert!(plan.isolation.is_isolated());
+        assert!(!plan.isolation.is_sealed());
+    }
+
+    /// A record from before isolation existed at all is shared, which is what
+    /// those plans in fact had.
+    #[test]
+    fn a_plan_recorded_before_isolation_existed_is_shared() {
+        let plan: Plan = serde_json::from_value(older_record(serde_json::json!({})))
+            .expect("an older plan must still load");
+
+        assert_eq!(plan.isolation, Isolation::Shared);
+        assert!(!plan.isolation.is_isolated());
+    }
+
+    /// The ladder holds: `is_isolated` is the question ~100 existing call sites
+    /// already ask, and a sealed plan must answer it exactly as an isolated one
+    /// does.
+    ///
+    /// If this ever came apart, every one of those callers would run a sealed
+    /// plan on the King's own network while the chamber claimed it was sealed.
+    #[test]
+    fn sealed_is_isolated_too() {
+        assert!(!Isolation::Shared.is_isolated());
+        assert!(Isolation::Isolated.is_isolated());
+        assert!(Isolation::Sealed.is_isolated());
+
+        assert!(!Isolation::Shared.is_sealed());
+        assert!(!Isolation::Isolated.is_sealed());
+        assert!(Isolation::Sealed.is_sealed());
+    }
+
+    /// A sealed plan survives being written and read back, which is what a
+    /// server restart is.
+    #[test]
+    fn sealed_survives_a_round_trip() {
+        let plan = Plan::opened(
+            PlanId::new("plan-sealed"),
+            CityId::new("c1"),
+            "Seal me in",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+            Isolation::Sealed,
+        );
+
+        let text = serde_json::to_string(&plan).expect("a plan must serialise");
+        let back: Plan = serde_json::from_str(&text).expect("and come back");
+
+        assert_eq!(back.isolation, Isolation::Sealed);
+    }
+
+    /// A subagent inherits its parent's isolation, sealed included: it works in
+    /// the parent's workspace and namespaces, and one that did not could not
+    /// see the server its parent had just started.
+    #[test]
+    fn a_subagent_is_sealed_when_its_parent_is() {
+        let parent = Plan::opened(
+            PlanId::new("plan-parent"),
+            CityId::new("c1"),
+            "Parent",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+            Isolation::Sealed,
+        );
+        let child = Plan::spawned(PlanId::new("plan-child"), &parent, "call-1", "Go and look");
+
+        assert_eq!(child.isolation, Isolation::Sealed);
     }
 }

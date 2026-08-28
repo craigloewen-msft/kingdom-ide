@@ -325,7 +325,7 @@ async fn start(input: &Value, shop: &Sandbox) -> ToolOutcome {
     // straight face about being isolated. A silent fallback there is what once
     // took `Address already in use` from the King's own server; the same
     // outcome here is a command believed private that was not.
-    let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.network.is_isolated());
+    let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.isolation.is_isolated());
     if isolated && enter.is_empty() {
         return Refusal::Refused(
             "This plan's network could not be entered, so nothing was started. \

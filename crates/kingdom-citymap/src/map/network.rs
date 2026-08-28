@@ -611,7 +611,7 @@ mod tests {
     use super::*;
     use crate::map::{MapLocation, MapManifest, MapPlaza, MapSun, MapUnderside, MapWorld};
     use kingdom_core::{
-        AgentNetwork, CityId, CityWells, KingdomNetwork, NetworkMode, PlanId, SharedService,
+        AgentNetwork, CityId, CityWells, Isolation, KingdomNetwork, PlanId, SharedService,
     };
 
     /// How far across a square is, matching `build::scene::PLAZA_SIZE`.
@@ -712,7 +712,7 @@ mod tests {
         }
     }
 
-    fn an_agent(plan: &str, city: &str, network: NetworkMode, drawing: &[&str]) -> AgentNetwork {
+    fn an_agent(plan: &str, city: &str, network: Isolation, drawing: &[&str]) -> AgentNetwork {
         AgentNetwork {
             plan: PlanId::new(plan),
             title: format!("Plan {plan}"),
@@ -756,7 +756,7 @@ mod tests {
         let map = a_map(&[("shopfront", [0.0, 0.0])]);
         let network = KingdomNetwork {
             wells: vec![a_well("shopfront", &["db"])],
-            agents: vec![an_agent("p1", "shopfront", NetworkMode::Isolated, &["db"])],
+            agents: vec![an_agent("p1", "shopfront", Isolation::Isolated, &["db"])],
         };
 
         let picture = resolve(&map, &network);
@@ -793,7 +793,7 @@ mod tests {
         let map = a_map(&[("orchard", [0.0, 0.0])]);
         let network = KingdomNetwork {
             wells: Vec::new(),
-            agents: vec![an_agent("p1", "orchard", NetworkMode::Shared, &[])],
+            agents: vec![an_agent("p1", "orchard", Isolation::Shared, &[])],
         };
 
         let picture = resolve(&map, &network);
@@ -807,7 +807,7 @@ mod tests {
         let map = a_map(&[("orchard", [0.0, 0.0])]);
         let network = KingdomNetwork {
             wells: Vec::new(),
-            agents: vec![an_agent("p1", "orchard", NetworkMode::Shared, &[])],
+            agents: vec![an_agent("p1", "orchard", Isolation::Shared, &[])],
         };
 
         let picture = resolve(&map, &network);
@@ -834,7 +834,7 @@ mod tests {
         let network = KingdomNetwork {
             wells: vec![a_well("shopfront", &["db", "cache"])],
             // Registered against the database only, though both are standing.
-            agents: vec![an_agent("p1", "shopfront", NetworkMode::Shared, &["db"])],
+            agents: vec![an_agent("p1", "shopfront", Isolation::Shared, &["db"])],
         };
 
         let picture = resolve(&map, &network);
@@ -858,7 +858,7 @@ mod tests {
         let map = a_map(&[("shopfront", [0.0, 0.0])]);
         let network = KingdomNetwork {
             wells: Vec::new(),
-            agents: vec![an_agent("p1", "shopfront", NetworkMode::Shared, &["db"])],
+            agents: vec![an_agent("p1", "shopfront", Isolation::Shared, &["db"])],
         };
 
         let picture = resolve(&map, &network);
@@ -1008,7 +1008,7 @@ mod tests {
             &map,
             &KingdomNetwork {
                 wells: vec![a_well("shopfront", &["db"])],
-                agents: vec![an_agent("p1", "shopfront", NetworkMode::Shared, &["db"])],
+                agents: vec![an_agent("p1", "shopfront", Isolation::Shared, &["db"])],
             },
         );
 
@@ -1033,7 +1033,7 @@ mod tests {
         let map = a_map(&[("orchard", [0.0, 0.0])]);
         let network = KingdomNetwork {
             wells: vec![a_well("ghost-town", &["db"])],
-            agents: vec![an_agent("p1", "ghost-town", NetworkMode::Shared, &["db"])],
+            agents: vec![an_agent("p1", "ghost-town", Isolation::Shared, &["db"])],
         };
 
         let picture = resolve(&map, &network);
@@ -1052,7 +1052,7 @@ mod tests {
         let network = KingdomNetwork {
             wells: Vec::new(),
             agents: (1..=5)
-                .map(|n| an_agent(&format!("p{n}"), "shopfront", NetworkMode::Shared, &[]))
+                .map(|n| an_agent(&format!("p{n}"), "shopfront", Isolation::Shared, &[]))
                 .collect(),
         };
 
@@ -1093,7 +1093,7 @@ mod tests {
         let network = KingdomNetwork {
             wells: Vec::new(),
             agents: (1..=6)
-                .map(|n| an_agent(&format!("p{n}"), "shopfront", NetworkMode::Shared, &[]))
+                .map(|n| an_agent(&format!("p{n}"), "shopfront", Isolation::Shared, &[]))
                 .collect(),
         };
 
@@ -1121,9 +1121,9 @@ mod tests {
         let network = KingdomNetwork {
             wells: vec![a_well("shopfront", &["db"])],
             agents: vec![
-                an_agent("p1", "shopfront", NetworkMode::Isolated, &["db"]),
-                an_agent("p2", "shopfront", NetworkMode::Shared, &[]),
-                an_agent("p3", "orchard", NetworkMode::Shared, &[]),
+                an_agent("p1", "shopfront", Isolation::Isolated, &["db"]),
+                an_agent("p2", "shopfront", Isolation::Shared, &[]),
+                an_agent("p3", "orchard", Isolation::Shared, &[]),
             ],
         };
 
@@ -1142,7 +1142,7 @@ mod tests {
     #[test]
     fn an_agents_marker_is_its_own_banner_colour() {
         let map = a_map(&[("orchard", [0.0, 0.0])]);
-        let agents = vec![an_agent("p1", "orchard", NetworkMode::Shared, &[])];
+        let agents = vec![an_agent("p1", "orchard", Isolation::Shared, &[])];
         let network = KingdomNetwork {
             wells: Vec::new(),
             agents: agents.clone(),
@@ -1260,7 +1260,7 @@ mod tests {
             &map,
             &KingdomNetwork {
                 wells: Vec::new(),
-                agents: vec![an_agent("p1", "orchard", NetworkMode::Shared, &[])],
+                agents: vec![an_agent("p1", "orchard", Isolation::Shared, &[])],
             },
         );
 

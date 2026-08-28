@@ -118,11 +118,12 @@ impl SystemPrompt {
         approved: bool,
         kingdom_root: &Path,
         city_root: &Path,
+        isolation: kingdom_core::Isolation,
     ) -> Self {
         let root = Path::new(&workspace.path);
         Self {
             city: city.clone(),
-            workspace: workspace_block(workspace),
+            workspace: workspace_block(workspace, isolation),
             permissions: permissions_block(permissions, approved),
             guidance: discover_guidance(root, kingdom_root),
             skills: crate::skills::discover(root),
@@ -308,7 +309,10 @@ const SKILLS_PREAMBLE: &str = "The following skills are available. Invoke them w
 /// 64% of which opened with a `cd` to this very path, to notice that nothing
 /// said commands **start** here. `tools/bash.rs` says it too, at the one moment
 /// it is acted on; this says it once, up front, for every tool that takes a path.
-fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
+fn workspace_block(
+    workspace: &kingdom_core::Workspace,
+    isolation: kingdom_core::Isolation,
+) -> String {
     let mut out = format!(
         "Working directory: {}\nEvery command runs here, and every relative path is \
          resolved from here.\n",
@@ -335,6 +339,22 @@ fn workspace_block(workspace: &kingdom_core::Workspace) -> String {
              runs against the offline `mock` model and keeps its records inside this \
              workspace, so rehearsing costs the user nothing and leaves nothing behind \
              -- you do not need to choose a model in the picker.",
+        );
+    }
+
+    // Said only where it is true, and it is worth saying: a sealed plan's
+    // commands run against a filesystem that is *not* the user's, and a model
+    // that does not know this reads an absent `~/.ssh` or an unfamiliar `ps`
+    // output as a broken machine and starts trying to repair it. Naming the
+    // boundary once, up front, is much cheaper than the exploration it saves.
+    if isolation.is_sealed() {
+        out.push_str(
+            "\n\nThis plan is sealed: it has its own network, its own filesystem and \
+             its own process table. You can see this workspace, its project's git \
+             directory, a read-only system, and whatever folders the user has \
+             allowed in -- and nothing else of his. A file you cannot find outside \
+             those is not missing, it is simply not shared with you; say so rather \
+             than working around it. `ps` shows only this plan's own processes.",
         );
     }
     out
@@ -772,7 +792,10 @@ mod tests {
                 argument_hint: None,
                 path: PathBuf::from("/somewhere/.claude/skills/build/SKILL.md"),
             }];
-            prompt.workspace = workspace_block(&kingdom_core::Workspace::in_place("/somewhere"));
+            prompt.workspace = workspace_block(
+                &kingdom_core::Workspace::in_place("/somewhere"),
+                kingdom_core::Isolation::Shared,
+            );
 
             let rendered = prompt.render();
 
@@ -938,7 +961,7 @@ mod tests {
         );
 
         for workspace in [isolated, kingdom_core::Workspace::in_place("/dev/city")] {
-            let block = workspace_block(&workspace);
+            let block = workspace_block(&workspace, kingdom_core::Isolation::Shared);
 
             assert!(
                 block.contains(&workspace.path),
@@ -948,6 +971,41 @@ mod tests {
                 block.contains("Every command runs here"),
                 "naming the directory is not the same as saying work begins in \
                  it -- that gap is what buys a `cd` on every command: {block}"
+            );
+        }
+    }
+
+    /// A sealed plan is told its filesystem is not the user's.
+    ///
+    /// Without this the model reads an absent `~/.ssh`, an unfamiliar `ps` or a
+    /// missing tool as a machine in need of repair, and spends a turn trying to
+    /// fix it. The boundary is cheap to state and expensive to discover.
+    #[test]
+    fn a_sealed_plan_is_told_what_it_can_see() {
+        let workspace = kingdom_core::Workspace::in_place("/dev/city");
+
+        let sealed = workspace_block(&workspace, kingdom_core::Isolation::Sealed);
+        assert!(
+            sealed.contains("sealed"),
+            "a sealed plan must be told so: {sealed}"
+        );
+        assert!(
+            sealed.contains("not missing"),
+            "and told how to read an absent file, which is the actual failure \
+             this prevents: {sealed}"
+        );
+
+        // And the other two modes say nothing of the kind, because for them it
+        // would be false: their filesystem *is* the user's.
+        for ordinary in [
+            kingdom_core::Isolation::Shared,
+            kingdom_core::Isolation::Isolated,
+        ] {
+            let block = workspace_block(&workspace, ordinary);
+            assert!(
+                !block.contains("sealed"),
+                "{ordinary:?} shares the user's filesystem and must not claim \
+                 otherwise: {block}"
             );
         }
     }

@@ -6,7 +6,7 @@
 //! dies. That is the collision AGENTS.md names as the reason this product
 //! exists, and until now Kingdom could only *watch* it happen.
 //!
-//! A plan opened with [`NetworkMode::Isolated`] gets a Linux network namespace
+//! A plan opened with [`Isolation::Isolated`] gets a Linux network namespace
 //! of its own. Inside it, `127.0.0.1:3000` is a different socket from the one
 //! on the King's machine and from every other plan's, so nothing collides and
 //! no agent has to be told to pick another port.
@@ -88,7 +88,7 @@
 //! saying so plainly is worth more than a guarantee that does not hold --
 //! `tools::Sandbox::root` makes the same admission about paths.
 
-use super::{kill, lock, sanitise, wait_for_child, Namespace, NetworkError};
+use super::{kill, lock, sanitise, wait_for_child, Namespace, NetworkError, Request};
 use kingdom_core::PlanId;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -497,7 +497,7 @@ fn port_span() -> u64 {
 }
 
 impl Namespace {
-    pub(super) async fn create(plan: &PlanId) -> Result<Self, NetworkError> {
+    pub(super) async fn create(plan: &PlanId, request: &Request) -> Result<Self, NetworkError> {
         use tokio::process::Command;
 
         // Whatever a *previous* server left behind for this plan. A namespace
@@ -507,23 +507,51 @@ impl Namespace {
         // the plan, in the spirit of `kingdom_browser::sweep_orphans`.
         reclaim_previous(plan);
 
+        // What the holder will be, which is the whole of the difference
+        // between the two isolated kinds. A sealed plan takes two more
+        // namespaces and a script that builds it a filesystem; everything
+        // below this point -- slirp, the api socket, the pidfile, the registry
+        // entry -- is identical for both, which is the point of building it
+        // this way rather than as two `create`s.
+        let sealed = request.isolation.is_sealed();
+        let mount_plan = sealed.then(|| {
+            super::mount::MountPlan::built_in(
+                plan.as_str(),
+                &request.workspace,
+                request.city_root.as_deref(),
+            )
+        });
+
+        let mut unshare_args = vec!["--user", "--map-root-user", "--net"];
+        if sealed {
+            // The filesystem and the process table. `--pid` is what makes `ps`
+            // inside show this plan's own handful of processes rather than the
+            // King's several hundred, and it is why the holder must be the
+            // thing that `exec`s `sleep` -- pid 1 of that namespace.
+            unshare_args.push("--mount");
+            unshare_args.push("--pid");
+        }
+        unshare_args.push("--fork");
+        unshare_args.push("--");
+
+        // `lo` up: a plan's own server on 127.0.0.1 is the entire point, and a
+        // fresh namespace's loopback is DOWN. A sealed plan's script does the
+        // same thing at its end, after it has a filesystem to do it from.
+        let script = match &mount_plan {
+            Some(mount_plan) => super::mount::holder_script(mount_plan),
+            None => "ip link set lo up; exec sleep infinity".to_string(),
+        };
+
         // The holder. `--map-root-user` so the agent is root *inside* its own
-        // namespace, which is what lets it bring up `lo`; it is still the
-        // King's uid everywhere that matters, because a user namespace maps
-        // rather than grants.
+        // namespace, which is what lets it bring up `lo` -- and, for a sealed
+        // plan, mount and pivot_root at all. It is still the King's uid
+        // everywhere that matters, because a user namespace maps rather than
+        // grants: measured, a write to `/usr/bin` from inside is refused.
         let mut holder = Command::new("unshare")
-            .args([
-                "--user",
-                "--map-root-user",
-                "--net",
-                "--fork",
-                "--",
-                "sh",
-                "-c",
-                // `lo` up: a plan's own server on 127.0.0.1 is the entire point,
-                // and a fresh namespace's loopback is DOWN.
-                "ip link set lo up; exec sleep infinity",
-            ])
+            .args(&unshare_args)
+            .arg("sh")
+            .arg("-c")
+            .arg(&script)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -600,6 +628,10 @@ impl Namespace {
             forwards: HashMap::new(),
             cdp_port: None,
             wells: HashMap::new(),
+            // Recorded only for a sealed plan, and it is what every later
+            // `enter_prefix` reads to know this namespace has a filesystem of
+            // its own -- and where to stand in it.
+            workdir: mount_plan.map(|plan| plan.workdir),
         })
     }
 
@@ -994,6 +1026,7 @@ pub(crate) fn pretend_wells_are_open(plan: &PlanId, targets: &[&str]) {
         forwards: HashMap::new(),
         cdp_port: None,
         wells: HashMap::new(),
+        workdir: None,
     });
     for (index, target) in targets.iter().enumerate() {
         let port = target
@@ -1197,6 +1230,7 @@ mod tests {
                 forwards,
                 cdp_port: Some(9222),
                 wells: HashMap::new(),
+                workdir: None,
             },
         );
         *namespaces().lock().unwrap() = registry;

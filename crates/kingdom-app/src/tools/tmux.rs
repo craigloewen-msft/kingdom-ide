@@ -88,7 +88,7 @@ const SESSION: &str = "main";
 /// was never given.
 fn isolated_enter_prefix(shop: &Sandbox) -> Result<Vec<String>, Refusal> {
     let enter = crate::namespaces::enter_prefix(shop.plan());
-    let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.network.is_isolated());
+    let isolated = crate::api::snapshot(shop.plan()).is_some_and(|p| p.isolation.is_isolated());
     if isolated && enter.is_empty() {
         return Err(Refusal::Refused(
             "This plan's network could not be entered, so no tmux server was \
@@ -599,6 +599,27 @@ async fn ensure_server(
         ));
     }
 
+    // Stamped with the namespace this server was started in, so a later call
+    // can tell it from one a previous Kingdom left behind. Written before the
+    // options below because it is the thing that makes the daemon
+    // *identifiable*: a server that came up but was never stamped is treated as
+    // stale and restarted, which is correct but wasteful.
+    //
+    // Skipped for a plan with no namespace of its own, which has nothing to be
+    // stale against -- `daemon_belongs_here` returns early for those.
+    if let Some(holder) = crate::namespaces::holder_ns(plan) {
+        let _ = cli(
+            socket,
+            &[
+                "set-environment",
+                "-g",
+                HOLDER_STAMP,
+                &holder.to_string_lossy(),
+            ],
+        )
+        .await;
+    }
+
     // Set on the server's window defaults, once, so a command that exits
     // instantly still leaves its output readable. Without it the window
     // vanishes with the process and the model is left with nothing to explain
@@ -610,13 +631,39 @@ async fn ensure_server(
     Ok(())
 }
 
-/// Whether a live tmux daemon is in the same network namespace this plan is
-/// meant to be in.
+/// The tmux environment variable carrying the holder this server was started
+/// under.
 ///
-/// A **shared-network plan is never mismatched**: it has no namespace of its
-/// own to compare against, so any live daemon belongs to it by definition, and
-/// this returns `true` without asking tmux anything more. Only an isolated
-/// plan can have a daemon that has fallen behind a server restart.
+/// Written once at creation and read back to tell a live daemon from a stale
+/// one. See [`daemon_belongs_here`] for why `#{pid}` cannot do this job.
+const HOLDER_STAMP: &str = "KINGDOM_HOLDER_NS";
+
+/// Whether a live tmux daemon is in the same namespaces this plan is meant to
+/// be in.
+///
+/// A **shared plan is never mismatched**: it has no namespace of its own to
+/// compare against, so any live daemon belongs to it by definition, and this
+/// returns `true` without asking tmux anything more. Only an isolated plan can
+/// have a daemon that has fallen behind a server restart.
+///
+/// # Why the daemon is stamped rather than asked for its pid
+///
+/// This used to read `#{pid}` and `readlink /proc/<pid>/ns/net`. That works for
+/// a plan with only a network of its own and is **silently wrong for a sealed
+/// one**: a sealed plan's tmux runs in a PID namespace, so `#{pid}` is a number
+/// in *its* numbering, not the host's. Measured -- tmux reported `21`, and
+/// `readlink /proc/21/ns/net` on the host fails or, far worse, names an
+/// unrelated process that happens to be pid 21.
+///
+/// Every failure path here returns `true`, so the mismatch would be read as
+/// "this daemon is fine" and the exact stale-daemon trap `docs/architecture.md`
+/// documents would come back wearing a different hat: every window opened
+/// afterwards lands in an orphaned namespace.
+///
+/// So the *holder* is stamped into the server's own environment when it is
+/// created, and compared as a string. It crosses both namespaces because it is
+/// the King's own number for the holder, recorded from out here where that
+/// number means something.
 async fn daemon_belongs_here(socket: &Path, plan: &kingdom_core::PlanId) -> bool {
     let Some(current) = crate::namespaces::holder_ns(plan) else {
         // Not isolated, or isolation not yet (re-)established for this call --
@@ -624,16 +671,22 @@ async fn daemon_belongs_here(socket: &Path, plan: &kingdom_core::PlanId) -> bool
         return true;
     };
 
-    let Ok(out) = cli(socket, &["display-message", "-p", "#{pid}"]).await else {
+    let Ok(out) = cli(socket, &["show-environment", "-g", HOLDER_STAMP]).await else {
         return true;
     };
-    let Some(pid) = text(&out.stdout).trim().parse::<u32>().ok() else {
-        return true;
+    let stamped = text(&out.stdout);
+    let Some(stamped) = stamped
+        .trim()
+        .strip_prefix(&format!("{HOLDER_STAMP}="))
+        .map(str::to_string)
+    else {
+        // No stamp at all: a daemon from before this was introduced, or one
+        // whose creation did not get this far. Either way it cannot be shown
+        // to belong here, and restarting it is the cheap, safe answer.
+        return false;
     };
-    let Ok(theirs) = std::fs::read_link(format!("/proc/{pid}/ns/net")) else {
-        return true;
-    };
-    theirs == current
+
+    stamped == current.to_string_lossy()
 }
 
 /// One tmux invocation, always against this plan's socket.

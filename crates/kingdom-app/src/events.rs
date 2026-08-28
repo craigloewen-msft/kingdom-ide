@@ -233,7 +233,7 @@ pub(crate) fn fitted(
     services: Vec<kingdom_core::SharedService>,
 ) -> Plan {
     let mut wire = plan.for_wire();
-    if plan.network.is_isolated() {
+    if plan.isolation.is_isolated() {
         wire.ports = ports;
     }
     // Unconditional, unlike ports: a shared service is used by every plan in
@@ -248,7 +248,7 @@ pub(crate) fn fitted(
 ///
 /// The city is given rather than looked up: see [`publish_within`].
 pub(crate) fn on_the_wire(plan: &Plan, city_root: Option<&std::path::Path>) -> Plan {
-    let ports = if plan.network.is_isolated() {
+    let ports = if plan.isolation.is_isolated() {
         crate::namespaces::net::forwards_of(&plan.id)
             .into_iter()
             .map(|(guest, host)| kingdom_core::PortForward { guest, host })
@@ -409,7 +409,7 @@ mod tests {
             "do the thing",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/tmp/city"),
-            kingdom_core::NetworkMode::Shared,
+            kingdom_core::Isolation::Shared,
         )
     }
 
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn fitted_attaches_ports_and_services_to_a_bare_record() {
         let mut plan = a_plan("fitted");
-        plan.network = kingdom_core::NetworkMode::Isolated;
+        plan.isolation = kingdom_core::Isolation::Isolated;
         assert!(plan.ports.is_empty(), "the record itself must carry none");
 
         let ports = vec![kingdom_core::PortForward {
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn fitted_never_shows_ports_for_a_shared_plan() {
         let plan = a_plan("shared-fitted");
-        assert!(!plan.network.is_isolated());
+        assert!(!plan.isolation.is_isolated());
 
         let ports = vec![kingdom_core::PortForward {
             guest: 3000,

@@ -608,7 +608,7 @@ pub async fn begin_plan(
     city: Option<String>,
     choice: Option<ModelChoice>,
     workspace: Option<WorkspaceMode>,
-    network: Option<kingdom_core::NetworkMode>,
+    isolation: Option<kingdom_core::Isolation>,
 ) -> Result<Plan, ServerFnError> {
     use kingdom_core::{CityId, NoteKind};
 
@@ -648,13 +648,13 @@ pub async fn begin_plan(
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let network = network.unwrap_or_default();
+    let isolation = isolation.unwrap_or_default();
 
     // Refused *before* a plan exists, not when its first command runs. A plan
     // that took the setting and then quietly ran on the shared network would be
     // exactly the invisible isolation this feature exists to end -- and the
     // King would only find out when two agents collided on 3000 anyway.
-    if network.is_isolated() {
+    if isolation.is_isolated() {
         crate::namespaces::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
     }
 
@@ -664,7 +664,7 @@ pub async fn begin_plan(
         &prompt,
         &choice,
         workspace.clone(),
-        network,
+        isolation,
     );
     // Where an agent is fenced in is not something it said, it is something that
     // happened -- and isolation the user cannot see is isolation he cannot
@@ -678,14 +678,24 @@ pub async fn begin_plan(
     );
     // The same argument, for the other axis. A plan with its own network can
     // bind whatever port it likes, and the King needs to know that the `:3000`
-    // this plan talks about is not the `:3000` in his own browser.
-    if network.is_isolated() {
-        plan.note(
+    // this plan talks about is not the `:3000` in his own browser -- and a
+    // sealed plan cannot see his files at all, which changes what it is
+    // reasonable to ask of it.
+    match isolation {
+        kingdom_core::Isolation::Shared => {}
+        kingdom_core::Isolation::Isolated => plan.note(
             NoteKind::Workspace,
             "On a network of its own: ports it opens belong to this plan alone, \
              and are forwarded to the host on ports shown in the chamber."
                 .to_string(),
-        );
+        ),
+        kingdom_core::Isolation::Sealed => plan.note(
+            NoteKind::Workspace,
+            "On a machine of its own: its own network, and its own filesystem. \
+             It sees this workspace, a read-only system and the folders you \
+             allow in -- nothing else of yours is there to be changed."
+                .to_string(),
+        ),
     }
 
     let mut kingdom = lock()?;
@@ -1022,7 +1032,7 @@ type LiveAgent = (
     // and it is read here because only the kingdom knows it.
     String,
     kingdom_core::CityId,
-    kingdom_core::NetworkMode,
+    kingdom_core::Isolation,
 );
 
 /// A city with live agents in it, and where its project sits on disk.
@@ -1079,7 +1089,7 @@ pub async fn kingdom_network() -> Result<kingdom_core::KingdomNetwork, ServerFnE
                     plan.id.clone(),
                     plan.title.clone(),
                     plan.city.clone(),
-                    plan.network,
+                    plan.isolation,
                 )
             })
             .collect();
@@ -2781,6 +2791,7 @@ pub async fn plan_briefing(plan: String) -> Result<String, ServerFnError> {
         plan.approved_proposal().is_some(),
         &root,
         &city_root,
+        plan.isolation,
     )
     .render())
 }
@@ -2822,7 +2833,7 @@ fn expand_home(path: &str) -> String {
 #[cfg(all(test, feature = "ssr"))]
 pub(crate) mod tests {
     use super::*;
-    use kingdom_core::NetworkMode;
+    use kingdom_core::Isolation;
     use std::path::PathBuf;
 
     /// Containment must survive traversal, not merely prefix-matching.
@@ -2905,7 +2916,7 @@ pub(crate) mod tests {
                 "A decree",
                 &ModelChoice::new("mock", None),
                 Workspace::in_place("/dev/testburg"),
-                NetworkMode::Shared,
+                Isolation::Shared,
             )
         };
 
@@ -2971,7 +2982,7 @@ pub(crate) mod tests {
                     "A decree",
                     &ModelChoice::new("mock", None),
                     Workspace::in_place("/dev/shopfront"),
-                    NetworkMode::Shared,
+                    Isolation::Shared,
                 )
             })
             .collect();
@@ -3172,7 +3183,7 @@ pub(crate) mod tests {
             "Read the tests",
             &ModelChoice::new("mock", None),
             Workspace::in_place(city_path.to_string_lossy()),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         plan.permissions = kingdom_core::Permissions::Propose;
 
@@ -3343,7 +3354,7 @@ pub(crate) mod tests {
                 "A fabricated decree",
                 &ModelChoice::new("mock", None),
                 Workspace::in_place("/dev/testburg"),
-                NetworkMode::Shared,
+                Isolation::Shared,
             )]
         }
 
@@ -3360,7 +3371,7 @@ pub(crate) mod tests {
             "The King's own decree",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )];
         assert_eq!(
             seed_starter_plans(recorded.clone(), &[], starter_plans),
@@ -3391,7 +3402,7 @@ pub(crate) mod tests {
             "A decree whose turn died",
             &ModelChoice::new("mock", None),
             Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
 
         // Exactly what a turn killed mid-flight leaves behind.
@@ -3763,7 +3774,7 @@ pub(crate) mod tests {
                 id: Some("abc".into()),
                 base: Some("main".into()),
             },
-            NetworkMode::Shared,
+            Isolation::Shared,
         );
         let subagent = Plan::spawned(PlanId::new("plan-2"), &parent, "call-1", "Read the tests");
 
@@ -3820,7 +3831,7 @@ pub(crate) mod tests {
                         plan.id.clone(),
                         plan.title.clone(),
                         plan.city.clone(),
-                        plan.network,
+                        plan.isolation,
                     )
                 })
                 .collect();
@@ -3848,7 +3859,7 @@ pub(crate) mod tests {
             "Fix the parser",
             &kingdom_core::ModelChoice::new("mock", None),
             kingdom_core::Workspace::in_place("/dev/testburg"),
-            NetworkMode::Shared,
+            Isolation::Shared,
         )
     }
 
