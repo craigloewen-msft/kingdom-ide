@@ -1399,7 +1399,7 @@ fn ConversationBody(
                         node_ref=follow.log
                         on:scroll=move |_| follow.saw_scroll()
                     >
-                        <Transcript live=live/>
+                        <Transcript live=live follow=follow/>
 
                         <Show when={move || drafting.get()}>
                             <div class="chat-msg drafting">
@@ -1864,9 +1864,34 @@ fn ConversationBody(
 /// the push socket is that lines arrive *during* a turn. A snapshot would show
 /// the transcript as it was when the user walked in.
 #[component]
-fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
+fn Transcript(live: Memo<Option<Plan>>, follow: Follow) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let plan_id = Memo::new(move |_| live.with(|p| p.as_ref().map(|p| p.id.clone())));
+
+    // How many of the newest entries are drawn. A long plan's chamber used to
+    // render every line it had ever held -- and worse, cloned the whole
+    // transcript on every push-socket message to do it. See `window_start`.
+    let shown = RwSignal::new(CHAMBER_WINDOW);
+
+    // Walking into another plan starts at the newest hundred again: an expanded
+    // window is a thing the King asked for *here*, not a setting.
+    Effect::new(move |_| {
+        plan_id.track();
+        shown.set(CHAMBER_WINDOW);
+    });
+
+    let total = Memo::new(move |_| {
+        live.with(|p| p.as_ref().map(|p| p.transcript.len()))
+            .unwrap_or(0)
+    });
+    let hidden = Memo::new(move |_| window_start(total.get(), shown.get()));
+
+    // Adding to the window prepends lines above him, which would otherwise
+    // shove everything he is reading down the screen. Measured before and after
+    // by `keep_place_after`.
+    let show_more = move |more: usize| {
+        follow.keep_place_after(move || shown.update(|n| *n = n.saturating_add(more)));
+    };
 
     // The chamber's one clock. It runs only while some deed is actually in
     // flight, and every running deed on the line reads this same signal -- see
@@ -1906,18 +1931,54 @@ fn Transcript(live: Memo<Option<Plan>>) -> impl IntoView {
     });
 
     view! {
+        // The way further back. Deliberately a button and not an automatic load
+        // on reaching the top: an automatic one fights his scroll and makes the
+        // beginning of a long chamber unreachable.
+        <Show when={move || hidden.get() > 0}>
+            <div class="chamber-earlier">
+                <button
+                    class="earlier-more"
+                    on:click=move |_| show_more(CHAMBER_WINDOW)
+                >
+                    {move || {
+                        let n = hidden.get().min(CHAMBER_WINDOW);
+                        format!("Show {n} earlier lines")
+                    }}
+                </button>
+                <Show when={move || hidden.get() > CHAMBER_WINDOW}>
+                    <button
+                        class="earlier-all"
+                        on:click=move |_| show_more(usize::MAX)
+                    >
+                        {move || format!("Show all {} earlier", hidden.get())}
+                    </button>
+                </Show>
+            </div>
+        </Show>
+
         <For
             each={move || {
-                // `with`: this clones the transcript it is about to iterate,
-                // which is unavoidable, but `get` would clone the whole plan
-                // *and then* the transcript out of it.
+                // `with`: this clones the entries it is about to iterate, which
+                // is unavoidable, but `get` would clone the whole plan *and
+                // then* the transcript out of it -- and only the window is
+                // cloned, so a thousand-deed plan no longer copies its whole
+                // history on every socket push.
+                //
+                // `enumerate` before `skip`, so each row keeps its *absolute*
+                // position: `delete_at` is positional, and an index relative to
+                // the window would delete the wrong line.
+                let start = hidden.get();
                 live.with(|p| {
                     p.as_ref()
-                        .map(|p| p.transcript.clone())
+                        .map(|p| {
+                            p.transcript
+                                .iter()
+                                .enumerate()
+                                .skip(start)
+                                .map(|(i, e)| (i, e.clone()))
+                                .collect::<Vec<_>>()
+                        })
                         .unwrap_or_default()
-                        .into_iter()
-                        .enumerate()
-                        .collect::<Vec<_>>()
                 })
             }}
             // Keyed by position *and* by what the entry is, so a tool call
@@ -3224,6 +3285,20 @@ fn is_at_bottom(scroll_top: i32, client_height: i32, scroll_height: i32) -> bool
     scroll_height - (scroll_top + client_height) <= BOTTOM_SLACK
 }
 
+/// How many of the newest transcript entries the chamber draws at first, and
+/// how many more each "show earlier" adds.
+const CHAMBER_WINDOW: usize = 100;
+
+/// Index of the first transcript entry to draw, given how many there are and
+/// how many the King has asked to see.
+///
+/// Also, read as a count, how many are hidden above -- which is what the button
+/// at the top of the log is labelled from. Saturating, so asking for more than
+/// exist simply shows everything.
+fn window_start(total: usize, shown: usize) -> usize {
+    total.saturating_sub(shown)
+}
+
 /// The chamber log's scroll behaviour: follow the newest line while the King is
 /// reading the newest line, and otherwise leave him where he is and say that
 /// something landed.
@@ -3308,6 +3383,34 @@ impl Follow {
         self.missed.set(false);
         #[cfg(feature = "hydrate")]
         self.scroll_to_bottom();
+    }
+
+    /// Run `expand`, which prepends lines above the King, and leave him looking
+    /// at the same line he was looking at before.
+    ///
+    /// Measured rather than computed: the height of the lines being added is
+    /// whatever the browser makes of them, so the honest number is the
+    /// difference in `scroll_height` across the render. Compiles to a bare call
+    /// under SSR, where there is nothing to scroll.
+    fn keep_place_after(self, expand: impl FnOnce() + 'static) {
+        #[cfg(not(feature = "hydrate"))]
+        expand();
+
+        #[cfg(feature = "hydrate")]
+        {
+            let before = self
+                .log
+                .get_untracked()
+                .map(|el| (el.scroll_height(), el.scroll_top()));
+            expand();
+            // After the render, not during it: the new rows have no height yet.
+            leptos::prelude::request_animation_frame(move || {
+                let (Some(el), Some((height, top))) = (self.log.get_untracked(), before) else {
+                    return;
+                };
+                el.set_scroll_top(top + (el.scroll_height() - height));
+            });
+        }
     }
 
     #[cfg(feature = "hydrate")]
@@ -3682,6 +3785,32 @@ mod tests {
         // is at the bottom by definition. Reading this as "scrolled up" would
         // mean a short conversation never followed a reply at all.
         assert!(is_at_bottom(0, 200, 120));
+    }
+
+    /// Which slice of a long chamber is drawn.
+    ///
+    /// The count it returns is doing double duty -- it is both the index of the
+    /// first entry drawn and how many are hidden above it -- so getting it
+    /// wrong either hides the newest lines or labels the button with a lie.
+    #[test]
+    fn the_chamber_draws_the_newest_lines_and_counts_the_rest() {
+        // Nothing to hide: fewer entries than the window, or exactly as many.
+        assert_eq!(window_start(0, CHAMBER_WINDOW), 0);
+        assert_eq!(window_start(7, CHAMBER_WINDOW), 0);
+        assert_eq!(window_start(CHAMBER_WINDOW, CHAMBER_WINDOW), 0);
+
+        // One over, and the oldest line is the one held back.
+        assert_eq!(window_start(CHAMBER_WINDOW + 1, CHAMBER_WINDOW), 1);
+
+        // A long plan: the newest hundred are drawn, the rest counted.
+        assert_eq!(window_start(1000, CHAMBER_WINDOW), 900);
+        // ...and each press of the button uncovers another hundred.
+        assert_eq!(window_start(1000, 2 * CHAMBER_WINDOW), 800);
+        assert_eq!(window_start(1000, 3 * CHAMBER_WINDOW), 700);
+
+        // "Show all" asks for more than exist. Saturating, so this is the
+        // beginning of the transcript and not a wrapped enormous index.
+        assert_eq!(window_start(1000, usize::MAX), 0);
     }
 
     /// A turn moving must not rebuild the chamber.
