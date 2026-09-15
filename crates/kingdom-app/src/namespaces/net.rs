@@ -659,6 +659,12 @@ impl Namespace {
     }
 
     pub(super) fn tear_down(&self) {
+        // What namespace this is, read while the holder is still alive --
+        // `/proc/<holder>/ns/net` is the only name it has, and it goes when the
+        // holder does. Captured first so the sweep below has something to
+        // match against after the kills have started.
+        let theirs = std::fs::read_link(format!("/proc/{}/ns/net", self.holder)).ok();
+
         // Relays first: each is a child of nothing but its own bind, and
         // killing it before the holder avoids a moment where the relay is
         // still accepting into a namespace whose holder is already gone.
@@ -673,6 +679,20 @@ impl Namespace {
         for well in self.wells.values() {
             kill(well.pid);
         }
+
+        // Everything else the plan left in there. This is what makes
+        // `shutdown`'s promise -- "and everything still running in it" -- true
+        // for an *isolated* plan, which unlike a sealed one has no PID
+        // namespace to collect its strays for it.
+        //
+        // Swept BEFORE the holder is killed, deliberately: while the holder
+        // lives the namespace cannot be collected, so its inode cannot be
+        // recycled under a different namespace and a pid matched here is
+        // provably still in this one. See [`sweep`].
+        if let Some(theirs) = &theirs {
+            sweep(theirs, self.holder);
+        }
+
         // slirp next: it holds a descriptor on the namespace, and killing the
         // holder while it watches produces a noisy log for no benefit.
         kill(self.slirp);
@@ -702,6 +722,88 @@ fn pid_path(api_socket: &std::path::Path) -> PathBuf {
     api_socket.with_extension("pid")
 }
 
+/// Kills everything still inside a namespace this server made, except `keep`.
+///
+/// # Why this has to exist
+///
+/// A namespace is collected when the last process in it exits -- so one
+/// survivor keeps it, and everything in it, alive for the life of the machine.
+/// Killing the holder is not enough, because the holder is not the only thing
+/// in there.
+///
+/// Only a *sealed* plan gets `--pid`, where the kernel reaps the whole table
+/// the moment pid 1 dies. An **isolated** plan has a network namespace and no
+/// process namespace, so anything that daemonised inside it simply carries on:
+/// reparented to the King's `systemd --user`, off every process tree Kingdom
+/// knows about, pinning a namespace nothing can name any more.
+///
+/// Measured on a developer machine: **20 stray `dbus-daemon --session`
+/// processes**, in three batches matching three plans torn down over two days,
+/// all in one orphaned network namespace with no holder, no slirp and no relay
+/// left. Nothing had autolaunched them on purpose -- a session bus is what
+/// libdbus starts by itself when a program that wants one finds
+/// `DBUS_SESSION_BUS_ADDRESS` unset, which inside a fresh namespace it always
+/// is. That is the shape of the bug in general: Kingdom cannot enumerate what
+/// an agent might start, so teardown must be defined over *the namespace*
+/// rather than over a list of processes Kingdom remembers starting.
+///
+/// # Why it cannot run away
+///
+/// Two things bound it, and both matter:
+///
+/// - **It refuses to sweep our own network.** If the namespace being torn down
+///   reads as the one this server is in, the pids matching it are the King's
+///   whole session -- his editor, his browser, his terminal. That is the one
+///   mistake here that would be catastrophic rather than merely wrong, so it is
+///   checked explicitly and the sweep abandoned. It is also the condition that
+///   makes a *stale* namespace harmless, exactly as `reclaim_previous` already
+///   argues for a single recorded pid.
+/// - **The namespace is pinned while it reads.** Callers sweep before killing
+///   the holder, so the namespace cannot be collected mid-scan and its inode
+///   cannot be recycled under something else. Without that, `net:[4026533208]`
+///   read from two processes a moment apart would not provably mean the same
+///   namespace.
+///
+/// `slirp4netns` is never caught by this: it stays on the *host* network and
+/// only puts a `tap0` in the plan's, so it reads as ours and is filtered by the
+/// first rule anyway. It is killed by name, by the caller, as it always was.
+fn sweep(theirs: &std::path::Path, keep: u32) {
+    // The check that makes everything below safe. A failure to read our own
+    // namespace is treated as "do not sweep": the guard is the whole defence,
+    // and a sweep that cannot prove it is pointed elsewhere must not run.
+    let Ok(ours) = std::fs::read_link("/proc/self/ns/net") else {
+        return;
+    };
+    if theirs == ours {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // The holder is the caller's to kill, and killing it here would
+        // unpin the namespace in the middle of the scan.
+        if pid == keep || pid == std::process::id() {
+            continue;
+        }
+        if std::fs::read_link(format!("/proc/{pid}/ns/net"))
+            .ok()
+            .as_deref()
+            == Some(theirs)
+        {
+            kill(pid);
+        }
+    }
+}
+
 fn remember_pids(api_socket: &std::path::Path, holder: u32, slirp: u32) {
     let _ = std::fs::write(pid_path(api_socket), format!("{holder}\n{slirp}\n"));
 }
@@ -723,6 +825,11 @@ fn remember_pids(api_socket: &std::path::Path, holder: u32, slirp: u32) {
 ///   namespace matches the holder's. Like the holder, a relay left running
 ///   keeps its namespace alive on its own -- the same trap this whole design
 ///   exists to close for tmux, reproduced here if it were left unhandled.
+///
+/// That last one is now the general case rather than a special one: anything
+/// still in the namespace keeps it alive, whether Kingdom started it or an
+/// agent did, so the scan matches on the namespace and not on argv. See
+/// [`sweep`].
 fn reclaim_previous(plan: &PlanId) {
     let api_socket = api_socket_path(plan);
     let Ok(recorded) = std::fs::read_to_string(pid_path(&api_socket)) else {
@@ -746,37 +853,15 @@ fn reclaim_previous(plan: &PlanId) {
         }
     }
 
-    // Relays, before the holder: found by their own `--relay` argv and a net
-    // namespace matching the holder's -- the same identification the holder
-    // itself gets below, applied to every pid rather than one recorded one,
-    // because a relay's pid was never written to the pidfile.
+    // Everything still in there, before the holder: relays, and anything the
+    // agent left daemonised beside them. Identified by the namespace rather
+    // than by argv -- a relay was recognisable by its `--relay`, but a stray
+    // session bus is not recognisable by anything, and the namespace is what
+    // they actually have in common. Swept while the holder still pins it; see
+    // [`sweep`] for both halves of why that is safe.
     if let Some(holder_pid) = holder {
         if let Ok(theirs) = std::fs::read_link(format!("/proc/{holder_pid}/ns/net")) {
-            if let Ok(entries) = std::fs::read_dir("/proc") {
-                for entry in entries.flatten() {
-                    let Some(pid) = entry
-                        .file_name()
-                        .to_str()
-                        .and_then(|n| n.parse::<u32>().ok())
-                    else {
-                        continue;
-                    };
-                    if pid == holder_pid {
-                        continue;
-                    }
-                    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-                        continue;
-                    };
-                    if !String::from_utf8_lossy(&cmdline).contains("--relay") {
-                        continue;
-                    }
-                    if std::fs::read_link(format!("/proc/{pid}/ns/net")).ok()
-                        == Some(theirs.clone())
-                    {
-                        kill(pid);
-                    }
-                }
-            }
+            sweep(&theirs, holder_pid);
         }
     }
 
@@ -1168,6 +1253,183 @@ pub async fn reserve_cdp_port(plan: &PlanId) -> Option<u16> {
 mod tests {
     use super::super::namespaces;
     use super::*;
+
+    /// The sweep refuses to touch the network this server is on.
+    ///
+    /// This is the one mistake in [`sweep`] that would be catastrophic rather
+    /// than merely wrong: on the host network, "every pid in this namespace"
+    /// is the King's whole session -- his editor, his browser, the server
+    /// running this test. A stale pidfile naming a holder that has since died
+    /// and been replaced by an ordinary process is exactly how that would be
+    /// reached in the wild, so the guard is pinned with a live process rather
+    /// than argued for in a comment.
+    ///
+    /// Written as a real spawn because the assertion has to be "it is still
+    /// running": a `sweep` that silently did nothing and a `sweep` that killed
+    /// the machine are indistinguishable from their return value, which is
+    /// `()`.
+    #[test]
+    fn our_own_network_is_never_swept() {
+        let mut victim = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("sleep should be spawnable");
+
+        let ours = std::fs::read_link("/proc/self/ns/net")
+            .expect("a Linux test machine has /proc/self/ns/net");
+
+        // The whole host, named as though it were a plan's.
+        sweep(&ours, std::process::id());
+
+        // Still there. `try_wait` reports None while it lives.
+        let alive = victim
+            .try_wait()
+            .expect("try_wait should succeed")
+            .is_none();
+        let _ = victim.kill();
+        let _ = victim.wait();
+        assert!(
+            alive,
+            "sweep killed a process on our own network -- the guard is gone"
+        );
+    }
+
+    /// A namespace that cannot be read is not swept.
+    ///
+    /// `sweep` is best effort like everything else in teardown, and the failure
+    /// it must not have is "matched nothing, so killed everything". A path that
+    /// no `/proc/<pid>/ns/net` will ever equal stands in for a holder that died
+    /// before its namespace could be named.
+    #[test]
+    fn a_namespace_nothing_is_in_kills_nothing() {
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("sleep should be spawnable");
+
+        sweep(std::path::Path::new("net:[0]"), std::process::id());
+
+        let alive = bystander
+            .try_wait()
+            .expect("try_wait should succeed")
+            .is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(alive, "sweep killed a process outside the named namespace");
+    }
+
+    /// The bug itself, against a real namespace: a daemonised stray is reaped.
+    ///
+    /// Everything about this leak is invisible to a fixture. The stray has to
+    /// genuinely double-fork, so it genuinely reparents to pid 1 and leaves
+    /// Kingdom's process tree; the namespace has to be a real one, so that
+    /// "still in it" means what the kernel means by it. Reproduced by hand
+    /// before this was written -- holder killed, stray still running, namespace
+    /// still alive -- which is the state twenty stray session buses were found
+    /// in.
+    ///
+    /// `#[ignore]` like the other live tests here: it needs `unshare`,
+    /// `nsenter` and unprivileged user namespaces, which the suite does not
+    /// assume. Run it with `cargo test -p kingdom-app -- --ignored`.
+    #[test]
+    #[ignore = "creates a real namespace; needs unshare, nsenter and user namespaces"]
+    fn a_daemonised_stray_does_not_outlive_its_namespace() {
+        let mut unshared = std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net", "--fork", "--"])
+            .args(["sh", "-c", "ip link set lo up; exec sleep infinity"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("unshare should be spawnable");
+
+        // The namespace belongs to the child `--fork` made, not to the pid we
+        // just got back. Same wait the real `create` does.
+        let parent = unshared.id();
+        let mut holder = None;
+        for _ in 0..50 {
+            let children =
+                std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"));
+            if let Ok(children) = children {
+                if let Some(pid) = children
+                    .split_whitespace()
+                    .next()
+                    .and_then(|p| p.parse::<u32>().ok())
+                {
+                    holder = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let holder = holder.expect("unshare should have forked a holder");
+        let theirs = std::fs::read_link(format!("/proc/{holder}/ns/net"))
+            .expect("the holder should have a network namespace");
+        assert_ne!(
+            theirs,
+            std::fs::read_link("/proc/self/ns/net").unwrap(),
+            "the holder must not be on our own network, or the test proves nothing"
+        );
+
+        // The stray. Double-forked exactly as `dbus-launch` daemonises, so it
+        // is reparented away and no longer any child of ours.
+        let _ = std::process::Command::new("nsenter")
+            .arg("--preserve-credentials")
+            .arg(format!("--user=/proc/{holder}/ns/user"))
+            .arg(format!("--net=/proc/{holder}/ns/net"))
+            .args(["--", "sh", "-c", "( ( exec sleep 600 ) & ) &"])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let inside = |ns: &std::path::Path| -> Vec<u32> {
+            let mut found = Vec::new();
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    if let Some(pid) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|n| n.parse::<u32>().ok())
+                    {
+                        if std::fs::read_link(format!("/proc/{pid}/ns/net"))
+                            .ok()
+                            .as_deref()
+                            == Some(ns)
+                        {
+                            found.push(pid);
+                        }
+                    }
+                }
+            }
+            found
+        };
+
+        let strays: Vec<u32> = inside(&theirs)
+            .into_iter()
+            .filter(|pid| *pid != holder && *pid != parent)
+            .collect();
+        assert!(
+            !strays.is_empty(),
+            "the stray never started, so there is nothing to prove"
+        );
+
+        // What teardown now does, in the order it does it: sweep while the
+        // holder still pins the namespace, then kill the holder.
+        sweep(&theirs, holder);
+        kill(holder);
+        let _ = unshared.wait();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert!(
+            inside(&theirs).is_empty(),
+            "a process survived in the namespace, which is what keeps it alive"
+        );
+    }
 
     /// The `/proc/net/tcp` shape, pinned against a real capture.
     ///

@@ -275,7 +275,7 @@ and the King's terminal all prepend `namespaces::enter_prefix`, which is **empty
 for a shared-network plan** — that emptiness is what makes the default path
 behave exactly as it did before this existed.
 
-Five things learned by running it:
+Six things learned by running it:
 
 - **`nsenter` needs `--preserve-credentials`.** Re-entering a namespace you made
   yourself otherwise fails with `setgroups failed`. A test pins the flag: its
@@ -296,6 +296,19 @@ Five things learned by running it:
   daemon's `/proc/<pid>/ns/net` against the namespace the plan should be in, and
   restarts on a mismatch rather than trusting that a live daemon is the right
   one.
+- **Teardown is defined over the namespace, not over a list of pids.** Killing
+  the holder is not enough: a namespace dies when its *last* process does, so
+  one survivor keeps it alive for the life of the machine. Only a sealed plan
+  has `--pid` to reap its own strays; an isolated plan does not, so anything
+  that daemonised inside it is reparented away and off every tree Kingdom
+  knows. Found as twenty stray `dbus-daemon --session` processes — a session
+  bus libdbus autolaunches by itself when `DBUS_SESSION_BUS_ADDRESS` is unset,
+  which inside a fresh namespace it always is — pinning one orphaned namespace
+  with no holder, slirp or relay left. `net::sweep` therefore kills every pid
+  whose `/proc/<pid>/ns/net` matches, and is bounded by two rules: it refuses
+  to sweep the server's *own* network (where that set is the King's whole
+  session), and it runs while the holder still pins the namespace, so the
+  inode cannot be recycled mid-scan.
 - **The browser's two wrappers nest; they do not compete.** CPU confinement
   (`taskset`) and namespace entry (`nsenter`) both want to be the executable
   chromiumoxide launches, and setting `chrome_executable` twice silently keeps
