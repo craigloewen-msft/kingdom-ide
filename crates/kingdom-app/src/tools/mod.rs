@@ -47,6 +47,41 @@ use kingdom_core::{ToolOutcome, WaitBudget, Workspace};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
+/// Where a plan's artifacts live, relative to its workspace.
+///
+/// Inside `worktree::WORKTREE_DIR` on purpose: that directory is already
+/// excluded from the project's repository, which is what keeps a screenshot out
+/// of both `git status` and `git add -A`. See [`Sandbox::artifact_path`].
+pub const ARTIFACT_DIR: &str = ".kingdom/artifacts";
+
+/// Clears away everything a plan's tools left for the King to look at.
+///
+/// Called from `api::finish_plan` and nowhere else, and that is the whole point
+/// of it existing: a picture is worth keeping for as long as the plan is, so it
+/// goes when the plan is *really* over -- merged or archived -- and at no other
+/// moment. Nothing during a turn, and nothing on a merge git refused: such a
+/// plan is still in play and the King is still reading it.
+///
+/// A plan working in a worktree has already had its whole checkout removed by
+/// then, so this finds nothing and says nothing. It exists for the plan working
+/// **in place**, whose workspace is the user's own project folder and survives
+/// the ending -- without this, a directory of screenshots would sit there
+/// forever with nothing left that knows what it was for.
+///
+/// Deliberately quiet, on the same terms as `tmux::dismiss` and
+/// `browser::dismiss`: the work has already landed by the time this runs, and
+/// failing a completed merge over an undeletable PNG would be a far worse
+/// outcome than a directory the King can remove himself.
+pub fn discard_artifacts(workspace: &Workspace) {
+    let dir = Path::new(&workspace.path).join(ARTIFACT_DIR);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        // Never written, or gone with the worktree. Nothing to report.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => leptos::logging::warn!("could not remove {}: {e}", dir.display()),
+    }
+}
+
 // `Permissions` moved down into the domain -- it crosses the wire now, because
 // the conversation view renders differently while a plan is only proposing.
 // Re-exported at its historical path so every existing `tools::Permissions`
@@ -457,6 +492,50 @@ impl Sandbox {
     /// The tool call this call is recorded as.
     pub fn tool_call(&self) -> Option<&str> {
         self.tool_call.as_deref()
+    }
+
+    /// Where a tool should put a file it wants the King to be able to look at.
+    ///
+    /// `<workspace>/.kingdom/artifacts/<stem>-<nanos>.<ext>`, with the directory
+    /// created. One definition rather than one per tool module, because the two
+    /// ends of an artifact must agree: what a tool writes here is recorded
+    /// through [`Sandbox::relative`] and later opened again through
+    /// [`Sandbox::resolve`] by [`crate::artifact`], and a second copy of this
+    /// rule is a second place for them to drift apart.
+    ///
+    /// # Why under `.kingdom/` rather than at the workspace root
+    ///
+    /// These files used to be written as `.kingdom-<stem>-<nanos>.<ext>` beside
+    /// the project's own files, where nothing ignored them. That is not a
+    /// tidiness complaint -- it is why the King's screenshots kept vanishing.
+    /// Two measured consequences, both from real plan records:
+    ///
+    /// - A name git reports as untracked sits in the middle of the plan's own
+    ///   `git status`, so the court cleared it away **mid-plan** -- four plans
+    ///   ran `rm -f .kingdom-browser-screenshot-*.png` while still working, one
+    ///   of them deleting all twenty-two pictures it had shown. The model was
+    ///   reasoning correctly from what it could see.
+    /// - [`crate::worktree`] commits with `git add -A` before merging, so
+    ///   anything the court *did* leave would land in the user's project.
+    ///
+    /// `.kingdom/` is already excluded from the repository by
+    /// `worktree::exclude_worktree_dir`, so a file here is invisible to both:
+    /// nothing to tidy, and nothing to commit. It goes when the worktree goes,
+    /// which is the King's rule -- cleared on merge or archive, and not before.
+    ///
+    /// The nanosecond serial is load-bearing beyond uniqueness: `artifact.rs`
+    /// serves these immutably, so a URL is the same bytes forever.
+    pub fn artifact_path(&self, stem: &str, extension: &str) -> PathBuf {
+        let serial = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = self.root().join(ARTIFACT_DIR);
+        // Best-effort: the write that follows reports its own failure, and a
+        // second error message about the directory would say the same thing
+        // twice in less useful words.
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(format!("{stem}-{serial}.{extension}"))
     }
 
     /// The directory everything this plan does happens under.
@@ -1034,6 +1113,93 @@ mod tests {
             Some("shots/a.png"),
             "a record must carry neither root"
         );
+    }
+
+    /// Where a picture is put, and why it is put there.
+    ///
+    /// The regression this pins is the one the whole change exists for: these
+    /// files used to land at the workspace *root*, where git reported them as
+    /// untracked and the court dutifully deleted them mid-plan. Under
+    /// `.kingdom/` they are already excluded (see
+    /// `worktree::exclude_worktree_dir`), so there is nothing to tidy and
+    /// nothing for `git add -A` to sweep into the user's history.
+    ///
+    /// The round trip is asserted here too, rather than trusted: what
+    /// `artifact_path` writes must be nameable by [`Sandbox::relative`] and
+    /// openable again by [`Sandbox::resolve`], because that is the chain
+    /// `artifact.rs` serves a chamber's `<img>` through.
+    #[test]
+    fn a_picture_is_put_where_git_will_not_see_it() {
+        let dir = tempfile::tempdir().expect("a temporary workspace");
+        let shop = Sandbox::new(Workspace::in_place(dir.path().display().to_string()));
+
+        let path = shop.artifact_path("browser-screenshot", "png");
+
+        assert_eq!(
+            path.parent(),
+            Some(dir.path().join(ARTIFACT_DIR).as_path()),
+            "a picture at the workspace root is one the court will delete: {}",
+            path.display()
+        );
+        assert!(
+            path.parent().is_some_and(Path::is_dir),
+            "the directory must exist, or the write that follows fails"
+        );
+        assert!(path.extension().is_some_and(|e| e == "png"));
+
+        // Two captures in the same instant are still two files. The serial is
+        // also what lets `artifact.rs` serve these immutably.
+        assert_ne!(
+            shop.artifact_path("browser-screenshot", "png"),
+            shop.artifact_path("browser-screenshot", "png"),
+            "one name for two pictures loses one of them"
+        );
+
+        let recorded = shop.relative(&path).expect("a path inside is nameable");
+        assert!(
+            recorded.starts_with(ARTIFACT_DIR),
+            "the record is what the chamber asks for: {recorded}"
+        );
+        assert_eq!(
+            shop.resolve(&recorded).unwrap(),
+            path,
+            "a recorded artifact must resolve back to the file it named"
+        );
+    }
+
+    /// A plan's pictures go when the plan does, and not one moment sooner.
+    ///
+    /// The King's rule, stated as a test because the two halves are easy to get
+    /// individually right and jointly wrong: `finish_plan` calls this only for
+    /// a `Settled` ending, and this removes only the artifacts -- the project
+    /// it is standing in is the user's own folder when the plan works in place.
+    #[test]
+    fn ending_a_plan_clears_its_pictures_and_nothing_else() {
+        let dir = tempfile::tempdir().expect("a temporary workspace");
+        let workspace = Workspace::in_place(dir.path().display().to_string());
+        let shop = Sandbox::new(workspace.clone());
+
+        let picture = shop.artifact_path("browser-screenshot", "png");
+        std::fs::write(&picture, b"not really a png").unwrap();
+        let theirs = dir.path().join("src.rs");
+        std::fs::write(&theirs, b"fn main() {}").unwrap();
+
+        discard_artifacts(&workspace);
+
+        assert!(!picture.exists(), "a settled plan's pictures are cleared");
+        assert!(
+            !dir.path().join(ARTIFACT_DIR).exists(),
+            "and so is the directory that held them"
+        );
+        assert!(
+            theirs.exists(),
+            "the user's own files are not this function's business"
+        );
+
+        // A plan that never took a picture, and a worktree already removed, are
+        // the ordinary cases -- not failures to report.
+        discard_artifacts(&workspace);
+        discard_artifacts(&Workspace::in_place("/dev/gone-with-the-worktree"));
     }
 
     /// The invariant subagents rest on, and the level that was added beside it.

@@ -144,14 +144,6 @@ fn outcome(result: Result<String, BrowserError>) -> ToolOutcome {
 fn parse<T: for<'de> Deserialize<'de>>(tool: &str, input: Value) -> Result<T, ToolOutcome> {
     serde_json::from_value(input).map_err(|error| bad(tool, error.to_string()))
 }
-fn artifact(shop: &Sandbox, stem: &str, extension: &str) -> PathBuf {
-    let serial = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    shop.root()
-        .join(format!(".kingdom-{stem}-{serial}.{extension}"))
-}
 async fn write_artifact(path: &PathBuf, bytes: &[u8]) -> Result<(), BrowserError> {
     tokio::fs::write(path, bytes).await.map_err(|error| {
         BrowserError::Operation(format!("could not save {}: {error}", path.display()))
@@ -268,7 +260,7 @@ impl Tool for BrowserEval {
             .await
         {
             Ok(value) if value.len() > LARGE_OUTPUT => {
-                let path = artifact(shop, "browser-eval", "json");
+                let path = shop.artifact_path("browser-eval", "json");
                 outcome(
                     write_artifact(&path, value.as_bytes())
                         .await
@@ -298,9 +290,12 @@ impl Tool for BrowserTakeScreenshot {
         "browser_take_screenshot"
     }
     fn description(&self) -> String {
-        "Capture the page or one element to a PNG file in the workspace. The \
-         King is shown it in the chamber, and the picture comes back with this \
-         call -- you do not need read_image to look at what you just captured."
+        "Capture the page or one element to a PNG file under \
+         .kingdom/artifacts/. The King is shown it in the chamber, and the \
+         picture comes back with this call -- you do not need read_image to look \
+         at what you just captured. The file is kept for him to look at later \
+         and is ignored by git: do not delete it, and do not tidy that directory \
+         up. Kingdom clears it when the plan is merged or archived."
             .into()
     }
     fn input_schema(&self) -> Value {
@@ -320,7 +315,7 @@ impl Tool for BrowserTakeScreenshot {
             .await
         {
             Ok(image) => {
-                let path = artifact(shop, "browser-screenshot", "png");
+                let path = shop.artifact_path("browser-screenshot", "png");
                 let artifacts = shop
                     .relative(&path)
                     .map(|path| {
@@ -693,7 +688,7 @@ impl Tool for BrowserRecentConsoleLogs {
         )
         .unwrap_or_else(|_| "[]".into());
         if value.len() > LARGE_OUTPUT {
-            let path = artifact(shop, "browser-console", "json");
+            let path = shop.artifact_path("browser-console", "json");
             outcome(
                 write_artifact(&path, value.as_bytes())
                     .await

@@ -238,7 +238,9 @@ impl Tool for BrowserProfile {
          harness: it returns RAW per-run samples and never averages them, so \
          the statistics are yours to compute. Also: metrics, throttle, gc_heap, \
          cpu_start/cpu_stop, trace_start/trace_stop, coverage_start/\
-         coverage_stop, why_render, heap_snapshot."
+         coverage_stop, why_render, heap_snapshot. Anything it saves goes under \
+         .kingdom/artifacts/, which is kept for the King and ignored by git: \
+         leave those files alone."
             .into()
     }
 
@@ -354,7 +356,7 @@ impl Tool for BrowserProfile {
                     ToolOutcome::done("The heap snapshot came back empty.")
                 }
                 Ok(snapshot) => {
-                    let path = artifact(shop, "heap", "heapsnapshot");
+                    let path = shop.artifact_path("heap", "heapsnapshot");
                     match tokio::fs::write(&path, snapshot).await {
                         Ok(()) => ToolOutcome::done(format!(
                             "Heap snapshot saved to {}. Open it in Chrome DevTools \u{2192} Memory.",
@@ -465,7 +467,7 @@ async fn cpu_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
                 .into()
         }
         Ok(Some(profile)) => {
-            let path = artifact(shop, "cpu-profile", "cpuprofile");
+            let path = shop.artifact_path("cpu-profile", "cpuprofile");
             let body = serde_json::to_string(&profile).unwrap_or_else(|_| "{}".into());
             match tokio::fs::write(&path, body).await {
                 Ok(()) => ToolOutcome::done(format!(
@@ -502,7 +504,7 @@ async fn coverage_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
         .into(),
         Ok(Some(coverage)) => {
             let scripts = coverage.as_array().map_or(0, Vec::len);
-            let path = artifact(shop, "coverage", "json");
+            let path = shop.artifact_path("coverage", "json");
             let body = serde_json::to_string(&coverage).unwrap_or_else(|_| "[]".into());
             match tokio::fs::write(&path, body).await {
                 Ok(()) => ToolOutcome::done(format!(
@@ -569,7 +571,7 @@ async fn trace_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
                 .into()
         }
         Ok(Some(events)) => {
-            let path = artifact(shop, "trace", "json");
+            let path = shop.artifact_path("trace", "json");
             let body = serde_json::to_string(&events).unwrap_or_else(|_| "[]".into());
             match tokio::fs::write(&path, body).await {
                 Ok(()) => ToolOutcome::done(format!(
@@ -583,15 +585,6 @@ async fn trace_stop(plan: &str, shop: &Sandbox) -> ToolOutcome {
         }
         Err(error) => failed(error),
     }
-}
-
-fn artifact(shop: &Sandbox, stem: &str, extension: &str) -> std::path::PathBuf {
-    let serial = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    shop.root()
-        .join(format!(".kingdom-{stem}-{serial}.{extension}"))
 }
 
 /// Checks a scenario's arguments and, if they hold, runs it.
@@ -685,7 +678,7 @@ async fn scenario(
     let body = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
 
     if body.len() > LARGE_OUTPUT {
-        let path = artifact(shop, "scenario", "json");
+        let path = shop.artifact_path("scenario", "json");
         return Ok(match tokio::fs::write(&path, &body).await {
             Ok(()) => ToolOutcome::done(format!("Scenario samples saved to {}.", path.display())),
             Err(error) => ToolOutcome::done(format!("Could not save them: {error}")),
