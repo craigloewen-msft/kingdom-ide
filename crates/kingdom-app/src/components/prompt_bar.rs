@@ -256,17 +256,127 @@ pub fn PromptBar() -> impl IntoView {
 /// on -- the map here, the chamber log there -- and a pasted essay must not
 /// swallow it. Past the cap the box scrolls instead.
 ///
-/// **The reset-then-measure is not redundant, and cannot be skipped.** Reading
-/// `scroll_height` after setting `height:auto` forces a synchronous reflow, and
-/// this runs on every keystroke -- so it looks like an obvious thing to guard
-/// with "only measure if the height would change". It is not, because
-/// `scroll_height` never reports less than the height already set. A box grown
-/// to 80px reports 80 even when its content now needs 20, so the guard reads as
-/// "nothing to do" in exactly the case that needs doing, and the composer grows
-/// with a long decree and never shrinks back after it is sent. Deciding it
-/// wants to be *shorter* requires the reset; there is no cheaper question to
-/// ask first.
+/// **Measuring a textarea is not cheap, and this runs on every keystroke.**
+/// Writing `height:auto` dirties layout and reading `scroll_height` then forces
+/// the browser to lay out the whole document before it can answer. In a chamber
+/// with a long transcript that is hundreds of entries laid out per character:
+/// measured at ~50ms per keystroke on a 426-entry log, against 0.5ms with the
+/// log detached. That is the whole of why typing in an old chat crawled.
+///
+/// So the measurement is avoided where it can be and deferred where it cannot:
+///
+/// 1. Where the browser supports `field-sizing: content`, the stylesheet sizes
+///    the box itself (see `_decree-bar.scss`) and this does nothing at all.
+/// 2. Otherwise the measure is coalesced onto the next animation frame, so a
+///    burst of typing costs one reflow rather than one per character.
+///
+/// **The reset-then-measure inside [`measure_and_set`] is not redundant, and
+/// cannot be skipped.** It looks like an obvious thing to guard with "only
+/// measure if the height would change". It is not, because `scroll_height` never
+/// reports less than the height already set. A box grown to 80px reports 80 even
+/// when its content now needs 20, so the guard reads as "nothing to do" in
+/// exactly the case that needs doing, and the composer grows with a long decree
+/// and never shrinks back after it is sent. Deciding it wants to be *shorter*
+/// requires the reset; there is no cheaper question to ask first. Deferring the
+/// reflow is the saving, not skipping it.
 pub(crate) fn autogrow(el: &web_sys::HtmlTextAreaElement) {
+    // The stylesheet is already doing this, without touching layout.
+    if css_sizes_fields() {
+        return;
+    }
+
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+
+        // One pass per frame per element. The flag lives on the element because
+        // that is what is being coalesced -- three composers can be on screen at
+        // once, and a pending measure for one must not swallow another's.
+        const PENDING: &str = "data-autogrow-pending";
+        if el.has_attribute(PENDING) {
+            return;
+        }
+        let Some(window) = web_sys::window() else {
+            // No window to schedule against: measure now rather than never.
+            measure_and_set(el);
+            return;
+        };
+        let _ = el.set_attribute(PENDING, "");
+
+        let deferred = el.clone();
+        let frame = Closure::once_into_js(move || {
+            let _ = deferred.remove_attribute(PENDING);
+            measure_and_set(&deferred);
+        });
+        if window
+            .request_animation_frame(frame.unchecked_ref())
+            .is_err()
+        {
+            // Scheduling failed, so nothing will clear the flag or size the box.
+            let _ = el.remove_attribute(PENDING);
+            measure_and_set(el);
+        }
+    }
+
+    // No frames to wait for off the browser, and no `Closure` to build one with.
+    #[cfg(not(feature = "hydrate"))]
+    measure_and_set(el);
+}
+
+/// Whether the browser sizes a textarea to its contents on its own.
+///
+/// Asked by setting the property and reading it back: a browser that does not
+/// know `field-sizing` discards the declaration and hands back an empty string.
+/// That avoids pulling in a web-sys feature for one question, and it asks the
+/// CSS engine the same thing `@supports` asks it in the stylesheet -- so the two
+/// cannot disagree about which path is live.
+///
+/// Cached, because the answer cannot change within a session and this sits on
+/// the keystroke path.
+fn css_sizes_fields() -> bool {
+    use std::cell::Cell;
+    thread_local! {
+        static SUPPORTED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    SUPPORTED.with(|cached| {
+        if let Some(known) = cached.get() {
+            return known;
+        }
+        let answer = probe_field_sizing();
+        cached.set(Some(answer));
+        answer
+    })
+}
+
+#[cfg(feature = "hydrate")]
+fn probe_field_sizing() -> bool {
+    use wasm_bindgen::JsCast;
+
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.create_element("textarea").ok())
+        .and_then(|probe| probe.dyn_into::<web_sys::HtmlElement>().ok())
+        .is_some_and(|probe| {
+            let style = web_sys::HtmlElement::style(&probe);
+            let _ = style.set_property("field-sizing", "content");
+            !style
+                .get_property_value("field-sizing")
+                .unwrap_or_default()
+                .is_empty()
+        })
+}
+
+/// There is no CSS engine on the server to ask, and nothing rendering to size.
+#[cfg(not(feature = "hydrate"))]
+fn probe_field_sizing() -> bool {
+    false
+}
+
+/// The measurement itself: reset, read, and set. Forces a reflow -- see
+/// [`autogrow`] for who is allowed to call it and how often.
+fn measure_and_set(el: &web_sys::HtmlTextAreaElement) {
     const MAX_PX: i32 = 160;
 
     // Fully qualified: leptos's own `style()` extension trait is in scope here

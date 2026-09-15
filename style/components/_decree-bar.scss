@@ -45,6 +45,25 @@
   resize: none;
   overflow-y: hidden;
 
+  // Sizing the box to its own contents, without JavaScript measuring it.
+  //
+  // The JS path (`autogrow`, `prompt_bar.rs`) has to write `height:auto` and
+  // then read `scroll_height`, and that read forces a synchronous reflow of the
+  // whole document. In a chamber with a long transcript that means laying out
+  // hundreds of entries on *every keystroke* — measured at ~50ms per key on a
+  // 426-entry log, against 0.5ms with the log detached. Where the browser can
+  // size the field itself, no measurement happens and the cost is gone.
+  //
+  // `field-sizing` is not yet everywhere, so `autogrow` remains the fallback and
+  // these two must agree: MAX_PX there is this `max-height`. Past the cap the
+  // box scrolls, which is what `overflow-y: auto` restores after the `hidden`
+  // above — it wins only when this rule applies at all.
+  @supports (field-sizing: content) {
+    field-sizing: content;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+
   // The composer sits against a darker fill than the opening screen's, where
   // the UA default placeholder is too dim to read.
   &::placeholder { color: t.$ink-faint; }
