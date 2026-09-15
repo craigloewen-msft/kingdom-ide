@@ -66,14 +66,33 @@ async fn main() {
         Err(e) => eprintln!("  Could not read .kingdom.env: {e}"),
     }
 
+    let conf = get_configuration(None).expect("failed to read Leptos configuration");
+    let leptos_options = conf.leptos_options;
+    let addr = leptos_options.site_addr;
+
+    // The first thing done after the address is known, because everything
+    // below either costs time, prints, or takes action: `opening_realm` reads
+    // a kingdom off disk and announces it, the model catalogue is a network
+    // round trip, and `start_housekeeping` *reclaims* the browser profiles it
+    // judges abandoned. A second server started against a port the first one
+    // already holds would do all of that -- including clearing the running
+    // server's browsers out from under it, and telling the reader it had
+    // reopened their work -- and only then discover it had nowhere to listen.
+    // Holding the socket first means the worst a doomed start can do is
+    // explain itself.
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("{}", bind_failure(&addr, &e));
+            std::process::exit(1);
+        }
+    };
+
     // Done before anything slow, so a misspelt realm is reported while the
     // reader is still looking at the startup lines. The line it produces is
     // held back to keep the banner in one block below.
     let realm = opening_realm();
 
-    let conf = get_configuration(None).expect("failed to read Leptos configuration");
-    let leptos_options = conf.leptos_options;
-    let addr = leptos_options.site_addr;
     let routes = generate_route_list(App);
 
     let app = Router::new()
@@ -151,15 +170,46 @@ async fn main() {
         println!("     Reclaimed {reclaimed} abandoned browser profile(s) from a previous run\n");
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("failed to bind");
     axum::serve(listener, app.into_make_service())
         .await
         .expect("server error");
 }
 
-/// Opens whatever the server should come up on: the named proving ground, or
+/// What to say when the server cannot take the address it was asked for.
+///
+/// `AddrInUse` earns its own wording because it is the one failure here that a
+/// reader causes by hand and can undo by hand: a Kingdom is already running,
+/// usually forgotten in another terminal. The `expect` this replaced rendered
+/// that as `Os { code: 98, kind: AddrInUse }` under a panic backtrace, which
+/// reads as a bug in the server rather than as a second copy of it -- the same
+/// confusion `terminal.rs` records from the other side, where a shell that
+/// fell through to the host network took `Address already in use` from the
+/// King's own server and left the King diagnosing the wrong machine. Naming
+/// the likely cause, and the command that confirms it, turns a crash report
+/// back into an instruction.
+///
+/// Every other kind is left to the operating system's own words. They are
+/// rare, they are various, and a guess dressed up as an explanation would be
+/// worse than the real message: a wrong `LEPTOS_SITE_ADDR` and a privileged
+/// port fail differently, and only the error itself knows which happened.
+#[cfg(feature = "ssr")]
+fn bind_failure(addr: &std::net::SocketAddr, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::AddrInUse {
+        return format!(
+            "\n  Kingdom IDE could not start: something already holds {addr}.\n\n  \
+             Almost always that is another Kingdom server, still running in a \
+             terminal you have lost track of. Ask who has it:\n\n      \
+             ss -tlnp 'sport = :{port}'\n\n  \
+             Stop that one and start this again, or point LEPTOS_SITE_ADDR at a \
+             free port to run both side by side.\n",
+            addr = addr,
+            port = addr.port(),
+        );
+    }
+
+    format!("\n  Kingdom IDE could not listen on {addr}: {error}\n")
+}
+
 /// failing that the kingdom the King last chose.
 ///
 /// The server otherwise comes up with no kingdom open, so every restart sends
@@ -214,4 +264,63 @@ fn opening_realm() -> Option<String> {
 #[cfg(not(feature = "ssr"))]
 fn main() {
     // The wasm target builds the library, not this binary.
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::bind_failure;
+
+    /// The failure a reader actually hits, reproduced the way they hit it.
+    ///
+    /// A real second bind against a really-held port, rather than a synthesised
+    /// `ErrorKind`: the point of the test is that the kind the operating system
+    /// reports for this situation is the kind the match arm looks for, and a
+    /// hand-made error would assert that agreement instead of checking it.
+    #[test]
+    fn a_port_someone_else_holds_names_the_port_and_what_to_run() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port to hold");
+        let addr = held.local_addr().expect("the port it settled on");
+
+        let error = std::net::TcpListener::bind(addr).expect_err("the second bind to be refused");
+        let said = bind_failure(&addr, &error);
+
+        assert!(
+            said.contains(&addr.to_string()),
+            "names the address: {said}"
+        );
+        assert!(
+            said.contains(&format!("sport = :{}", addr.port())),
+            "names a command that finds the holder: {said}"
+        );
+        assert!(
+            said.contains("LEPTOS_SITE_ADDR"),
+            "offers the other way out: {said}"
+        );
+        assert!(
+            !said.contains("AddrInUse"),
+            "and does not fall back to the debug form: {said}"
+        );
+    }
+
+    /// Anything else keeps the system's own words.
+    ///
+    /// A privileged port and a misspelt `LEPTOS_SITE_ADDR` both arrive here,
+    /// and they need different answers -- so this says what happened and gets
+    /// out of the way rather than guessing which one it was.
+    #[test]
+    fn any_other_failure_is_reported_in_the_systems_own_words() {
+        let addr: std::net::SocketAddr = "127.0.0.1:3000".parse().expect("a literal address");
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+
+        let said = bind_failure(&addr, &error);
+
+        assert!(
+            said.contains("permission denied"),
+            "keeps the cause: {said}"
+        );
+        assert!(
+            !said.contains("ss -tlnp"),
+            "and does not send the reader hunting a holder that does not exist: {said}"
+        );
+    }
 }
