@@ -222,6 +222,33 @@
   gap: 14px;
 }
 
+// The way further back through a long chamber. Sits at the top of the log,
+// where the older lines would have been, so a King scrolling up to read meets
+// it exactly where he stops.
+//
+// Quiet, like `.chat-note`: nobody said this, it is the log describing itself.
+.chamber-earlier {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px 0;
+
+  button {
+    background: none;
+    border: 1px solid var(--edge, rgba(255, 255, 255, 0.14));
+    border-radius: 999px;
+    color: var(--ink-quiet, rgba(255, 255, 255, 0.55));
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.82em;
+    padding: 3px 12px;
+
+    &:hover {
+      color: var(--ink, inherit);
+    }
+  }
+}
+
 // A standing proposal takes the column, so the log is not shrunk beside it --
 // it is removed from the flow. Left in the DOM rather than unmounted so the
 // scroll position, and everything already rendered, is still there when he
