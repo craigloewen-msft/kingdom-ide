@@ -63,7 +63,9 @@ crates/
                     and the folders the King allows in
     terminal.rs     The King's own shell, in a plan's workspace and its
                     network. One shell per plan, outliving any socket
-    artifact.rs     Serving a file a plan's work left behind
+    artifact.rs     Serving a file a plan's work left behind, from
+                    <workspace>/.kingdom/artifacts/ -- kept until the plan is
+                    merged or archived                       (ssr)
     profile.rs      The King's own ~/.kingdom                 (ssr)
     review.rs       What a plan changed against the default branch, and one
                     file's diff, read with git                (ssr)

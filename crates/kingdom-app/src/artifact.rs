@@ -182,6 +182,38 @@ mod tests {
         assert_eq!(body, A_REAL_PNG, "the bytes served must be the bytes saved");
     }
 
+    /// Both spellings of an artifact path are served, and that is deliberate.
+    ///
+    /// Pictures now live under `.kingdom/artifacts/` -- see
+    /// `tools::Sandbox::artifact_path` -- but this route has never cared where
+    /// in the workspace a file is, and a plan recorded before the move still
+    /// names one at the root. Nothing was migrated on purpose: the record is
+    /// the path, so a route that resolves whatever it is handed loses nothing,
+    /// and an upgrade that blanked a transcript's older pictures would be a
+    /// worse answer than doing nothing at all.
+    #[tokio::test]
+    async fn a_picture_is_served_wherever_the_record_says_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join(crate::tools::ARTIFACT_DIR);
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("browser-screenshot-1.png"), A_REAL_PNG).unwrap();
+        std::fs::write(
+            dir.path().join(".kingdom-browser-screenshot-1.png"),
+            A_REAL_PNG,
+        )
+        .unwrap();
+
+        for path in [
+            ".kingdom/artifacts/browser-screenshot-1.png",
+            ".kingdom-browser-screenshot-1.png",
+        ] {
+            let (status, media, body) = ask(dir.path(), path).await;
+            assert_eq!(status, StatusCode::OK, "{path} must still be servable");
+            assert_eq!(media, "image/png");
+            assert_eq!(body, A_REAL_PNG);
+        }
+    }
+
     /// The reason this module is written the way it is. A path from a browser
     /// is the one place an outsider names a file the server will open, so the
     /// boundary is asserted here as well as in `tools::Sandbox`.

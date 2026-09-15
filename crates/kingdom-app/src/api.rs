@@ -2554,6 +2554,11 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     }
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+    // Read before `finish` is consumed by the `update` below, so both the
+    // teardown above and the artifact sweep further down can ask the same
+    // question of the same answer.
+    let settled = matches!(finish, Finish::Settled(_));
+
     // Only once the work has actually landed. A refused merge leaves the plan
     // in play, and killing the model's dev server under a plan the user is
     // about to retry would take away the thing he needs to see to fix it.
@@ -2561,7 +2566,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // The browser goes with it, for the same reason and on the same terms: a
     // settled plan's Chrome is holding nine processes and most of a gigabyte on
     // behalf of work that is over.
-    if matches!(finish, Finish::Settled(_)) {
+    if settled {
         crate::tools::tmux::dismiss(&plan_id).await;
         crate::tools::browser::dismiss(&plan_id).await;
     }
@@ -2622,6 +2627,20 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // is a far better outcome than a plan deleted twice over.
     if filed {
         crate::tools::propose_plan::discard_draft(&workspace);
+    }
+
+    // The pictures the court took go here, and *only* here. They are kept for
+    // the whole life of the plan precisely so the King can still look at them
+    // after the work is done -- the one thing that ends them is the plan itself
+    // ending. Guarded on `Settled` for the same reason the browser and the tmux
+    // server are: a merge git refused leaves the plan in play, and taking away
+    // what he is reading while he decides what to do about the conflict would
+    // be the worst possible moment for it.
+    //
+    // A worktree is already gone by now, so this is really about a plan working
+    // in place. See `tools::discard_artifacts`.
+    if settled {
+        crate::tools::discard_artifacts(&workspace);
     }
 
     // Now that the plan is settled -- and only now -- the wells are reconciled

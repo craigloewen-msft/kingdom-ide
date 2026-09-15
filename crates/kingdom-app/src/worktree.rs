@@ -46,6 +46,14 @@ pub async fn prepare(
     slug: &str,
 ) -> Result<Workspace, WorktreeError> {
     if let WorkspaceMode::InPlace = mode {
+        // No worktree to cut, but the workspace still gets a `.kingdom/` of its
+        // own -- the artifacts a browser tool leaves for the King live there
+        // (`tools::ARTIFACT_DIR`). In place, that directory is inside the
+        // *user's own* project folder, so without this his `git status` sprouts
+        // untracked files nobody asked for and `git add -A` would commit a
+        // screenshot into his history. Same rule, same file, same best-effort
+        // terms as the isolated path below.
+        exclude_worktree_dir(city_root);
         return Ok(Workspace::in_place(city_root.to_string_lossy()));
     }
 
@@ -456,6 +464,15 @@ pub async fn branches(city_root: &Path) -> Vec<String> {
 /// just shows Kingdom's scratch folder as untracked. That is cosmetic, and not a
 /// reason to refuse the user a workspace.
 fn exclude_worktree_dir(city_root: &Path) {
+    // A folder that is not a repository has nothing to exclude from, and
+    // writing would leave a stray `.git/info/` in somebody's directory. In
+    // place, that folder is the user's own, and it may well not be a repo --
+    // the isolated path refuses such a city before reaching here, the in-place
+    // path does not.
+    if !city_root.join(".git").exists() {
+        return;
+    }
+
     let contents = format!("{WORKTREE_DIR}/*");
     let keep = format!("!{}", kingdom_core::services::MANIFEST_PATH);
     let exclude = city_root.join(".git").join("info").join("exclude");
@@ -629,6 +646,52 @@ mod tests {
             "",
             "cutting worktrees must leave the city clean"
         );
+    }
+
+    /// The pictures the court takes must be invisible to git, in every mode.
+    ///
+    /// This is the load-bearing half of keeping a screenshot until the King has
+    /// finished with it. A file git reports as untracked sits in the middle of
+    /// the plan's own `git status`, and the court cleared exactly such files
+    /// away mid-plan -- measured, in four real plans. Worse, `commit_pending`
+    /// runs `git add -A` before merging, so anything left would land in the
+    /// user's history.
+    ///
+    /// Asserted through git itself rather than by reading `info/exclude`,
+    /// because what matters is git's answer, not the rule's spelling. Both
+    /// modes, because in place the directory is in the user's own folder --
+    /// which is precisely where an untracked file is least welcome.
+    #[tokio::test]
+    async fn a_plans_pictures_are_invisible_to_git_in_every_mode() {
+        let dir = repo().await;
+        let root = dir.path();
+
+        for mode in [WorkspaceMode::Fresh, WorkspaceMode::InPlace] {
+            let workspace = prepare(root, &mode, "look-at-the-sidebar").await.unwrap();
+            let workspace_root = PathBuf::from(&workspace.path);
+
+            let shots = workspace_root.join(crate::tools::ARTIFACT_DIR);
+            std::fs::create_dir_all(&shots).unwrap();
+            std::fs::write(shots.join("browser-screenshot-1.png"), "pretend").unwrap();
+
+            assert_eq!(
+                git(&workspace_root, &["status", "--porcelain"])
+                    .await
+                    .unwrap()
+                    .trim(),
+                "",
+                "{mode:?}: a picture git can see is a picture the court deletes"
+            );
+
+            // And the consequence that would outlive the plan: the commit both
+            // endings make must not carry it.
+            assert!(
+                !commit_pending(&workspace_root, "Kingdom: work in progress")
+                    .await
+                    .unwrap(),
+                "{mode:?}: there must be nothing to commit, so nothing to land"
+            );
+        }
     }
 
     /// The user asked to be fenced in. Quietly handing him the live folder
