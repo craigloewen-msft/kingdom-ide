@@ -162,6 +162,17 @@ pub struct RunningService {
     pub scope: ServiceScope,
     /// The registry key it is filed under: `host`, or the city's key.
     pub key: String,
+    /// Whether Kingdom is what put this here.
+    ///
+    /// False for a resource the King raised himself, which Kingdom found by
+    /// probing the address the declaration says it would be at -- the case on a
+    /// machine where reaching the daemon needs `sudo`, which Kingdom cannot
+    /// supply.
+    ///
+    /// It gates exactly one thing: [`stop`]. Something this process did not
+    /// start is not its to take away, which is the same judgement the sweep
+    /// already makes about a container standing that no live agent needs.
+    pub ours: bool,
 }
 
 impl RunningService {
@@ -638,6 +649,14 @@ pub async fn reconcile(agents: Vec<(PlanId, PathBuf)>) {
 /// function: a resource that is already gone, or a daemon that has since
 /// stopped answering, are both "it is not running", which is what was wanted.
 async fn stop(service: &RunningService) {
+    // Not ours to stop. Kingdom never started it -- the King did, because his
+    // daemon needs a password Kingdom cannot give -- and stopping it would be
+    // this process taking away something it did not put there. The `docker
+    // stop` would fail for the same permission reason anyway; refusing here
+    // makes it a decision rather than a swallowed error.
+    if !service.ours {
+        return;
+    }
     match service.kind {
         "docker" => docker::stop(service).await,
         // Not reachable while there is one kind, and deliberately not a panic:
@@ -898,13 +917,14 @@ pub async fn inventory(kingdom: &Kingdom) -> ResourceInventory {
 
     for (scope, city, shown_path, manifest) in &declared {
         let key = scope.key();
-        for spec in &manifest.services {
+        for (index, spec) in manifest.services.iter().enumerate() {
             out.resources.push(describe(
                 kingdom,
                 scope,
                 &key,
                 *city,
                 shown_path,
+                index,
                 spec,
                 out.runtime_trouble.is_some(),
             ));
@@ -950,6 +970,8 @@ fn describe(
     key: &str,
     city: Option<&kingdom_core::City>,
     manifest_path: &str,
+    // Its position in the manifest, which is where its address comes from.
+    index: usize,
     spec: &ServiceSpec,
     runtime_is_out: bool,
 ) -> SharedResource {
@@ -989,11 +1011,11 @@ fn describe(
     // Derived rather than allocated, so both are known even for a resource that
     // has never run -- which is what makes `docker logs <name>` printable on a
     // row that is not up.
-    let (handle, hint) = match &spec.kind {
+    let (handle, hint, by_hand) = match &spec.kind {
         ResourceKind::Docker(_) => {
             let handle = docker::container_name(key, &spec.name);
             let hint = docker::log_hint(&handle);
-            (handle, hint)
+            (handle, hint, docker::by_hand(key, index, spec))
         }
     };
 
@@ -1010,6 +1032,7 @@ fn describe(
         address: running.as_ref().map(RunningService::address),
         handle,
         hint,
+        by_hand,
         users,
     }
 }
@@ -1681,6 +1704,8 @@ pub(crate) fn pretend_a_named_well_is_running(
         kind: "docker",
         scope: ServiceScope::City,
         key: key.clone(),
+        // A fixture standing in for a well Kingdom raised itself.
+        ours: true,
     };
     registry()
         .running
@@ -2168,6 +2193,8 @@ mod tests {
                     kind: "docker",
                     scope: ServiceScope::City,
                     key: city.clone(),
+                    // A fixture standing in for a well Kingdom raised itself.
+                    ours: true,
                 },
             );
             registry
@@ -2364,6 +2391,8 @@ mod tests {
                     kind: "docker",
                     scope: ServiceScope::City,
                     key: key.clone(),
+                    // A fixture standing in for a well Kingdom raised itself.
+                    ours: true,
                 },
             );
             registry
@@ -2714,6 +2743,8 @@ mod tests {
                         kind: "docker",
                         scope,
                         key: filed_under,
+                        // A fixture standing in for a well Kingdom raised itself.
+                        ours: true,
                     },
                 );
             }

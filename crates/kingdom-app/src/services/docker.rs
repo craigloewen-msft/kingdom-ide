@@ -98,6 +98,24 @@ pub(super) async fn raise(scope: &Scope, key: &str, specs: &[(usize, &ServiceSpe
     let network = network_name(key);
     let subnet = match ensure_network(&network).await {
         Ok(subnet) => subnet,
+        // The daemon is not answering *this process*. Before giving up, look
+        // for what the King may have raised himself: on a machine where Docker
+        // needs `sudo`, running the commands the screen prints is the only way
+        // a well can exist at all, and refusing here would mean Kingdom could
+        // never see one. See `stand_by_hand`.
+        Err(e @ ServiceError::Unavailable(_)) => {
+            let standing = stand_by_hand(scope, key, specs).await;
+            if standing.is_empty() {
+                return Raised::failed(e);
+            }
+            // Reported only if some are still missing: a scope where every
+            // declared well answered is working, however it got that way.
+            let failure = (standing.len() < specs.len()).then_some(e);
+            return Raised {
+                up: standing,
+                failure,
+            };
+        }
         // Nothing is up, and nothing can be: no container was started, so there
         // is nothing for the caller to record.
         Err(e) => return Raised::failed(e),
@@ -158,7 +176,23 @@ pub(super) async fn trouble() -> Option<String> {
     }
     match docker(&["version", "--format", "{{.Server.Version}}"]).await {
         Ok(_) => None,
-        Err(e) => Some(unavailable_unreachable(&e).to_string()),
+        Err(e) => Some(diagnose(&e).to_string()),
+    }
+}
+
+/// Which of the two ways a present-but-unusable Docker fails this is.
+///
+/// Split apart because the two have **opposite** remedies and the same
+/// symptom. A daemon that is down is started; a daemon that is up and refusing
+/// this user is a permissions decision, and starting it again does nothing.
+/// Telling a King with a running daemon to `systemctl start docker` sends him
+/// to a command that reports success and changes none of what he is looking
+/// at.
+fn diagnose(detail: &str) -> ServiceError {
+    if detail.to_lowercase().contains("permission denied") {
+        unavailable_forbidden(detail)
+    } else {
+        unavailable_unreachable(detail)
     }
 }
 
@@ -176,7 +210,25 @@ fn unavailable_missing() -> ServiceError {
     ))
 }
 
-/// Docker is installed and not answering.
+/// Docker is installed, running, and refusing this user.
+///
+/// The remedy is a decision rather than a command, so this names the two ways
+/// out instead of picking one. Joining `docker` is the usual answer and is
+/// worth saying plainly: that group is root-equivalent, because anything that
+/// can start a container can mount the host's file system into it. A King who
+/// would rather not grant that has a real alternative, and one sentence here
+/// saves him finding out what he agreed to afterwards.
+fn unavailable_forbidden(detail: &str) -> ServiceError {
+    ServiceError::Unavailable(format!(
+        "Docker is running but will not let this user reach it ({detail}). \
+         Add your user to the `docker` group and log in again -- noting that \
+         the group is equivalent to root on this machine -- or run a rootless \
+         Docker of your own and point `DOCKER_HOST` at it. Kingdom runs the \
+         `docker` command as itself and cannot ask for a password."
+    ))
+}
+
+/// Docker is installed and not answering at all.
 fn unavailable_unreachable(detail: &str) -> ServiceError {
     ServiceError::Unavailable(format!(
         "Docker is installed but not answering ({detail}). It is usually the \
@@ -349,6 +401,9 @@ async fn ensure_one(
         kind: spec.kind.wire_name(),
         scope: scope.kind(),
         key: key.to_string(),
+        // Kingdom is talking to the daemon on this path, so whatever the state
+        // turns out to be, this well is one it can stop again.
+        ours: true,
     };
 
     match container_state(&container).await {
@@ -374,15 +429,125 @@ async fn ensure_one(
         ContainerState::Absent => {}
     }
 
+    let args: Vec<String> = run_argv(&container, network, &host, key, spec, docker_spec);
+
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    docker(&argv).await.map_err(|detail| ServiceError::Failed {
+        name: spec.name.clone(),
+        detail,
+    })?;
+
+    wait_until_ready(&service).await?;
+    Ok(service)
+}
+
+/// Finds wells the King raised himself, when Kingdom cannot ask the daemon.
+///
+/// # Why this exists
+///
+/// Kingdom runs `docker` as itself and cannot answer a password prompt, so on a
+/// machine where the socket is reachable only through `sudo` -- the King
+/// deliberately out of the root-equivalent `docker` group -- it can neither
+/// start a well nor *inspect* one. Without this, running the commands the
+/// screen prints would achieve nothing: the container would stand there while
+/// Kingdom, unable to see it, went on refusing to start an agent over a
+/// database that was in fact up.
+///
+/// # Why a TCP connect is enough
+///
+/// It is the same question every client asks, and it is true exactly when a
+/// plan handed the address would succeed -- the identical test
+/// [`wait_until_ready`] already trusts for a container Kingdom started itself.
+/// The address probed is the one [`by_hand`] prints, which is the *preferred*
+/// subnet: the King creating the network from those commands creates the
+/// network they name, so the two cannot disagree.
+///
+/// Something else answering there would have to be inside `172.31.0.0/16`, on
+/// the exact host this scope's hash chose, on the declared port. Against that
+/// unlikelihood stands the alternative, which is a King who has done everything
+/// right being told his database is not running.
+///
+/// What is found is recorded with `ours: false`, so the sweep will never stop
+/// it. See [`RunningService::ours`].
+async fn stand_by_hand(
+    scope: &Scope,
+    key: &str,
+    specs: &[(usize, &ServiceSpec)],
+) -> Vec<RunningService> {
+    let mut up = Vec::new();
+    for (index, spec) in specs {
+        let service = hand_raised(scope, key, *index, spec);
+        if answering(&service.address()).await {
+            up.push(service);
+        }
+    }
+    up
+}
+
+/// What a well the King raised himself would be, if it is there.
+///
+/// Pure, and separate from the probe, so the thing that matters can be tested
+/// without a daemon or a socket: that this describes the resource at the very
+/// address [`by_hand`] told him to create, and that it is marked not Kingdom's
+/// to stop.
+fn hand_raised(scope: &Scope, key: &str, index: usize, spec: &ServiceSpec) -> RunningService {
+    let ResourceKind::Docker(docker_spec) = &spec.kind;
+    let subnet = preferred_subnet(&network_name(key));
+
+    RunningService {
+        name: spec.name.clone(),
+        what: docker_spec.what(),
+        host: service_address(subnet, index),
+        port: spec.port,
+        handle: container_name(key, &spec.name),
+        kind: spec.kind.wire_name(),
+        scope: scope.kind(),
+        key: key.to_string(),
+        // Kingdom did not put this here and will not take it away.
+        ours: false,
+    }
+}
+
+/// Whether anything is listening at `host:port` right now.
+///
+/// One attempt, not a wait: this asks whether a well is *already* standing, and
+/// a King who has not raised one should not be made to wait out a timeout on
+/// every reconcile.
+async fn answering(address: &str) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// The full `docker run` for one service, as an argv.
+///
+/// Extracted so that [`ensure_one`] and [`by_hand`] cannot disagree. The King
+/// is shown the command Kingdom would itself run, character for character,
+/// because a printed command that has drifted from the real one is worse than
+/// no printed command: he runs it, gets a container on the wrong address or
+/// without the password its image needs, and the failure looks like Kingdom's.
+fn run_argv(
+    container: &str,
+    network: &str,
+    host: &str,
+    key: &str,
+    spec: &ServiceSpec,
+    docker_spec: &kingdom_core::services::DockerSpec,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
         "--detach".into(),
         "--name".into(),
-        container.clone(),
+        container.into(),
         "--network".into(),
         network.into(),
         "--ip".into(),
-        host.clone(),
+        host.into(),
         "--label".into(),
         format!("{LABEL_CITY}={key}"),
         "--label".into(),
@@ -407,15 +572,74 @@ async fn ensure_one(
         }
     }
     args.push(docker_spec.image.clone());
+    args
+}
 
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    docker(&argv).await.map_err(|detail| ServiceError::Failed {
-        name: spec.name.clone(),
-        detail,
-    })?;
+/// The commands that raise this one service by hand, in order.
+///
+/// # Why the screen prints these at all
+///
+/// Kingdom runs `docker` as itself and cannot ask for a password, so on a
+/// machine where reaching the daemon needs `sudo` -- the King deliberately not
+/// in the `docker` group, because that group is root-equivalent -- Kingdom
+/// cannot raise a well at all. The alternative to printing these is a King
+/// reverse-engineering the container name, the `/24` and the boot environment
+/// out of the source, which is a thing he should never have to read.
+///
+/// These describe the resource **from nothing**: create the network, then run
+/// the container. Once a container exists, `docker start <handle>` is the whole
+/// of it, which is what [`log_hint`]'s neighbour on the screen says.
+///
+/// The subnet is the *preferred* one, which is the right answer precisely
+/// because nothing is standing yet: [`ensure_network`] only settles on a
+/// different `/24` when this one is taken, and a King running these by hand is
+/// creating the network these commands name.
+pub(super) fn by_hand(key: &str, index: usize, spec: &ServiceSpec) -> Vec<String> {
+    let ResourceKind::Docker(docker_spec) = &spec.kind;
 
-    wait_until_ready(&service).await?;
-    Ok(service)
+    let network = network_name(key);
+    let subnet = preferred_subnet(&network);
+    let (a, b) = SUBNET_PREFIX;
+    let host = service_address(subnet, index);
+    let container = container_name(key, &spec.name);
+
+    let create = vec![
+        "network".to_string(),
+        "create".to_string(),
+        "--subnet".to_string(),
+        format!("{a}.{b}.{subnet}.0/24"),
+        network.clone(),
+    ];
+    let run = run_argv(&container, &network, &host, key, spec, docker_spec);
+
+    [create, run]
+        .iter()
+        .map(|argv| command_line(argv))
+        .collect()
+}
+
+/// One argv as a line the King can paste into a shell.
+///
+/// Quoted only where a value would otherwise be re-split or interpreted --
+/// `docker run --name kingdom-x-db` reads as itself, and quoting every argument
+/// of it would make a command he has to decipher rather than recognise.
+fn command_line(argv: &[String]) -> String {
+    let mut out = String::from("docker");
+    for arg in argv {
+        out.push(' ');
+        let safe = !arg.is_empty()
+            && arg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+        if safe {
+            out.push_str(arg);
+        } else {
+            out.push('\'');
+            out.push_str(&arg.replace('\'', r"'\''"));
+            out.push('\'');
+        }
+    }
+    out
 }
 
 /// Whether a container exists, and whether it is running.
@@ -480,6 +704,194 @@ async fn wait_until_ready(service: &RunningService) -> Result<(), ServiceError> 
 mod tests {
     use super::*;
     use crate::services::city_key;
+
+    /// The message a King with a running daemon and no group membership gets.
+    ///
+    /// The real stderr from Docker 24 and 27, both phrasings. Told to join a
+    /// group or run rootless, and **not** told to start a daemon that is
+    /// already up -- the command that reports success and changes nothing.
+    #[test]
+    fn a_refused_socket_is_not_diagnosed_as_a_stopped_daemon() {
+        for detail in [
+            "permission denied while trying to connect to the docker API at \
+             unix:///var/run/docker.sock",
+            "Got permission denied while trying to connect to the Docker \
+             daemon socket at unix:///var/run/docker.sock: Get \
+             \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/version\": dial unix \
+             /var/run/docker.sock: connect: permission denied",
+        ] {
+            let said = diagnose(detail).to_string();
+            assert!(
+                !said.contains("systemctl start docker"),
+                "told to start a daemon that is already running: {said}"
+            );
+            assert!(
+                said.contains("docker` group") && said.contains("DOCKER_HOST"),
+                "does not name either way out: {said}"
+            );
+        }
+    }
+
+    /// A daemon that is genuinely down still gets the command that fixes it.
+    #[test]
+    fn a_stopped_daemon_is_still_diagnosed_as_one() {
+        let detail = "Cannot connect to the Docker daemon at \
+                      unix:///var/run/docker.sock. Is the docker daemon running?";
+        let said = diagnose(detail).to_string();
+        assert!(
+            said.contains("systemctl start docker"),
+            "does not say how to start it: {said}"
+        );
+    }
+
+    /// What the screen prints for a King who must raise a well himself.
+    ///
+    /// Pinned against the real shape of a Postgres declaration, because these
+    /// are commands he will paste: the network must come first and carry the
+    /// `/24` the container's `--ip` is inside, and the boot environment must be
+    /// there or the container exits 1 and the failure looks like Kingdom's.
+    #[test]
+    fn the_commands_shown_are_the_commands_kingdom_would_run() {
+        let spec = ServiceSpec {
+            name: "db".into(),
+            port: 5432,
+            kind: ResourceKind::Docker(kingdom_core::services::DockerSpec {
+                image: "postgres:16".into(),
+                volume: Some("mommys-heart-db".into()),
+            }),
+        };
+        let key = city_key(Path::new("/home/king/mommys-heart"));
+        let shown = by_hand(&key, 0, &spec);
+
+        assert_eq!(shown.len(), 2, "network then container: {shown:?}");
+
+        let network = network_name(&key);
+        let subnet = preferred_subnet(&network);
+        let (a, b) = SUBNET_PREFIX;
+        assert_eq!(
+            shown[0],
+            format!("docker network create --subnet {a}.{b}.{subnet}.0/24 {network}")
+        );
+
+        // The address the container is given must be inside the network just
+        // created, or Docker refuses the run.
+        let run = &shown[1];
+        assert!(
+            run.contains(&format!("--ip {a}.{b}.{subnet}.10")),
+            "address is outside the subnet above: {run}"
+        );
+        assert!(run.contains("--env POSTGRES_PASSWORD=postgres"), "{run}");
+        assert!(
+            run.contains(&format!(
+                "--volume mommys-heart-db:{}",
+                data_dir_for("postgres:16")
+            )),
+            "{run}"
+        );
+        assert!(
+            run.contains(&format!("--name {}", container_name(&key, "db"))),
+            "{run}"
+        );
+        assert!(run.ends_with(" postgres:16"), "image comes last: {run}");
+        // The same promise the raise makes: nothing on the King's loopback.
+        assert!(!run.contains("-p "), "{run}");
+    }
+
+    /// The printed command and the run command are one list, not two.
+    ///
+    /// The failure this forbids is silent: a flag added to `ensure_one` alone
+    /// leaves the King pasting a command that builds a subtly different
+    /// container, and the divergence surfaces as a bug in his project.
+    #[test]
+    fn what_is_shown_cannot_drift_from_what_is_run() {
+        let spec = ServiceSpec {
+            name: "cache".into(),
+            port: 6379,
+            kind: ResourceKind::Docker(kingdom_core::services::DockerSpec {
+                image: "redis:7".into(),
+                volume: None,
+            }),
+        };
+        let ResourceKind::Docker(docker_spec) = &spec.kind;
+        let key = "host";
+        let network = network_name(key);
+        let subnet = preferred_subnet(&network);
+        let host = service_address(subnet, 1);
+        let container = container_name(key, &spec.name);
+
+        let run = run_argv(&container, &network, &host, key, &spec, docker_spec);
+        assert_eq!(
+            by_hand(key, 1, &spec)[1],
+            command_line(&run),
+            "the screen and the daemon were handed different arguments"
+        );
+    }
+
+    /// A value a shell would mangle is quoted; an ordinary one is left alone.
+    #[test]
+    fn a_shown_command_is_quoted_only_where_it_must_be() {
+        assert_eq!(
+            command_line(&["run".into(), "--name".into(), "kingdom-x-db".into()]),
+            "docker run --name kingdom-x-db"
+        );
+        assert_eq!(
+            command_line(&["--env".into(), "PASSWORD=a b".into()]),
+            "docker --env 'PASSWORD=a b'"
+        );
+    }
+
+    /// A well the King raised himself is looked for exactly where he was told
+    /// to put it.
+    ///
+    /// The two halves of this feature are only useful together: the screen
+    /// prints an address, and this is what goes looking at it. If they ever
+    /// disagreed, a King who followed the instructions to the letter would
+    /// still be told his database was not running.
+    #[test]
+    fn a_hand_raised_well_is_sought_at_the_address_the_screen_printed() {
+        let spec = ServiceSpec {
+            name: "db".into(),
+            port: 5432,
+            kind: ResourceKind::Docker(kingdom_core::services::DockerSpec {
+                image: "postgres:16".into(),
+                volume: Some("mommys-heart-db".into()),
+            }),
+        };
+        let key = city_key(Path::new("/home/king/mommys-heart"));
+        let scope = Scope::Host;
+
+        let found = hand_raised(&scope, &key, 0, &spec);
+        let printed = by_hand(&key, 0, &spec);
+
+        assert!(
+            printed[1].contains(&format!("--ip {}", found.host)),
+            "looked for at {}, told to create at: {}",
+            found.host,
+            printed[1]
+        );
+        assert_eq!(found.address(), format!("{}:5432", found.host));
+        assert_eq!(found.handle, container_name(&key, "db"));
+        assert!(
+            !found.ours,
+            "Kingdom did not raise this and must never stop it"
+        );
+    }
+
+    /// The probe answers the question a plan would ask, and nothing more.
+    #[tokio::test]
+    async fn only_something_actually_listening_counts_as_standing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let live = listener.local_addr().unwrap().to_string();
+        assert!(answering(&live).await, "{live} is bound and listening");
+
+        // Port 1 needs root to bind, so no other test in this suite can take
+        // it while this one runs -- which a port merely released back to the
+        // ephemeral range cannot promise, and did not.
+        let dead = "127.0.0.1:1";
+        assert!(!answering(dead).await, "{dead} has nothing on it");
+    }
 
     /// A path with spaces or dots still yields a name Docker will take.
     #[test]

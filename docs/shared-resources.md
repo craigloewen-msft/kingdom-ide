@@ -323,7 +323,7 @@ work is merged.
 
 | What you see | What it means |
 |---|---|
-| An orange banner across the screen | The runtime a declared resource needs is missing, or not answering — for Docker, try `sudo systemctl start docker`. Asked only of the kinds something actually declares, so a machine that shares nothing never sees it. |
+| An orange banner across the screen | The runtime a declared resource needs is missing, or not answering. For Docker that is usually the daemon being down (`sudo systemctl start docker`) — but if the socket refuses *this user*, the banner says so instead, and names the two ways out rather than sending you to a command that would report success and change nothing. Asked only of the kinds something actually declares, so a machine that shares nothing never sees it. |
 | A yellow row with a file path | That manifest does not parse — bad TOML, a duplicate name, or a `type` naming a kind Kingdom does not have. The message says why and which file. **Nothing else in that file works either** until it is fixed. |
 | `not started` | Ordinary. Nothing needs it — a project with no live agent open. |
 | `unknown` | It is declared, but with no daemon answering Kingdom cannot tell. |
@@ -336,6 +336,40 @@ database it was told about fails in a way that reads as a bug in its own code.
 docker ps --filter label=kingdom.city        # everything Kingdom has standing
 docker logs kingdom-host-cache               # why one will not start
 ```
+
+### When Kingdom may not reach Docker at all
+
+Kingdom runs `docker` as itself and **cannot answer a password prompt**. So on a
+machine where reaching the daemon needs `sudo` — most often because you have
+deliberately kept out of the `docker` group, which is root-equivalent, since
+anything that can start a container can mount `/` into it — Kingdom cannot raise
+a well, and a project that declares one refuses to start an agent.
+
+The detail pane for a resource that is down therefore prints **the commands
+Kingdom would itself have run**, in order: create the network, then run the
+container. Prefix each with `sudo`. They are generated from the same argv the
+daemon is handed (`docker::run_argv`), so the printed command and the real one
+cannot drift — a test asserts it.
+
+Nothing else is needed afterwards. Kingdom cannot ask the daemon whether the
+container exists, so it **probes the address instead** — the same TCP connect it
+already trusts for a container it started itself, at exactly the address the
+printed commands told you to create. Anything answering there is adopted into
+the ledger, reference-counted, and relayed onto each plan's `localhost` as
+usual. On later occasions `docker start <handle>` is the whole of it.
+
+A well found this way is recorded as **not Kingdom's** (`RunningService::ours`),
+and the sweep will never stop it: a process that did not start something has no
+business taking it away, and the `docker stop` would fail on the same permission
+anyway.
+
+Two alternatives, if you would rather Kingdom did it itself:
+
+- **Join the `docker` group.** The usual answer, and worth being clear that it
+  is equivalent to root on that machine.
+- **Run a rootless Docker** and point `DOCKER_HOST` at it. Untested against
+  Kingdom's addressing, which relies on `docker network create --subnet`
+  installing a host route so a relay can reach the container.
 
 ## What this is not
 
@@ -358,7 +392,7 @@ needs no daemon, and almost every project declares nothing.
 | `crates/kingdom-core/src/services/mod.rs` | The manifest, its validation, the scopes, `ResourceKind`, and rendering a block back out. Pure and wasm-safe, so all of it is tested without a disk or a daemon. |
 | `crates/kingdom-core/src/services/docker.rs` | What a container *is*: `DockerSpec`, and the table of well-known images. |
 | `crates/kingdom-core/src/services/mounts.rs` | Folders a sealed plan may see. Shares the file with the services because both answer "what does this project need in order to run?", while reaching no runtime at all. |
-| `crates/kingdom-app/src/services/mod.rs` | The registry, the reference count, `reconcile`, the ledger, and the writer. Everything that is about *sharing*. |
-| `crates/kingdom-app/src/services/docker.rs` | The conversation with the daemon: `docker run`, the network per scope, the `/24`, the wait for a port. Also the tests that need a real daemon. |
+| `crates/kingdom-app/src/services/mod.rs` | The registry, the reference count, `reconcile`, the ledger, and the writer. Everything that is about *sharing* — including `stop`, which leaves alone anything Kingdom did not raise. |
+| `crates/kingdom-app/src/services/docker.rs` | The conversation with the daemon: `docker run`, the network per scope, the `/24`, the wait for a port, and the commands printed for a King who must raise one by hand. Also the tests that need a real daemon. |
 | `crates/kingdom-app/src/components/wells.rs` | The screen. |
 | `crates/kingdom-app/src/components/ports_badge.rs` | The badge in a chamber. |

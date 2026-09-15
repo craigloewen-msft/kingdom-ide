@@ -712,6 +712,20 @@ pub struct SharedResource {
     /// the browser, which is a Docker command composed by a component that
     /// cannot run one and would be wrong for any other kind.
     pub hint: String,
+    /// The commands that raise this resource by hand, in order.
+    ///
+    /// For the King whose daemon Kingdom cannot reach -- most often because he
+    /// has deliberately kept himself out of the root-equivalent `docker` group
+    /// and reaches Docker only through `sudo`, which Kingdom has no way to
+    /// answer. Kingdom cannot raise the resource for him, but it knows exactly
+    /// what raising it *is*, and printing that is the difference between a
+    /// screen that only says "not started" and a two-line instruction.
+    ///
+    /// Written by the runtime, for [`Self::hint`]'s reason: a container's argv
+    /// is Docker's business, and a second kind would print something else
+    /// entirely. Empty for a kind with nothing to say.
+    #[serde(default)]
+    pub by_hand: Vec<String>,
     /// The titles of the plans drawing from it right now.
     ///
     /// Titles rather than ids: "who else is in here?" is a question about
@@ -1150,6 +1164,7 @@ mod tests {
             address: None,
             handle: "kingdom-host-db".to_string(),
             hint: "docker logs kingdom-host-db".to_string(),
+            by_hand: Vec::new(),
             users: Vec::new(),
         };
 

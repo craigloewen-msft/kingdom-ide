@@ -4,6 +4,10 @@
 //! server; built for `wasm32` with the `hydrate` feature it is the browser
 //! bundle. The `#[server]` functions in [`api`] span both.
 
+// `prompt_bar`'s deeply nested `view!` trees push the type-level recursion
+// used by Leptos/tachys past the compiler's default depth limit.
+#![recursion_limit = "256"]
+
 pub mod api;
 pub mod app;
 pub mod components;

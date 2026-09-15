@@ -446,6 +446,40 @@
   color: t.$ink-faint;
   font-size: 11px;
   line-height: 1.5;
+
+  code {
+    color: t.$ink-dim;
+    font-family: t.$font-mono;
+  }
+}
+
+// Commands the King raises a well with himself, when Kingdom cannot reach the
+// daemon. Numbered because the order is load-bearing -- the network has to
+// exist before a container can be given an address inside it -- and
+// `user-select: all` because every one of them is here to be copied.
+.well-commands {
+  max-width: 66ch;
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: t.$ink-dim;
+  font-size: 11px;
+  line-height: 1.6;
+
+  li {
+    margin: 0 0 6px;
+  }
+
+  code {
+    display: block;
+    overflow-x: auto;
+    padding: 6px 8px;
+    border-radius: 3px;
+    background: t.$deep;
+    color: t.$gold;
+    font-family: t.$font-mono;
+    white-space: pre;
+    user-select: all;
+  }
 }
 
 // What the King will get, said while he is still typing. The counterpart of

@@ -374,6 +374,7 @@ fn Detail(resource: SharedResource) -> impl IntoView {
         address,
         handle,
         hint,
+        by_hand,
         users,
         city_name,
         ..
@@ -385,6 +386,10 @@ fn Detail(resource: SharedResource) -> impl IntoView {
     // the resource, which is the entire point of relaying it onto the plan's
     // loopback.
     let local = format!("localhost:{}", spec.port);
+    // Read before the view takes ownership of the list itself.
+    let has_by_hand = !by_hand.is_empty();
+    // `docker start <name>`, for the visit after the first.
+    let start_again = format!("docker start {handle}");
     // What this kind of thing is called, and the rows only it has. Asked of the
     // kind rather than reached for, so this screen has no opinion about what a
     // container is -- see `ResourceKind::facts`.
@@ -506,6 +511,37 @@ fn Detail(resource: SharedResource) -> impl IntoView {
                  next time the service starts \u{2014} not the moment it is saved, and \
                  not for a container that is already up."
             </p>
+
+            // For the King whose daemon Kingdom cannot reach. Shown only while
+            // the resource is down, because a running one has already been
+            // raised and pasting these at it would fail on the name.
+            <Show when=move || !running && has_by_hand>
+                <p class="well-section">"Or raise it yourself"</p>
+                <p class="well-note">
+                    "Kingdom runs "<code>"docker"</code>" as itself and cannot answer a \
+                     password prompt, so on a machine where the daemon needs "
+                    <code>"sudo"</code>" it cannot raise this for you. These are exactly \
+                     the commands it would have run. Prefix each with "<code>"sudo"</code>
+                    " if you need to."
+                </p>
+                <ol class="well-commands">
+                    <For
+                        each={
+                            let by_hand = by_hand.clone();
+                            move || by_hand.clone().into_iter().enumerate().collect::<Vec<_>>()
+                        }
+                        key=|(i, _): &(usize, String)| *i
+                        let:step
+                    >
+                        <li><code>{step.1}</code></li>
+                    </For>
+                </ol>
+                <p class="well-note">
+                    "Kingdom finds a container that is already up and adopts it rather \
+                     than starting a second one, so it will pick this up by itself. \
+                     Later, "<code>{start_again.clone()}</code>" is the whole of it."
+                </p>
+            </Show>
         </div>
     }
 }
@@ -865,6 +901,7 @@ mod tests {
             address: None,
             handle: String::new(),
             hint: String::new(),
+            by_hand: Vec::new(),
             users: Vec::new(),
         };
 
