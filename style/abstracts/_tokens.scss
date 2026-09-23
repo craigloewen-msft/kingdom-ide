@@ -100,8 +100,11 @@ $statuses: (
   "working":   $working,
   // A subagent's remit. No rail draws it -- subagents are excluded -- but the
   // suffix exists, and a class the stylesheet does not know would be invisible
-  // text rather than a visible mistake.
+  // text rather than a visible mistake. `verifying` is what a subagent is
+  // actually badged with today; `surveying` is the narrower remit beneath it,
+  // kept because a record written before subagents could browse still says so.
   "surveying": $working,
+  "verifying": $exploring,
 
   // Not a `PlanStatus` — see `Attention` in kingdom-core. A plan that has
   // stopped to ask something is still `Drafting`, so without an entry of its own

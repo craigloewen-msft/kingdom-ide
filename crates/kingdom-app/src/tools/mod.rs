@@ -142,12 +142,19 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
         Box::new(skill::Skill),
     ];
 
-    // Acting on the world without changing the project: Propose and above.
-    if matches!(permissions, Permissions::Propose | Permissions::Full) {
+    // Looking at a running page: Browse and above. A subagent is born here --
+    // see `Permissions::Browse` -- so an errand can open the app its parent
+    // just started and say what it actually does, rather than reasoning about
+    // it from the source. None of these touch the worktree, which is what lets
+    // several errands hold one at once.
+    //
+    // Each drives a *per-plan* Chrome, keyed by plan id in `tools::browser`, so
+    // an errand never steers the session the King is watching.
+    if matches!(
+        permissions,
+        Permissions::Browse | Permissions::Propose | Permissions::Full
+    ) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
-            Box::new(bash::Bash),
-            Box::new(tmux::TmuxRun),
-            Box::new(tmux::Tmux),
             Box::new(browser::BrowserNavigate),
             Box::new(browser::BrowserClick),
             Box::new(browser::BrowserType),
@@ -159,8 +166,18 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
             Box::new(browser::BrowserRecentConsoleLogs),
             Box::new(browser::BrowserClearConsoleLogs),
             // Driving a browser at all is more than read-only, and profiling
-            // drives one -- it navigates, clicks and throttles a real page.
+            // drives one -- it navigates, clicks and throttles a real page. It
+            // changes nothing outside the page, so it belongs with them.
             Box::new(profile::BrowserProfile),
+        ]);
+    }
+
+    // Acting on the world without changing the project: Propose and above.
+    if matches!(permissions, Permissions::Propose | Permissions::Full) {
+        tools.extend::<Vec<Box<dyn Tool>>>(vec![
+            Box::new(bash::Bash),
+            Box::new(tmux::TmuxRun),
+            Box::new(tmux::Tmux),
             Box::new(ask_user_question::AskUserQuestion),
         ]);
     }
@@ -262,6 +279,7 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
     // do right now.
     let exists_elsewhere = [
         Permissions::ReadOnly,
+        Permissions::Browse,
         Permissions::Propose,
         Permissions::Full,
     ]
@@ -277,6 +295,16 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
         (true, Permissions::ReadOnly) => Refusal::Refused(format!(
             "`{tool}` is not available to a subagent. You were sent to read and report, \
              so report what you found to the plan that sent you."
+        ))
+        .into(),
+        // Told apart from `ReadOnly` on purpose: this subagent *can* act on a
+        // page, so "you were sent to read" would contradict the browser tools
+        // it is holding, and a refusal a model cannot square with its own tool
+        // list earns a retry of the same call.
+        (true, Permissions::Browse) => Refusal::Refused(format!(
+            "`{tool}` is not available to a subagent. You can read the project and drive \
+             the browser, but you cannot run commands or change anything -- report what \
+             you found to the plan that sent you, and let it act."
         ))
         .into(),
         _ => Refusal::NoSuchTool(tool.to_string()).into(),
@@ -1246,6 +1274,69 @@ mod tests {
                     .iter()
                     .any(|t| t.name() == allowed),
                 "{allowed} is how a survey does its job"
+            );
+        }
+    }
+
+    /// What a subagent is actually born as: reads, plus a browser, and nothing
+    /// that can change anything.
+    ///
+    /// This is the level every errand runs under -- see `SUBAGENT_PERMISSIONS`
+    /// -- so it carries the invariant the read-only test above carries: several
+    /// errands share one worktree, and that is only safe while none of them can
+    /// write. A browser does not write, which is the whole argument for
+    /// widening; `bash` does, which is why it stays out even though the browser
+    /// went in.
+    ///
+    /// The refusal is tested as well as the absence, for the reason the
+    /// neighbouring tests give: the list a model is shown and the list it may
+    /// run must not disagree.
+    #[tokio::test]
+    async fn a_browsing_subagent_may_drive_a_page_and_change_nothing() {
+        let verifying = sandbox().under(Permissions::Browse);
+
+        for forbidden in [
+            "bash",
+            "patch",
+            "tmux_run",
+            "tmux",
+            "spawn_agents",
+            "propose_plan",
+            "ask_user_question",
+        ] {
+            assert!(
+                !all(Permissions::Browse)
+                    .iter()
+                    .any(|t| t.name() == forbidden),
+                "{forbidden} must not be offered to a browsing subagent"
+            );
+            assert!(
+                matches!(
+                    invoke(forbidden, serde_json::json!({}), &verifying).await,
+                    ToolOutcome::Refused { .. }
+                ),
+                "{forbidden} must be refused even when a subagent asks for it by name"
+            );
+        }
+
+        // The point of the level. Without these it is an ordinary survey, and
+        // an errand sent to check a page would have to reason about it from the
+        // source.
+        for allowed in [
+            "think",
+            "read_file",
+            "search",
+            "read_image",
+            "browser_navigate",
+            "browser_click",
+            "browser_eval",
+            "browser_take_screenshot",
+            "browser_recent_console_logs",
+            "browser_profile",
+        ] {
+            assert!(
+                all(Permissions::Browse).iter().any(|t| t.name() == allowed),
+                "{allowed} is how a browsing subagent does its job"
             );
         }
     }

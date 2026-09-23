@@ -110,7 +110,7 @@ const PORT_ATTEMPTS: usize = 40;
 ///
 /// Not a fixed list: the one port that must stay off the badge is Chrome's own
 /// CDP port, and that number is chosen per plan at launch time rather than
-/// known up front. It is tracked on [`Namespace::cdp_port`] instead and
+/// known up front. It is tracked on [`Namespace::cdp_ports`] instead and
 /// excluded there. This constant now names the *idea*, not any content -- kept
 /// so a future private port has somewhere obvious to be added.
 const NEVER_FORWARD: &[u16] = &[];
@@ -225,7 +225,9 @@ fn parse_listeners(table: &str) -> Vec<u16> {
 /// Chrome's CDP port is excluded, deliberately: it is forwarded like any other
 /// listener so the relay can reach it, but it is not a port the King ever
 /// wants to click -- it speaks CDP, not HTTP, and showing it would be a badge
-/// entry that always fails to open in a browser.
+/// entry that always fails to open in a browser. *Every* such port is
+/// excluded, not just one: a subagent borrowing this namespace has a Chrome of
+/// its own in it, and its port is no more clickable than its parent's.
 pub fn forwards_of(plan: &PlanId) -> Vec<(u16, u16)> {
     let registry = lock();
     let Some(namespace) = registry.get(plan) else {
@@ -234,7 +236,7 @@ pub fn forwards_of(plan: &PlanId) -> Vec<(u16, u16)> {
     let mut out: Vec<(u16, u16)> = namespace
         .forwards
         .iter()
-        .filter(|(guest, _)| Some(**guest) != namespace.cdp_port)
+        .filter(|(guest, _)| !namespace.cdp_ports.values().any(|cdp| cdp == *guest))
         .map(|(guest, forward)| (*guest, forward.host_port))
         .collect();
     out.sort_unstable();
@@ -648,7 +650,7 @@ impl Namespace {
             slirp: slirp_pid,
             api_socket,
             forwards: HashMap::new(),
-            cdp_port: None,
+            cdp_ports: HashMap::new(),
             wells: HashMap::new(),
             // Recorded only for a sealed plan, and it is what every later
             // `enter_prefix` reads to know this namespace has a filesystem of
@@ -1170,7 +1172,7 @@ pub(crate) fn pretend_wells_are_open(plan: &PlanId, targets: &[&str]) {
         slirp: 0,
         api_socket: PathBuf::from("/run/nowhere.sock"),
         forwards: HashMap::new(),
-        cdp_port: None,
+        cdp_ports: HashMap::new(),
         wells: HashMap::new(),
         workdir: None,
         scratch: None,
@@ -1212,17 +1214,24 @@ pub(crate) fn forget_namespace(plan: &PlanId) {
 ///
 /// Idempotent for a given plan: a session relaunching keeps its previous port
 /// rather than drawing a new one and leaving the old forward stranded.
+///
+/// The *namespace* is the plan's owner's -- a subagent has none of its own and
+/// works in its parent's, see [`super::owner_of`] -- but the port is recorded
+/// against the plan whose **session** it is. Both halves matter: the forward
+/// has to be added to the namespace the browser will actually run in, and two
+/// browsers in one namespace must not be handed the same number.
 pub async fn reserve_cdp_port(plan: &PlanId) -> Option<u16> {
+    let owner = super::owner_of(plan);
     let holder = {
         let registry = lock();
-        let namespace = registry.get(plan)?;
-        if let Some(port) = namespace.cdp_port {
-            return Some(port);
+        let namespace = registry.get(&owner)?;
+        if let Some(port) = namespace.cdp_ports.get(plan) {
+            return Some(*port);
         }
         namespace.holder
     };
 
-    let api_socket = api_socket_path(plan);
+    let api_socket = api_socket_path(&owner);
     for _ in 0..PORT_ATTEMPTS {
         let port = random_port();
         // Bound directly rather than through the relay's own retry: the port
@@ -1232,8 +1241,8 @@ pub async fn reserve_cdp_port(plan: &PlanId) -> Option<u16> {
         if add_hostfwd(&api_socket, port, port).await.is_ok() {
             let relay = spawn_relay(holder, port).await;
             let mut registry = lock();
-            if let Some(namespace) = registry.get_mut(plan) {
-                namespace.cdp_port = Some(port);
+            if let Some(namespace) = registry.get_mut(&owner) {
+                namespace.cdp_ports.insert(plan.clone(), port);
                 namespace.forwards.insert(
                     port,
                     Forward {
@@ -1524,10 +1533,16 @@ mod tests {
     /// needs the forward to reach it -- but never shown on the King's badge.
     /// A badge entry that speaks CDP, not HTTP, would be one the King clicks
     /// and gets nothing useful from.
+    ///
+    /// Two of them here, not one: a subagent borrows its parent's namespace
+    /// and drives a browser of its own in it, so the exclusion has to be over
+    /// every recorded CDP port rather than a single slot. With a lone
+    /// `Option<u16>` the errand's port was the one that leaked onto the badge.
     #[test]
-    fn the_cdp_port_never_reaches_the_badge() {
+    fn no_cdp_port_reaches_the_badge() {
         let mut registry = HashMap::new();
         let plan = PlanId::new("plan-with-a-browser");
+        let errand = PlanId::new("plan-errand");
         let mut forwards = HashMap::new();
         forwards.insert(
             3000,
@@ -1545,6 +1560,17 @@ mod tests {
                 relay: Some(9999),
             },
         );
+        forwards.insert(
+            9333,
+            Forward {
+                host_port: 40003,
+                id: 3,
+                relay: Some(9998),
+            },
+        );
+        let mut cdp_ports = HashMap::new();
+        cdp_ports.insert(plan.clone(), 9222);
+        cdp_ports.insert(errand, 9333);
         registry.insert(
             plan.clone(),
             Namespace {
@@ -1552,7 +1578,7 @@ mod tests {
                 slirp: 2,
                 api_socket: PathBuf::from("/run/nowhere.sock"),
                 forwards,
-                cdp_port: Some(9222),
+                cdp_ports,
                 wells: HashMap::new(),
                 workdir: None,
                 scratch: None,
