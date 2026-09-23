@@ -536,6 +536,7 @@ fn services_block(plan: &kingdom_core::PlanId, city_root: &Path) -> String {
 fn permissions_block(permissions: Permissions, approved: bool) -> String {
     match permissions {
         Permissions::ReadOnly => SUBAGENT.to_string(),
+        Permissions::Browse => BROWSING_SUBAGENT.to_string(),
         Permissions::Propose => PROPOSE.to_string(),
         Permissions::Full if approved => format!("{FULL}\n\n{CARRYING_OUT}"),
         Permissions::Full => FULL.to_string(),
@@ -551,6 +552,28 @@ const SUBAGENT: &str = "You are a sub-agent working on a specific task. You can 
      search; you cannot run commands, edit files, or spawn sub-agents of your own. When you \
      have your answer, reply with it: your reply is the report, and the conversation ends \
      there. Answer concretely, citing the files you looked at.";
+
+/// [`SUBAGENT`], for the remit a subagent is actually born under.
+///
+/// The difference is one sentence of capability and one of stance. The
+/// capability: it holds the `browser_*` tools, on a Chrome of its own inside
+/// whatever network its parent is working in, so `localhost` means the same
+/// thing to it as to the plan that sent it.
+///
+/// The stance matters more. A model handed a browser and no shell will
+/// otherwise spend its first rounds trying to start the thing it was sent to
+/// look at, be refused, and report the refusal as its finding. So it is told
+/// plainly that the app is already running and that failing to reach it is an
+/// answer worth reporting rather than a problem to fix.
+const BROWSING_SUBAGENT: &str = "You are a sub-agent working on a specific task. You can read \
+     and search the project, and you can drive a real browser -- navigate, click, type, take \
+     screenshots, profile a page and read its console. You cannot run commands, edit files, \
+     or spawn sub-agents of your own.\n\n\
+     Whatever you have been asked to look at is already running; you cannot start or change \
+     it. If you cannot reach a page, say so and say what you saw instead -- that is a real \
+     finding, not something for you to repair.\n\n\
+     When you have your answer, reply with it: your reply is the report, and the conversation \
+     ends there. Answer concretely, citing the files you read and the URLs you opened.";
 
 /// Phoenix's `mode_explore`, adapted to Kingdom's proposal flow.
 ///
@@ -862,6 +885,7 @@ mod tests {
     fn the_remit_is_the_last_thing_the_model_reads() {
         for permissions in [
             Permissions::ReadOnly,
+            Permissions::Browse,
             Permissions::Propose,
             Permissions::Full,
         ] {

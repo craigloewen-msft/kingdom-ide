@@ -87,10 +87,18 @@ pub struct Namespace {
     /// Guest port -> (host port, slirp's id for the forward, and the relay
     /// standing between them, if one was needed).
     forwards: HashMap<u16, Forward>,
-    /// Chrome's own CDP port inside this namespace, if a browser has been
-    /// launched for this plan. Excluded from [`forwards_of`] -- see its own
-    /// docs for why the King's badge must never show it.
-    cdp_port: Option<u16>,
+    /// The CDP port of each Chrome launched inside this namespace, keyed by
+    /// the plan whose session it is.
+    ///
+    /// A map rather than one port because a namespace can hold more than one
+    /// browser: a subagent borrows its parent's namespace (see
+    /// [`super::owner_of`]) and drives a Chrome of its own in it, so a single
+    /// slot would have handed the errand's session the parent's port and left
+    /// one of the two forwards stranded.
+    ///
+    /// Every entry is excluded from [`forwards_of`] -- see its own docs for
+    /// why the King's badge must never show one.
+    cdp_ports: HashMap<PlanId, u16>,
     /// Service port -> the relay putting a shared service on this namespace's
     /// own loopback. See [`open_wells`].
     ///
@@ -189,6 +197,29 @@ fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
+/// Whose namespace a plan actually works in.
+///
+/// Itself, for every plan the King opened. Its **parent**, for a subagent: an
+/// errand is another agent working in the same place as the plan that sent it,
+/// and a network of its own would undo that -- the parent starts a server and
+/// the errand sent to look at it finds nothing on `localhost`. So the errand is
+/// never given one (see `turn::converse`) and borrows instead.
+///
+/// One helper rather than a check at each of `bash`, `tmux` and the browser,
+/// for the reason [`enter_prefix`] already gives: a call site that has to
+/// remember is a call site that will forget.
+///
+/// The kingdom is read *before* the namespace registry is locked, deliberately.
+/// Both are process-global mutexes and neither is reentrant; taking them in one
+/// order here and the other order anywhere else is a deadlock that would only
+/// appear under load.
+fn owner_of(plan: &PlanId) -> PlanId {
+    match crate::api::snapshot(plan).and_then(|p| p.spawned_by) {
+        Some(sent_by) => sent_by.parent,
+        None => plan.clone(),
+    }
+}
+
 /// The argv prefix that puts a command inside a plan's namespace.
 ///
 /// **Empty for a shared-network plan**, which is what makes every call site a
@@ -197,13 +228,16 @@ fn which(program: &str) -> Option<PathBuf> {
 /// namespace. That is deliberate -- a call site that had to *remember* to check
 /// is a call site that will forget, and the one that forgets is the one that
 /// starts a server on the King's own `:3000`.
+///
+/// For a subagent this is its *parent's* prefix. See [`owner_of`].
 pub fn enter_prefix(plan: &PlanId) -> Vec<String> {
+    let owner = owner_of(plan);
     let registry = match namespaces().lock() {
         Ok(r) => r,
         Err(poisoned) => poisoned.into_inner(),
     };
     registry
-        .get(plan)
+        .get(&owner)
         .map(|ns| ns.enter_prefix())
         .unwrap_or_default()
 }
@@ -214,10 +248,12 @@ pub fn enter_prefix(plan: &PlanId) -> Vec<String> {
 ///
 /// `None` for a shared-network plan, the same as `enter_prefix`'s empty
 /// vector, and for the same reason: there is nothing of the plan's own to
-/// compare against.
+/// compare against. A subagent answers with its parent's, so that a thing
+/// started in the borrowed namespace is recognised as belonging there.
 pub fn holder_ns(plan: &PlanId) -> Option<std::path::PathBuf> {
+    let owner = owner_of(plan);
     let registry = lock();
-    let namespace = registry.get(plan)?;
+    let namespace = registry.get(&owner)?;
     std::fs::read_link(format!("/proc/{}/ns/net", namespace.holder)).ok()
 }
 
@@ -411,7 +447,7 @@ mod tests {
             slirp: 4243,
             api_socket: PathBuf::from("/run/nowhere.sock"),
             forwards: HashMap::new(),
-            cdp_port: None,
+            cdp_ports: HashMap::new(),
             wells: HashMap::new(),
             workdir: None,
             scratch: None,
@@ -441,5 +477,77 @@ mod tests {
     fn a_shared_network_plan_is_never_wrapped() {
         let nobody = PlanId::new("plan-that-was-never-isolated");
         assert!(enter_prefix(&nobody).is_empty());
+    }
+
+    /// A subagent works in its **parent's** namespace, not one of its own.
+    ///
+    /// This is the failure the whole borrowing arrangement exists to prevent,
+    /// and it is invisible when it happens: a subagent inherits its parent's
+    /// isolation, so before this it raised a second network and its browser
+    /// went there. `http://127.0.0.1:3000` then meant the parent's server to
+    /// the parent and nothing at all to the errand sent to check it -- which
+    /// reads as "the page is broken" rather than as a wiring mistake.
+    ///
+    /// Registered by hand rather than by opening a real namespace: this pins
+    /// the *lookup*, and creating one needs slirp4netns and a kernel that
+    /// allows it.
+    #[test]
+    fn a_subagent_enters_the_namespace_its_parent_is_working_in() {
+        let parent_id = PlanId::new("plan-parent-with-a-network");
+        let errand_id = PlanId::new("plan-errand-borrowing-it");
+
+        // The records the lookup reads: an errand that names its parent.
+        {
+            let mut kingdom = crate::api::lock().expect("kingdom");
+            let parent = kingdom_core::Plan::opened(
+                parent_id.clone(),
+                kingdom_core::CityId::new("c1"),
+                "Parent",
+                &kingdom_core::ModelChoice::new("mock", None),
+                kingdom_core::Workspace::in_place("/dev/testburg"),
+                kingdom_core::Isolation::Isolated,
+            );
+            let errand =
+                kingdom_core::Plan::spawned(errand_id.clone(), &parent, "call-1", "Go and look");
+            kingdom.plans.push(parent);
+            kingdom.plans.push(errand);
+        }
+
+        lock().insert(
+            parent_id.clone(),
+            Namespace {
+                holder: 4242,
+                slirp: 4243,
+                api_socket: PathBuf::from("/run/nowhere.sock"),
+                forwards: HashMap::new(),
+                cdp_ports: HashMap::new(),
+                wells: HashMap::new(),
+                workdir: None,
+                scratch: None,
+            },
+        );
+
+        assert_eq!(owner_of(&errand_id), parent_id, "an errand borrows");
+        assert_eq!(owner_of(&parent_id), parent_id, "a plan of the King's owns");
+
+        let borrowed = enter_prefix(&errand_id);
+        assert!(
+            !borrowed.is_empty(),
+            "an errand of an isolated plan must not run on the host network"
+        );
+        assert_eq!(
+            borrowed,
+            enter_prefix(&parent_id),
+            "and must land in exactly the network its parent is in, not a second one"
+        );
+
+        // Leave the process-global registries as they were found: these are
+        // shared with every other test in this binary.
+        lock().remove(&parent_id);
+        if let Ok(mut kingdom) = crate::api::lock() {
+            kingdom
+                .plans
+                .retain(|p| p.id != parent_id && p.id != errand_id);
+        }
     }
 }

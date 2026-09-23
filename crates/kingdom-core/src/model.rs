@@ -1254,7 +1254,9 @@ impl Plan {
     /// [`Plan::is_subagent`], and that guard is load-bearing.
     ///
     /// Its **model and effort**, so a fan-out is drafted by the thing the user
-    /// chose rather than by whatever the default happens to be that day.
+    /// chose rather than by whatever the default happens to be that day. A
+    /// parent that wants otherwise says so with [`Plan::on_model`] -- sending
+    /// one errand to a second opinion is the case that asks for it.
     ///
     /// # Why the task is recorded as the user speaking
     ///
@@ -1301,11 +1303,11 @@ impl Plan {
                 parent: parent.id.clone(),
                 tool_call: tool_call.to_string(),
             }),
-            // A subagent reads and reports and never writes, which is the
-            // whole reason several may share one worktree safely. Carried on
-            // the subagent rather than passed to the turn loop, so the
-            // invariant lives on the thing it constrains.
-            permissions: Permissions::ReadOnly,
+            // A subagent reads, reports and looks at pages, and never writes
+            // -- which is the whole reason several may share one worktree
+            // safely. Carried on the subagent rather than passed to the turn
+            // loop, so the invariant lives on the thing it constrains.
+            permissions: Permissions::Browse,
             // A subagent answers to the plan that sent it. Nothing about it is
             // ever put to the user.
             proposal: None,
@@ -1316,6 +1318,23 @@ impl Plan {
             // nothing for him to write against.
             review_notes: Vec::new(),
         }
+    }
+
+    /// Sends this plan to a different model than it inherited.
+    ///
+    /// The one use is an errand: a parent that wants a *second opinion* rather
+    /// than a second copy of itself -- "go and check this in the browser with a
+    /// different model" is worth nothing if the checker thinks exactly like the
+    /// thing being checked.
+    ///
+    /// A builder rather than another parameter on [`Plan::spawned`] because
+    /// overriding is the rare case: eleven of its twelve call sites want the
+    /// parent's model, and an `Option<ModelChoice>` threaded through all of
+    /// them would put `None` at every one of them to serve the twelfth.
+    pub fn on_model(mut self, choice: ModelChoice) -> Self {
+        self.model = choice.model;
+        self.effort = choice.effort;
+        self
     }
 
     /// True when this plan was spawned by another plan rather than opened by
@@ -5386,5 +5405,60 @@ mod isolation_tests {
         let child = Plan::spawned(PlanId::new("plan-child"), &parent, "call-1", "Go and look");
 
         assert_eq!(child.isolation, Isolation::Sealed);
+    }
+
+    /// A subagent is born able to look at a page, and unable to change
+    /// anything.
+    ///
+    /// The remit is what makes an errand useful for verification -- it holds
+    /// the `browser_*` tools -- and it is also the invariant that lets several
+    /// errands share one worktree: `Browse` cannot write. Pinned here, on the
+    /// constructor, because that is the one place it is decided.
+    #[test]
+    fn a_subagent_may_browse_and_may_not_write() {
+        let parent = Plan::opened(
+            PlanId::new("plan-parent"),
+            CityId::new("c1"),
+            "Parent",
+            &ModelChoice::new("mock", None),
+            Workspace::in_place("/dev/testburg"),
+            Isolation::Shared,
+        );
+        let child = Plan::spawned(PlanId::new("plan-child"), &parent, "call-1", "Go and look");
+
+        assert_eq!(child.permissions, Permissions::Browse);
+        assert!(!child.permissions.is_full());
+        assert!(!child.permissions.can_propose());
+    }
+
+    /// An errand can be sent to a model other than its parent's -- and takes
+    /// its parent's when it is not.
+    ///
+    /// The whole value of sending one to *check* something is that it is not a
+    /// copy of the thing being checked, so a model that silently came back as
+    /// the parent's would answer a question nobody asked.
+    #[test]
+    fn an_errand_takes_its_parents_model_unless_it_is_given_another() {
+        let parent = Plan::opened(
+            PlanId::new("plan-parent"),
+            CityId::new("c1"),
+            "Parent",
+            &ModelChoice::new("copilot/claude-opus-5", Some(ModelEffort::Low)),
+            Workspace::in_place("/dev/testburg"),
+            Isolation::Shared,
+        );
+
+        let inherited = Plan::spawned(PlanId::new("plan-a"), &parent, "call-1", "Read it");
+        assert_eq!(inherited.choice(), parent.choice());
+
+        let second_opinion = Plan::spawned(PlanId::new("plan-b"), &parent, "call-1", "Check it")
+            .on_model(ModelChoice::new("mock", Some(ModelEffort::High)));
+        assert_eq!(second_opinion.model, "mock");
+        assert_eq!(second_opinion.effort, Some(ModelEffort::High));
+        assert_eq!(
+            second_opinion.workspace, parent.workspace,
+            "a different model is still the same worktree -- only the thinking changes"
+        );
+        assert_eq!(second_opinion.permissions, Permissions::Browse);
     }
 }

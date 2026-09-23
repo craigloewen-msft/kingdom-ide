@@ -197,12 +197,22 @@ pub(crate) async fn converse(
     // of them must land in the *same* namespace and a per-call check would be
     // three chances to forget.
     //
+    // **Not for a subagent.** It inherits its parent's isolation (see
+    // `Plan::spawned`), but raising a *second* namespace for it would put its
+    // browser on a different network from the server its parent just started --
+    // so `localhost:3000` would mean two different things to a parent and the
+    // errand it sent to check the page. It borrows its parent's instead; see
+    // `namespaces::owner_of`. The parent is blocked inside the `spawn_agents`
+    // call for as long as the errand runs, so that namespace cannot go away
+    // underneath it.
+    //
     // A failure here is fatal to the turn on purpose. The alternative is
     // running the agent on the shared network, or on the King's own
     // filesystem, after he asked for isolation -- the one outcome this feature
     // must never produce silently: he would find out when it took the port he
     // was using, or deleted something he needed.
-    if isolation.is_isolated() {
+    let is_subagent = snapshot(&plan_id).map(|p| p.is_subagent()).unwrap_or(false);
+    if isolation.is_isolated() && !is_subagent {
         let request = crate::namespaces::Request {
             isolation,
             workspace: std::path::PathBuf::from(&workspace.path),
@@ -718,9 +728,10 @@ pub(crate) async fn converse(
 /// `pub(crate)` rather than private.
 ///
 /// Each subagent is a real plan: recorded, watched and pushed like any other,
-/// which is what lets the user open one and read it while it works. They run
+/// which is what lets the user open one and read it while it works -- and,
+/// since it holds the browser tools, watch its spyglass. They run
 /// concurrently, which is only safe because a subagent is born under
-/// [`kingdom_core::Permissions::ReadOnly`] and so cannot write -- see
+/// [`kingdom_core::Permissions::Browse`] and so cannot write -- see
 /// [`Plan::spawned`], which is where that is now settled, and
 /// `tools::spawn_agents`.
 ///
@@ -760,6 +771,12 @@ pub(crate) async fn spawn_subagents(
         for errand in tasks {
             let id = PlanId::new(format!("plan-{}", next_plan_number()));
             let mut subagent = Plan::spawned(id.clone(), &parent, tool_call, errand.task.clone());
+            // A second opinion, when the parent asked for one. Applied here
+            // rather than inside `Plan::spawned` because the choice arrives
+            // with the errand, not with the parent -- see `Plan::on_model`.
+            if let Some(choice) = errand.choice.clone() {
+                subagent = subagent.on_model(choice);
+            }
             let root = std::path::PathBuf::from(&kingdom.root);
             remember(&root, &mut subagent);
             // Pushed as well as recorded, so the parent's conversation can draw
@@ -816,6 +833,22 @@ pub(crate) async fn spawn_subagents(
             .and_then(|joined| joined.ok())
             .and_then(|result| result.ok());
         outcomes.push(settled);
+    }
+
+    // Every errand's browser is closed here, and this is the only place that
+    // can do it. `api::finish_plan` is where a plan's Chrome is normally
+    // dismissed -- and a subagent is never finished, by design
+    // (`Plan::is_subagent` guards it), because merging one would land its
+    // parent's half-done work. So without this each browsing errand leaves
+    // nine processes and most of a gigabyte held by a plan that can never
+    // reach the path that would free them: exactly the orphaned resource this
+    // product exists to prevent.
+    //
+    // After the deadline rather than before, so an errand that timed out is
+    // still shut down; `dismiss` is deliberately quiet and infallible, and
+    // closing a session that was never opened costs nothing.
+    for (id, _) in &subagents {
+        crate::tools::browser::dismiss(id).await;
     }
 
     Ok(report(&subagents, &outcomes))

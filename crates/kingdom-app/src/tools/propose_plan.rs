@@ -212,7 +212,7 @@ impl Tool for ProposePlan {
                 )
                 .into()
             }
-            Permissions::ReadOnly => {
+            Permissions::ReadOnly | Permissions::Browse => {
                 return Refusal::Refused(
                     "You were sent to answer a question, not to propose work. Report what \
                      you found to the plan that sent you."

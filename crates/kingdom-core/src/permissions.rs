@@ -22,6 +22,19 @@ use serde::{Deserialize, Serialize};
 /// unrepresentable. That is what lets subagents run in parallel with no lease
 /// machinery behind them.
 ///
+/// [`Permissions::Browse`] is the same bargain as `ReadOnly`, widened by one
+/// thing: a browser. It is **what every subagent gets**, because a subagent is
+/// sent to find something out and "is the page actually doing that" is one of
+/// the things worth finding out. None of it touches the worktree -- so the
+/// collision argument above still holds and several errands may still run at
+/// once. What it withholds is everything that could change the project or the
+/// machine: no `bash`, no `tmux`, no `patch`, and no subagents of its own.
+///
+/// [`Permissions::ReadOnly`] is what is left when even that is too much. It is
+/// kept because records written before subagents could browse still name it,
+/// and because "reads and nothing else" is the floor this ladder is measured
+/// from -- not because anything is opened at it today.
+///
 /// [`Permissions::Propose`] is about *stance*. A plan at this level may look at
 /// anything and run anything, and is trusted not to change the project. It is
 /// not a sandbox and does not pretend to be one -- see `Sandbox::root`, which
@@ -44,6 +57,14 @@ pub enum Permissions {
     /// needs an answer to "who is blocked behind whom" that Kingdom does not
     /// have yet.
     ReadOnly,
+    /// Reads and reports, and may drive a browser to do it.
+    ///
+    /// What every subagent gets. It can navigate, click, type, screenshot,
+    /// profile and read the console -- and still cannot run a command, edit a
+    /// file, or send subagents of its own. Whatever it is looking at was
+    /// started by the plan that sent it; this level verifies, it does not
+    /// build.
+    Browse,
     /// May look at anything and run anything, but changes nothing and puts a
     /// plan to the user instead. What a prompt starts under.
     Propose,
@@ -84,12 +105,13 @@ impl Permissions {
     /// every match on plan state. Exactly the argument [`crate::Attention`]
     /// already makes for a different question.
     ///
-    /// A subagent says "Surveying" and no rail ever draws it: subagents are
+    /// A subagent says "Verifying" and no rail ever draws it: subagents are
     /// excluded from the rail, and reach the user only in the errand list of
     /// the chamber that sent them.
     pub fn label(&self) -> &'static str {
         match self {
             Permissions::ReadOnly => "Surveying",
+            Permissions::Browse => "Verifying",
             Permissions::Propose => "Exploring",
             Permissions::Full => "Working",
         }
@@ -104,8 +126,44 @@ impl Permissions {
     pub fn css_suffix(&self) -> &'static str {
         match self {
             Permissions::ReadOnly => "surveying",
+            Permissions::Browse => "verifying",
             Permissions::Propose => "exploring",
             Permissions::Full => "working",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every level reads as a different word and tints differently.
+    ///
+    /// Pinned because the two halves are written out separately, and a level
+    /// that borrowed another's suffix would badge an agent driving a browser
+    /// as one that merely reads -- which is the distinction the King is being
+    /// shown.
+    #[test]
+    fn no_two_levels_read_or_tint_alike() {
+        let levels = [
+            Permissions::ReadOnly,
+            Permissions::Browse,
+            Permissions::Propose,
+            Permissions::Full,
+        ];
+        for (i, one) in levels.iter().enumerate() {
+            for other in &levels[i + 1..] {
+                assert_ne!(one.label(), other.label(), "{one:?} vs {other:?}");
+                assert_ne!(one.css_suffix(), other.css_suffix(), "{one:?} vs {other:?}");
+            }
+        }
+    }
+
+    /// A browsing subagent is not a plan that may act on the project, and the
+    /// two predicates every guard reads must both say so.
+    #[test]
+    fn browsing_is_neither_full_nor_proposing() {
+        assert!(!Permissions::Browse.is_full());
+        assert!(!Permissions::Browse.can_propose());
     }
 }
