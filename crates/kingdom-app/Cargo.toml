@@ -34,6 +34,10 @@ tokio = { version = "1", features = [
     "macros",
     "net",
     "process",
+    # The stand-down path in `main`: SIGINT, SIGTERM and -- because cargo-leptos
+    # does not handle it -- SIGHUP, so a closed terminal stops the server
+    # instead of orphaning it.
+    "signal",
     # `broadcast`, which the herald fans a plan's changes out over.
     "sync",
     "time",

@@ -57,6 +57,11 @@ async fn main() {
         }
     }
 
+    // Below the hidden modes, so a relay or a confined tool call keeps the
+    // lifetime its spawner gave it. From here down this process is the server,
+    // and the server must not outlive whoever started it.
+    die_when_the_parent_does();
+
     // Model configuration lives in an optional, gitignored `.kingdom.env` so a
     // credential or provider choice survives restarts without being committed.
     // Real environment variables win, which keeps one-off overrides easy.
@@ -170,9 +175,103 @@ async fn main() {
         println!("     Reclaimed {reclaimed} abandoned browser profile(s) from a previous run\n");
     }
 
-    axum::serve(listener, app.into_make_service())
-        .await
-        .expect("server error");
+    // Deliberately *not* `with_graceful_shutdown`: that waits for every open
+    // connection to close, and the chamber, the rail, the spyglass and the
+    // King's shell are all long-lived websockets that never will. It would
+    // turn every restart under `cargo leptos watch` into the full ten seconds
+    // cargo-leptos waits before it reaches for SIGKILL. Dropping the serve
+    // future instead stops accepting at once, which is what a development
+    // server wants.
+    tokio::select! {
+        served = axum::serve(listener, app.into_make_service()) => {
+            served.expect("server error");
+        }
+        _ = told_to_stand_down() => {
+            println!("\n  Kingdom IDE is standing down.");
+        }
+    }
+
+    stop_the_household();
+}
+
+/// Resolves when the operating system asks this process to stop.
+///
+/// SIGHUP is here because of the failure that motivated all of this: the
+/// terminal closing. cargo-leptos listens for SIGINT and SIGTERM only, so a
+/// closed window kills it outright and leaves the server it spawned running.
+/// Kingdom hears that one itself rather than relying on being told.
+#[cfg(feature = "ssr")]
+async fn told_to_stand_down() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut interrupt = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    let mut terminate = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    let mut hangup = signal(SignalKind::hangup()).expect("SIGHUP handler");
+
+    tokio::select! {
+        _ = interrupt.recv() => {}
+        _ = terminate.recv() => {}
+        _ = hangup.recv() => {}
+    }
+}
+
+/// Ask the kernel to kill this process when its parent dies.
+///
+/// cargo-leptos spawns the server with `setpgid(0, 0)` -- through
+/// `tokio-process-tools`, so it can signal the whole tree at once -- which also
+/// takes the server *out* of the terminal's foreground process group. Ctrl+C
+/// therefore never reaches the server directly; it reaches cargo-leptos, which
+/// forwards it. That works, right up until cargo-leptos dies without getting
+/// the chance: a closed terminal (SIGHUP, which it does not handle), a
+/// `kill -9`, a panic. The server is then reparented to init and holds port
+/// 3000 for the rest of the session, and the next `cargo leptos serve` meets
+/// the `AddrInUse` message below instead of a throne room.
+///
+/// `PR_SET_PDEATHSIG` closes that hole in the one place that cannot be
+/// bypassed: the kernel sends the signal on parent death regardless of *how*
+/// the parent died, so there is no exit path left that can orphan a server.
+#[cfg(feature = "ssr")]
+fn die_when_the_parent_does() {
+    // SAFETY: `getppid` and this `prctl` take no pointers and cannot fail in a
+    // way that matters -- an older kernel without `PR_SET_PDEATHSIG` returns
+    // an error and leaves the process exactly as it was.
+    unsafe {
+        let parent = libc::getppid();
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+        // The parent may have died in the gap between those two calls, in
+        // which case the signal just asked for will never come and this
+        // process is already the orphan the call was meant to prevent.
+        if libc::getppid() != parent {
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Take the plans' own processes down on the way out.
+///
+/// A plan leaves real processes behind it -- `slirp4netns`, the `unshare` that
+/// holds its network, a relay, a browser -- and they are all in this process's
+/// group, because they inherited it. Signalling the group is what reaches them
+/// all without keeping a register of who is who.
+///
+/// Guarded on actually *leading* that group, which is true exactly when
+/// something spawned this server the way cargo-leptos does. Run straight from
+/// a shell, the server shares the shell's process group, and signalling that
+/// would take down the King's own terminal job along with it.
+#[cfg(feature = "ssr")]
+fn stop_the_household() {
+    // SAFETY: plain process-group calls, no pointers, and nothing here can
+    // touch a process outside this server's own group.
+    unsafe {
+        if libc::getpgrp() != libc::getpid() {
+            return;
+        }
+        // Deafen this process first: the group about to be signalled includes
+        // it, and the point is to leave on our own terms rather than be killed
+        // partway through doing so.
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        libc::killpg(0, libc::SIGTERM);
+    }
 }
 
 /// What to say when the server cannot take the address it was asked for.

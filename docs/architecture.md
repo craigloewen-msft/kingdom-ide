@@ -38,6 +38,10 @@ crates/
 
   kingdom-app/      Server + UI in one crate, split by feature flag.
     main.rs         Axum binary                              (ssr)
+                    Also ties the server's lifetime to its parent's: cargo-leptos
+                    spawns it into its own process group, so Ctrl+C never reaches
+                    it directly and a parent that dies abruptly would otherwise
+                    leave it holding the port forever
     bin/kingdom-seed.rs   Seeds a proving ground             (ssr)
     lib.rs          wasm entry point                         (hydrate)
     api.rs          #[server] functions — the browser/server bridge, and
