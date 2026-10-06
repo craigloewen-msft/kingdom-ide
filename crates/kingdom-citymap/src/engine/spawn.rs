@@ -13,7 +13,7 @@ use core::ops::Range;
 use super::activity;
 use super::bridge::{Bridge, LodLevel};
 use super::camera;
-use super::materials::{MaterialCache, Surface, to_color};
+use super::materials::{self, MaterialCache, MaterialKey, Surface, to_color};
 use super::meshes::{self, BuildingShape};
 use super::raise::Step;
 use super::text;
@@ -112,13 +112,133 @@ pub struct VisibleFrom(pub LodLevel);
 #[derive(Resource, Default)]
 pub struct LoadedMap(pub Option<Box<MapManifest>>);
 
-/// Mesh handles shared across the world.
+/// Mesh handles shared across the world, and geometry still being merged.
+///
+/// Two jobs, held together because both are per-world caches cleared by the
+/// same [`clear_world`] pass. The handles are what lets five thousand files
+/// share a few thousand building meshes; [`Merge`] is what lets fifty thousand
+/// roads and trees become a few hundred *entities*.
 #[derive(Resource, Default)]
 pub struct MeshCache {
     buildings: HashMap<BuildingShape, BuildingHandles>,
-    foliage: Option<Handle<Mesh>>,
-    trunk: Option<Handle<Mesh>>,
-    post: Option<Handle<Mesh>>,
+    /// Roads, accumulated across the slices of [`Step::Roads`].
+    roads: Merge,
+    /// Trees and posts, accumulated across the slices of [`Step::Groves`].
+    groves: Merge,
+}
+
+/// Static geometry being gathered into one mesh per material.
+///
+/// # Why this exists
+///
+/// A road used to be an entity with a mesh of its own. Measured against a real
+/// dev folder -- fifteen projects -- that was 13,547 roads and 11,898 trees, and
+/// because every road's ribbon was a fresh `Assets<Mesh>` entry there was
+/// nothing for Bevy's batcher to merge them with. The frame came out at
+/// **62,178 draw calls and 1.8 seconds**, of which 120,086 out of 124,356 drew
+/// exactly *one* instance.
+///
+/// Trees were the same shape of problem arriving the other way round: they do
+/// share three meshes, but opaque geometry is depth-sorted before it is
+/// batched, so eleven thousand of them scattered across the map interleave with
+/// everything else and collapse to one instance apiece regardless.
+///
+/// So the geometry is merged here instead of being left to the renderer. The
+/// grouping key is [`materials::material_key`] -- deliberately the cache's own
+/// key rather than a second one -- because a merged mesh carries a single
+/// material, and two surfaces may only share a mesh if they would have shared
+/// that. The result is the same triangles at the same heights with the same
+/// materials, in a few hundred entities rather than fifty thousand.
+///
+/// # Why it is a buffer rather than a function
+///
+/// A world is raised in slices so the loading bar can move between them (see
+/// [`super::raise`]), and a merged stage therefore cannot emit at the end of
+/// one call: the roads arrive forty-eight at a time across many frames. This
+/// accumulates across those slices and [`Merge::flush`] empties it when the
+/// stage's last slice lands, which leaves the slicing, the bar and the
+/// `Step::weight` pacing exactly as they were.
+#[derive(Default)]
+struct Merge {
+    groups: HashMap<MaterialKey, MergeGroup>,
+}
+
+/// One material's worth of merged geometry, and what to paint it with.
+struct MergeGroup {
+    builder: meshes::MeshBuilder,
+    /// The colour this group was opened with. Every colour in the group falls
+    /// in the same bucket, so any of them names the material; the first is
+    /// kept because it is the one that is certainly present.
+    color: crate::map::MapColor,
+    surface: Surface,
+}
+
+impl Merge {
+    /// The builder for a colour and surface, opened on first use.
+    ///
+    /// Heights are **not** part of the key: a merged mesh cannot be moved by a
+    /// `Transform` afterwards, so every caller bakes its own `layer::` height
+    /// into the vertices it adds. That is what lets a road and its kerb -- two
+    /// hundredths of a unit apart, and the same colour only by accident -- land
+    /// in one mesh when they do share one.
+    fn group(&mut self, color: crate::map::MapColor, surface: Surface) -> &mut meshes::MeshBuilder {
+        &mut self
+            .groups
+            .entry(materials::material_key(color, surface))
+            .or_insert_with(|| MergeGroup {
+                builder: meshes::MeshBuilder::new(),
+                color,
+                surface,
+            })
+            .builder
+    }
+
+    /// Spawns one entity per group and empties the buffer.
+    ///
+    /// `decorate` adds whatever components the stage needs beyond a mesh and a
+    /// material -- `Pickable::IGNORE` for every caller here, plus a
+    /// [`VisibleFrom`] for the ones that drop out with zoom.
+    fn flush(
+        &mut self,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        cache: &mut MaterialCache,
+        root: Entity,
+        decorate: impl Fn(&mut bevy::ecs::system::EntityCommands),
+    ) {
+        for (_, group) in self.groups.drain() {
+            // An empty group is a colour that was opened and never drawn into,
+            // which a degenerate road or a zero-radius tree can do.
+            if group.builder.is_empty() {
+                continue;
+            }
+            let material = cache.get(materials, group.color, group.surface);
+            let mut entity = commands.spawn((
+                ChildOf(root),
+                Mesh3d(meshes.add(group.builder.build())),
+                MeshMaterial3d(material),
+                // The geometry carries its own world position, so the entity
+                // sits at the origin rather than being placed.
+                Transform::default(),
+            ));
+            decorate(&mut entity);
+        }
+    }
+
+    /// How many entities a flush would spawn. The figure the merge exists to
+    /// keep small.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.groups
+            .values()
+            .filter(|group| !group.builder.is_empty())
+            .count()
+    }
+
+    fn clear(&mut self) {
+        self.groups.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -159,12 +279,15 @@ impl MeshCache {
         self.buildings.len()
     }
 
-    /// Drops every cached mesh, for when a new world is loaded.
+    /// Drops every cached mesh and any half-merged geometry, for when a new
+    /// world is loaded.
     pub fn clear(&mut self) {
         self.buildings.clear();
-        self.foliage = None;
-        self.trunk = None;
-        self.post = None;
+        // A world abandoned mid-raise leaves partly-filled buffers behind, and
+        // carrying them into the next one would draw the old kingdom's roads
+        // across the new one's ground.
+        self.roads.clear();
+        self.groves.clear();
     }
 }
 
@@ -289,6 +412,7 @@ pub fn spawn_step(
             commands,
             meshes,
             materials,
+            mesh_cache,
             material_cache,
             root,
             world,
@@ -375,6 +499,7 @@ pub fn spawn_world(
         commands,
         meshes,
         materials,
+        mesh_cache,
         material_cache,
         root,
         world,
@@ -777,15 +902,25 @@ fn spawn_ward_outline(
     ));
 }
 
+/// Every road and path, merged into one mesh per colour.
+///
+/// The ribbons are accumulated rather than spawned (see [`Merge`]), and the
+/// last slice of the stage is what empties the buffer -- `slice.end` reaching
+/// the end of the list is the only signal available here that the stage is
+/// done, and it is exact because `RaisePlan` walks each list once, in order.
+#[allow(clippy::too_many_arguments)]
 fn spawn_roads(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    mesh_cache: &mut MeshCache,
     cache: &mut MaterialCache,
     root: Entity,
     world: &MapWorld,
     slice: Range<usize>,
 ) {
+    let last = slice.end >= world.roads.len();
+
     for road in world.roads.get(slice).unwrap_or_default() {
         if road.points.len() < 2 {
             continue;
@@ -796,23 +931,25 @@ fn spawn_roads(
         // `MapRoad`'s own business rather than a constant here: the verge is
         // part of how wide a road *looks*, so it belongs beside the width it is
         // measured from. See `MapRoad::ribbon_width`.
-        let edge = meshes::ribbon(&points, road.ribbon_width());
-        commands.spawn((
-            ChildOf(root),
-            Mesh3d(meshes.add(edge)),
-            MeshMaterial3d(cache.get(materials, road.edge, Surface::Matte)),
-            Transform::from_xyz(0.0, layer::ROAD, 0.0),
-            Pickable::IGNORE,
-        ));
+        mesh_cache.roads.group(road.edge, Surface::Matte).ribbon(
+            &points,
+            road.ribbon_width(),
+            layer::ROAD,
+        );
 
-        let surface = meshes::ribbon(&points, road.width);
-        commands.spawn((
-            ChildOf(root),
-            Mesh3d(meshes.add(surface)),
-            MeshMaterial3d(cache.get(materials, road.color, Surface::Matte)),
-            Transform::from_xyz(0.0, layer::ROAD + 0.02, 0.0),
-            Pickable::IGNORE,
-        ));
+        mesh_cache.roads.group(road.color, Surface::Matte).ribbon(
+            &points,
+            road.width,
+            layer::ROAD + 0.02,
+        );
+    }
+
+    if last {
+        mesh_cache
+            .roads
+            .flush(commands, meshes, materials, cache, root, |entity| {
+                entity.insert(Pickable::IGNORE);
+            });
     }
 }
 
@@ -913,6 +1050,19 @@ fn spawn_building(
     }
 }
 
+/// Trees and rim posts, merged into one mesh per colour.
+///
+/// Scenery already shared three meshes and was still the single largest source
+/// of draw calls, because sharing a mesh is not enough: opaque geometry is
+/// depth-sorted before it is batched, and eleven thousand trees scattered
+/// across a kingdom interleave with everything else. So each one's geometry is
+/// generated at its own position and size and folded into its colour's mesh.
+///
+/// The shapes are the same ones [`meshes::tree_foliage`] and
+/// [`meshes::tree_trunk`] build at unit size: those were modelled at one unit
+/// and scaled into place by a `Transform`, and the calls below are that scale
+/// applied to the generator's arguments instead. Two cones for a crown, a
+/// six-sided cylinder for a trunk.
 #[allow(clippy::too_many_arguments)]
 fn spawn_scenery(
     commands: &mut Commands,
@@ -924,19 +1074,7 @@ fn spawn_scenery(
     world: &MapWorld,
     slice: Range<usize>,
 ) {
-    // Scenery is modelled once at unit size and scaled into place.
-    let foliage = mesh_cache
-        .foliage
-        .get_or_insert_with(|| meshes.add(meshes::tree_foliage(1.0, 1.0)))
-        .clone();
-    let trunk = mesh_cache
-        .trunk
-        .get_or_insert_with(|| meshes.add(meshes::tree_trunk(1.0, 1.0)))
-        .clone();
-    let post = mesh_cache
-        .post
-        .get_or_insert_with(|| meshes.add(meshes::tree_trunk(1.0, 1.0)))
-        .clone();
+    let last = slice.end >= world.scenery.len();
 
     for item in world.scenery.get(slice).unwrap_or_default() {
         match *item {
@@ -947,49 +1085,46 @@ fn spawn_scenery(
                 foliage: foliage_color,
                 trunk: trunk_color,
             } => {
-                // Foliage and trunk hang off the world root directly rather
-                // than off a shared parent transform. An island now grows with
-                // the codebase, so a realm carries tens of thousands of trees,
-                // and the parent bought nothing but a third entity and an extra
-                // level for transform propagation to walk.
-                commands.spawn((
-                    ChildOf(root),
-                    Mesh3d(foliage.clone()),
-                    MeshMaterial3d(material_cache.get(materials, foliage_color, Surface::Matte)),
-                    Transform::from_xyz(position[0], 0.0, position[1])
-                        .with_scale(Vec3::new(radius, height, radius)),
-                    VisibleFrom(LodLevel::Architecture),
-                    Pickable::IGNORE,
-                ));
-                commands.spawn((
-                    ChildOf(root),
-                    Mesh3d(trunk.clone()),
-                    MeshMaterial3d(material_cache.get(materials, trunk_color, Surface::Matte)),
-                    Transform::from_xyz(position[0], 0.0, position[1]).with_scale(Vec3::new(
-                        radius * 0.16,
-                        height * 0.42,
-                        radius * 0.16,
-                    )),
-                    VisibleFrom(LodLevel::Architecture),
-                    Pickable::IGNORE,
-                ));
+                let at = Vec2::new(position[0], position[1]);
+
+                // Two stacked cones read as a fuller crown than one --
+                // `meshes::tree_foliage`'s own comment, and its own proportions.
+                let crown = mesh_cache.groves.group(foliage_color, Surface::Matte);
+                crown.cone(at, radius, height * 0.32, height, 9);
+                crown.cone(at, radius * 0.74, height * 0.58, height * 1.16, 9);
+
+                mesh_cache
+                    .groves
+                    .group(trunk_color, Surface::Matte)
+                    .cylinder(at, radius * 0.16, 0.0, height * 0.42, 6);
             }
             MapScenery::Post {
                 position,
                 height,
                 color,
             } => {
-                commands.spawn((
-                    ChildOf(root),
-                    Mesh3d(post.clone()),
-                    MeshMaterial3d(material_cache.get(materials, color, Surface::Matte)),
-                    Transform::from_xyz(position[0], 0.0, position[1])
-                        .with_scale(Vec3::new(0.5, height, 0.5)),
-                    VisibleFrom(LodLevel::Architecture),
-                    Pickable::IGNORE,
-                ));
+                mesh_cache.groves.group(color, Surface::Matte).cylinder(
+                    Vec2::new(position[0], position[1]),
+                    0.5,
+                    0.0,
+                    height,
+                    6,
+                );
             }
         }
+    }
+
+    if last {
+        mesh_cache.groves.flush(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            root,
+            |entity| {
+                entity.insert((VisibleFrom(LodLevel::Architecture), Pickable::IGNORE));
+            },
+        );
     }
 }
 
@@ -1106,6 +1241,227 @@ mod tests {
         assert_eq!(cache.building_shapes(), 1);
         cache.clear();
         assert_eq!(cache.building_shapes(), 0);
+    }
+
+    /// Counts the triangles a builder holds, by reading back the mesh it
+    /// produces. The merge must not lose or invent geometry -- only entities.
+    fn triangle_count(mesh: &Mesh) -> usize {
+        mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0)
+    }
+
+    /// The whole point of `Merge`. Thirteen thousand roads in three colours
+    /// must come out as three entities, not thirteen thousand.
+    #[test]
+    fn roads_sharing_a_colour_are_merged_into_one_mesh() {
+        let mut merge = Merge::default();
+        let colors = [[120, 90, 60, 255], [40, 40, 40, 255], [200, 200, 180, 255]];
+
+        for index in 0..13_000usize {
+            let color = colors[index % colors.len()];
+            let at = index as f32;
+            merge.group(color, Surface::Matte).ribbon(
+                &[Vec2::new(at, 0.0), Vec2::new(at, 10.0)],
+                3.0,
+                layer::ROAD,
+            );
+        }
+
+        assert_eq!(
+            merge.len(),
+            colors.len(),
+            "thirteen thousand roads should draw as one mesh per colour"
+        );
+    }
+
+    /// Colours a single step apart already share a *material*, so they must
+    /// also share a mesh: a merged mesh carries one material, and grouping more
+    /// finely than the material cache does would spawn entities that could have
+    /// been one. This is why `Merge` keys on `materials::material_key`.
+    #[test]
+    fn near_identical_colours_merge_together() {
+        let mut merge = Merge::default();
+        let line = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0)];
+        merge
+            .group([120, 90, 60, 255], Surface::Matte)
+            .ribbon(&line, 1.0, 0.0);
+        merge
+            .group([122, 91, 61, 255], Surface::Matte)
+            .ribbon(&line, 1.0, 0.0);
+        assert_eq!(merge.len(), 1);
+    }
+
+    /// The same colour on a different surface is a different material, so it
+    /// cannot share a mesh. The mirror of the test above, and the bound on it.
+    #[test]
+    fn a_different_surface_is_not_merged_in() {
+        let mut merge = Merge::default();
+        let line = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0)];
+        merge
+            .group([120, 90, 60, 255], Surface::Matte)
+            .ribbon(&line, 1.0, 0.0);
+        merge
+            .group([120, 90, 60, 255], Surface::Unlit)
+            .ribbon(&line, 1.0, 0.0);
+        assert_eq!(merge.len(), 2);
+    }
+
+    /// Merging must be geometry-neutral: the triangles of N roads gathered into
+    /// one mesh are the triangles those N roads had separately. This is what
+    /// stops the optimisation quietly becoming a visual change.
+    #[test]
+    fn merging_keeps_every_triangle() {
+        let roads: Vec<[Vec2; 2]> = (0..50)
+            .map(|index| {
+                let at = index as f32;
+                [Vec2::new(at, 0.0), Vec2::new(at + 1.0, 4.0)]
+            })
+            .collect();
+
+        let separate: usize = roads
+            .iter()
+            .map(|points| triangle_count(&meshes::ribbon(points, 2.0)))
+            .sum();
+
+        let mut merge = Merge::default();
+        for points in &roads {
+            merge
+                .group([10, 20, 30, 255], Surface::Matte)
+                .ribbon(points, 2.0, 0.0);
+        }
+        let merged: usize = merge
+            .groups
+            .values()
+            .map(|group| triangle_count(&group.builder.clone_mesh()))
+            .sum();
+
+        assert_eq!(merged, separate, "the merge lost or invented triangles");
+    }
+
+    /// A road's ribbon has to land on its own `layer::` height, because a
+    /// merged mesh cannot be lifted by a `Transform` afterwards. If this
+    /// regressed, every road would sink to the ground plane and z-fight with
+    /// the wards under it.
+    #[test]
+    fn a_merged_ribbon_sits_at_the_height_it_was_given() {
+        let mut merge = Merge::default();
+        merge.group([10, 20, 30, 255], Surface::Matte).ribbon(
+            &[Vec2::new(0.0, 0.0), Vec2::new(4.0, 0.0)],
+            2.0,
+            layer::ROAD,
+        );
+        let mesh = merge.groups.values().next().unwrap().builder.clone_mesh();
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions");
+        assert!(
+            positions.iter().all(|point| point[1] == layer::ROAD),
+            "a merged ribbon did not keep its layer"
+        );
+    }
+
+    /// Abandoning a world mid-raise must not leave its roads in the buffer, or
+    /// they would be drawn across the next kingdom's ground.
+    #[test]
+    fn clearing_the_cache_discards_half_merged_geometry() {
+        let mut cache = MeshCache::default();
+        cache.roads.group([1, 2, 3, 255], Surface::Matte).ribbon(
+            &[Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0)],
+            1.0,
+            0.0,
+        );
+        assert_eq!(cache.roads.len(), 1);
+        cache.clear();
+        assert_eq!(cache.roads.len(), 0, "a stale road survived a new world");
+    }
+
+    /// The merge bakes each tree's position and size into its vertices instead
+    /// of scaling a unit mesh by a `Transform`. Those two must produce the
+    /// *same* triangles, or the optimisation is a visual change wearing a
+    /// performance change's clothes.
+    ///
+    /// Checked against the unit generators themselves, with the transform
+    /// applied by hand, so this fails if either side drifts.
+    #[test]
+    fn a_merged_tree_is_the_same_tree_the_transform_drew() {
+        let (radius, height) = (3.5f32, 9.0f32);
+        let at = Vec2::new(120.0, -40.0);
+
+        // The old path: a unit mesh, scaled and moved into place.
+        let scale = Vec3::new(radius, height, radius);
+        let placed = |mesh: &Mesh| -> Vec<Vec3> {
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .and_then(|values| values.as_float3())
+                .expect("positions");
+            positions
+                .iter()
+                .map(|point| Vec3::from_array(*point) * scale + Vec3::new(at.x, 0.0, at.y))
+                .collect()
+        };
+        let was_crown = placed(&meshes::tree_foliage(1.0, 1.0));
+
+        // The new path: generated at its true size and position.
+        let mut builder = meshes::MeshBuilder::new();
+        builder.cone(at, radius, height * 0.32, height, 9);
+        builder.cone(at, radius * 0.74, height * 0.58, height * 1.16, 9);
+        let now_crown = placed_identity(&builder.clone_mesh());
+
+        assert_eq!(
+            was_crown.len(),
+            now_crown.len(),
+            "a merged crown has a different vertex count"
+        );
+        for (was, now) in was_crown.iter().zip(now_crown.iter()) {
+            assert!(
+                was.distance(*now) < 1e-3,
+                "a crown vertex moved: {was:?} became {now:?}"
+            );
+        }
+    }
+
+    /// The trunk half of the check above.
+    #[test]
+    fn a_merged_trunk_is_the_same_trunk_the_transform_drew() {
+        let (radius, height) = (3.5f32, 9.0f32);
+        let at = Vec2::new(-12.0, 70.0);
+
+        let scale = Vec3::new(radius * 0.16, height * 0.42, radius * 0.16);
+        let unit = meshes::tree_trunk(1.0, 1.0);
+        let positions = unit
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions");
+        let was: Vec<Vec3> = positions
+            .iter()
+            .map(|point| Vec3::from_array(*point) * scale + Vec3::new(at.x, 0.0, at.y))
+            .collect();
+
+        let mut builder = meshes::MeshBuilder::new();
+        builder.cylinder(at, radius * 0.16, 0.0, height * 0.42, 6);
+        let now = placed_identity(&builder.clone_mesh());
+
+        assert_eq!(
+            was.len(),
+            now.len(),
+            "a merged trunk has a different vertex count"
+        );
+        for (was, now) in was.iter().zip(now.iter()) {
+            assert!(
+                was.distance(*now) < 1e-3,
+                "a trunk vertex moved: {was:?} became {now:?}"
+            );
+        }
+    }
+
+    /// Reads a mesh's vertices as they stand, with no transform applied.
+    fn placed_identity(mesh: &Mesh) -> Vec<Vec3> {
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions")
+            .iter()
+            .map(|point| Vec3::from_array(*point))
+            .collect()
     }
 
     /// Every zoom has to have a ring drawn for it, and only one. The pair is

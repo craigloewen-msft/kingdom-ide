@@ -11,7 +11,29 @@ use bevy::prelude::*;
 
 /// Colours are bucketed before lookup so two shades a single step apart share
 /// one material instead of allocating two.
-type MaterialKey = (u8, u8, u8, u8, u8);
+///
+/// Public because merging geometry has to group by *exactly* the set that
+/// already shares a material: a merged mesh carries one material, so two
+/// surfaces may only be merged if the cache would have handed them the same
+/// handle. See `spawn::Merge`, which keys its builders on this.
+pub type MaterialKey = (u8, u8, u8, u8, u8);
+
+/// The bucket a colour and surface fall into.
+///
+/// Split out of [`MaterialCache::get`] so a caller can ask which group a
+/// surface belongs to without also creating the material -- which is what
+/// lets geometry be merged while it is still being accumulated, long before
+/// there is an `Assets<StandardMaterial>` in hand.
+#[must_use]
+pub fn material_key(color: MapColor, surface: Surface) -> MaterialKey {
+    (
+        quantise(color[0]),
+        quantise(color[1]),
+        quantise(color[2]),
+        quantise(color[3]),
+        surface.tag(),
+    )
+}
 
 /// One material per bucketed colour and surface, shared by every mesh using
 /// it, so a five thousand file world draws from a few dozen materials.
@@ -58,13 +80,7 @@ impl MaterialCache {
         color: MapColor,
         surface: Surface,
     ) -> Handle<StandardMaterial> {
-        let key = (
-            quantise(color[0]),
-            quantise(color[1]),
-            quantise(color[2]),
-            quantise(color[3]),
-            surface.tag(),
-        );
+        let key = material_key(color, surface);
         self.materials
             .entry(key)
             .or_insert_with(|| {
