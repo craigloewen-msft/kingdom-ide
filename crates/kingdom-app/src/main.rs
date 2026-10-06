@@ -140,7 +140,18 @@ async fn main() {
         // the app shell instead of the geometry.
         .route(
             kingdom_citymap::ROUTE,
-            axum::routing::get(kingdom_app::citymap::serve),
+            // Gzipped, and this is the one route that needs it. The manifest
+            // for a real dev folder is 11.5 MB of JSON made almost entirely of
+            // repeated numeric arrays -- the kind of thing gzip is best at --
+            // and it is the single largest thing the server ever sends.
+            //
+            // On this route rather than on the whole router on purpose: the
+            // sockets above carry small, latency-sensitive messages that
+            // compression would only add work to, and the static bundle is
+            // served by the fallback, which has its own opinions about
+            // encoding. One large body, one layer.
+            axum::routing::get(kingdom_app::citymap::serve)
+                .layer(tower_http::compression::CompressionLayer::new().gzip(true)),
         )
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();

@@ -290,6 +290,53 @@ impl MeshBuilder {
         self.prism(&ring, base_y, top_y);
     }
 
+    /// Adds a ribbon following a polyline at height `y`, used for roads.
+    ///
+    /// Takes a `y` for the same reason [`Self::ground_polygon`] does: a merged
+    /// mesh holds the geometry of many roads at once and cannot be moved into
+    /// place by a `Transform` afterwards, so the layer each one sits on has to
+    /// be baked into its vertices. The free [`ribbon`] below is this at `y = 0`.
+    pub fn ribbon(&mut self, points: &[Vec2], width: f32, y: f32) {
+        let half = width * 0.5;
+        for segment in points.windows(2) {
+            let (from, to) = (segment[0], segment[1]);
+            let direction = (to - from).normalize_or_zero();
+            if direction == Vec2::ZERO {
+                continue;
+            }
+            // Extend each segment by half its width so the corners meet without
+            // a notch where the road bends.
+            let from = from - direction * half;
+            let to = to + direction * half;
+            let side = Vec2::new(-direction.y, direction.x) * half;
+            // Wound so the ribbon faces upward once it is laid into a y-up
+            // world.
+            self.quad(
+                Vec3::new(from.x - side.x, y, from.y - side.y),
+                Vec3::new(from.x + side.x, y, from.y + side.y),
+                Vec3::new(to.x + side.x, y, to.y + side.y),
+                Vec3::new(to.x - side.x, y, to.y - side.y),
+            );
+        }
+    }
+
+    /// The mesh this builder holds, without consuming it.
+    ///
+    /// For inspecting geometry that is still being accumulated -- a merged
+    /// buffer's contents, mid-build -- which [`Self::build`] cannot do because
+    /// it takes `self`.
+    #[cfg(test)]
+    pub fn clone_mesh(&self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions.clone())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals.clone())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs.clone())
+        .with_inserted_indices(Indices::U32(self.indices.clone()))
+    }
+
     /// Whether no triangles have been added, so the mesh can be skipped.
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
@@ -1003,26 +1050,7 @@ fn centroid(polygon: &[Vec2]) -> Vec2 {
 /// A ribbon following a polyline, used for roads.
 pub fn ribbon(points: &[Vec2], width: f32) -> Mesh {
     let mut builder = MeshBuilder::new();
-    let half = width * 0.5;
-    for segment in points.windows(2) {
-        let (from, to) = (segment[0], segment[1]);
-        let direction = (to - from).normalize_or_zero();
-        if direction == Vec2::ZERO {
-            continue;
-        }
-        // Extend each segment by half its width so the corners meet without a
-        // notch where the road bends.
-        let from = from - direction * half;
-        let to = to + direction * half;
-        let side = Vec2::new(-direction.y, direction.x) * half;
-        // Wound so the ribbon faces upward once it is laid into a y-up world.
-        builder.quad(
-            Vec3::new(from.x - side.x, 0.0, from.y - side.y),
-            Vec3::new(from.x + side.x, 0.0, from.y + side.y),
-            Vec3::new(to.x + side.x, 0.0, to.y + side.y),
-            Vec3::new(to.x - side.x, 0.0, to.y - side.y),
-        );
-    }
+    builder.ribbon(points, width, 0.0);
     builder.build()
 }
 

@@ -29,6 +29,11 @@ leptos_router = { version = "0.8" }
 leptos_axum = { version = "0.8", optional = true }
 # `ws` for the chamber's push channel; see `watch.rs`.
 axum = { version = "0.8", features = ["ws"], optional = true }
+# Gzip, for the map manifest. A real dev folder's manifest is 11.5 MB of JSON
+# -- repeated numeric arrays, which compress to a fraction of that. Already in
+# the tree as a transitive dependency of the Leptos server stack; this makes it
+# direct so the layer can be named. See `main.rs`.
+tower-http = { version = "0.6", features = ["compression-gzip"], optional = true }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
@@ -157,6 +162,7 @@ ssr = [
     "dep:kingdom-browser",
     "kingdom-citymap/ssr",
     "dep:axum",
+    "dep:tower-http",
     "dep:tokio",
     "dep:leptos_axum",
     "dep:reqwest",
