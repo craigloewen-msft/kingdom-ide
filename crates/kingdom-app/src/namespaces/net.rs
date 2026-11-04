@@ -1086,8 +1086,7 @@ pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<String
         )
     };
 
-    for (host, port) in services {
-        let target = format!("{host}:{port}");
+    for (target, port) in services {
         // Already relayed -- either this very container, in which case there is
         // nothing to do, or a *different* one holding the port. Both are the
         // same decision here: do not spawn a second relay onto a socket that is
@@ -1098,7 +1097,7 @@ pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<String
             continue;
         }
         let bind = format!("127.0.0.1:{port}");
-        let Some(pid) = spawn_relay_between(holder, &bind, &target).await else {
+        let Some(pid) = spawn_relay_between(holder, &bind, target).await else {
             // The bind was refused, so this port is *not* answering on the
             // loopback and must not be recorded as if it were. The caller
             // falls back to the container address, which is what every plan
@@ -1119,7 +1118,7 @@ pub async fn open_wells(plan: &PlanId, services: &[(String, u16)]) -> Vec<String
                 target: target.clone(),
             },
         );
-        standing.push((*port, target));
+        standing.push((*port, target.clone()));
     }
 
     let mut open: Vec<String> = standing.into_iter().map(|(_, target)| target).collect();
@@ -1677,7 +1676,7 @@ mod tests {
         let plan = PlanId::new("plan-on-the-machines-network");
         namespaces().lock().unwrap().remove(&plan);
 
-        let opened = open_wells(&plan, &[("172.31.4.10".to_string(), 27017)]).await;
+        let opened = open_wells(&plan, &[("172.31.4.10:27017".to_string(), 27017)]).await;
 
         assert!(
             opened.is_empty(),

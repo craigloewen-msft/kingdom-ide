@@ -17,6 +17,30 @@ Today a shared resource is always a **Docker container** — that is the one
 things in the code, so a second kind is a variant rather than a rewrite: see
 [what kind of thing it is](#what-kind-of-thing-it-is-type).
 
+### WSL container runtime
+
+On WSL, install [wslc-remote](https://github.com/craigloewen-msft/WSLc-remote),
+run `wslc _check`, and put this in `.kingdom.env`:
+
+```dotenv
+KINGDOM_CONTAINER_RUNTIME=wslc
+```
+
+Declarations still use `type = "docker"` and ordinary image and volume names.
+Kingdom runs Docker commands through `wslc system session run docker`, so the
+containers, networks and durable volumes live in WSL's container runtime VM,
+not the distro's Docker daemon. Unset the option, or set it to `docker`, to
+keep using the local daemon.
+
+The VM's bridge addresses are not reachable from the distro. Kingdom therefore
+tunnels each running resource through `wslc` to a free port on the distro's
+default-route IPv4 address. Only connections originating in the distro are
+accepted; connections from other machines are refused. No service is published
+on Windows or assigned its usual database port on the host. A shared-network
+plan uses the tunnel address shown in the interface; an isolated plan still
+gets `localhost` on the service's original port. Tunnels end when the resource
+is stopped, while containers and named volumes remain for the next plan.
+
 ## How an agent reaches one
 
 **At `localhost`, on the service's own port.** `mongodb://localhost:27017`,

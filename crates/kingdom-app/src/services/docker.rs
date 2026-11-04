@@ -34,7 +34,7 @@
 //! from him, and `docker network create --subnet` installs a host route that
 //! lets him open the address directly anyway.
 
-use super::{path_hash, which, RunningService, Scope, ServiceError};
+use super::{path_hash, which, wslc, RunningService, Scope, ServiceError};
 use kingdom_core::services::{data_dir_for, known_image, ResourceKind, ServiceSpec};
 use std::path::Path;
 
@@ -91,8 +91,8 @@ const LABEL_SERVICE: &str = "kingdom.service";
 /// Each spec carries its index in the manifest, which is where its address
 /// comes from: see [`service_address`].
 pub(super) async fn raise(scope: &Scope, key: &str, specs: &[(usize, &ServiceSpec)]) -> Raised {
-    if which("docker").is_none() {
-        return Raised::failed(unavailable_missing());
+    if let Err(e) = check_runtime() {
+        return Raised::failed(e);
     }
 
     let network = network_name(key);
@@ -104,6 +104,9 @@ pub(super) async fn raise(scope: &Scope, key: &str, specs: &[(usize, &ServiceSpe
         // a well can exist at all, and refusing here would mean Kingdom could
         // never see one. See `stand_by_hand`.
         Err(e @ ServiceError::Unavailable(_)) => {
+            if wslc::selected() == Ok(true) {
+                return Raised::failed(e);
+            }
             let standing = stand_by_hand(scope, key, specs).await;
             if standing.is_empty() {
                 return Raised::failed(e);
@@ -167,12 +170,13 @@ impl Raised {
 /// existed, and a stopped container starts again with everything in it.
 pub(super) async fn stop(service: &RunningService) {
     let _ = docker(&["stop", &service.handle]).await;
+    wslc::stop(&service.handle);
 }
 
 /// Why nothing can be running, or `None` if the daemon answered.
 pub(super) async fn trouble() -> Option<String> {
-    if which("docker").is_none() {
-        return Some(unavailable_missing().to_string());
+    if let Err(e) = check_runtime() {
+        return Some(e.to_string());
     }
     match docker(&["version", "--format", "{{.Server.Version}}"]).await {
         Ok(_) => None,
@@ -189,6 +193,12 @@ pub(super) async fn trouble() -> Option<String> {
 /// to a command that reports success and changes none of what he is looking
 /// at.
 fn diagnose(detail: &str) -> ServiceError {
+    if wslc::selected() == Ok(true) {
+        return ServiceError::Unavailable(format!(
+            "The wslc runtime is not answering ({detail}). Run `wslc _check` \
+             and check that WSL container support is running."
+        ));
+    }
     if detail.to_lowercase().contains("permission denied") {
         unavailable_forbidden(detail)
     } else {
@@ -242,7 +252,29 @@ fn unavailable_unreachable(detail: &str) -> ServiceError {
 /// formatted: a Docker command composed by a component that cannot run one is a
 /// command that would be wrong for any other kind of resource.
 pub(super) fn log_hint(container: &str) -> String {
-    format!("docker logs {container}")
+    format!("{} logs {container}", command_prefix())
+}
+
+fn check_runtime() -> Result<(), ServiceError> {
+    let remote = wslc::selected().map_err(ServiceError::Unavailable)?;
+    let executable = if remote { "wslc" } else { "docker" };
+    if which(executable).is_some() {
+        Ok(())
+    } else if remote {
+        Err(ServiceError::Unavailable(
+            "wslc is not installed. Install wslc-remote, then run `wslc _check`.".into(),
+        ))
+    } else {
+        Err(unavailable_missing())
+    }
+}
+
+fn command_prefix() -> &'static str {
+    if wslc::selected() == Ok(true) {
+        "wslc system session run docker"
+    } else {
+        "docker"
+    }
 }
 
 /// The Docker network for a city.
@@ -280,8 +312,16 @@ fn preferred_subnet(city_key: &str) -> u8 {
 /// handful of subcommands, and the CLI is the interface Docker documents and
 /// the King can reproduce by hand when something goes wrong.
 async fn docker(args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::new("docker")
+    let mut command = if wslc::selected()? {
+        let mut command = wslc::command();
+        command.arg("docker");
+        command
+    } else {
+        tokio::process::Command::new("docker")
+    };
+    let output = command
         .args(args)
+        .stdin(std::process::Stdio::null())
         .output()
         .await
         .map_err(|e| e.to_string())?;
@@ -289,7 +329,7 @@ async fn docker(args: &[&str]) -> Result<String, String> {
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if message.is_empty() {
-            format!("`docker {}` failed", args.join(" "))
+            format!("`{} {}` failed", command_prefix(), args.join(" "))
         } else {
             message
         });
@@ -321,7 +361,7 @@ async fn ensure_network(network: &str) -> Result<u8, ServiceError> {
     // down, which is a different problem with a different fix -- so ask.
     docker(&["version", "--format", "{{.Server.Version}}"])
         .await
-        .map_err(|e| unavailable_unreachable(&e))?;
+        .map_err(|e| diagnose(&e))?;
 
     let preferred = preferred_subnet(network);
     let mut last = String::new();
@@ -397,6 +437,7 @@ async fn ensure_one(
         what: docker_spec.what(),
         host: host.clone(),
         port: spec.port,
+        endpoint: None,
         handle: container.clone(),
         kind: spec.kind.wire_name(),
         scope: scope.kind(),
@@ -411,8 +452,7 @@ async fn ensure_one(
         // finding what the last one left. Adopted, deliberately -- see the
         // module docs on why this differs from `namespaces::net::reclaim_previous`.
         ContainerState::Running => {
-            wait_until_ready(&service).await?;
-            return Ok(service);
+            return ready_service(service).await;
         }
         // There but stopped: the last plan released it, and a new one wants it
         // again. Starting it keeps the volume and everything in it.
@@ -423,8 +463,7 @@ async fn ensure_one(
                     name: spec.name.clone(),
                     detail,
                 })?;
-            wait_until_ready(&service).await?;
-            return Ok(service);
+            return ready_service(service).await;
         }
         ContainerState::Absent => {}
     }
@@ -437,7 +476,21 @@ async fn ensure_one(
         detail,
     })?;
 
+    ready_service(service).await
+}
+
+async fn ready_service(mut service: RunningService) -> Result<RunningService, ServiceError> {
     wait_until_ready(&service).await?;
+    if wslc::selected().map_err(ServiceError::Unavailable)? {
+        service.endpoint = Some(
+            wslc::forward(&service.handle, &service.host, service.port)
+                .await
+                .map_err(|detail| ServiceError::Failed {
+                    name: service.name.clone(),
+                    detail,
+                })?,
+        );
+    }
     Ok(service)
 }
 
@@ -499,6 +552,7 @@ fn hand_raised(scope: &Scope, key: &str, index: usize, spec: &ServiceSpec) -> Ru
         what: docker_spec.what(),
         host: service_address(subnet, index),
         port: spec.port,
+        endpoint: None,
         handle: container_name(key, &spec.name),
         kind: spec.kind.wire_name(),
         scope: scope.kind(),
@@ -595,6 +649,10 @@ fn run_argv(
 /// different `/24` when this one is taken, and a King running these by hand is
 /// creating the network these commands name.
 pub(super) fn by_hand(key: &str, index: usize, spec: &ServiceSpec) -> Vec<String> {
+    // The local sudo workaround cannot repair a remote WSL runtime.
+    if wslc::selected() == Ok(true) {
+        return Vec::new();
+    }
     let ResourceKind::Docker(docker_spec) = &spec.kind;
 
     let network = network_name(key);
@@ -681,12 +739,12 @@ async fn wait_until_ready(service: &RunningService) -> Result<(), ServiceError> 
             });
         }
 
-        let connected = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            tokio::net::TcpStream::connect(&address),
-        )
-        .await;
-        if matches!(connected, Ok(Ok(_))) {
+        let connected = if wslc::selected().map_err(ServiceError::Unavailable)? {
+            wslc::answering(&service.host, service.port).await
+        } else {
+            answering(&address).await
+        };
+        if connected {
             return Ok(());
         }
 
@@ -988,6 +1046,7 @@ mod real_docker {
     // go in through the same entry points the server does.
     use crate::services::{address_for, city_key, reconcile, registry, running_in, users_of};
     use kingdom_core::PlanId;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// The whole lifecycle: start, adopt, share, release, and keep the data.
     ///
@@ -1042,6 +1101,34 @@ mod real_docker {
         tokio::net::TcpStream::connect(service.address())
             .await
             .expect("the service must answer at the address we hand to plans");
+
+        let mut connection = tokio::net::TcpStream::connect(service.address())
+            .await
+            .expect("connect to the cache through its advertised endpoint");
+        connection
+            .write_all(b"*1\r\n$4\r\nPING\r\n")
+            .await
+            .expect("send a Redis request");
+        connection.shutdown().await.expect("finish sending");
+        let mut response = [0; 7];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.read_exact(&mut response),
+        )
+        .await
+        .expect("the transport must deliver a response")
+        .expect("read the Redis response");
+        assert_eq!(&response, b"+PONG\r\n");
+        let mut trailing = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.read_to_end(&mut trailing),
+        )
+        .await
+        .expect("the transport must close after the request and response")
+        .expect("finish reading the Redis response");
+        assert!(trailing.is_empty());
+        drop(connection);
 
         // And so does the Postgres, which is the case that could not start
         // before: nothing in the manifest gives it a password, so it comes up

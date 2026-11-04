@@ -102,6 +102,7 @@
 //! runtime without knowing what a container is.
 
 pub mod docker;
+mod wslc;
 
 use kingdom_core::services::{
     ManifestTrouble, ResourceInventory, ResourceKind, ServiceManifest, ServiceScope, ServiceSpec,
@@ -139,6 +140,8 @@ pub struct RunningService {
     pub host: String,
     /// The port it listens on.
     pub port: u16,
+    /// A transport endpoint when the runtime's network is not locally routable.
+    pub endpoint: Option<String>,
     /// What the runtime calls it, which is also how it is found again.
     ///
     /// A container's name today. Named for what it *does* -- the string the
@@ -178,7 +181,9 @@ pub struct RunningService {
 impl RunningService {
     /// What the King copies to reach it himself: `172.31.4.10:27017`.
     pub fn address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        self.endpoint
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", self.host, self.port))
     }
 }
 
@@ -722,7 +727,7 @@ pub async fn require(plan: &PlanId, city_root: &Path) -> Result<(), ServiceError
                         .to_string(),
                 });
             };
-            standing.push((service.host.clone(), service.port));
+            standing.push((service.address(), service.port));
             // This plan is one of its drawers from here on. The well is
             // already up, so this is bookkeeping rather than a start -- it is
             // what stops the well being swept out from under a plan that
@@ -1700,6 +1705,7 @@ pub(crate) fn pretend_a_named_well_is_running(
         what: "mongo:7".to_string(),
         host: host.to_string(),
         port,
+        endpoint: None,
         handle: format!("kingdom-{key}-{name}"),
         kind: "docker",
         scope: ServiceScope::City,
@@ -2189,6 +2195,7 @@ mod tests {
                     what: "mongo:7".to_string(),
                     host: "172.31.9.10".to_string(),
                     port: 27017,
+                    endpoint: None,
                     handle: "kingdom-double-release-test-db".to_string(),
                     kind: "docker",
                     scope: ServiceScope::City,
@@ -2279,6 +2286,19 @@ mod tests {
         crate::namespaces::net::forget_namespace(&plan);
 
         assert_eq!(address_for(&plan, &service), "172.31.4.10:27017");
+    }
+
+    #[test]
+    fn a_remote_endpoint_preserves_the_services_original_loopback_port() {
+        let (_root, mut service) = a_running_well("kingdom-remote-endpoint-test", 27017);
+        service.endpoint = Some("192.0.2.10:41234".into());
+        let plan = PlanId::new("plan-with-a-remote-service");
+        assert_eq!(service.address(), "192.0.2.10:41234");
+        assert_eq!(address_for(&plan, &service), "192.0.2.10:41234");
+
+        crate::namespaces::net::pretend_wells_are_open(&plan, &["192.0.2.10:41234"]);
+        assert_eq!(address_for(&plan, &service), "localhost:27017");
+        crate::namespaces::net::forget_namespace(&plan);
     }
 
     /// A relay that did not come up must not be described as if it had.
@@ -2387,6 +2407,7 @@ mod tests {
                     what: "mongo:7".to_string(),
                     host: "172.31.9.10".to_string(),
                     port: 27017,
+                    endpoint: None,
                     handle: "kingdom-leaving-test-db".to_string(),
                     kind: "docker",
                     scope: ServiceScope::City,
@@ -2739,6 +2760,7 @@ mod tests {
                         what: "mongo:7".to_string(),
                         host: "172.31.9.10".to_string(),
                         port: 27017,
+                        endpoint: None,
                         handle: docker::container_name(&filed_under, name),
                         kind: "docker",
                         scope,
