@@ -1,0 +1,239 @@
+// The pull requests screen (`/pulls`), and the court's findings on one.
+//
+// The screen borrows the ledger's frame (`.wells-head`, `.wells-sub`) because
+// the two are siblings in the rail and should read as the same kind of place.
+// What is its own is the list: one row per pull request, quiet until the King
+// opens its composer.
+
+@use "../abstracts/tokens" as t;
+@use "../abstracts/mixins" as m;
+
+.pulls-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+
+// Which project is being listed. Chips rather than a select, because a kingdom
+// has a handful of repositories and seeing them all is the point.
+.pulls-cities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pulls-city {
+  padding: 4px 10px;
+  border: 1px solid t.$edge;
+  border-radius: 999px;
+  background: t.$panel;
+  color: t.$ink-dim;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover { border-color: t.$edge-bright; color: t.$ink; }
+
+  &.current {
+    border-color: t.$gold-dim;
+    color: t.$gold;
+  }
+}
+
+.pulls-count {
+  margin: 0;
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
+// `gh` missing, logged out, or no GitHub remote. Said as a fact with the fix
+// in it, not as an error colour: nothing has failed, the machine simply is
+// this way.
+.pulls-unavailable {
+  max-width: 64ch;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid t.$edge;
+  border-left: 3px solid t.$review;
+  border-radius: t.$radius;
+  background: t.$panel;
+  color: t.$ink-dim;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.pulls-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  border: 1px solid t.$edge;
+  border-radius: t.$radius;
+  list-style: none;
+}
+
+.pull-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+
+  & + & { border-top: 1px solid t.$edge; }
+
+  &:hover, &.open { background: t.$panel; }
+}
+
+.pull-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pull-number {
+  flex: 0 0 auto;
+  color: t.$ink-faint;
+  font-family: t.$font-mono;
+  font-size: 12px;
+}
+
+.pull-title {
+  @include m.truncate;
+  min-width: 0;
+  color: t.$ink;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+
+  &:hover { color: t.$gold; text-decoration: underline; }
+}
+
+.pull-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid t.$edge-bright;
+  border-radius: 999px;
+  color: t.$ink-faint;
+  font-size: 10px;
+
+  &.decision-approved { border-color: rgba(t.$working, 0.6); color: t.$working; }
+  &.decision-changes  { border-color: rgba(t.$blocked, 0.6); color: t.$blocked; }
+  &.decision-required { border-color: rgba(t.$review, 0.6); color: t.$review; }
+}
+
+// The row's one action. Gold-bordered rather than filled: the filled gold is
+// kept for the composer's "Start review", the moment something actually
+// begins.
+.pull-review {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid t.$gold-dim;
+  border-radius: t.$radius;
+  background: t.$panel-2;
+  color: t.$gold;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover { border-color: t.$gold; }
+  &.open { border-color: t.$edge-bright; color: t.$ink-dim; }
+}
+
+.pull-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  color: t.$ink-faint;
+  font-size: 11px;
+
+  code {
+    color: t.$ink-dim;
+    font-family: t.$font-mono;
+    font-size: 11px;
+  }
+}
+
+.pull-fork {
+  color: t.$review;
+}
+
+.pull-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+
+  .decree-error { padding: 0; }
+}
+
+.pull-notes {
+  @include m.field(8px 10px, 13px);
+  width: 100%;
+  box-sizing: border-box;
+  background: t.$deep;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.pull-compose-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  .start-btn { margin-left: auto; }
+}
+
+.pull-terms {
+  color: t.$ink-faint;
+  font-size: 11px;
+}
+
+// --- The findings, in the chamber ------------------------------------------
+//
+// Built on `.chat-proposal` so it stands where a proposal stands and takes the
+// column the same way. What differs is the verdict, which is the first thing
+// the King's eye should land on after the headline.
+
+.chat-report {
+  border-color: rgba(t.$exploring, 0.45);
+  background: rgba(t.$exploring, 0.04);
+
+  .proposal-head { color: t.$exploring; }
+}
+
+.report-verdict {
+  padding: 2px 9px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+
+  &.verdict-merge   { color: t.$working; }
+  &.verdict-changes { color: t.$blocked; }
+  &.verdict-discuss { color: t.$review; }
+}
+
+.report-of {
+  margin: -4px 0 10px;
+  color: t.$ink-faint;
+  font-size: 11px;
+
+  code { font-family: t.$font-mono; color: t.$ink-dim; }
+}
+
+.report-open {
+  padding: 8px 14px;
+  border: 1px solid t.$edge-bright;
+  border-radius: t.$radius;
+  background: t.$panel;
+  color: t.$ink;
+  font-size: 13px;
+  text-decoration: none;
+
+  &:hover { border-color: t.$gold-dim; color: t.$gold; }
+}

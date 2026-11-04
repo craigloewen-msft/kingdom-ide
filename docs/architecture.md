@@ -19,6 +19,9 @@ crates/
                     deliberately: the browser splits to offer a target and the
                     server splits to quote it back, and two answers to "where
                     does a block begin" is how those come to disagree
+    pull_request.rs A pull request as listed, the reference a review's
+                    workspace carries, the court's findings and their
+                    recommendation, and the review's opening message. Pure
     review.rs       What a plan changed, and how one file differs, as pure
                     data, already paired for a side-by-side view. FileText and
                     FileStamp live here too: one file whole and byte-exact for
@@ -54,6 +57,8 @@ crates/
                     Stopping is shared with api::stop_plan through turns.rs
                     rather than by either side reaching into the other   (ssr)
     scan.rs         Filesystem scanning                      (ssr)
+    github.rs       Reading open pull requests through `gh`. Read-only on
+                    purpose: nothing in Kingdom posts to GitHub        (ssr)
     events.rs       Publishing a plan's changes to its watchers, and a digest
                     of every plan to the rail                 (ssr)
     watch.rs        The chamber's push socket, and the rail's
@@ -103,10 +108,13 @@ crates/
                     cannot spend the King's credential or write into his
                     profile), think, read_file, read_image, search, skill,
                     bash, tmux, patch, browser, profile, propose_plan,
-                    spawn_agents, ask_user_question
+                    submit_review (a review's findings, ending the turn as
+                    propose_plan does), spawn_agents, ask_user_question
 
     app.rs          Shell, routes, shared UI state
     components/     sidebar.rs, prompt_bar.rs, conversation.rs,
+                    pull_requests.rs (`/pulls`: open pull requests and asking
+                    for a review), review_report.rs (the findings card),
                     markdown.rs (the court's prose: markdown, and mermaid
                     fences drawn as diagrams. Raw HTML is escaped, never passed
                     through — the text is model output and it lands via

@@ -64,6 +64,8 @@ The translation, in full:
 | the spyglass | the screencast — `screencast.rs`, `BrowserView` |
 | the herald | the event bus — `events::publish`, `events::subscribe` |
 | a remit | `Permissions::ReadOnly` / `Permissions::Full` |
+| a review, the court's findings | a pull-request review — `Permissions::Review`, `PullRequestReview`, `submit_review` |
+| the pull requests screen | `PullRequestsView`, `github.rs`, `begin_review` |
 | on this machine / a network of its own / a machine of its own | `Isolation::Shared` / `Isolated` / `Sealed` |
 | a workshop | `Sandbox` |
 | a well | a shared container — `ServiceSpec`, `RunningService`, `SharedService` |
@@ -241,6 +243,12 @@ is invisible until a plan is halfway through a job:
   its address to every plan that can reach it. Without a daemon such a city
   refuses to run rather than starting an agent that cannot reach its own
   database. Almost no project needs this and no test does.
+- **The GitHub CLI (`gh`), logged in**, but only for the pull requests screen.
+  Kingdom reads open pull requests through it and holds no token of its own;
+  without it the screen says how to install it. `KINGDOM_GH` overrides which
+  `gh` runs. Kingdom never *writes* to GitHub, and a review plan's own commands
+  run with `gh` logged out and `git push` refused — see
+  `tools::child_environment`.
 - **Whatever the city itself needs to run.** That is the *project's*
   prerequisite, not Kingdom's, and Kingdom cannot install it.
 

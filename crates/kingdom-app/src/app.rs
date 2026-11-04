@@ -1,7 +1,7 @@
 //! The application shell and root component.
 
 use crate::api::{get_kingdom, open_kingdom};
-use crate::components::{Conversation, PromptBar, SharedResourcesView, Sidebar};
+use crate::components::{Conversation, PromptBar, PullRequestsView, SharedResourcesView, Sidebar};
 use kingdom_citymap::map::MapPresence;
 use kingdom_citymap::CityMap;
 use kingdom_core::{
@@ -552,6 +552,10 @@ fn store_workspace(mode: &WorkspaceMode) {
                 let _ = storage.set_item(WORKSPACE_KEY, "branch");
                 let _ = storage.set_item(BRANCH_KEY, b);
             }
+            // Never the King's standing choice: a review opens from the pull
+            // requests screen, not from the decree bar, so there is nothing
+            // to remember for the next decree.
+            WorkspaceMode::PullRequest(_) => {}
         }
     }
 
@@ -920,6 +924,10 @@ pub fn App() -> impl IntoView {
                         // plus the King's own profile, which is not a question
                         // one conversation can be asked.
                         <Route path=path!("resources") view=SharedResourcesView/>
+                        // Beside the ledger, for its reason: which pull request
+                        // to have reviewed is chosen before any conversation
+                        // about it exists.
+                        <Route path=path!("pulls") view=PullRequestsView/>
                     </ParentRoute>
                 </Routes>
             </Router>

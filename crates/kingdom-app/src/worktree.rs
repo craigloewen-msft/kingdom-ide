@@ -95,6 +95,27 @@ pub async fn prepare(
             git(city_root, &["worktree", "add", &dir_arg, b]).await?;
             b.clone()
         }
+        WorkspaceMode::PullRequest(pr) => {
+            let branch = review_branch(city_root, pr, &id, &dir_arg).await?;
+            // The commit actually checked out, which is what the review is of.
+            // Usually the one the King was shown; if somebody pushed in
+            // between, it is the newer one, and the record says so.
+            let mut pr = pr.clone();
+            if let Ok(tip) = head_of(&dir).await {
+                pr.head_sha = tip;
+            }
+            // Measured against the branch the pull request asks to land on,
+            // not whatever the King happens to have checked out: that is what
+            // the review is *of*. Recorded for the changes drawer; nothing is
+            // ever merged into it from here -- see `merge`.
+            return Ok(Workspace {
+                mode: WorkspaceMode::PullRequest(pr.clone()),
+                path: dir_arg,
+                branch: Some(branch),
+                id: Some(id),
+                base: Some(pr.base.clone()),
+            });
+        }
         WorkspaceMode::InPlace => unreachable!("handled above"),
     };
 
@@ -128,6 +149,17 @@ async fn fresh_branch(
     id: &str,
     dir_arg: &str,
 ) -> Result<String, WorktreeError> {
+    fresh_branch_at(city_root, slug, id, dir_arg, "HEAD").await
+}
+
+/// [`fresh_branch`], cut from any commit rather than only `HEAD`.
+async fn fresh_branch_at(
+    city_root: &Path,
+    slug: &str,
+    id: &str,
+    dir_arg: &str,
+    from: &str,
+) -> Result<String, WorktreeError> {
     let taken = branches(city_root).await;
 
     let candidates = (1..=MAX_ATTEMPTS)
@@ -144,7 +176,7 @@ async fn fresh_branch(
 
     let mut last = None;
     for branch in candidates {
-        let args = ["worktree", "add", "-b", &branch, dir_arg, "HEAD"];
+        let args = ["worktree", "add", "-b", &branch, dir_arg, from];
         match git(city_root, &args).await {
             Ok(_) => return Ok(branch),
             // Only a name clash is worth another attempt. Anything else -- a
@@ -173,6 +205,41 @@ fn is_name_clash(e: &WorktreeError) -> bool {
     };
     let message = message.to_lowercase();
     message.contains("already exists") || message.contains("already used by worktree")
+}
+
+/// Fetches a pull request and checks it out into a worktree of its own.
+///
+/// # Why a ref of our own rather than `FETCH_HEAD`
+///
+/// `FETCH_HEAD` is one file per repository. Two reviews starting at once --
+/// the ordinary case for a King with a queue of pull requests -- would each
+/// fetch into it and each check out whichever landed last. A uniquely named
+/// ref under `refs/kingdom/` cannot be raced, and it is deleted the moment the
+/// worktree's own branch holds the commit.
+///
+/// `pull/N/head` lives on the *base* repository, so a pull request from a fork
+/// checks out exactly the same way and needs no remote for the fork.
+///
+/// The base branch is fetched too, best-effort, so the changes drawer can diff
+/// against the remote's view of it -- which is what GitHub shows -- rather
+/// than against a local copy that may be days stale.
+async fn review_branch(
+    city_root: &Path,
+    pr: &kingdom_core::PullRequestRef,
+    id: &str,
+    dir_arg: &str,
+) -> Result<String, WorktreeError> {
+    let scratch = format!("refs/kingdom/fetch/{id}");
+    let spec = format!("+pull/{}/head:{scratch}", pr.number);
+    git(city_root, &["fetch", "--no-tags", &pr.remote, &spec]).await?;
+    let _ = git(city_root, &["fetch", "--no-tags", &pr.remote, &pr.base]).await;
+
+    // If somebody pushed since the King looked, the fetched tip wins: the
+    // review is of what is actually there, and `prepare` records it.
+    let slug = format!("pr-{}-review", pr.number);
+    let result = fresh_branch_at(city_root, &slug, id, dir_arg, &scratch).await;
+    let _ = git(city_root, &["update-ref", "-d", &scratch]).await;
+    result
 }
 
 /// What became of an attempt to finish a plan.
@@ -207,6 +274,20 @@ pub enum Finish {
 /// a refused merge is aborted, so there is never a half-merged working tree for
 /// the user to discover later.
 pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, WorktreeError> {
+    // A review is never landed by Kingdom. The pull request is somebody's
+    // proposal to the project, and merging it is a decision the King makes on
+    // GitHub, where the people who wrote it can see it made. The conversation
+    // never offers this, but the blast radius is his own branch, so the guard
+    // lives here as well.
+    if let Some(pr) = workspace.mode.pull_request() {
+        return Ok(Finish::Refused(format!(
+            "This plan is a review of pull request #{}, and Kingdom does not merge \
+             pull requests. Merge it on GitHub if the findings say it is ready, then \
+             close this review.",
+            pr.number
+        )));
+    }
+
     // Working in place, there is nothing to merge -- the work is already in the
     // folder. Saying so plainly beats pretending to merge (a lie) or refusing
     // (a plan the user cannot close).
@@ -379,6 +460,80 @@ pub async fn archive(
         base_commit,
         patch,
         pruned,
+    }))
+}
+
+/// Closes a review: its checkout and its scratch branch go, and nothing lands.
+///
+/// The court is told not to edit a pull request it is reviewing, and holds no
+/// unrestricted `patch` -- but it does hold `bash`, and a build can leave
+/// tracked files changed. Anything it left is kept as a patch at `patch_path`
+/// before the worktree is removed, on `archive`'s rule: removing a checkout
+/// must never be the thing that destroys work.
+///
+/// Only a `kingdom/` branch is ever deleted, so a bug here cannot take a branch
+/// the King made.
+pub async fn close_review(
+    city_root: &Path,
+    workspace: &Workspace,
+    patch_path: &Path,
+) -> Result<Finish, WorktreeError> {
+    let Some(pr) = workspace.mode.pull_request() else {
+        return Ok(Finish::Refused(
+            "This plan is not a review, so it cannot be closed as one.".to_string(),
+        ));
+    };
+    let worktree = PathBuf::from(&workspace.path);
+
+    let mut patch = None;
+    if worktree.is_dir() {
+        // Tracked changes only: untracked files in a review checkout are build
+        // output, `node_modules` and the like, and none of it is the court's
+        // work worth keeping.
+        if let Ok(diff) = git(&worktree, &["diff", "--binary", "HEAD"]).await {
+            if !diff.trim().is_empty() {
+                let written = patch_path
+                    .parent()
+                    .is_none_or(|d| std::fs::create_dir_all(d).is_ok())
+                    && std::fs::write(patch_path, &diff).is_ok();
+                if !written {
+                    return Ok(Finish::Refused(format!(
+                        "The court left changes in this review's checkout and they could \
+                         not be saved to {}, so the checkout was left where it is. Look at \
+                         {} before closing it.",
+                        patch_path.display(),
+                        workspace.path
+                    )));
+                }
+                patch = Some(patch_path.to_string_lossy().to_string());
+            }
+        }
+
+        git(
+            city_root,
+            &["worktree", "remove", "--force", &workspace.path],
+        )
+        .await?;
+    } else {
+        // Already gone -- removed by hand, perhaps. Tidy git's record of it so
+        // the branch below can be deleted.
+        let _ = git(city_root, &["worktree", "prune"]).await;
+    }
+
+    if let Some(branch) = workspace
+        .branch
+        .as_deref()
+        .filter(|b| b.starts_with(BRANCH_PREFIX))
+    {
+        // `-D`: a review branch is never merged, by design. Failure is untidy
+        // rather than harmful, so it does not fail the close.
+        let _ = git(city_root, &["branch", "-D", branch]).await;
+    }
+
+    Ok(Finish::Settled(Outcome::Reviewed {
+        number: pr.number,
+        head: pr.head_sha.clone(),
+        patch,
     }))
 }
 
@@ -1072,5 +1227,181 @@ mod tests {
             branches(root).await.contains(&"fix/parser".to_string()),
             "archiving must leave a branch the King named exactly where it was"
         );
+    }
+
+    /// A repository with a remote that carries `refs/pull/7/head`, the way
+    /// GitHub does, one commit ahead of `main`. Returns the city and the sha.
+    async fn repo_with_a_pull_request() -> (tempfile::TempDir, String) {
+        let dir = repo().await;
+        let root = dir.path();
+        let remote = root.join(".remote.git");
+        let remote_arg = remote.to_string_lossy().to_string();
+        git(root, &["init", "-q", "--bare", &remote_arg])
+            .await
+            .unwrap();
+        git(root, &["remote", "add", "origin", &remote_arg])
+            .await
+            .unwrap();
+        git(root, &["push", "-q", "origin", "main"]).await.unwrap();
+
+        // The author's change, made on a branch and pushed only as the pull
+        // ref -- the King has no local branch for it, exactly as with a fork.
+        git(root, &["checkout", "-q", "-b", "author"])
+            .await
+            .unwrap();
+        std::fs::write(root.join("login.rs"), "fn login() {}").unwrap();
+        git(root, &["add", "login.rs"]).await.unwrap();
+        git(root, &["commit", "-q", "-m", "Add login"])
+            .await
+            .unwrap();
+        let sha = head_of(root).await.unwrap();
+        git(root, &["push", "-q", "origin", "author:refs/pull/7/head"])
+            .await
+            .unwrap();
+        git(root, &["checkout", "-q", "main"]).await.unwrap();
+        git(root, &["branch", "-D", "author"]).await.unwrap();
+        (dir, sha)
+    }
+
+    fn pull_seven(sha: &str) -> kingdom_core::PullRequestRef {
+        kingdom_core::PullRequestRef {
+            number: 7,
+            title: "Add login".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            base: "main".into(),
+            head: "author".into(),
+            head_sha: sha.into(),
+            remote: "origin".into(),
+        }
+    }
+
+    /// The whole checkout half of a review: the pull request lands in a
+    /// worktree of its own at exactly its commit, on a scratch branch, with no
+    /// stray fetch ref left behind -- and the King's checkout does not move.
+    #[tokio::test]
+    async fn a_pull_request_is_checked_out_at_its_own_commit() {
+        let (dir, sha) = repo_with_a_pull_request().await;
+        let root = dir.path();
+
+        let mode = WorkspaceMode::PullRequest(pull_seven("stale"));
+        let workspace = prepare(root, &mode, "").await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+
+        assert_eq!(head_of(&worktree).await.unwrap(), sha);
+        assert!(
+            worktree.join("login.rs").is_file(),
+            "the change is there to run"
+        );
+        assert_eq!(workspace.branch.as_deref(), Some("kingdom/pr-7-review"));
+        assert_eq!(workspace.base.as_deref(), Some("main"));
+        assert_eq!(
+            workspace.mode.pull_request().map(|p| p.head_sha.as_str()),
+            Some(sha.as_str()),
+            "the record names the commit actually checked out, not the stale one asked for"
+        );
+        let scratch = git(root, &["for-each-ref", "refs/kingdom"]).await.unwrap();
+        assert!(scratch.trim().is_empty(), "left behind: {scratch}");
+        assert!(!root.join("login.rs").exists(), "the King's checkout moved");
+
+        // A second review of the same pull request does not collide.
+        let again = prepare(root, &mode, "").await.unwrap();
+        assert_eq!(again.branch.as_deref(), Some("kingdom/pr-7-review-2"));
+        assert_ne!(again.path, workspace.path);
+    }
+
+    /// Kingdom never merges a pull request, even when asked directly.
+    #[tokio::test]
+    async fn a_review_is_never_merged() {
+        let (dir, sha) = repo_with_a_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &WorkspaceMode::PullRequest(pull_seven(&sha)), "")
+            .await
+            .unwrap();
+        let before = head_of(root).await.unwrap();
+
+        let finish = merge(root, &workspace).await.unwrap();
+        assert!(matches!(finish, Finish::Refused(ref why) if why.contains("does not merge")));
+        assert_eq!(head_of(root).await.unwrap(), before, "main moved");
+        assert!(
+            PathBuf::from(&workspace.path).is_dir(),
+            "the review was torn down"
+        );
+    }
+
+    /// Closing a review clears the checkout and its scratch branch -- and keeps
+    /// anything the court left in it, rather than throwing it away.
+    #[tokio::test]
+    async fn closing_a_review_clears_it_and_keeps_stray_edits() {
+        let (dir, sha) = repo_with_a_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &WorkspaceMode::PullRequest(pull_seven(&sha)), "")
+            .await
+            .unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        std::fs::write(worktree.join("login.rs"), "fn login() { todo!() }").unwrap();
+
+        let patch_path = dir.path().join("archive").join("plan-9.patch");
+        let finish = close_review(root, &workspace, &patch_path).await.unwrap();
+        let Finish::Settled(Outcome::Reviewed {
+            number,
+            head,
+            patch,
+        }) = finish
+        else {
+            panic!("closing a review must settle as reviewed");
+        };
+
+        assert_eq!((number, head.as_str()), (7, sha.as_str()));
+        assert_eq!(patch.as_deref(), Some(&*patch_path.to_string_lossy()));
+        assert!(std::fs::read_to_string(&patch_path)
+            .unwrap()
+            .contains("todo!()"));
+        assert!(!worktree.exists(), "the checkout is gone");
+        assert!(
+            !git(root, &["branch", "--list", "kingdom/pr-7-review"])
+                .await
+                .unwrap()
+                .contains("pr-7"),
+            "the scratch branch is gone"
+        );
+    }
+
+    /// The changes drawer shows a review exactly the pull request's own
+    /// change -- measured against its base on the remote, so a commit the King
+    /// has on his local `main` and the remote does not is not attributed to
+    /// the author.
+    #[tokio::test]
+    async fn a_reviews_changes_are_the_pull_requests_alone() {
+        let (dir, sha) = repo_with_a_pull_request().await;
+        let root = dir.path();
+        // Local work the remote has never seen.
+        std::fs::write(root.join("mine.rs"), "fn mine() {}").unwrap();
+        git(root, &["add", "mine.rs"]).await.unwrap();
+        git(root, &["commit", "-q", "-m", "Mine"]).await.unwrap();
+
+        let workspace = prepare(root, &WorkspaceMode::PullRequest(pull_seven(&sha)), "")
+            .await
+            .unwrap();
+        let summary = crate::review::changes(&workspace).await;
+        let paths: Vec<&str> = summary.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["login.rs"], "{summary:?}");
+    }
+
+    /// A clean review leaves no patch behind.
+    #[tokio::test]
+    async fn a_clean_review_closes_without_a_patch() {
+        let (dir, sha) = repo_with_a_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &WorkspaceMode::PullRequest(pull_seven(&sha)), "")
+            .await
+            .unwrap();
+        let patch_path = dir.path().join("archive").join("plan-10.patch");
+
+        let finish = close_review(root, &workspace, &patch_path).await.unwrap();
+        assert!(matches!(
+            finish,
+            Finish::Settled(Outcome::Reviewed { patch: None, .. })
+        ));
+        assert!(!patch_path.exists());
     }
 }

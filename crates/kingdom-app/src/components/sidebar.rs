@@ -88,6 +88,7 @@ pub fn Sidebar() -> impl IntoView {
     // Whether the ledger is the screen currently open, so the rail's own entry
     // reads as where you are rather than as somewhere to go.
     let on_resources = Memo::new(move |_| location.pathname.get() == "/resources");
+    let on_pulls = Memo::new(move |_| location.pathname.get() == "/pulls");
 
     // Clearing the kingdom locally is what returns the app to the opening
     // screen; the server call is what stops the next start reopening it.
@@ -187,6 +188,19 @@ pub fn Sidebar() -> impl IntoView {
             >
                 <span class="rail-resources-mark">"\u{26c1}"</span>
                 <span class="rail-resources-label">"Shared resources"</span>
+            </a>
+
+            // Pull requests to have reviewed. Navigation like the ledger above,
+            // and styled as its sibling: both are screens about the kingdom
+            // rather than about one plan.
+            <a
+                class="rail-resources"
+                class:current=move || on_pulls.get()
+                href="/pulls"
+                title="Open pull requests the court can check out, test and review for you"
+            >
+                <span class="rail-resources-mark">"\u{2442}"</span>
+                <span class="rail-resources-label">"Pull requests"</span>
             </a>
 
             <div class="sidebar-body">

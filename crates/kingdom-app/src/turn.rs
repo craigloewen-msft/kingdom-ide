@@ -598,6 +598,11 @@ pub(crate) async fn converse(
                     let put = (act.tool == "propose_plan")
                         .then(|| crate::tools::propose_plan::proposed(&act.input, &shop))
                         .flatten();
+                    // The same, for a review's findings. Read here for the
+                    // same reason and from the same arguments.
+                    let found = (act.tool == "submit_review")
+                        .then(|| crate::tools::submit_review::submitted(&act.input, &shop))
+                        .flatten();
 
                     // The lock is deliberately not held across this. A tool can
                     // take minutes -- and `ask_user_question` waits on a person
@@ -655,6 +660,20 @@ pub(crate) async fn converse(
                             if output == crate::tools::propose_plan::PROPOSED);
                         if let (Some((title, body)), true) = (put.clone(), accepted) {
                             p.propose(title, body);
+                            p.working_on = None;
+                            p.status = kingdom_core::PlanStatus::AwaitingReview;
+                            proposed = Some(p.clone());
+                        }
+
+                        // Findings handed back end the turn exactly as a
+                        // proposal does, and park the plan the same way: the
+                        // next move is the King's, and it is a reading.
+                        let handed_back = matches!(&outcome, ToolOutcome::Done { output, .. }
+                            if output == crate::tools::submit_review::SUBMITTED);
+                        if let (Some((title, body, recommendation)), true) =
+                            (found.clone(), handed_back)
+                        {
+                            p.submit_review(title, body, recommendation);
                             p.working_on = None;
                             p.status = kingdom_core::PlanStatus::AwaitingReview;
                             proposed = Some(p.clone());
@@ -924,6 +943,12 @@ fn describe(tool: &str, input: &serde_json::Value) -> String {
     // sort of "busy" again and worth its own words.
     if tool == "propose_plan" {
         return "Awaiting the King's word".to_string();
+    }
+
+    // Findings, which are the same kind of ending: the turn is over and the
+    // next move is a reading.
+    if tool == "submit_review" {
+        return "Handing the King its findings".to_string();
     }
 
     let subject = ["cmd", "path", "pattern", "url", "selector", "query"]

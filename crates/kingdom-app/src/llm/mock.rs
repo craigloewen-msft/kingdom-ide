@@ -124,6 +124,13 @@ pub enum Scenario {
     /// gateway, which is exactly the dependency the mock exists to remove --
     /// and this is now the most important path there is to rehearse.
     Propose,
+    /// Reviews a pull request: looks at the history, writes findings, and hands
+    /// them back -- and again, revised, after each follow-up.
+    ///
+    /// Chosen by the remit rather than by the prompt: a plan offered
+    /// `submit_review` is a review whatever its words hash to, exactly as a
+    /// plan that has proposed stays in [`Scenario::Propose`].
+    Review,
 }
 
 impl Scenario {
@@ -194,7 +201,10 @@ impl MockModel {
         // hash to. Without this the mock falls out of the scenario the moment
         // they ask for a change -- and the revision loop, which is half of what
         // this scenario exists to rehearse, could never be exercised offline.
-        let scenario = if proposed_already(brief) && !approved(brief) {
+        let reviewing = brief.tools.iter().any(|t| t.name == "submit_review");
+        let scenario = if reviewing {
+            Scenario::Review
+        } else if proposed_already(brief) && !approved(brief) {
             Scenario::Propose
         } else {
             Scenario::for_prompt(&prompt)
@@ -564,6 +574,74 @@ impl MockModel {
                 }),
             }),
 
+            Scenario::Review => Ok(match done_since_last_word(brief) {
+                // A real reviewer starts by looking; so does the rehearsal, so
+                // the chamber shows a deed before the findings.
+                None => Reply::Acts(
+                    Acts::plain(vec![Act {
+                        id: format!("mock-review-look-{}", reviews_so_far(brief) + 1),
+                        tool: "bash".to_string(),
+                        input: serde_json::json!({
+                            "cmd": "git log --oneline -5 && git status --short | head -20",
+                            "wait_seconds": 15
+                        }),
+                    }])
+                    .saying("I'll look at what this pull request changed before I judge it."),
+                ),
+                Some(looked) => {
+                    let nth = reviews_so_far(brief) + 1;
+                    let draft = crate::tools::propose_plan::DRAFT;
+                    let asked = if nth > 1 {
+                        format!(
+                            "Revised, having read: \"{}\".\n\n",
+                            latest_prompt(brief).trim()
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let body = format!(
+                        "# Works as described, with one thing to tidy\n\n\
+                         {asked}## Summary\n\n\
+                         A rehearsal review of {} by the mock model. The history it read:\n\n\
+                         ```\n{}\n```\n\n\
+                         ## Tested in the browser\n\n\
+                         Nothing -- the mock model drives no browser. A real model starts \
+                         the project and exercises the change here.\n\n\
+                         ## Findings\n\n\
+                         - **Should fix** \u{2014} `src/lib.rs:1`: an example finding, so the \
+                         card has something to show.\n\n\
+                         ## Recommendations\n\n\
+                         1. Address the finding above, then merge.\n\n\
+                         ## Suggested review comments\n\n\
+                         - `src/lib.rs:1` \u{2014} \"Could this handle the empty case?\"\n\n\
+                         (Drafted by the mock model \u{2014} no real review was done.)",
+                        city.name,
+                        looked.trim(),
+                    );
+                    Reply::Acts(
+                        Acts::plain(vec![
+                            Act {
+                                id: format!("mock-review-draft-{nth}"),
+                                tool: "patch".to_string(),
+                                input: serde_json::json!({
+                                    "path": draft,
+                                    "patches": [{ "operation": "overwrite", "newText": body }]
+                                }),
+                            },
+                            Act {
+                                id: format!("mock-review-{nth}"),
+                                tool: "submit_review".to_string(),
+                                input: serde_json::json!({
+                                    "report": draft,
+                                    "recommendation": "changes"
+                                }),
+                            },
+                        ])
+                        .saying("I'll write the findings down and hand them to you."),
+                    )
+                }
+            }),
+
             Scenario::Survey => Ok(Reply::Spoke(Draft {
                 summary: format!("A reading of {} as it stands.", city.name),
                 body: format!(
@@ -675,6 +753,31 @@ fn approval_at(brief: &Brief) -> Option<usize> {
 /// speech, rehearsing none of the work it had just been given permission to do.
 fn done_since_approval(brief: &Brief) -> Option<String> {
     let at = approval_at(brief)?;
+    brief.turns.iter().skip(at).rev().find_map(|t| match t {
+        Turn::Tool(d) if !d.in_flight() => Some(d.report().to_string()),
+        _ => None,
+    })
+}
+
+/// How many times findings have been handed back in this conversation.
+fn reviews_so_far(brief: &Brief) -> usize {
+    brief
+        .turns
+        .iter()
+        .filter(|t| matches!(t, Turn::Tool(d) if d.tool == "submit_review"))
+        .count()
+}
+
+/// The result of a tool call made since the King last spoke, if there is one.
+///
+/// What makes a follow-up question start the review loop over -- look, then
+/// write -- rather than finding the previous round's `submit_review` and
+/// concluding there is nothing left to do.
+fn done_since_last_word(brief: &Brief) -> Option<String> {
+    let at = brief
+        .turns
+        .iter()
+        .rposition(|t| matches!(t, Turn::Message(u) if u.speaker == Speaker::User))?;
     brief.turns.iter().skip(at).rev().find_map(|t| match t {
         Turn::Tool(d) if !d.in_flight() => Some(d.report().to_string()),
         _ => None,

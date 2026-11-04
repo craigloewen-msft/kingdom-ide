@@ -78,7 +78,11 @@ pub enum Scope {
     /// gets.
     Unrestricted,
     /// One markdown file, and nothing else: the plan's own draft.
-    Draft { file: String },
+    ///
+    /// `exit` is the tool the draft is handed to -- `propose_plan` for a plan,
+    /// `submit_review` for a review -- so the refusal and the cue name the one
+    /// this plan actually holds.
+    Draft { file: String, exit: &'static str },
 }
 
 pub struct Patch {
@@ -102,7 +106,24 @@ impl Patch {
     /// can emit it in one call. See the module docs on [`super::propose_plan`].
     pub fn for_draft(file: impl Into<String>) -> Self {
         Self {
-            scope: Scope::Draft { file: file.into() },
+            scope: Scope::Draft {
+                file: file.into(),
+                exit: "propose_plan",
+            },
+        }
+    }
+
+    /// A patch that may write only a review's report.
+    ///
+    /// The same file and the same reason as [`Patch::for_draft`]: the court
+    /// writes its findings down as it goes rather than producing them whole in
+    /// one call. Only the exit differs. See `tools::submit_review`.
+    pub fn for_report(file: impl Into<String>) -> Self {
+        Self {
+            scope: Scope::Draft {
+                file: file.into(),
+                exit: "submit_review",
+            },
         }
     }
 
@@ -113,13 +134,22 @@ impl Patch {
     /// should. `Sandbox::resolve` has already normalised `..` away and bounded
     /// both to the workspace before either reaches here.
     fn enforce(&self, shop: &Sandbox, raw: &str, resolved: &Path) -> Option<String> {
-        let Scope::Draft { file } = &self.scope else {
+        let Scope::Draft { file, exit } = &self.scope else {
             return None;
         };
 
         let allowed = shop.resolve(file).ok()?;
         if resolved == allowed {
             return None;
+        }
+
+        if *exit == "submit_review" {
+            return Some(format!(
+                "`patch` is restricted to `{file}` while you are reviewing a pull request, \
+                 and `{raw}` is not it. You are judging this code, not changing it: put the \
+                 fix you would make in your report, then call `submit_review` with `report` \
+                 set to `{file}`."
+            ));
         }
 
         Some(format!(
@@ -141,7 +171,15 @@ impl Patch {
     fn next_step(&self) -> Option<String> {
         match &self.scope {
             Scope::Unrestricted => None,
-            Scope::Draft { file } => Some(format!(
+            Scope::Draft {
+                file,
+                exit: "submit_review",
+            } => Some(format!(
+                "\n<next_step>Call submit_review with report=\"{}\" and your recommendation \
+                 once these are the findings you want the user to read.</next_step>",
+                escape_xml_attribute(file)
+            )),
+            Scope::Draft { file, .. } => Some(format!(
                 "\n<next_step>Call propose_plan with draft=\"{}\" if this is the plan you \
                  want the user to approve.</next_step>",
                 escape_xml_attribute(file)

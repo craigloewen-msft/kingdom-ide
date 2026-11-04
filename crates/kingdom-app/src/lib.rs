@@ -28,6 +28,9 @@ pub mod citymap;
 pub mod edit;
 #[cfg(feature = "ssr")]
 pub mod events;
+// Pull requests, read through `gh`. Server-only: it spawns a process.
+#[cfg(feature = "ssr")]
+pub mod github;
 // Syntax colour for the source panel. Server-only on purpose: tokenising before
 // the lines go over the wire is what keeps a regex engine and 213 syntax
 // definitions out of the wasm bundle. See the module's own note.
