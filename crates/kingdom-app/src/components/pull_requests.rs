@@ -14,14 +14,21 @@
 //!
 //! # Which model, which fence
 //!
-//! A review opens with whatever the decree bar is set to -- the same model and
-//! the same isolation the King's next plan would get -- and says so beside the
-//! button, rather than offering a second set of pickers that could disagree
-//! with the first. Changing them is one click away on the realm.
+//! The review composer carries the decree bar's own model and isolation chips,
+//! opening the very same pickers onto the very same settings. So the King can
+//! choose what drafts a review and how far it is walled off without leaving
+//! this screen -- and there is still only **one** setting, changeable from two
+//! places, rather than a second set of pickers that could disagree with the
+//! first. A choice made here is what the next decree opens with too, exactly as
+//! a choice made in the decree bar is.
+//!
+//! There is no workspace picker: a review always works in the pull request's
+//! own checkout, so there is nothing to choose.
 
-use crate::api::{begin_review, list_pull_requests};
+use super::prompt_bar::{resolved_choice, IsolationPicker, ModelPicker};
+use crate::api::{begin_review, list_models, list_pull_requests};
 use crate::app::KingdomState;
-use kingdom_core::{City, CityId, Isolation, PullRequest, PullRequestList};
+use kingdom_core::{City, CityId, ModelCatalogue, PullRequest, PullRequestList};
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 
@@ -56,6 +63,10 @@ pub fn PullRequestsView() -> impl IntoView {
 
     // Bumped by the refresh button; part of the source so it re-runs.
     let revision = RwSignal::new(0_u32);
+
+    // Asked once for the whole screen rather than once per row: every review
+    // composer offers the same models.
+    let catalogue = Resource::new(|| (), |_| list_models());
     let listing = Resource::new(
         move || (city.get(), revision.get()),
         |(city, _)| async move {
@@ -151,7 +162,7 @@ pub fn PullRequestsView() -> impl IntoView {
                                     {pulls
                                         .into_iter()
                                         .map(|pull| view! {
-                                            <PullRow pull=pull city=city.clone()/>
+                                            <PullRow pull=pull city=city.clone() catalogue=catalogue/>
                                         })
                                         .collect_view()}
                                 </ul>
@@ -166,7 +177,11 @@ pub fn PullRequestsView() -> impl IntoView {
 
 /// One pull request, and the composer that asks for its review.
 #[component]
-fn PullRow(pull: PullRequest, city: Option<CityId>) -> impl IntoView {
+fn PullRow(
+    pull: PullRequest,
+    city: Option<CityId>,
+    catalogue: Resource<Result<ModelCatalogue, ServerFnError>>,
+) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let navigate = use_navigate();
 
@@ -174,10 +189,23 @@ fn PullRow(pull: PullRequest, city: Option<CityId>) -> impl IntoView {
     let notes = RwSignal::new(String::new());
     let number = pull.number;
 
+    // Which of the two pickers is open under the composer, if either. One at a
+    // time, as in the decree bar.
+    let (showing_models, set_showing_models) = signal(false);
+    let (showing_isolation, set_showing_isolation) = signal(false);
+
+    // What the chip shows and what Start sends: the decree bar's own memo, so
+    // the two cannot disagree about which model a remembered choice resolves to.
+    let choice = resolved_choice(state, catalogue);
+
+    // The project being reviewed, for the isolation panel's Files tab -- which
+    // need not be the one selected on the map.
+    let reviewed = Signal::stored(city.clone());
+
     let start = Action::new(move |notes: &String| {
         let notes = notes.clone();
         let city = city.clone();
-        let choice = state.choice.get_untracked();
+        let choice = choice.get_untracked();
         let isolation = state.isolation.get_untracked();
         let mounts = state.mounts.get_untracked();
         let navigate = navigate.clone();
@@ -209,22 +237,6 @@ fn PullRow(pull: PullRequest, city: Option<CityId>) -> impl IntoView {
             }
         }
     });
-
-    // What the review will be drafted by and fenced in, said beside the button
-    // that commits to it.
-    let terms = move || {
-        let model = state
-            .choice
-            .get()
-            .map(|c| c.model)
-            .unwrap_or_else(|| "the default model".to_string());
-        let fence = match state.isolation.get() {
-            Isolation::Shared => "on this machine's network",
-            Isolation::Isolated => "on a network of its own",
-            Isolation::Sealed => "on a machine of its own",
-        };
-        format!("Drafted by {model}, {fence}. Change these from the realm's decree bar.")
-    };
 
     let updated = pull
         .updated_at
@@ -292,7 +304,38 @@ fn PullRow(pull: PullRequest, city: Option<CityId>) -> impl IntoView {
                         on:input=move |ev| notes.set(event_target_value(&ev))
                     />
                     <div class="pull-compose-foot">
-                        <span class="pull-terms">{terms}</span>
+                        // The decree bar's two chips, opening its two pickers:
+                        // what drafts this review, and how far it is walled off.
+                        <button
+                            class="model-chip"
+                            class:open=move || showing_models.get()
+                            title="Choose the model that reviews this, and how hard it thinks"
+                            on:click=move |_| {
+                                set_showing_isolation.set(false);
+                                set_showing_models.update(|s| *s = !*s);
+                            }
+                        >
+                            {move || match choice.get() {
+                                Some(c) => c.label(),
+                                None => "\u{2026}".to_string(),
+                            }}
+                            <span class="chip-chevron">"\u{2304}"</span>
+                        </button>
+                        <button
+                            class="isolation-chip"
+                            class:isolated=move || state.isolation.get().is_isolated()
+                            title="Choose how far this review is walled off"
+                            on:click=move |_| {
+                                set_showing_models.set(false);
+                                set_showing_isolation.update(|s| *s = !*s);
+                            }
+                        >
+                            "Isolation"
+                            <Show when=move || state.isolation.get().is_isolated()>
+                                <span class="chip-mark">"\u{2022}"</span>
+                            </Show>
+                            <span class="chip-chevron">"\u{2304}"</span>
+                        </button>
                         <button
                             class="start-btn"
                             disabled=move || start.pending().get()
@@ -305,6 +348,19 @@ fn PullRow(pull: PullRequest, city: Option<CityId>) -> impl IntoView {
                             }}
                         </button>
                     </div>
+                    <Show when=move || showing_models.get()>
+                        <ModelPicker
+                            catalogue=catalogue
+                            chosen=Signal::derive(move || choice.get())
+                            on_close=move || set_showing_models.set(false)
+                        />
+                    </Show>
+                    <Show when=move || showing_isolation.get()>
+                        <IsolationPicker
+                            city=reviewed
+                            on_close=move || set_showing_isolation.set(false)
+                        />
+                    </Show>
                     <Show when=move || state.error.get().is_some()>
                         <p class="decree-error">{move || state.error.get().unwrap_or_default()}</p>
                     </Show>
