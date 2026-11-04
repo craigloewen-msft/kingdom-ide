@@ -188,9 +188,30 @@
   .start-btn { margin-left: auto; }
 }
 
-.pull-terms {
-  color: t.$ink-faint;
-  font-size: 11px;
+// The decree bar's chips and pickers, sat inside a review composer. Only the
+// parts that assume a full-width bar are changed, and only here, so the decree
+// bar itself is untouched.
+.pull-compose {
+  // In the bar the model chip is a borderless cell divided from its neighbour
+  // by a rule; here it stands alone beside the isolation chip, so it is given
+  // the same box that one has.
+  .model-chip {
+    padding: 5px 10px;
+    background: t.$panel-2;
+    border: 1px solid t.$edge;
+    border-radius: t.$radius;
+
+    &:hover,
+    &.open { border-color: t.$edge-bright; color: t.$ink; }
+  }
+
+  // The pickers draw a rule above themselves to part from the composer row in
+  // the bar. In here they are a box of their own within the row.
+  .model-picker,
+  .workspace-picker {
+    border: 1px solid t.$edge;
+    border-radius: t.$radius;
+  }
 }
 
 // --- The findings, in the chamber ------------------------------------------

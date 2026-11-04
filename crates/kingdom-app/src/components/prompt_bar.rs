@@ -9,8 +9,8 @@
 use crate::api::{begin_plan, list_branches, list_models, mount_offers, network_available};
 use crate::app::KingdomState;
 use kingdom_core::{
-    City, CredentialState, Isolation, ModelCatalogue, ModelChoice, ModelEffort, ModelOption,
-    WorkspaceMode,
+    City, CityId, CredentialState, Isolation, ModelCatalogue, ModelChoice, ModelEffort,
+    ModelOption, WorkspaceMode,
 };
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -37,21 +37,7 @@ pub fn PromptBar() -> impl IntoView {
             .with(|k| k.city(&id).map(|c: &City| c.name.clone()))
     });
 
-    // What the chip shows, and what the next prompt will carry: the user's own
-    // choice if he has made one, otherwise the catalogue's default.
-    //
-    // Passed through the catalogue before it is shown, because the server
-    // resolves the same way before drafting -- a chip advertising a model that
-    // has left the catalogue would be a promise the prompt cannot keep.
-    let choice = Memo::new(move |_| {
-        let wanted = state.choice.get();
-        match catalogue.get() {
-            Some(Ok(c)) => Some(c.resolve(wanted.as_ref())),
-            // Before the catalogue lands there is nothing to check against, so
-            // show the user's own choice rather than a placeholder.
-            _ => wanted,
-        }
-    });
+    let choice = resolved_choice(state, catalogue);
 
     let start = Action::new(move |prompt: &String| {
         let prompt = prompt.clone();
@@ -240,7 +226,10 @@ pub fn PromptBar() -> impl IntoView {
             </Show>
 
             <Show when={move || showing_isolation.get()}>
-                <IsolationPicker on_close=move || set_showing_isolation.set(false)/>
+                <IsolationPicker
+                    city={Signal::derive(move || state.selected.get())}
+                    on_close=move || set_showing_isolation.set(false)
+                />
             </Show>
 
             <Show when={move || state.error.get().is_some()}>
@@ -248,6 +237,30 @@ pub fn PromptBar() -> impl IntoView {
             </Show>
         </section>
     }
+}
+
+/// What the model chip shows, and what the next plan will carry: the user's own
+/// choice if he has made one, otherwise the catalogue's default.
+///
+/// Passed through the catalogue before it is shown, because the server
+/// resolves the same way before drafting -- a chip advertising a model that has
+/// left the catalogue would be a promise the prompt cannot keep.
+///
+/// Shared by the decree bar and the pull-request review composer, so the two
+/// chips cannot disagree about the one setting they both show.
+pub(super) fn resolved_choice(
+    state: KingdomState,
+    catalogue: Resource<Result<ModelCatalogue, ServerFnError>>,
+) -> Memo<Option<ModelChoice>> {
+    Memo::new(move |_| {
+        let wanted = state.choice.get();
+        match catalogue.get() {
+            Some(Ok(c)) => Some(c.resolve(wanted.as_ref())),
+            // Before the catalogue lands there is nothing to check against, so
+            // show the user's own choice rather than a placeholder.
+            _ => wanted,
+        }
+    })
 }
 
 /// Size a composer to its own contents, up to a cap.
@@ -406,7 +419,7 @@ fn measure_and_set(el: &web_sys::HtmlTextAreaElement) {
 /// badge: a thin list and the reason it is thin belong in the same place, at
 /// the moment the user notices the models he expected are missing.
 #[component]
-fn ModelPicker(
+pub(super) fn ModelPicker(
     catalogue: Resource<Result<ModelCatalogue, ServerFnError>>,
     chosen: Signal<Option<ModelChoice>>,
     on_close: impl Fn() + Copy + Send + Sync + 'static,
@@ -767,8 +780,17 @@ enum IsolationTab {
 /// no timeout -- so on a machine where Docker is slow or absent the panel sat
 /// waiting on a daemon in order to print a sentence about databases, and then
 /// changed height when it landed. `/resources` is where a well is reviewed.
+///
+/// # Which city
+///
+/// `city` is the project whose machine offers the Files tab lists. The decree
+/// bar passes the map's selection; the review composer passes the project
+/// whose pull request is being reviewed, which need not be the same one.
 #[component]
-fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+pub(super) fn IsolationPicker(
+    city: Signal<Option<CityId>>,
+    on_close: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
     let state = expect_context::<KingdomState>();
     let (tab, set_tab) = signal(IsolationTab::Network);
 
@@ -801,7 +823,7 @@ fn IsolationPicker(on_close: impl Fn() + Copy + Send + Sync + 'static) -> impl I
     // to force a refetch after writing to a manifest; nothing writes now, so
     // re-reading the machine would only throw the list away and draw the
     // spinner again -- which was the reset the King was complaining about.
-    let city = Memo::new(move |_| state.selected.get());
+    let city = Memo::new(move |_| city.get());
     let offers = Resource::new(
         move || city.get(),
         |city| async move { mount_offers(city.map(|c| c.to_string())).await.ok() },
