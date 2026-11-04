@@ -144,6 +144,25 @@ pub fn file_plan(root: &Path, plan: &Plan, body: &str) -> std::io::Result<PathBu
     if let Some(branch) = &plan.workspace.branch {
         let _ = writeln!(out, "- **Branch**: `{branch}`");
     }
+    // A review's findings are filed like a plan, and say what they are of: the
+    // pull request and the exact commit, because a later push makes them a
+    // review of something else.
+    if let Some(pr) = plan.workspace.mode.pull_request() {
+        let _ = writeln!(
+            out,
+            "- **Pull request**: [#{}]({}) at `{}`",
+            pr.number,
+            pr.url,
+            pr.short_sha()
+        );
+    }
+    if let Some(review) = &plan.pr_review {
+        let _ = writeln!(
+            out,
+            "- **Recommendation**: {}",
+            review.recommendation.label()
+        );
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "## The decree");
     let _ = writeln!(out);
@@ -173,7 +192,10 @@ pub fn file_plan(root: &Path, plan: &Plan, body: &str) -> std::io::Result<PathBu
 /// the plan was put to the King and the moment the words were fixed. `None`
 /// falls through to [`stamp`]'s marker for a plan filed having never proposed.
 fn filed_at(plan: &Plan) -> Option<kingdom_core::Timestamp> {
-    plan.proposal.as_ref().and_then(|p| p.at)
+    plan.proposal
+        .as_ref()
+        .and_then(|p| p.at)
+        .or_else(|| plan.pr_review.as_ref().and_then(|r| r.at))
 }
 
 /// A timestamp as a person reads it, or a plain marker when there is none.

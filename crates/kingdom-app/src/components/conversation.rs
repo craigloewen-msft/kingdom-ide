@@ -28,7 +28,7 @@ use crate::components::SourceView;
 use crate::components::TerminalView;
 // `FileTree` is not named here: the files rail is `CityRail`, which stacks the
 // tree over the review drawer and mounts both itself.
-use crate::components::ProposalCard;
+use crate::components::{ProposalCard, ReviewReport};
 use kingdom_core::{
     Disposition, Entry, Permissions, Plan, PlanId, PlanStatus, Speaker, Timestamp, ToolCall,
 };
@@ -550,6 +550,15 @@ fn ConversationBody(
     // the browser and the server agree on what "awaiting their word" means.
     let proposal =
         Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| p.standing_proposal().cloned())));
+    // The findings on a pull request, when this plan is a review and they are
+    // waiting to be read. Read through `standing_review` for the reason the
+    // proposal goes through `standing_proposal`.
+    let findings =
+        Memo::new(move |_| live.with(|p| p.as_ref().and_then(|p| p.standing_review().cloned())));
+    // The pull request this plan is reviewing, if it is one. Settled at open,
+    // like the workspace it lives on.
+    let pull = StoredValue::new(plan.workspace.mode.pull_request().cloned());
+    let reviewing = pull.with_value(Option::is_some);
     // What this plan wants of the King, read off the plan itself rather than
     // from `state.attention`. The chamber holds the whole plan, so it has the
     // better source; the cache exists for the rail, which does not.
@@ -1513,6 +1522,14 @@ fn ConversationBody(
                     // composer rather than inside the log for the same reason the error
                     // strip is: the log is what was said and done, and this is a decision
                     // still to make. It sits where his attention already is.
+                    // A review's findings, where a proposal would stand and for
+                    // its reason. Never both: a review cannot propose.
+                    <Show when=move || findings.get().is_some()>
+                        {move || findings.get().zip(pull.get_value()).map(|(review, pull)| view! {
+                            <ReviewReport review=review pull=pull/>
+                        })}
+                    </Show>
+
                     <Show when=move || proposal.get().is_some()>
                         {move || proposal.get().map(|put| view! {
                             <ProposalCard
@@ -1596,6 +1613,8 @@ fn ConversationBody(
                                     // the plan*.
                                     if drafting.get() {
                                         "The court is working \u{2014} say something for it to hear next\u{2026}"
+                                    } else if reviewing {
+                                        "Ask about the findings, or what else to test\u{2026}"
                                     } else if permissions.get().is_full() {
                                         "Say more, or ask for a change\u{2026}"
                                     } else if proposal.get().is_some() {
@@ -1670,6 +1689,27 @@ fn ConversationBody(
                                 </div>
 
                                 <ul class="done-list">
+                                    // A review has one ending. Kingdom does not
+                                    // merge pull requests -- that is done on
+                                    // GitHub, where its author can see it -- so
+                                    // the merge row is not drawn rather than
+                                    // drawn and refused.
+                                    <Show when=move || reviewing>
+                                        <li>
+                                            <button
+                                                class="done-row"
+                                                on:click=move |_| close_with(Disposition::Archive)
+                                            >
+                                                <span class="done-name">"Close the review"</span>
+                                                <span class="done-detail">
+                                                    "Clears the checkout. The findings are \
+                                                     filed with your plans; nothing is posted \
+                                                     to GitHub."
+                                                </span>
+                                            </button>
+                                        </li>
+                                    </Show>
+                                    <Show when=move || !reviewing>
                                     <li>
                                         <button
                                             class="done-row"
@@ -1696,6 +1736,7 @@ fn ConversationBody(
                                             </span>
                                         </button>
                                     </li>
+                                    </Show>
                                 </ul>
                             </div>
                         </Show>

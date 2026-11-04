@@ -611,11 +611,20 @@ pub async fn begin_plan(
     isolation: Option<kingdom_core::Isolation>,
     mounts: Option<Vec<kingdom_core::services::MountSpec>>,
 ) -> Result<Plan, ServerFnError> {
-    use kingdom_core::{CityId, NoteKind};
+    use kingdom_core::CityId;
 
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(ServerFnError::new("A decree cannot be empty."));
+    }
+    // A pull request is reviewed, never worked on: it opens through
+    // `begin_review`, which settles the remit that keeps it read-only. Letting
+    // it in here would open one under `Propose`, one approval away from
+    // editing somebody else's branch.
+    if matches!(workspace, Some(WorkspaceMode::PullRequest(_))) {
+        return Err(ServerFnError::new(
+            "A pull request is opened for review from the Pull requests screen.",
+        ));
     }
 
     let city_id = CityId::new(
@@ -659,7 +668,7 @@ pub async fn begin_plan(
         crate::namespaces::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
     }
 
-    let mut plan = Plan::opened(
+    let plan = Plan::opened(
         plan_id,
         city_id,
         &prompt,
@@ -667,6 +676,26 @@ pub async fn begin_plan(
         workspace.clone(),
         isolation,
     );
+    open_plan(plan, mounts)
+}
+
+/// Records a freshly opened plan and announces it: the half of opening that
+/// [`begin_plan`] and [`begin_review`] share.
+///
+/// One function rather than two copies, because everything here is a promise
+/// the King relies on -- that isolation is written in the log, that a sealed
+/// plan's folders are fixed at open, that another tab hears about it, that the
+/// city's wells are raised -- and a review that skipped one of them would be a
+/// plan quietly different from every other.
+#[cfg(feature = "ssr")]
+fn open_plan(
+    mut plan: Plan,
+    mounts: Option<Vec<kingdom_core::services::MountSpec>>,
+) -> Result<Plan, ServerFnError> {
+    use kingdom_core::NoteKind;
+
+    let isolation = plan.isolation;
+    let workspace = plan.workspace.clone();
     // What the King ticked in the isolation panel, recorded on the plan so it
     // is settled for the plan's whole life -- see [`Plan::mounts`]. Only for a
     // sealed plan: nothing else reads it, and storing a list against a plan
@@ -678,9 +707,16 @@ pub async fn begin_plan(
     // trust, so it is recorded in the log rather than only in the header.
     plan.note(
         NoteKind::Workspace,
-        match &workspace.branch {
-            Some(branch) => format!("Working in {} on {branch}.", workspace.path),
-            None => format!("Working directly in {}, with no isolation.", workspace.path),
+        match (&workspace.branch, workspace.mode.pull_request()) {
+            (Some(branch), Some(pr)) => format!(
+                "Checked out pull request #{} at {} in {} on {branch}. This checkout \
+                 cannot push, and nothing the court finds is posted to GitHub.",
+                pr.number,
+                pr.short_sha(),
+                workspace.path
+            ),
+            (Some(branch), None) => format!("Working in {} on {branch}.", workspace.path),
+            (None, _) => format!("Working directly in {}, with no isolation.", workspace.path),
         },
     );
     // The same argument, for the other axis. A plan with its own network can
@@ -719,6 +755,110 @@ pub async fn begin_plan(
     reconcile_wells(&kingdom);
 
     Ok(plan)
+}
+
+/// The open pull requests on a city's GitHub repository.
+///
+/// Never an `Err` for an ordinary absence -- see [`kingdom_core::PullRequestList`].
+/// The lock is released before `gh` runs: it is a network call, and holding
+/// the kingdom's mutex across it would freeze every plan behind GitHub.
+#[server(ListPullRequests, "/api")]
+pub async fn list_pull_requests(
+    city: String,
+) -> Result<kingdom_core::PullRequestList, ServerFnError> {
+    let city_id = kingdom_core::CityId::new(city);
+    let root = {
+        let kingdom = lock()?;
+        let Some(city) = kingdom.city(&city_id) else {
+            return Ok(kingdom_core::PullRequestList::Unavailable(
+                "That project is no longer in this kingdom.".to_string(),
+            ));
+        };
+        std::path::Path::new(&kingdom.root).join(&city.path)
+    };
+    Ok(crate::github::list(&root).await)
+}
+
+/// Opens a plan to review one pull request, and returns before any review
+/// happens -- the same split [`begin_plan`] makes, for the same reason.
+///
+/// The pull request is read again here rather than trusted from the list the
+/// King was looking at: his list may be minutes old, and the court must be
+/// briefed on the commit it is actually handed. Then it is fetched into a
+/// worktree of its own, the push-refusing hook is written into it, and the
+/// plan is opened under [`kingdom_core::Permissions::Review`].
+///
+/// Nothing here, and nothing the plan can do, posts to GitHub.
+#[server(BeginReview, "/api")]
+pub async fn begin_review(
+    city: String,
+    number: u64,
+    notes: String,
+    choice: Option<ModelChoice>,
+    isolation: Option<kingdom_core::Isolation>,
+    mounts: Option<Vec<kingdom_core::services::MountSpec>>,
+) -> Result<Plan, ServerFnError> {
+    use kingdom_core::{CityId, PullRequestRef, WorkspaceMode};
+
+    let city_id = CityId::new(city);
+    let choice = crate::llm::catalogue::catalogue()
+        .await
+        .resolve(choice.as_ref());
+
+    let city_root = {
+        let kingdom = lock()?;
+        let Some(city) = kingdom.city(&city_id) else {
+            return Err(ServerFnError::new("No such city in this kingdom."));
+        };
+        std::path::Path::new(&kingdom.root).join(&city.path)
+    };
+
+    let isolation = isolation.unwrap_or_default();
+    // Before anything is fetched, for the reason `begin_plan` gives.
+    if isolation.is_isolated() {
+        crate::namespaces::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
+    }
+
+    let (pull, remote) = crate::github::view(&city_root, number)
+        .await
+        .map_err(ServerFnError::new)?;
+
+    let mode = WorkspaceMode::PullRequest(PullRequestRef::of(&pull, remote));
+    let workspace = crate::worktree::prepare(&city_root, &mode, "")
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // The pull request as it was actually checked out -- `prepare` records the
+    // commit it got, which differs from what was read if somebody pushed in
+    // between -- so the brief and the checkout agree.
+    let mut pull = pull;
+    if let Some(checked_out) = workspace.mode.pull_request() {
+        pull.head_sha = checked_out.head_sha.clone();
+    }
+
+    let plan_id = PlanId::new(format!("plan-{}", next_plan_number()));
+    let mut plan = Plan::opened_for_review(
+        plan_id,
+        city_id,
+        kingdom_core::pull_request::review_title(&pull),
+        kingdom_core::pull_request::review_prompt(&pull, &notes),
+        &choice,
+        workspace.clone(),
+        isolation,
+    );
+
+    if let Err(e) = crate::tools::write_review_hooks(std::path::Path::new(&workspace.path)) {
+        plan.note(
+            kingdom_core::NoteKind::Failed,
+            format!(
+                "The hook that stops this checkout pushing could not be written ({e}). \
+                 `git push` is still refused by the review's git settings, and `gh` is \
+                 still logged out."
+            ),
+        );
+    }
+
+    open_plan(plan, mounts)
 }
 
 /// Whether this machine can give a plan a network of its own.
@@ -2546,6 +2686,13 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     // merge git refuses leaves the plan in play, still needing its database.
 
     let finish = match how {
+        // A review is closed rather than archived: nothing of the court's is
+        // meant to be kept, and the branch is Kingdom's scratch copy of
+        // somebody else's. `merge` refuses a review on its own account.
+        Disposition::Archive if workspace.mode.pull_request().is_some() => {
+            let patch = crate::store::archive_patch(&root, &plan_id);
+            crate::worktree::close_review(&city_root, &workspace, &patch).await
+        }
         Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
         Disposition::Archive => {
             let patch = crate::store::archive_patch(&root, &plan_id);

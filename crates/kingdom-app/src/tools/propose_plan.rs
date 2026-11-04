@@ -212,6 +212,14 @@ impl Tool for ProposePlan {
                 )
                 .into()
             }
+            Permissions::Review => {
+                return Refusal::Refused(
+                    "You are reviewing a pull request, not proposing work. Write your \
+                     findings to the report and hand them back with `submit_review`."
+                        .to_string(),
+                )
+                .into()
+            }
             Permissions::ReadOnly | Permissions::Browse => {
                 return Refusal::Refused(
                     "You were sent to answer a question, not to propose work. Report what \
@@ -275,7 +283,7 @@ impl Tool for ProposePlan {
 }
 
 /// A trimmed string field, or empty when absent or of the wrong type.
-fn text(input: &Value, key: &str) -> String {
+pub(crate) fn text(input: &Value, key: &str) -> String {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -289,7 +297,7 @@ fn text(input: &Value, key: &str) -> String {
 /// Phoenix's `TaskSource::PlainMarkdown` rule. Only `# `, never `##`: a plan
 /// whose first heading is a subsection has not given itself a name, and taking
 /// one from a subsection would put the wrong words on the rail and on the card.
-fn headline(body: &str) -> Option<String> {
+pub(crate) fn headline(body: &str) -> Option<String> {
     body.lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix("# "))

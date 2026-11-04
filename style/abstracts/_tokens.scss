@@ -97,6 +97,9 @@ $statuses: (
   // nothing. `drafting` above stays: `PlanStatus::css_suffix` still emits it,
   // and the errand dots in the chamber still read it.
   "exploring": $exploring,
+  // A review reads and runs and never touches, which is exploring's stance
+  // pointed at somebody else's work -- so it shares the teal.
+  "reviewing": $exploring,
   "working":   $working,
   // A subagent's remit. No rail draws it -- subagents are excluded -- but the
   // suffix exists, and a class the stylesheet does not know would be invisible

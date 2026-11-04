@@ -42,6 +42,14 @@ use serde::{Deserialize, Serialize};
 /// `patch`: offering the editing tool says *you may edit*, and withholding it
 /// says *you may not*. The system prompt says the rest in words.
 ///
+/// [`Permissions::Review`] is `Propose` pointed at somebody else's work. It may
+/// look at anything and run anything -- it has to build and run a pull request
+/// to test it -- and, like `Propose`, writes only its own draft. What it
+/// produces is a report rather than a plan, so it holds `submit_review` where
+/// `Propose` holds `propose_plan`, and it **never widens**: there is nothing to
+/// approve, so no door leads from it to `Full`. It is also the one level whose
+/// commands cannot push or speak to GitHub -- see `tools::child_environment`.
+///
 /// [`Permissions::Full`] is what the user grants, once, on a proposal they
 /// accept.
 ///
@@ -68,6 +76,9 @@ pub enum Permissions {
     /// May look at anything and run anything, but changes nothing and puts a
     /// plan to the user instead. What a prompt starts under.
     Propose,
+    /// May look at anything and run anything, changes nothing, and hands back
+    /// findings on a pull request. What a review starts under, and ends under.
+    Review,
     /// Everything the model has. Granted by the user, on a proposal.
     Full,
 }
@@ -113,6 +124,7 @@ impl Permissions {
             Permissions::ReadOnly => "Surveying",
             Permissions::Browse => "Verifying",
             Permissions::Propose => "Exploring",
+            Permissions::Review => "Reviewing",
             Permissions::Full => "Working",
         }
     }
@@ -128,6 +140,7 @@ impl Permissions {
             Permissions::ReadOnly => "surveying",
             Permissions::Browse => "verifying",
             Permissions::Propose => "exploring",
+            Permissions::Review => "reviewing",
             Permissions::Full => "working",
         }
     }
@@ -149,6 +162,7 @@ mod tests {
             Permissions::ReadOnly,
             Permissions::Browse,
             Permissions::Propose,
+            Permissions::Review,
             Permissions::Full,
         ];
         for (i, one) in levels.iter().enumerate() {
@@ -165,5 +179,12 @@ mod tests {
     fn browsing_is_neither_full_nor_proposing() {
         assert!(!Permissions::Browse.is_full());
         assert!(!Permissions::Browse.can_propose());
+    }
+
+    /// A review never becomes work on the pull request it is judging.
+    #[test]
+    fn reviewing_is_neither_full_nor_proposing() {
+        assert!(!Permissions::Review.is_full());
+        assert!(!Permissions::Review.can_propose());
     }
 }

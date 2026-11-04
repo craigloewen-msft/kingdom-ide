@@ -476,6 +476,25 @@ pub enum WorkspaceMode {
     Branch(String),
     /// The project directory itself. No isolation.
     InPlace,
+    /// A pull request, fetched from its remote and checked out into a worktree
+    /// of its own, to be reviewed.
+    ///
+    /// A variant here rather than a [`WorkspaceMode::Branch`] because it is
+    /// different in every way that touches disk: the branch is fetched rather
+    /// than found, it is Kingdom's own scratch name rather than the King's, it
+    /// must never be merged into anything, and it is diffed against the pull
+    /// request's base on the remote rather than the King's local `main`.
+    PullRequest(crate::PullRequestRef),
+}
+
+impl WorkspaceMode {
+    /// The pull request this workspace holds, if it is a review.
+    pub fn pull_request(&self) -> Option<&crate::PullRequestRef> {
+        match self {
+            WorkspaceMode::PullRequest(pr) => Some(pr),
+            _ => None,
+        }
+    }
 }
 
 impl WorkspaceMode {
@@ -485,6 +504,7 @@ impl WorkspaceMode {
             WorkspaceMode::Fresh => "fresh worktree".to_string(),
             WorkspaceMode::Branch(b) => format!("branch: {b}"),
             WorkspaceMode::InPlace => "in place".to_string(),
+            WorkspaceMode::PullRequest(pr) => format!("pull request #{}", pr.number),
         }
     }
 }
@@ -894,6 +914,14 @@ pub struct Plan {
     /// for, and by then there is no standing proposal to hang them on.
     #[serde(default)]
     pub review_notes: Vec<ReviewNote>,
+    /// The court's findings on a pull request, when this plan is a review and
+    /// has handed some back.
+    ///
+    /// `None` for every ordinary plan, and for every record written before
+    /// reviews existed. See [`crate::pull_request`] for why this is not a
+    /// [`Proposal`].
+    #[serde(default)]
+    pub pr_review: Option<crate::PullRequestReview>,
 }
 
 /// Something the user wrote against one line of one file.
@@ -1238,7 +1266,67 @@ impl Plan {
             // Nothing has been sent yet, so there is nothing counted.
             context: None,
             review_notes: Vec::new(),
+            pr_review: None,
         }
+    }
+
+    /// A plan opened to review a pull request.
+    ///
+    /// [`Plan::opened`] with two things settled differently, both on purpose:
+    /// the title names the pull request rather than being cut from the prompt,
+    /// and the plan starts under [`Permissions::Review`] -- which it keeps for
+    /// its whole life, because a review has nothing to approve.
+    pub fn opened_for_review(
+        id: PlanId,
+        city: CityId,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        choice: &ModelChoice,
+        workspace: Workspace,
+        isolation: Isolation,
+    ) -> Self {
+        let mut plan = Self::opened(id, city, prompt, choice, workspace, isolation);
+        plan.title = title.into();
+        plan.permissions = Permissions::Review;
+        plan
+    }
+
+    /// True when this plan is reviewing a pull request.
+    pub fn is_review(&self) -> bool {
+        self.workspace.mode.pull_request().is_some()
+    }
+
+    /// The court hands its findings back.
+    ///
+    /// Replaces any earlier version: a revision is the court answering a
+    /// follow-up, and the earlier text is still in the transcript on the call
+    /// that carried it.
+    pub fn submit_review(
+        &mut self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        recommendation: crate::Recommendation,
+    ) {
+        let revision = self.pr_review.as_ref().map_or(1, |r| r.revision + 1);
+        self.pr_review = Some(crate::PullRequestReview {
+            title: title.into(),
+            body: body.into(),
+            recommendation,
+            at: Timestamp::now(),
+            revision,
+        });
+    }
+
+    /// The findings waiting for the King to read, if there are some.
+    ///
+    /// Only while the plan is awaiting review: a plan drafting may be in the
+    /// middle of revising the very report being looked at, and its card goes
+    /// quiet rather than showing a version the court is busy replacing.
+    pub fn standing_review(&self) -> Option<&crate::PullRequestReview> {
+        if self.status != PlanStatus::AwaitingReview {
+            return None;
+        }
+        self.pr_review.as_ref()
     }
 
     /// A plan sent by another plan to answer one question.
@@ -1317,6 +1405,7 @@ impl Plan {
             // Nothing is ever put to the user about a subagent, so there is
             // nothing for him to write against.
             review_notes: Vec::new(),
+            pr_review: None,
         }
     }
 
@@ -1373,7 +1462,10 @@ impl Plan {
     pub fn settle(&mut self, outcome: Outcome) {
         self.status = match &outcome {
             Outcome::Merged { .. } => PlanStatus::Merged,
-            Outcome::Archived { .. } => PlanStatus::Archived,
+            // Not a sixth status, for the reason `Attention` is not one: a
+            // closed review is over and its work set aside, which is what
+            // `Archived` already means to the rail and the map.
+            Outcome::Archived { .. } | Outcome::Reviewed { .. } => PlanStatus::Archived,
         };
         self.working_on = None;
         self.outcome = Some(outcome);
@@ -1823,6 +1915,9 @@ impl Plan {
         }
         if self.open_question().is_some() {
             return Some(Attention::Question);
+        }
+        if self.standing_review().is_some() {
+            return Some(Attention::Report);
         }
         self.standing_proposal().map(|_| Attention::Proposal)
     }
@@ -2868,6 +2963,12 @@ pub enum Attention {
     Question,
     /// A plan is standing in front of the user, waiting to be started.
     Proposal,
+    /// A review of a pull request has come back and is waiting to be read.
+    ///
+    /// Its own variant rather than a [`Attention::Proposal`] because the act
+    /// behind it is different: there is nothing to start, only something to
+    /// read and decide about outside Kingdom.
+    Report,
 }
 
 impl Attention {
@@ -2876,6 +2977,7 @@ impl Attention {
         match self {
             Attention::Question => "Question",
             Attention::Proposal => "Proposal",
+            Attention::Report => "Findings",
         }
     }
 
@@ -2890,6 +2992,9 @@ impl Attention {
         match self {
             Attention::Question => "asking",
             Attention::Proposal => "review",
+            // The same colour as a proposal: both are the awaiting-review
+            // state, and both mean "your move, and it is a reading".
+            Attention::Report => "review",
         }
     }
 }
@@ -2997,6 +3102,18 @@ pub enum Outcome {
         patch: Option<String>,
         pruned: bool,
     },
+    /// A review of a pull request was closed. Nothing was landed and nothing
+    /// was posted; the checkout is gone and the findings are filed.
+    ///
+    /// `patch` is set only if the court left edits in the checkout despite its
+    /// remit -- kept rather than thrown away, on the rule [`Outcome::Archived`]
+    /// keeps, because a discarded edit cannot be had back.
+    Reviewed {
+        number: u64,
+        head: String,
+        #[serde(default)]
+        patch: Option<String>,
+    },
 }
 
 impl Outcome {
@@ -3018,6 +3135,21 @@ impl Outcome {
                     format!("Archived on {branch}, at {}.", short_sha(tip))
                 }
             }
+            Outcome::Reviewed {
+                number,
+                head,
+                patch,
+            } => match patch {
+                None => format!(
+                    "Review of #{number} closed at {}. Nothing was posted to GitHub.",
+                    short_sha(head)
+                ),
+                Some(path) => format!(
+                    "Review of #{number} closed at {}. Edits left in the checkout were \
+                     kept as a patch at {path}. Nothing was posted to GitHub.",
+                    short_sha(head)
+                ),
+            },
         }
     }
 }
@@ -4968,6 +5100,99 @@ mod review_note_tests {
 
         let plan: Plan = serde_json::from_str(before).expect("an older record must still load");
         assert!(plan.review_notes().is_empty());
+        assert!(plan.pr_review.is_none(), "an older plan is not a review");
+        assert!(!plan.is_review());
+    }
+}
+
+#[cfg(test)]
+mod pull_request_review_tests {
+    use super::*;
+    use crate::{PullRequestRef, Recommendation};
+
+    fn review() -> Plan {
+        let pr = PullRequestRef {
+            number: 42,
+            title: "Fix login".into(),
+            url: "https://github.com/o/r/pull/42".into(),
+            base: "main".into(),
+            head: "fix-login".into(),
+            head_sha: "0123456789".into(),
+            remote: "origin".into(),
+        };
+        let workspace = Workspace {
+            mode: WorkspaceMode::PullRequest(pr),
+            path: "/dev/r/.kingdom/abc".into(),
+            branch: Some("kingdom/pr-42-review".into()),
+            id: Some("abc".into()),
+            base: Some("main".into()),
+        };
+        Plan::opened_for_review(
+            PlanId::new("plan-7"),
+            CityId::new("c1"),
+            "Review #42: Fix login",
+            "Review pull request #42",
+            &ModelChoice::new("mock", None),
+            workspace,
+            Isolation::Shared,
+        )
+    }
+
+    /// A review opens reading and stays reading: there is no proposal for it
+    /// to make, so no approval can widen it.
+    #[test]
+    fn a_review_opens_under_its_own_remit_and_cannot_be_approved_into_work() {
+        let mut plan = review();
+        assert_eq!(plan.permissions, Permissions::Review);
+        assert_eq!(plan.title, "Review #42: Fix login");
+        assert!(plan.is_review());
+        assert!(!plan.approve(), "nothing is standing to approve");
+        assert_eq!(plan.permissions, Permissions::Review);
+    }
+
+    /// Findings handed back want the King's attention, under their own name,
+    /// and stop wanting it while the court revises them.
+    #[test]
+    fn findings_ask_for_the_king_until_the_court_is_working_again() {
+        let mut plan = review();
+        plan.submit_review("# Works", "# Works\n\nbody", Recommendation::Merge);
+        assert_eq!(plan.wants_attention(), None, "still drafting");
+
+        plan.status = PlanStatus::AwaitingReview;
+        assert_eq!(plan.wants_attention(), Some(Attention::Report));
+        assert_eq!(plan.standing_review().unwrap().revision, 1);
+        assert!(plan.standing_proposal().is_none());
+
+        plan.status = PlanStatus::Drafting;
+        plan.submit_review("Revised", "# Revised", Recommendation::Changes);
+        plan.status = PlanStatus::AwaitingReview;
+        let latest = plan.standing_review().unwrap();
+        assert_eq!(latest.revision, 2);
+        assert_eq!(latest.recommendation, Recommendation::Changes);
+    }
+
+    /// A closed review reads as set aside, not as merged.
+    #[test]
+    fn a_closed_review_is_archived_and_says_nothing_was_posted() {
+        let mut plan = review();
+        let outcome = Outcome::Reviewed {
+            number: 42,
+            head: "0123456789".into(),
+            patch: None,
+        };
+        assert!(outcome.summary().contains("Nothing was posted to GitHub"));
+        plan.settle(outcome);
+        assert_eq!(plan.status, PlanStatus::Archived);
+    }
+
+    /// A review round-trips through its record intact, workspace and all.
+    #[test]
+    fn a_review_survives_being_written_and_read_back() {
+        let mut plan = review();
+        plan.submit_review("Works", "# Works", Recommendation::Discuss);
+        let back: Plan = serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+        assert_eq!(back, plan);
+        assert_eq!(back.workspace.mode.label(), "pull request #42");
     }
 }
 

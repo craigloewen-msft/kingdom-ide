@@ -353,6 +353,23 @@ fn workspace_block(
         workspace.path
     );
     match (&workspace.branch, workspace.is_isolated()) {
+        (Some(branch), true) if workspace.mode.pull_request().is_some() => {
+            let pr = workspace.mode.pull_request().expect("matched above");
+            let _ = write!(
+                out,
+                "This is an isolated worktree holding pull request #{} (\"{}\") at commit {}, \
+                 on a scratch branch {branch}. It asks to merge `{}` into `{}`; diff against \
+                 `{}/{}` to see its changes. The user's own checkout is elsewhere and is not \
+                 affected by what you do here.",
+                pr.number,
+                pr.title,
+                pr.short_sha(),
+                pr.head,
+                pr.base,
+                pr.remote,
+                pr.base,
+            );
+        }
         (Some(branch), true) => out.push_str(&format!(
             "This is an isolated worktree on branch {branch}. It is yours: the user's own \
              checkout is elsewhere and is not affected by what you do here."
@@ -538,6 +555,7 @@ fn permissions_block(permissions: Permissions, approved: bool) -> String {
         Permissions::ReadOnly => SUBAGENT.to_string(),
         Permissions::Browse => BROWSING_SUBAGENT.to_string(),
         Permissions::Propose => PROPOSE.to_string(),
+        Permissions::Review => REVIEW.to_string(),
         Permissions::Full if approved => format!("{FULL}\n\n{CARRYING_OUT}"),
         Permissions::Full => FULL.to_string(),
     }
@@ -610,6 +628,55 @@ const PROPOSE: &str = "You are in Propose mode. This conversation is read-only f
         review and can approve, request revisions, or reject. On approval you gain full \
         write access and carry the plan out in this same conversation.\n\n\
      If the user asks you to change code directly, explain that you must propose a plan first.";
+
+/// The remit of a plan reviewing a pull request.
+///
+/// Kingdom's own, with no Phoenix counterpart. It borrows `PROPOSE`'s two
+/// mechanisms -- a trusted-not-to-change shell, and a draft written as it goes
+/// and handed back by path -- and changes what the draft is *for*.
+///
+/// The order of the workflow is the King's: he asked for the change to be
+/// tested in a browser *before* the code is read, because how a change behaves
+/// is the claim and the code is the evidence. So it says run, look, then read.
+///
+/// The no-posting rule is said in words here as well as enforced in
+/// `tools::child_environment`, because a model that does not know it may not
+/// push spends rounds discovering that it cannot.
+const REVIEW: &str = "You are in Review mode. You are reviewing someone else's pull request \
+     for the user, and your deliverable is a written report for them. The pull request is \
+     checked out in your working directory.\n\n\
+     You may read anything and run anything -- build it, start it, run its tests, open it in \
+     the browser. You must not change it: do not edit its files, commit, push, or post \
+     anything to GitHub (no `gh pr review`, `gh pr comment`, `gh pr merge`, no comments \
+     anywhere). This checkout cannot push and `gh` is logged out here, on purpose. If you \
+     would fix something, describe the fix in your report.\n\n\
+     How to review:\n\
+     1. Read what the pull request claims to do and what the user asked you to look at, then \
+        `git log` and `git diff` against its base to see what changed.\n\
+     2. Run it. Install what it needs, build it, start it (with `tmux_run` for anything \
+        long-running), and **exercise the change in the browser**: navigate to it, click \
+        through it, take screenshots, read the console. Test what it claims, then the edges \
+        it is likely to have missed. If it cannot be run in a browser, say why and test it \
+        the way it can be.\n\
+     3. Run the project's tests and checks.\n\
+     4. Read the code: correctness, edge cases, error handling, security, performance, \
+        readability, tests that are missing, and whether it fits how the project already does \
+        things.\n\
+     5. Stop anything you started.\n\n\
+     Write your findings as markdown at `.kingdom/draft.md` with `patch` (operation \
+     `overwrite`), and revise them as you go -- `patch` is restricted to that one file. \
+     Start with an `# H1` headline that is the verdict in a sentence, then:\n\
+     - **Summary** -- what the change does and your bottom line.\n\
+     - **Tested in the browser** -- what you did and what you saw, with the screenshots you \
+       took.\n\
+     - **Findings** -- each with a severity (blocking, should fix, nit), the `path:line`, \
+       what is wrong and why it matters.\n\
+     - **Recommendations** -- what should change before this merges, in order.\n\
+     - **Suggested review comments** -- comments the user could post on the pull request \
+       themselves, each with its `path:line`.\n\n\
+     Then call `submit_review` with `report` set to that path and your recommendation. The \
+     user may ask follow-up questions; answer them, revise the report if your view changes, \
+     and submit it again.";
 
 /// Phoenix's `mode_work`, adapted.
 ///

@@ -40,6 +40,8 @@ pub mod read_image;
 pub mod search;
 pub mod skill;
 pub mod spawn_agents;
+// Handing findings on a pull request back. The sibling of `propose_plan`.
+pub mod submit_review;
 pub mod think;
 pub mod tmux;
 
@@ -150,9 +152,12 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     //
     // Each drives a *per-plan* Chrome, keyed by plan id in `tools::browser`, so
     // an errand never steers the session the King is watching.
+    //
+    // A review above all: trying the pull request in a browser before reading
+    // its code is the first thing it is asked to do.
     if matches!(
         permissions,
-        Permissions::Browse | Permissions::Propose | Permissions::Full
+        Permissions::Browse | Permissions::Propose | Permissions::Review | Permissions::Full
     ) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
             Box::new(browser::BrowserNavigate),
@@ -173,7 +178,12 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     }
 
     // Acting on the world without changing the project: Propose and above.
-    if matches!(permissions, Permissions::Propose | Permissions::Full) {
+    // A review is here too: testing a pull request means building it and
+    // running it, which is a shell and a long-running server.
+    if matches!(
+        permissions,
+        Permissions::Propose | Permissions::Review | Permissions::Full
+    ) {
         tools.extend::<Vec<Box<dyn Tool>>>(vec![
             Box::new(bash::Bash),
             Box::new(tmux::TmuxRun),
@@ -193,6 +203,14 @@ pub fn all(permissions: Permissions) -> Vec<Box<dyn Tool>> {
     if matches!(permissions, Permissions::Propose) {
         tools.push(Box::new(patch::Patch::for_draft(propose_plan::DRAFT)));
         tools.push(Box::new(propose_plan::ProposePlan));
+    }
+
+    // Handing findings back: only while reviewing. The same pairing as
+    // proposing -- a `patch` scoped to the one file, and the call that names it
+    // -- with a different exit, and no door to `Full` behind it.
+    if matches!(permissions, Permissions::Review) {
+        tools.push(Box::new(patch::Patch::for_report(propose_plan::DRAFT)));
+        tools.push(Box::new(submit_review::SubmitReview));
     }
 
     // Changing the project: only once the user has said so.
@@ -281,6 +299,7 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
         Permissions::ReadOnly,
         Permissions::Browse,
         Permissions::Propose,
+        Permissions::Review,
         Permissions::Full,
     ]
     .into_iter()
@@ -290,6 +309,12 @@ pub async fn invoke(tool: &str, input: Value, shop: &Sandbox) -> ToolOutcome {
         (true, Permissions::Propose) => Refusal::Refused(format!(
             "`{tool}` is not available while you are drawing up a plan. Put the plan to \
              the user with `propose_plan`; if they start you on it, you will have it."
+        ))
+        .into(),
+        (true, Permissions::Review) => Refusal::Refused(format!(
+            "`{tool}` is not available while you are reviewing a pull request. You judge \
+             this code rather than change it: put what you would change in your report and \
+             hand it back with `submit_review`."
         ))
         .into(),
         (true, Permissions::ReadOnly) => Refusal::Refused(format!(
@@ -773,10 +798,104 @@ fn normalise(path: &Path) -> PathBuf {
 ///
 /// None of it is forced: these are applied to the child before it runs, so a
 /// command that names its own value inline still wins.
+///
+/// # A review cannot reach GitHub
+///
+/// The other case that is not empty, and the one that is about the King's
+/// standing rather than his resources. A plan reviewing a pull request is told
+/// its findings are for him alone, and these make the accidental breach of
+/// that fail rather than succeed -- see [`review_environment`].
 pub fn child_environment(shop: &Sandbox) -> Vec<(String, String)> {
-    if !runs_a_kingdom(shop.root()) {
-        return Vec::new();
+    let mut out = Vec::new();
+    if shop.permissions() == Permissions::Review {
+        out.extend(review_environment(shop.root()));
     }
+    if runs_a_kingdom(shop.root()) {
+        out.extend(kingdom_environment(shop));
+    }
+    out
+}
+
+/// Where a review's push-refusing git hook is written, relative to its
+/// workspace. Under `.kingdom/`, so it is excluded from the repository and goes
+/// with the worktree.
+pub const REVIEW_HOOKS_DIR: &str = ".kingdom/review-hooks";
+
+/// Where a review's `gh` looks for a login, and finds none.
+const REVIEW_GH_DIR: &str = ".kingdom/gh-logged-out";
+
+/// What a reviewing plan's commands run under, so nothing they do speaks to
+/// GitHub on the King's behalf.
+///
+/// Three locks, because each alone has a known way round it, measured rather
+/// than assumed:
+///
+/// - **`pushInsteadOf`** rewrites every push URL to one that does not exist, so
+///   `git push origin` fails at once. It does not cover a remote with an
+///   explicit `pushurl`, nor a push straight to a URL.
+/// - **`core.hooksPath`** points at a `pre-push` hook that refuses, which
+///   covers both of those. [`write_review_hooks`] writes it. It does not cover
+///   `--no-verify`, which the first lock does.
+/// - **`gh` logged out**: an empty config directory and no token, so `gh pr
+///   review`, `gh pr comment` and `gh pr merge` have no identity to act with.
+///   The model needs nothing from `gh` -- the pull request's description is in
+///   its first message.
+///
+/// Set through `GIT_CONFIG_COUNT` rather than written to the repository's
+/// config, so the King's own repository and his own terminal are untouched.
+///
+/// **Not a sandbox**, in the same words `Sandbox::root` uses: a command could
+/// still find a credential somewhere else and use it deliberately. What this
+/// stops is the plausible accident -- a model that "helpfully" posts its
+/// review, or pushes a fix to the author's branch.
+fn review_environment(root: &Path) -> Vec<(String, String)> {
+    let hooks = root.join(REVIEW_HOOKS_DIR).display().to_string();
+    let gh = root.join(REVIEW_GH_DIR).display().to_string();
+    vec![
+        ("GIT_CONFIG_COUNT".to_string(), "2".to_string()),
+        (
+            "GIT_CONFIG_KEY_0".to_string(),
+            "url.file:///kingdom-review-does-not-push/.pushInsteadOf".to_string(),
+        ),
+        ("GIT_CONFIG_VALUE_0".to_string(), String::new()),
+        ("GIT_CONFIG_KEY_1".to_string(), "core.hooksPath".to_string()),
+        ("GIT_CONFIG_VALUE_1".to_string(), hooks),
+        ("GH_CONFIG_DIR".to_string(), gh),
+        ("GH_TOKEN".to_string(), String::new()),
+        ("GITHUB_TOKEN".to_string(), String::new()),
+        ("GH_ENTERPRISE_TOKEN".to_string(), String::new()),
+        ("GH_PROMPT_DISABLED".to_string(), "1".to_string()),
+    ]
+}
+
+/// Writes the hook [`review_environment`] points git at.
+///
+/// Called by `api::begin_review` once a review's checkout is cut. Best-effort
+/// in the sense that a failure is returned for the caller to report, not
+/// swallowed: a review whose hook could not be written still has the other two
+/// locks, but the King should know one is missing.
+pub fn write_review_hooks(root: &Path) -> std::io::Result<()> {
+    let dir = root.join(REVIEW_HOOKS_DIR);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(root.join(REVIEW_GH_DIR))?;
+    let hook = dir.join("pre-push");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\n\
+         echo \"Kingdom: this checkout is a review of a pull request, and a review does not \
+         push. Put the change you would make in your report instead.\" >&2\n\
+         exit 1\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// The rehearsal-server half of [`child_environment`].
+fn kingdom_environment(shop: &Sandbox) -> Vec<(String, String)> {
     vec![
         (
             crate::profile::HOME_VAR.to_string(),
@@ -874,6 +993,84 @@ mod tests {
         let shop = Sandbox::new(Workspace::in_place(dir.path().display().to_string()));
 
         assert!(child_environment(&shop).is_empty());
+    }
+
+    /// A review's commands cannot push, measured by pushing.
+    ///
+    /// Three pushes, one per way round a single lock: through a remote's
+    /// fetch URL (the `pushInsteadOf` catches it), through a remote with its
+    /// own `pushurl` (the hook catches it) and straight to a path (the hook
+    /// again). Each must leave the remote empty. A commit still works -- the
+    /// court may need one to run a tool -- so the locks are on pushing alone.
+    #[test]
+    fn a_review_cannot_push_by_any_of_the_obvious_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let work = dir.path().join("work");
+        let git = |cwd: &Path, args: &[&str], env: &[(String, String)]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                .env("GIT_AUTHOR_NAME", "K")
+                .env("GIT_AUTHOR_EMAIL", "k@k")
+                .env("GIT_COMMITTER_NAME", "K")
+                .env("GIT_COMMITTER_EMAIL", "k@k")
+                .output()
+                .unwrap()
+        };
+        assert!(
+            git(dir.path(), &["init", "-q", "--bare", "remote.git"], &[])
+                .status
+                .success()
+        );
+        assert!(git(dir.path(), &["init", "-q", "work"], &[])
+            .status
+            .success());
+        let remote_url = remote.display().to_string();
+        git(&work, &["remote", "add", "origin", &remote_url], &[]);
+        git(&work, &["remote", "add", "pushy", &remote_url], &[]);
+        git(
+            &work,
+            &["remote", "set-url", "--push", "pushy", &remote_url],
+            &[],
+        );
+
+        let shop = Sandbox::new(Workspace::in_place(work.display().to_string()))
+            .under(Permissions::Review);
+        write_review_hooks(&work).unwrap();
+        let env = child_environment(&shop);
+
+        assert!(
+            git(&work, &["commit", "-q", "--allow-empty", "-m", "x"], &env)
+                .status
+                .success(),
+            "committing is not what is being stopped"
+        );
+        for push in [
+            vec!["push", "origin", "HEAD:refs/heads/a"],
+            vec!["push", "pushy", "HEAD:refs/heads/b"],
+            vec!["push", &remote_url, "HEAD:refs/heads/c"],
+        ] {
+            assert!(!git(&work, &push, &env).status.success(), "{push:?} pushed");
+        }
+        let listed = git(&work, &["ls-remote", "origin"], &[]);
+        assert!(listed.stdout.is_empty(), "the remote received something");
+
+        // And `gh` has no identity to speak with.
+        let token = env
+            .iter()
+            .find(|(k, _)| k == "GH_TOKEN")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(token, Some(""));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GH_CONFIG_DIR" && v.starts_with(&*work.to_string_lossy())));
+
+        // A plan that is not a review is left exactly as it was.
+        let ordinary =
+            Sandbox::new(Workspace::in_place(work.display().to_string())).under(Permissions::Full);
+        assert!(child_environment(&ordinary).is_empty());
     }
 
     /// A Kingdom checkout gets both, and `KINGDOM_HOME` lands *inside* the
@@ -1274,6 +1471,74 @@ mod tests {
                     .iter()
                     .any(|t| t.name() == allowed),
                 "{allowed} is how a survey does its job"
+            );
+        }
+    }
+
+    /// A review may run the pull request and look at it, writes only its
+    /// report, and holds no door to more authority.
+    #[tokio::test]
+    async fn a_review_runs_and_browses_but_cannot_edit_or_propose() {
+        let reviewing = sandbox().under(Permissions::Review);
+        let names: Vec<&str> = all(Permissions::Review).iter().map(|t| t.name()).collect();
+
+        for needed in [
+            "bash",
+            "tmux_run",
+            "browser_navigate",
+            "browser_take_screenshot",
+            "submit_review",
+            "patch",
+        ] {
+            assert!(
+                names.contains(&needed),
+                "{needed} is how a review does its job"
+            );
+        }
+        for forbidden in ["propose_plan", "spawn_agents"] {
+            assert!(
+                !names.contains(&forbidden),
+                "{forbidden} must not be offered to a review"
+            );
+            assert!(
+                matches!(
+                    invoke(forbidden, serde_json::json!({}), &reviewing).await,
+                    ToolOutcome::Refused { reason } if reason.contains("reviewing a pull request")
+                ),
+                "{forbidden} must be refused by name, in words a reviewer can act on"
+            );
+        }
+
+        // The `patch` it holds is the scoped one: anything but the report is
+        // refused, with the exit named.
+        let dir = tempfile::tempdir().unwrap();
+        let shop = Sandbox::new(Workspace::in_place(dir.path().display().to_string()))
+            .under(Permissions::Review);
+        let edit = invoke(
+            "patch",
+            serde_json::json!({
+                "path": "src/lib.rs",
+                "patches": [{ "operation": "overwrite", "newText": "x" }]
+            }),
+            &shop,
+        )
+        .await;
+        assert!(
+            matches!(&edit, ToolOutcome::Refused { reason } if reason.contains("submit_review")),
+            "{edit:?}"
+        );
+        assert!(!dir.path().join("src/lib.rs").exists());
+
+        // And no other level can hand findings back.
+        for other in [
+            Permissions::ReadOnly,
+            Permissions::Browse,
+            Permissions::Propose,
+            Permissions::Full,
+        ] {
+            assert!(
+                !all(other).iter().any(|t| t.name() == "submit_review"),
+                "{other:?}"
             );
         }
     }

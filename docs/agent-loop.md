@@ -14,6 +14,19 @@ back — ordinary `say` + `draft_plan` — or presses **Start with this**
 (`approve_plan`): permissions widen to `Full` and the same conversation carries
 on with tools it did not have.
 
+**A review is the same loop with a different exit.** `begin_review` fetches a
+pull request into a worktree of its own (`worktree::prepare` with
+`WorkspaceMode::PullRequest`) and opens the plan under `Permissions::Review`:
+read and run anything, drive a browser, write only `.kingdom/draft.md`. It
+holds `submit_review` where a proposing plan holds `propose_plan`; that call
+ends the turn the same way and records a `PullRequestReview` on the plan rather
+than a `Proposal`. There is no approval behind it — `Review` never widens — and
+the King's follow-ups are ordinary `say` turns that the court answers by
+revising and re-submitting. Done offers only **Close the review**
+(`worktree::close_review`); `worktree::merge` refuses a review outright.
+Nothing reaches GitHub: the server only reads through `gh`, and the plan's own
+commands run with `gh` logged out and every `git push` refused.
+
 Nothing is parked while he reads. The turn genuinely ends, so a server restart
 mid-review loses nothing — the proposal is on the plan and the plan is on disk.
 That is why `propose_plan` does not work like `ask_user_question`, which holds a

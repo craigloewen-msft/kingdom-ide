@@ -473,6 +473,20 @@ async fn default_branch(root: &Path, workspace: &Workspace) -> Option<Against> {
 
     let mut candidates: Vec<String> = Vec::new();
 
+    // -- A pull request: its base on the remote, before anything local -------
+    //
+    // The one place the local-first rule above is reversed, and deliberately.
+    // An ordinary plan merges into the King's local branch, so that is what it
+    // must be measured against. A pull request merges into the *remote's*
+    // branch, and what the King wants to review is what GitHub would show --
+    // so the remote ref, which `worktree::prepare` fetched moments before
+    // cutting this checkout, is the honest base. Local `main` stays beneath it
+    // for a remote that could not be fetched.
+    if let Some(pr) = workspace.mode.pull_request() {
+        candidates.push(format!("{}/{}", pr.remote, pr.base));
+        candidates.push(pr.base.clone());
+    }
+
     // -- Local, in order of authority ----------------------------------------
     if let Some(declared) = &declared {
         // `origin/main` -> `main`: the local branch the remote's default names.

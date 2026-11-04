@@ -26,6 +26,7 @@ pub mod naming;
 pub mod palette;
 pub mod permissions;
 pub mod proposal;
+pub mod pull_request;
 pub mod review;
 pub mod sample;
 pub mod services;
@@ -34,6 +35,9 @@ pub use ids::*;
 pub use model::*;
 pub use palette::{assign_banners, AgentPalette, BANNERS};
 pub use permissions::*;
+pub use pull_request::{
+    PullRequest, PullRequestList, PullRequestRef, PullRequestReview, Recommendation, ReviewDecision,
+};
 pub use review::*;
 pub use services::{
     ManifestError, ManifestTrouble, ResourceInventory, ResourceKind, ServiceManifest, ServiceScope,
