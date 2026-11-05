@@ -626,6 +626,13 @@ pub async fn begin_plan(
             "A pull request is opened for review from the Pull requests screen.",
         ));
     }
+    // A fix opens from a review's findings, through `begin_fix`, which is
+    // what reads the pull request fresh and checks it can be pushed to.
+    if matches!(workspace, Some(WorkspaceMode::PullRequestFix(_))) {
+        return Err(ServerFnError::new(
+            "A pull request is fixed from its review's findings, with \"Fix these findings\".",
+        ));
+    }
 
     let city_id = CityId::new(
         city.ok_or_else(|| ServerFnError::new("Choose a city before issuing a decree."))?,
@@ -715,6 +722,17 @@ fn open_plan(
                 pr.short_sha(),
                 workspace.path
             ),
+            (Some(branch), None) if workspace.mode.fixing().is_some() => {
+                let pr = workspace.mode.fixing().expect("matched above");
+                format!(
+                    "Checked out pull request #{} at {} in {} on {branch}, to fix what its \
+                     review found. Finishing this plan pushes the work to `{}` on GitHub.",
+                    pr.number,
+                    pr.short_sha(),
+                    workspace.path,
+                    pr.head
+                )
+            }
             (Some(branch), None) => format!("Working in {} on {branch}.", workspace.path),
             (None, _) => format!("Working directly in {}, with no isolation.", workspace.path),
         },
@@ -859,6 +877,107 @@ pub async fn begin_review(
     }
 
     open_plan(plan, mounts)
+}
+
+/// Opens a plan to fix what a review found, on the pull request's own branch.
+///
+/// The review is left exactly as it was -- read-only, its findings standing --
+/// and a **new** plan is opened beside it: an ordinary one, under
+/// [`kingdom_core::Permissions::Propose`], whose first message is the
+/// findings. It proposes, the King approves, it works; finishing it pushes the
+/// work to the pull request rather than merging it locally. See
+/// `worktree::push_fix`.
+///
+/// The pull request is read again, for `begin_review`'s reason and one more:
+/// whether it can be pushed to at all. A fork closed to maintainers is refused
+/// here, before any work is spent on a fix that could never land.
+#[server(BeginFix, "/api")]
+pub async fn begin_fix(review: String) -> Result<Plan, ServerFnError> {
+    use kingdom_core::{ModelChoice, NoteKind, PullRequestRef, WorkspaceMode};
+
+    let review_id = PlanId::new(review);
+    let (city_id, city_root, pr, findings, choice, isolation, mounts) = {
+        let kingdom = lock()?;
+        let Some(reviewing) = kingdom.plan(&review_id) else {
+            return Err(ServerFnError::new(
+                "That review is no longer in the records.",
+            ));
+        };
+        let Some(pr) = reviewing.workspace.mode.pull_request() else {
+            return Err(ServerFnError::new(
+                "Only a review of a pull request has findings to fix.",
+            ));
+        };
+        let Some(findings) = reviewing.pr_review.clone() else {
+            return Err(ServerFnError::new(
+                "This review has no findings yet. Wait for the court to hand them back.",
+            ));
+        };
+        let Some(city) = kingdom.city(&reviewing.city) else {
+            return Err(ServerFnError::new("That review's city is gone."));
+        };
+        (
+            reviewing.city.clone(),
+            std::path::Path::new(&kingdom.root).join(&city.path),
+            pr.clone(),
+            findings,
+            ModelChoice::new(reviewing.model.clone(), reviewing.effort),
+            reviewing.isolation,
+            reviewing.mounts.clone(),
+        )
+    };
+
+    if isolation.is_isolated() {
+        crate::namespaces::availability().map_err(|e| ServerFnError::new(e.to_string()))?;
+    }
+
+    // Fresh, for where its branch lives and who may push to it. The remote
+    // the review fetched from is kept: it is the one that answered.
+    let (pull, _) = crate::github::view(&city_root, pr.number)
+        .await
+        .map_err(ServerFnError::new)?;
+    let fresh = PullRequestRef::of(&pull, pr.remote.clone());
+    if let Some(why) = fresh.unpushable() {
+        return Err(ServerFnError::new(why));
+    }
+
+    let choice = crate::llm::catalogue::catalogue()
+        .await
+        .resolve(Some(&choice));
+    let mode = WorkspaceMode::PullRequestFix(fresh);
+    let workspace = crate::worktree::prepare(&city_root, &mode, "")
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let Some(checked_out) = workspace.mode.fixing().cloned() else {
+        return Err(ServerFnError::new("The fix's checkout was not cut as one."));
+    };
+
+    let plan_id = PlanId::new(format!("plan-{}", next_plan_number()));
+    let mut plan = Plan::opened(
+        plan_id.clone(),
+        city_id,
+        kingdom_core::pull_request::fix_prompt(&checked_out, &findings),
+        &choice,
+        workspace,
+        isolation,
+    );
+    plan.title = kingdom_core::pull_request::fix_title(&checked_out);
+    let plan = open_plan(plan, mounts)?;
+
+    // The review says where its findings went, so the two can be found from
+    // each other.
+    let mut kingdom = lock()?;
+    update(&mut kingdom, &review_id, |p| {
+        p.note(
+            NoteKind::Workspace,
+            format!(
+                "Fixing these findings in {} (\"{}\"). Finishing it pushes to `{}`.",
+                plan_id, plan.title, checked_out.head
+            ),
+        );
+    });
+
+    Ok(plan)
 }
 
 /// Whether this machine can give a plan a network of its own.
@@ -2604,7 +2723,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
 
     let plan_id = PlanId::new(plan);
 
-    let (workspace, city_root, root) = {
+    let (workspace, city_root, root, message) = {
         let kingdom = lock()?;
         let Some(existing) = kingdom.plan(&plan_id) else {
             return Err(ServerFnError::new("That plan is no longer in the records."));
@@ -2648,6 +2767,7 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
             existing.workspace.clone(),
             std::path::Path::new(&kingdom.root).join(&city.path),
             std::path::PathBuf::from(&kingdom.root),
+            commit_message(existing),
         )
     };
 
@@ -2693,10 +2813,10 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
             let patch = crate::store::archive_patch(&root, &plan_id);
             crate::worktree::close_review(&city_root, &workspace, &patch).await
         }
-        Disposition::Merge => crate::worktree::merge(&city_root, &workspace).await,
+        Disposition::Merge => crate::worktree::merge(&city_root, &workspace, &message).await,
         Disposition::Archive => {
             let patch = crate::store::archive_patch(&root, &plan_id);
-            crate::worktree::archive(&city_root, &workspace, &patch).await
+            crate::worktree::archive(&city_root, &workspace, &patch, &message).await
         }
     }
     .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -2802,6 +2922,27 @@ pub async fn finish_plan(plan: String, how: Disposition) -> Result<Plan, ServerF
     reconcile_wells(&kingdom);
 
     Ok(to_browser_in(&kingdom, plan))
+}
+
+/// The one commit a plan's work lands as: its title, as the King read it in
+/// the rail.
+///
+/// It goes into the King's history (or onto a pull request), so it is written
+/// to read like a commit he made himself. It names the work, never the tool
+/// that did it. A plan with no usable title falls back to the first line of
+/// the prompt that opened it.
+#[cfg(feature = "ssr")]
+fn commit_message(plan: &Plan) -> String {
+    let title = plan.title.trim();
+    if !title.is_empty() {
+        return title.to_string();
+    }
+    plan.prompt
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(72).collect())
+        .unwrap_or_else(|| "Update".to_string())
 }
 
 /// Every shared resource this kingdom knows about, and what each is doing.

@@ -202,9 +202,13 @@ impl MockModel {
         // they ask for a change -- and the revision loop, which is half of what
         // this scenario exists to rehearse, could never be exercised offline.
         let reviewing = brief.tools.iter().any(|t| t.name == "submit_review");
+        // A plan fixing a review's findings is the propose-approve-work path
+        // whatever its prompt hashes to, so that path can be rehearsed offline
+        // end to end: findings, Fix, proposal, approval, Push.
+        let fixing = brief.system_prompt.workspace.contains(FIXING_MARK);
         let scenario = if reviewing {
             Scenario::Review
-        } else if proposed_already(brief) && !approved(brief) {
+        } else if fixing || (proposed_already(brief) && !approved(brief)) {
             Scenario::Propose
         } else {
             Scenario::for_prompt(&prompt)
@@ -677,6 +681,10 @@ impl MockModel {
 /// is Kingdom's phrasing of a click rather than a prompt, and treating it as
 /// one would have every approved plan re-roll its scenario from a sentence the
 /// user never typed.
+/// Words only a fix plan's workspace block says. See
+/// `system_prompt::workspace_block`.
+const FIXING_MARK: &str = "You are fixing what a review of it found.";
+
 fn latest_prompt(brief: &Brief) -> String {
     brief
         .turns

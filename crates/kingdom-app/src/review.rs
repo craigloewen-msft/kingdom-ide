@@ -486,6 +486,13 @@ async fn default_branch(root: &Path, workspace: &Workspace) -> Option<Against> {
         candidates.push(format!("{}/{}", pr.remote, pr.base));
         candidates.push(pr.base.clone());
     }
+    // -- A fix to a pull request: the commit it was cut from ----------------
+    //
+    // What the King approves and pushes is the fix alone, so that is all the
+    // drawer shows. The pull request's own changes were the review's subject.
+    if let Some(pr) = workspace.mode.fixing() {
+        candidates.push(pr.head_sha.clone());
+    }
 
     // -- Local, in order of authority ----------------------------------------
     if let Some(declared) = &declared {
@@ -530,9 +537,15 @@ async fn default_branch(root: &Path, workspace: &Workspace) -> Option<Against> {
             _ => resolved,
         };
 
+        // A fix is measured from a commit, and a bare forty-character sha is
+        // not a name anyone reads; the pull request's number is.
+        let label = match workspace.mode.fixing() {
+            Some(pr) if name == pr.head_sha => format!("#{} at {}", pr.number, pr.short_sha()),
+            _ => name,
+        };
         return Some(Against {
             commit,
-            label: name,
+            label,
             note: None,
         });
     }

@@ -58,7 +58,9 @@ crates/
                     rather than by either side reaching into the other   (ssr)
     scan.rs         Filesystem scanning                      (ssr)
     github.rs       Reading open pull requests through `gh`. Read-only on
-                    purpose: nothing in Kingdom posts to GitHub        (ssr)
+                    purpose: nothing in Kingdom posts to GitHub. The one
+                    write -- pushing a finished fix to its pull request's
+                    branch -- is plain git, in worktree::push_fix  (ssr)
     events.rs       Publishing a plan's changes to its watchers, and a digest
                     of every plan to the rail                 (ssr)
     watch.rs        The chamber's push socket, and the rail's
@@ -91,7 +93,11 @@ crates/
     turns.rs        Which plans have a turn running in this process  (ssr)
     services.rs     The registry, the conversation with Docker, the ledger,
                     and the manifest writer                  (ssr)
-    worktree.rs     Preparing and disposing of a plan's workspace  (ssr)
+    worktree.rs     Preparing and disposing of a plan's workspace. A plan
+                    lands as ONE commit named for the plan, squashed and
+                    rebased in its own worktree, then fast-forwarded into the
+                    King's branch -- no merge commit, nothing naming Kingdom.
+                    A fix plan pushes that commit to its pull request  (ssr)
     llm/            Drafting plans with a model              (ssr)
                     mod.rs (Model/Provider traits, Brief, Reply/Answer),
                     system_prompt.rs (everything the model is told, ported from

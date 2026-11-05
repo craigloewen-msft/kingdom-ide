@@ -555,7 +555,7 @@ fn store_workspace(mode: &WorkspaceMode) {
             // Never the King's standing choice: a review opens from the pull
             // requests screen, not from the decree bar, so there is nothing
             // to remember for the next decree.
-            WorkspaceMode::PullRequest(_) => {}
+            WorkspaceMode::PullRequest(_) | WorkspaceMode::PullRequestFix(_) => {}
         }
     }
 

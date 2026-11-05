@@ -95,8 +95,14 @@ pub async fn prepare(
             git(city_root, &["worktree", "add", &dir_arg, b]).await?;
             b.clone()
         }
-        WorkspaceMode::PullRequest(pr) => {
-            let branch = review_branch(city_root, pr, &id, &dir_arg).await?;
+        WorkspaceMode::PullRequest(pr) | WorkspaceMode::PullRequestFix(pr) => {
+            let fixing = matches!(mode, WorkspaceMode::PullRequestFix(_));
+            let slug = if fixing {
+                format!("pr-{}-fix", pr.number)
+            } else {
+                format!("pr-{}-review", pr.number)
+            };
+            let branch = pull_request_branch(city_root, pr, &slug, &id, &dir_arg).await?;
             // The commit actually checked out, which is what the review is of.
             // Usually the one the King was shown; if somebody pushed in
             // between, it is the newer one, and the record says so.
@@ -104,16 +110,29 @@ pub async fn prepare(
             if let Ok(tip) = head_of(&dir).await {
                 pr.head_sha = tip;
             }
-            // Measured against the branch the pull request asks to land on,
-            // not whatever the King happens to have checked out: that is what
-            // the review is *of*. Recorded for the changes drawer; nothing is
-            // ever merged into it from here -- see `merge`.
+            // A review is measured against the branch the pull request asks to
+            // land on, not whatever the King happens to have checked out: that
+            // is what the review is *of*. Nothing is ever merged into it from
+            // here -- see `merge`.
+            //
+            // A fix is measured against the pull request's own tip, as a
+            // commit: what the King approves is the fix, not the pull request
+            // underneath it, and a sha is what `archive` needs to cut a patch
+            // of exactly the fix.
+            let (mode, base) = if fixing {
+                (
+                    WorkspaceMode::PullRequestFix(pr.clone()),
+                    pr.head_sha.clone(),
+                )
+            } else {
+                (WorkspaceMode::PullRequest(pr.clone()), pr.base.clone())
+            };
             return Ok(Workspace {
-                mode: WorkspaceMode::PullRequest(pr.clone()),
+                mode,
                 path: dir_arg,
                 branch: Some(branch),
                 id: Some(id),
-                base: Some(pr.base.clone()),
+                base: Some(base),
             });
         }
         WorkspaceMode::InPlace => unreachable!("handled above"),
@@ -207,7 +226,8 @@ fn is_name_clash(e: &WorktreeError) -> bool {
     message.contains("already exists") || message.contains("already used by worktree")
 }
 
-/// Fetches a pull request and checks it out into a worktree of its own.
+/// Fetches a pull request and checks it out into a worktree of its own, on a
+/// scratch branch named `slug` -- `pr-N-review` or `pr-N-fix`.
 ///
 /// # Why a ref of our own rather than `FETCH_HEAD`
 ///
@@ -223,9 +243,10 @@ fn is_name_clash(e: &WorktreeError) -> bool {
 /// The base branch is fetched too, best-effort, so the changes drawer can diff
 /// against the remote's view of it -- which is what GitHub shows -- rather
 /// than against a local copy that may be days stale.
-async fn review_branch(
+async fn pull_request_branch(
     city_root: &Path,
     pr: &kingdom_core::PullRequestRef,
+    slug: &str,
     id: &str,
     dir_arg: &str,
 ) -> Result<String, WorktreeError> {
@@ -236,8 +257,7 @@ async fn review_branch(
 
     // If somebody pushed since the King looked, the fetched tip wins: the
     // review is of what is actually there, and `prepare` records it.
-    let slug = format!("pr-{}-review", pr.number);
-    let result = fresh_branch_at(city_root, &slug, id, dir_arg, &scratch).await;
+    let result = fresh_branch_at(city_root, slug, id, dir_arg, &scratch).await;
     let _ = git(city_root, &["update-ref", "-d", &scratch]).await;
     result
 }
@@ -270,10 +290,19 @@ pub enum Finish {
 
 /// Lands a plan's work on the branch its workspace was cut from.
 ///
+/// `message` is the one commit the work lands as -- the plan's title. It is the
+/// King's commit in the King's history, so it reads like one he wrote: no
+/// merge commit, no branch name and nothing saying which tool made it.
+///
 /// Every failure stops the whole thing and leaves the city exactly as it was:
-/// a refused merge is aborted, so there is never a half-merged working tree for
-/// the user to discover later.
-pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, WorktreeError> {
+/// the work is squashed and rebased inside the plan's own worktree, and the
+/// city only ever sees a fast-forward, so there is never a half-merged working
+/// tree for the user to discover later.
+pub async fn merge(
+    city_root: &Path,
+    workspace: &Workspace,
+    message: &str,
+) -> Result<Finish, WorktreeError> {
     // A review is never landed by Kingdom. The pull request is somebody's
     // proposal to the project, and merging it is a decision the King makes on
     // GitHub, where the people who wrote it can see it made. The conversation
@@ -286,6 +315,11 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
              close this review.",
             pr.number
         )));
+    }
+
+    // A fix lands on the pull request, not on any branch of the King's.
+    if workspace.mode.fixing().is_some() {
+        return push_fix(city_root, workspace, message).await;
     }
 
     // Working in place, there is nothing to merge -- the work is already in the
@@ -310,9 +344,6 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
         ));
     };
 
-    let worktree = PathBuf::from(&workspace.path);
-    commit_pending(&worktree, "Kingdom: work in progress").await?;
-
     // Merging requires the base branch to be the one checked out here. Checking
     // it out ourselves would move the user's working copy out from under him --
     // precisely the collision this product exists to prevent.
@@ -328,32 +359,20 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
         )));
     }
 
-    // `--no-ff` because a plan is the unit of review: one merge commit per plan
-    // is what makes "what did that plan actually land?" answerable afterwards.
-    let message = format!("Merge {branch}");
-    let merged = git(city_root, &["merge", "--no-ff", "-m", &message, branch]).await;
+    let worktree = PathBuf::from(&workspace.path);
+    if let Squash::Diverged(why) = squash_onto(&worktree, base, message).await? {
+        return Ok(Finish::Diverged(why));
+    }
 
-    if let Err(e) = merged {
-        // Leave the city exactly as it was found. A half-merged tree the user
-        // discovers hours later is far worse than a refusal he reads now.
-        let conflicts = git(city_root, &["diff", "--name-only", "--diff-filter=U"])
-            .await
-            .unwrap_or_default();
-        let _ = git(city_root, &["merge", "--abort"]).await;
-
-        let mut refusal = e.to_string();
-        let paths: Vec<&str> = conflicts
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        if !paths.is_empty() {
-            refusal.push_str("\n\nConflicting files:\n");
-            for path in paths {
-                refusal.push_str(&format!("  {path}\n"));
-            }
-        }
-        return Ok(Finish::Diverged(refusal));
+    // Only ever a fast-forward: the plan's branch is now one commit on top of
+    // `base`. git still refuses if the King's own uncommitted edits are in the
+    // way, and that is his to clear rather than the court's, so it is a plain
+    // refusal in git's words.
+    if let Err(e) = git(city_root, &["merge", "--ff-only", "--quiet", branch]).await {
+        return Ok(Finish::Refused(format!(
+            "The work is ready to land on {base}, but git would not move {base} \
+             forward in your checkout: {e}"
+        )));
     }
 
     let commit = head_of(city_root).await?;
@@ -374,6 +393,299 @@ pub async fn merge(city_root: &Path, workspace: &Workspace) -> Result<Finish, Wo
     }))
 }
 
+/// What [`squash_onto`] left behind.
+enum Squash {
+    /// The worktree's branch is now at most one commit, sitting on `upstream`.
+    Ready,
+    /// Replaying the work onto `upstream` conflicted. The rebase was aborted,
+    /// so the worktree holds the work as one commit on its old base.
+    Diverged(String),
+}
+
+/// Makes a plan's work one commit, titled `message`, on top of `upstream`.
+///
+/// Done entirely inside the plan's own worktree, which is the point: the
+/// King's checkout is never the one left mid-rebase. `upstream` is anything
+/// git can resolve -- a branch, a sha, a scratch ref.
+///
+/// # Why squash
+///
+/// The court commits as it goes, under whatever messages it likes, and its
+/// branch may carry merges of the base it was told to catch up with. None of
+/// that is history the King wrote. One commit per plan, named for the plan, is
+/// what makes "what did that plan land?" answerable afterwards -- the job the
+/// old `--no-ff` merge commit did, without the merge.
+///
+/// # Why not `git merge --squash` in the city
+///
+/// Measured: it folds whatever the King has *staged* in his own checkout into
+/// the plan's commit. Rebasing here and fast-forwarding there cannot.
+async fn squash_onto(
+    worktree: &Path,
+    upstream: &str,
+    message: &str,
+) -> Result<Squash, WorktreeError> {
+    commit_pending(worktree, message).await?;
+
+    let fork = git(worktree, &["merge-base", "HEAD", upstream])
+        .await?
+        .trim()
+        .to_string();
+    let ahead = git(worktree, &["rev-list", "--count", &format!("{fork}..HEAD")])
+        .await?
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+    if ahead > 0 {
+        git(worktree, &["reset", "--soft", &fork]).await?;
+        // Commits that undo each other net to nothing, and nothing is not a
+        // commit worth making.
+        let staged = git(worktree, &["diff", "--cached", "--name-only"]).await?;
+        if !staged.trim().is_empty() {
+            git(worktree, &["commit", "--quiet", "-m", message]).await?;
+        }
+    }
+
+    if is_ancestor(worktree, upstream, "HEAD").await {
+        return Ok(Squash::Ready);
+    }
+
+    if let Err(e) = git(worktree, &["rebase", "--quiet", upstream]).await {
+        let conflicts = git(worktree, &["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap_or_default();
+        let _ = git(worktree, &["rebase", "--abort"]).await;
+
+        let mut refusal = e.to_string();
+        let paths: Vec<&str> = conflicts
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !paths.is_empty() {
+            refusal.push_str("\n\nConflicting files:\n");
+            for path in paths {
+                refusal.push_str(&format!("  {path}\n"));
+            }
+        }
+        return Ok(Squash::Diverged(refusal));
+    }
+    Ok(Squash::Ready)
+}
+
+/// Whether `ancestor` is already in `of`'s history.
+async fn is_ancestor(repo: &Path, ancestor: &str, of: &str) -> bool {
+    git(repo, &["merge-base", "--is-ancestor", ancestor, of])
+        .await
+        .is_ok()
+}
+
+/// How long a push may take before the King is told GitHub did not answer.
+const PUSH_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Commits a fix plan's work and pushes it to its pull request's branch.
+///
+/// The one place Kingdom writes to GitHub, and it does so the way the King
+/// would from a terminal: plain `git push` with his own credentials, **never
+/// forced**. If somebody pushed to the pull request while the fix was being
+/// made, the work is replayed onto their tip first; if that conflicts, it is a
+/// [`Finish::Diverged`] the court can be sent to settle, exactly like a local
+/// merge.
+///
+/// Anything GitHub refuses for want of permission is a [`Finish::Refused`] that
+/// says so, and the plan stays where it is -- the work is not lost because a
+/// push was not allowed.
+pub async fn push_fix(
+    city_root: &Path,
+    workspace: &Workspace,
+    message: &str,
+) -> Result<Finish, WorktreeError> {
+    let Some(pr) = workspace.mode.fixing() else {
+        return Ok(Finish::Refused(
+            "This plan is not fixing a pull request, so there is nothing to push it to."
+                .to_string(),
+        ));
+    };
+    if let Some(why) = pr.unpushable() {
+        return Ok(Finish::Refused(why));
+    }
+    let worktree = PathBuf::from(&workspace.path);
+    if !worktree.is_dir() {
+        return Ok(Finish::Refused(format!(
+            "This plan's checkout at {} is gone, so there is nothing to push.",
+            workspace.path
+        )));
+    }
+
+    // Where it goes. A pull request from this repository pushes to the
+    // remote it was fetched from; one from a fork pushes to the fork, spelled
+    // the way the King's remote is so his credentials answer for it.
+    let target = if pr.from_fork {
+        let url = git(city_root, &["remote", "get-url", &pr.remote])
+            .await
+            .map(|u| u.trim().to_string())
+            .unwrap_or_default();
+        match pr
+            .head_repository
+            .as_deref()
+            .and_then(|repo| crate::github::fork_url(&url, repo))
+        {
+            Some(fork) => fork,
+            None => {
+                return Ok(Finish::Refused(format!(
+                    "Pull request #{} comes from a fork, and Kingdom could not work out \
+                     where that fork is, so the fix was not pushed. Push it to `{}` by hand \
+                     from {}.",
+                    pr.number, pr.head, workspace.path
+                )))
+            }
+        }
+    } else {
+        pr.remote.clone()
+    };
+
+    // The pull request as it stands now, which may be ahead of what was
+    // checked out. A scratch ref for `review_branch`'s reason.
+    let scratch = format!(
+        "refs/kingdom/fetch/{}",
+        workspace.id.as_deref().unwrap_or("fix")
+    );
+    let spec = format!("+pull/{}/head:{scratch}", pr.number);
+    if let Err(e) = git(city_root, &["fetch", "--no-tags", &pr.remote, &spec]).await {
+        return Ok(Finish::Refused(format!(
+            "Could not read pull request #{} from {} before pushing, so nothing was \
+             pushed: {e}",
+            pr.number, pr.remote
+        )));
+    }
+    let squashed = squash_onto(&worktree, &scratch, message).await;
+    let tip = git(city_root, &["rev-parse", &scratch])
+        .await
+        .map(|t| t.trim().to_string());
+    let _ = git(city_root, &["update-ref", "-d", &scratch]).await;
+    if let Squash::Diverged(why) = squashed? {
+        return Ok(Finish::Diverged(format!(
+            "Pull request #{} has moved on since this fix began, and the fix does not \
+             apply cleanly on top of it.\n\n{why}",
+            pr.number
+        )));
+    }
+
+    let commit = head_of(&worktree).await?;
+    if tip.as_deref().is_ok_and(|t| *t == commit) {
+        return Ok(Finish::Refused(
+            "This plan changed nothing, so there is nothing to push. Archive it instead."
+                .to_string(),
+        ));
+    }
+
+    let refspec = format!("HEAD:refs/heads/{}", pr.head);
+    if let Err(said) = push(&worktree, &target, &refspec).await {
+        return Ok(push_refusal(pr, &said));
+    }
+
+    // Pushed, so the checkout is done with. `-D`: the scratch branch was never
+    // merged anywhere local, and its commit is safely on GitHub.
+    git(
+        city_root,
+        &["worktree", "remove", "--force", &workspace.path],
+    )
+    .await?;
+    if let Some(branch) = workspace
+        .branch
+        .as_deref()
+        .filter(|b| b.starts_with(BRANCH_PREFIX))
+    {
+        let _ = git(city_root, &["branch", "-D", branch]).await;
+    }
+
+    Ok(Finish::Settled(Outcome::Pushed {
+        number: pr.number,
+        branch: pr.head.clone(),
+        commit,
+    }))
+}
+
+/// Runs `git push`, never prompting, within [`PUSH_PATIENCE`]. `Err` carries
+/// what git said.
+async fn push(worktree: &Path, target: &str, refspec: &str) -> Result<(), String> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(["push", "--porcelain", target, refspec])
+        .current_dir(worktree)
+        // There is no terminal to type a password into. Without this a
+        // missing credential hangs until the timeout instead of saying so.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(PUSH_PATIENCE, command.output()).await {
+        Err(_) => {
+            return Err(format!(
+                "GitHub did not answer within {} seconds.",
+                PUSH_PATIENCE.as_secs()
+            ))
+        }
+        Ok(Err(e)) => return Err(format!("git could not be run: {e}")),
+        Ok(Ok(output)) => output,
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr).trim(),
+        String::from_utf8_lossy(&output.stdout).trim()
+    );
+    Err(said.trim().to_string())
+}
+
+/// What to tell the King when a push is refused.
+///
+/// Only git's own words for "the branch moved" make it a divergence the court
+/// can settle. Everything else is a refusal shown in GitHub's words; the
+/// permission cases -- the ones the King asked to be told about plainly -- get
+/// a sentence of their own above them.
+fn push_refusal(pr: &kingdom_core::PullRequestRef, said: &str) -> Finish {
+    let lower = said.to_lowercase();
+    if lower.contains("non-fast-forward") || lower.contains("fetch first") {
+        return Finish::Diverged(format!(
+            "Somebody pushed to `{}` while this fix was being pushed, so GitHub refused \
+             it rather than overwrite their work.\n\n{said}",
+            pr.head
+        ));
+    }
+    let denied = [
+        "permission to",
+        "permission denied",
+        "denied to",
+        "403",
+        "gh006",
+        "protected branch",
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "repository not found",
+        "write access",
+        "not allowed to push",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    if denied {
+        return Finish::Refused(format!(
+            "You don't have permission to push to `{}` on pull request #{}, so the fix \
+             was not pushed. The work is still here: get push access and press Push \
+             again, or archive this plan to keep it as a patch.\n\nGitHub said:\n{said}",
+            pr.head, pr.number
+        ));
+    }
+    Finish::Refused(format!(
+        "The push to `{}` on pull request #{} was refused, so the fix was not pushed. \
+         The work is still here.\n\ngit said:\n{said}",
+        pr.head, pr.number
+    ))
+}
+
 /// Sets a plan's work aside, preserved, and reclaims its checkout.
 ///
 /// The promise is that the checkout goes and the work does not: a patch of the
@@ -385,6 +697,7 @@ pub async fn archive(
     city_root: &Path,
     workspace: &Workspace,
     patch_path: &Path,
+    message: &str,
 ) -> Result<Finish, WorktreeError> {
     // Nothing was isolated, so there is no checkout to reclaim and no branch to
     // keep. Archiving is then purely a matter of record.
@@ -404,7 +717,7 @@ pub async fn archive(
     let worktree = PathBuf::from(&workspace.path);
     // Committed first, or `worktree remove --force` would throw the work away --
     // which would make archiving a destructive act wearing a gentle name.
-    commit_pending(&worktree, "Kingdom: archived work in progress").await?;
+    commit_pending(&worktree, message).await?;
 
     let tip = head_of(&worktree).await?;
 
@@ -841,7 +1154,7 @@ mod tests {
             // And the consequence that would outlive the plan: the commit both
             // endings make must not carry it.
             assert!(
-                !commit_pending(&workspace_root, "Kingdom: work in progress")
+                !commit_pending(&workspace_root, "Look at the sidebar")
                     .await
                     .unwrap(),
                 "{mode:?}: there must be nothing to commit, so nothing to land"
@@ -892,7 +1205,7 @@ mod tests {
 
         let before = head_of(root).await.unwrap();
 
-        let finish = merge(root, &workspace).await.unwrap();
+        let finish = merge(root, &workspace, "Tidy the sidebar").await.unwrap();
         // `Diverged` and not `Refused`: git was asked and declined, which is the
         // one merge refusal an agent can clear. The chamber offers to send the
         // court after the base branch on exactly this distinction, so a
@@ -945,7 +1258,7 @@ mod tests {
         // The King wandered off `main` in his own checkout, which is his to do.
         git(root, &["checkout", "-b", "experiment"]).await.unwrap();
 
-        let finish = merge(root, &workspace).await.unwrap();
+        let finish = merge(root, &workspace, "Tidy the sidebar").await.unwrap();
         let Finish::Refused(why) = finish else {
             panic!(
                 "a city on the wrong branch is refused, and is not a divergence \
@@ -962,7 +1275,7 @@ mod tests {
         // next move, and it stays `Refused` too.
         let mut baseless = workspace.clone();
         baseless.base = None;
-        let Finish::Refused(_) = merge(root, &baseless).await.unwrap() else {
+        let Finish::Refused(_) = merge(root, &baseless, "Tidy the sidebar").await.unwrap() else {
             panic!("a plan with no recorded base has no divergence to settle");
         };
     }
@@ -984,7 +1297,7 @@ mod tests {
         // can finish, and a UI that offers no way to tidy would strand the work.
         std::fs::write(worktree.join("tower.rs"), "fn build() {}").unwrap();
 
-        let finish = merge(root, &workspace).await.unwrap();
+        let finish = merge(root, &workspace, "Tidy the sidebar").await.unwrap();
         let Finish::Settled(Outcome::Merged { commit, into }) = finish else {
             panic!("a clean merge must settle as merged");
         };
@@ -1023,7 +1336,9 @@ mod tests {
         std::fs::write(worktree.join("folly.rs"), "fn doomed() {}").unwrap();
 
         let patch_path = dir.path().join("archive").join("plan-1.patch");
-        let finish = archive(root, &workspace, &patch_path).await.unwrap();
+        let finish = archive(root, &workspace, &patch_path, "Tidy the sidebar")
+            .await
+            .unwrap();
         let Finish::Settled(Outcome::Archived {
             branch,
             tip,
@@ -1173,7 +1488,9 @@ mod tests {
             .expect("the draft is readable while the worktree stands");
 
         let patch_path = dir.path().join("archive").join("plan-1.patch");
-        archive(root, &workspace, &patch_path).await.unwrap();
+        archive(root, &workspace, &patch_path, "Tidy the sidebar")
+            .await
+            .unwrap();
 
         assert!(
             !draft.exists(),
@@ -1217,7 +1534,9 @@ mod tests {
         std::fs::write(worktree.join("parser.rs"), "fn parse() {}").unwrap();
 
         let patch_path = dir.path().join("archive").join("plan-2.patch");
-        let finish = archive(root, &workspace, &patch_path).await.unwrap();
+        let finish = archive(root, &workspace, &patch_path, "Tidy the sidebar")
+            .await
+            .unwrap();
         let Finish::Settled(Outcome::Archived { pruned, .. }) = finish else {
             panic!("archiving must settle as archived");
         };
@@ -1272,6 +1591,9 @@ mod tests {
             head: "author".into(),
             head_sha: sha.into(),
             remote: "origin".into(),
+            from_fork: false,
+            head_repository: None,
+            maintainer_can_modify: false,
         }
     }
 
@@ -1319,7 +1641,7 @@ mod tests {
             .unwrap();
         let before = head_of(root).await.unwrap();
 
-        let finish = merge(root, &workspace).await.unwrap();
+        let finish = merge(root, &workspace, "Tidy the sidebar").await.unwrap();
         assert!(matches!(finish, Finish::Refused(ref why) if why.contains("does not merge")));
         assert_eq!(head_of(root).await.unwrap(), before, "main moved");
         assert!(
@@ -1403,5 +1725,389 @@ mod tests {
             Finish::Settled(Outcome::Reviewed { patch: None, .. })
         ));
         assert!(!patch_path.exists());
+    }
+
+    /// Every commit message reachable from HEAD, newest first.
+    async fn log(repo: &Path) -> Vec<String> {
+        git(repo, &["log", "--format=%s"])
+            .await
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The King asked for commits that read like his own: one per plan, named
+    /// for the plan, with no merge commit and nothing about the tool.
+    #[tokio::test]
+    async fn a_merge_lands_as_one_plain_commit_named_for_the_plan() {
+        let dir = repo().await;
+        let root = dir.path();
+        let workspace = prepare(root, &WorkspaceMode::Fresh, "tidy-the-sidebar")
+            .await
+            .unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+
+        // The court commits as it likes, and leaves some work uncommitted.
+        commit(&worktree, "a.rs", "fn a() {}").await;
+        commit(&worktree, "b.rs", "fn b() {}").await;
+        std::fs::write(worktree.join("c.rs"), "fn c() {}").unwrap();
+
+        let finish = merge(root, &workspace, "Tidy the sidebar").await.unwrap();
+        assert!(matches!(finish, Finish::Settled(Outcome::Merged { .. })));
+
+        assert_eq!(log(root).await, vec!["Tidy the sidebar", "first"]);
+        let everything = git(root, &["log", "--format=%an %ae %s %b"]).await.unwrap();
+        assert!(
+            !everything.to_lowercase().contains("kingdom/")
+                && !everything.contains("Kingdom")
+                && !everything.contains("Merge"),
+            "no trace of the tool in the King's history: {everything}"
+        );
+        for file in ["a.rs", "b.rs", "c.rs"] {
+            assert!(root.join(file).is_file(), "{file} landed");
+        }
+    }
+
+    /// The King's branch moved on while the plan worked, without touching the
+    /// same lines: the work is replayed on top and still lands as one commit,
+    /// with nothing left mid-rebase anywhere.
+    #[tokio::test]
+    async fn a_base_that_moved_cleanly_is_caught_up_without_a_merge_commit() {
+        let dir = repo().await;
+        let root = dir.path();
+        let workspace = prepare(root, &WorkspaceMode::Fresh, "tidy-the-sidebar")
+            .await
+            .unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+
+        commit(&worktree, "tower.rs", "fn tower() {}").await;
+        commit(root, "wall.rs", "fn wall() {}").await;
+
+        let finish = merge(root, &workspace, "Raise the tower").await.unwrap();
+        assert!(matches!(finish, Finish::Settled(Outcome::Merged { .. })));
+        assert_eq!(
+            log(root).await,
+            vec!["Raise the tower", "edit wall.rs", "first"]
+        );
+        assert!(root.join("tower.rs").is_file() && root.join("wall.rs").is_file());
+        assert_eq!(
+            git(root, &["status", "--porcelain"]).await.unwrap().trim(),
+            ""
+        );
+    }
+
+    /// The King's own *staged* work must never be swept into a plan's commit.
+    /// The reason the city only ever fast-forwards.
+    #[tokio::test]
+    async fn the_kings_staged_work_stays_his() {
+        let dir = repo().await;
+        let root = dir.path();
+        let workspace = prepare(root, &WorkspaceMode::Fresh, "tidy-the-sidebar")
+            .await
+            .unwrap();
+        commit(&PathBuf::from(&workspace.path), "tower.rs", "fn tower() {}").await;
+
+        std::fs::write(root.join("mine.rs"), "fn mine() {}").unwrap();
+        git(root, &["add", "mine.rs"]).await.unwrap();
+
+        merge(root, &workspace, "Raise the tower").await.unwrap();
+        let landed = git(root, &["show", "--name-only", "--format=", "HEAD"])
+            .await
+            .unwrap();
+        assert_eq!(
+            landed.trim(),
+            "tower.rs",
+            "only the plan's work is in its commit"
+        );
+        assert!(git(root, &["status", "--porcelain"])
+            .await
+            .unwrap()
+            .contains("A  mine.rs"));
+    }
+
+    /// [`repo_with_a_pull_request`], with the pull request's branch also on
+    /// the remote under its own name, as GitHub has it -- which is what a fix
+    /// is pushed to. Returns the bare remote's path too.
+    async fn repo_with_a_pushable_pull_request() -> (tempfile::TempDir, String, PathBuf) {
+        let (dir, sha) = repo_with_a_pull_request().await;
+        let remote = dir.path().join(".remote.git");
+        git(&remote, &["update-ref", "refs/heads/author", &sha])
+            .await
+            .unwrap();
+        (dir, sha, remote)
+    }
+
+    /// Somebody else pushes to the pull request: GitHub moves the branch and
+    /// its `pull/N/head` together.
+    async fn push_to_the_pull_request(root: &Path, remote: &Path, name: &str, body: &str) {
+        let other = root.join(".someone-else");
+        let remote_arg = remote.to_string_lossy().to_string();
+        let other_arg = other.to_string_lossy().to_string();
+        git(
+            root,
+            &["clone", "-q", "-b", "author", &remote_arg, &other_arg],
+        )
+        .await
+        .unwrap();
+        for args in [
+            vec!["config", "user.email", "ada@example.test"],
+            vec!["config", "user.name", "Ada"],
+        ] {
+            git(&other, &args).await.unwrap();
+        }
+        commit(&other, name, body).await;
+        git(
+            &other,
+            &["push", "-q", "origin", "author", "author:refs/pull/7/head"],
+        )
+        .await
+        .unwrap();
+    }
+
+    fn fixing_seven(sha: &str) -> WorkspaceMode {
+        WorkspaceMode::PullRequestFix(pull_seven(sha))
+    }
+
+    /// A fix is cut from the pull request's own tip, on a branch of its own,
+    /// and measured from that tip -- so the drawer shows the fix alone.
+    #[tokio::test]
+    async fn a_fix_is_cut_from_the_pull_requests_tip() {
+        let (dir, sha, _) = repo_with_a_pushable_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &fixing_seven("stale"), "").await.unwrap();
+
+        assert_eq!(head_of(Path::new(&workspace.path)).await.unwrap(), sha);
+        assert_eq!(workspace.branch.as_deref(), Some("kingdom/pr-7-fix"));
+        assert_eq!(workspace.base.as_deref(), Some(sha.as_str()));
+        assert_eq!(
+            workspace.mode.fixing().map(|p| p.head_sha.as_str()),
+            Some(sha.as_str())
+        );
+        assert!(
+            workspace.mode.pull_request().is_none(),
+            "a fix is not a review"
+        );
+
+        std::fs::write(
+            Path::new(&workspace.path).join("login.rs"),
+            "fn login(ok: bool) {}",
+        )
+        .unwrap();
+        let summary = crate::review::changes(&workspace).await;
+        let paths: Vec<&str> = summary.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["login.rs"], "only the fix: {summary:?}");
+    }
+
+    /// The whole of the feature: finishing a fix puts one plain commit on the
+    /// pull request's branch on GitHub, and clears the checkout away.
+    #[tokio::test]
+    async fn finishing_a_fix_pushes_one_commit_to_the_pull_request() {
+        let (dir, sha, remote) = repo_with_a_pushable_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &fixing_seven(&sha), "").await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        commit(&worktree, "login.rs", "fn login(user: &str) {}").await;
+        std::fs::write(worktree.join("tests.rs"), "#[test] fn t() {}").unwrap();
+
+        let finish = merge(root, &workspace, "Fix #7: Add login").await.unwrap();
+        let Finish::Settled(Outcome::Pushed {
+            number,
+            branch,
+            commit,
+        }) = finish
+        else {
+            panic!("a clean fix must settle as pushed");
+        };
+        assert_eq!((number, branch.as_str()), (7, "author"));
+
+        let tip = git(&remote, &["rev-parse", "refs/heads/author"])
+            .await
+            .unwrap();
+        assert_eq!(
+            tip.trim(),
+            commit,
+            "the pull request's branch holds the fix"
+        );
+        assert_eq!(
+            git(&remote, &["log", "--format=%s", "-2", "author"])
+                .await
+                .unwrap(),
+            "Fix #7: Add login\nAdd login\n",
+            "one plain commit on top of the author's"
+        );
+        assert!(!worktree.exists(), "a pushed fix's checkout is disposed of");
+        assert!(!git(root, &["branch", "--list", "kingdom/*"])
+            .await
+            .unwrap()
+            .contains("pr-7-fix"));
+        assert_eq!(
+            git(root, &["for-each-ref", "refs/kingdom"])
+                .await
+                .unwrap()
+                .trim(),
+            "",
+            "no scratch ref is left behind"
+        );
+    }
+
+    /// The case the King named: no permission to push is said plainly, and
+    /// the work stays where it is so nothing is lost.
+    #[tokio::test]
+    async fn a_push_github_refuses_for_permission_is_said_plainly() {
+        let (dir, sha, remote) = repo_with_a_pushable_pull_request().await;
+        let root = dir.path();
+        let hook = remote.join("hooks").join("pre-receive");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho 'Permission to o/r.git denied to someone.' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let workspace = prepare(root, &fixing_seven(&sha), "").await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        commit(&worktree, "login.rs", "fn login(user: &str) {}").await;
+
+        let Finish::Refused(why) = merge(root, &workspace, "Fix #7").await.unwrap() else {
+            panic!("a refused push must be refused, not settled or diverged");
+        };
+        assert!(why.contains("don't have permission"), "{why}");
+        assert!(
+            why.contains("Permission to o/r.git denied"),
+            "GitHub's words: {why}"
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", "author"]).await.unwrap().trim(),
+            sha,
+            "nothing reached the branch"
+        );
+        assert!(
+            worktree.join("login.rs").is_file(),
+            "the work is still here"
+        );
+    }
+
+    /// A fork closed to maintainers is refused before git is asked anything.
+    #[tokio::test]
+    async fn a_fork_closed_to_maintainers_is_refused_before_pushing() {
+        let (dir, sha, remote) = repo_with_a_pushable_pull_request().await;
+        let root = dir.path();
+        let mut pr = pull_seven(&sha);
+        pr.from_fork = true;
+        pr.head_repository = Some("ada/r".into());
+        let mut workspace = prepare(root, &WorkspaceMode::PullRequestFix(pr.clone()), "")
+            .await
+            .unwrap();
+        workspace.mode = WorkspaceMode::PullRequestFix(pr);
+        commit(Path::new(&workspace.path), "login.rs", "fn login() { ok }").await;
+
+        let Finish::Refused(why) = merge(root, &workspace, "Fix #7").await.unwrap() else {
+            panic!("must refuse");
+        };
+        assert!(why.contains("Allow edits by maintainers"), "{why}");
+        assert_eq!(
+            git(&remote, &["rev-parse", "author"]).await.unwrap().trim(),
+            sha
+        );
+    }
+
+    /// Somebody pushed to the pull request meanwhile, elsewhere in the code:
+    /// the fix goes on top of their work. Never forced, never lost.
+    #[tokio::test]
+    async fn a_pull_request_that_moved_cleanly_takes_the_fix_on_top() {
+        let (dir, sha, remote) = repo_with_a_pushable_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &fixing_seven(&sha), "").await.unwrap();
+        commit(
+            Path::new(&workspace.path),
+            "login.rs",
+            "fn login(u: &str) {}",
+        )
+        .await;
+        push_to_the_pull_request(root, &remote, "docs.md", "how to log in").await;
+
+        let finish = merge(root, &workspace, "Fix #7").await.unwrap();
+        assert!(
+            matches!(finish, Finish::Settled(Outcome::Pushed { .. })),
+            "clean"
+        );
+        assert_eq!(
+            git(&remote, &["log", "--format=%s", "-3", "author"])
+                .await
+                .unwrap(),
+            "Fix #7\nedit docs.md\nAdd login\n"
+        );
+    }
+
+    /// The same, touching the same lines: a divergence the court can be sent to
+    /// settle, and the author's push is untouched.
+    #[tokio::test]
+    async fn a_pull_request_that_moved_into_the_fix_is_a_divergence() {
+        let (dir, sha, remote) = repo_with_a_pushable_pull_request().await;
+        let root = dir.path();
+        let workspace = prepare(root, &fixing_seven(&sha), "").await.unwrap();
+        let worktree = PathBuf::from(&workspace.path);
+        commit(&worktree, "login.rs", "fn login(mine: &str) {}").await;
+        push_to_the_pull_request(root, &remote, "login.rs", "fn login(theirs: u8) {}").await;
+        let theirs = git(&remote, &["rev-parse", "author"]).await.unwrap();
+
+        let Finish::Diverged(why) = merge(root, &workspace, "Fix #7").await.unwrap() else {
+            panic!("a conflicting move must be a divergence");
+        };
+        assert!(
+            why.contains("login.rs") && why.contains("moved on"),
+            "{why}"
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", "author"]).await.unwrap(),
+            theirs
+        );
+        let rebasing = git(&worktree, &["rev-parse", "--git-path", "rebase-merge"])
+            .await
+            .unwrap();
+        let rebasing = worktree.join(rebasing.trim());
+        assert!(
+            !rebasing.exists()
+                && git(&worktree, &["status", "--porcelain"])
+                    .await
+                    .unwrap()
+                    .trim()
+                    .is_empty(),
+            "nothing is left mid-rebase"
+        );
+        assert!(std::fs::read_to_string(worktree.join("login.rs"))
+            .unwrap()
+            .contains("mine"));
+    }
+
+    /// Only git's words for a moved branch are a divergence; the rest are the
+    /// King's to read, and permission ones say so first.
+    #[test]
+    fn push_refusals_are_sorted_by_whose_move_it_is() {
+        let pr = pull_seven("abc");
+        assert!(matches!(
+            push_refusal(&pr, "! [rejected] HEAD -> author (non-fast-forward)"),
+            Finish::Diverged(_)
+        ));
+        for said in [
+            "remote: Permission to o/r.git denied to ada.\nfatal: ... 403",
+            "remote: error: GH006: Protected branch update failed for refs/heads/author.",
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "git@github.com: Permission denied (publickey).",
+        ] {
+            let Finish::Refused(why) = push_refusal(&pr, said) else {
+                panic!("{said}");
+            };
+            assert!(why.contains("don't have permission"), "{said} -> {why}");
+        }
+        let Finish::Refused(why) = push_refusal(&pr, "fatal: the remote hung up") else {
+            panic!("an unknown refusal is still a refusal");
+        };
+        assert!(why.contains("the remote hung up") && !why.contains("permission"));
     }
 }

@@ -27,6 +27,15 @@ revising and re-submitting. Done offers only **Close the review**
 Nothing reaches GitHub: the server only reads through `gh`, and the plan's own
 commands run with `gh` logged out and every `git push` refused.
 
+Acting on the findings is a separate plan. **Fix these findings** on the card
+calls `api::begin_fix`, which opens an ordinary `Propose` plan on the pull
+request's own branch (`WorkspaceMode::PullRequestFix`), briefed with the
+findings. It proposes, the King approves, it works — and its Done offers
+**Push to #N** instead of a local merge: `worktree::push_fix` squashes the work
+into one commit, replays it onto the pull request's current tip and pushes it,
+never forced. A refusal for want of permission is said plainly; a pull request
+that moved under the fix is a divergence, with a "Catch up" button.
+
 Nothing is parked while he reads. The turn genuinely ends, so a server restart
 mid-review loses nothing — the proposal is on the plan and the plan is on disk.
 That is why `propose_plan` does not work like `ask_user_question`, which holds a

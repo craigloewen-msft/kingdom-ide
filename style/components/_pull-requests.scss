@@ -258,3 +258,7 @@
 
   &:hover { border-color: t.$gold-dim; color: t.$gold; }
 }
+
+// The findings card's way to act on them. Gold like a proposal's accept,
+// because it is the same weight of decision: it starts work.
+.report-fix { white-space: nowrap; }

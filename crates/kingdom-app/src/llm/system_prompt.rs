@@ -370,6 +370,24 @@ fn workspace_block(
                 pr.base,
             );
         }
+        (Some(branch), true) if workspace.mode.fixing().is_some() => {
+            let pr = workspace.mode.fixing().expect("matched above");
+            let _ = write!(
+                out,
+                "This is an isolated worktree holding pull request #{} (\"{}\") at commit {}, \
+                 on a branch {branch} of its own. You are fixing what a review of it found. \
+                 Diff against {} to see your own changes so far. When the user finishes this \
+                 plan, Kingdom commits your work and pushes it to `{}`, the pull request's \
+                 branch, for them: do not push, open pull requests or post to GitHub \
+                 yourself. The user's own checkout is elsewhere and is not affected by what \
+                 you do here.",
+                pr.number,
+                pr.title,
+                pr.short_sha(),
+                pr.short_sha(),
+                pr.head,
+            );
+        }
         (Some(branch), true) => out.push_str(&format!(
             "This is an isolated worktree on branch {branch}. It is yours: the user's own \
              checkout is elsewhere and is not affected by what you do here."
@@ -649,7 +667,8 @@ const REVIEW: &str = "You are in Review mode. You are reviewing someone else's p
      the browser. You must not change it: do not edit its files, commit, push, or post \
      anything to GitHub (no `gh pr review`, `gh pr comment`, `gh pr merge`, no comments \
      anywhere). This checkout cannot push and `gh` is logged out here, on purpose. If you \
-     would fix something, describe the fix in your report.\n\n\
+     would fix something, describe the fix in your report -- the user can ask for your \
+     findings to be fixed on the pull request afterwards, and that is done separately.\n\n\
      How to review:\n\
      1. Read what the pull request claims to do and what the user asked you to look at, then \
         `git log` and `git diff` against its base to see what changed.\n\
