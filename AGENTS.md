@@ -246,9 +246,12 @@ is invisible until a plan is halfway through a job:
 - **The GitHub CLI (`gh`), logged in**, but only for the pull requests screen.
   Kingdom reads open pull requests through it and holds no token of its own;
   without it the screen says how to install it. `KINGDOM_GH` overrides which
-  `gh` runs. Kingdom never *writes* to GitHub, and a review plan's own commands
-  run with `gh` logged out and `git push` refused — see
-  `tools::child_environment`.
+  `gh` runs. Kingdom posts nothing to GitHub — no reviews, no comments — and a
+  review plan's own commands run with `gh` logged out and `git push` refused
+  (see `tools::child_environment`). Its one write is finishing a plan that
+  *fixes* a review's findings: that pushes one commit to the pull request's
+  branch with plain `git push` and the King's own git credentials, never
+  forced (`worktree::push_fix`).
 - **Whatever the city itself needs to run.** That is the *project's*
   prerequisite, not Kingdom's, and Kingdom cannot install it.
 

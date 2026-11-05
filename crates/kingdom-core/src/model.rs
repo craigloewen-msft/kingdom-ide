@@ -485,6 +485,15 @@ pub enum WorkspaceMode {
     /// must never be merged into anything, and it is diffed against the pull
     /// request's base on the remote rather than the King's local `main`.
     PullRequest(crate::PullRequestRef),
+    /// A pull request's own branch, checked out to fix what a review found.
+    ///
+    /// Not a [`WorkspaceMode::PullRequest`] with a flag, because everything a
+    /// review guards against is exactly what this one is for: it is worked on
+    /// under an approved proposal, and finishing it pushes to the pull
+    /// request's branch rather than refusing to land anything. Keeping the two
+    /// apart is what lets [`WorkspaceMode::pull_request`] go on meaning "a
+    /// review", so no review guard had to learn a second case.
+    PullRequestFix(crate::PullRequestRef),
 }
 
 impl WorkspaceMode {
@@ -492,6 +501,14 @@ impl WorkspaceMode {
     pub fn pull_request(&self) -> Option<&crate::PullRequestRef> {
         match self {
             WorkspaceMode::PullRequest(pr) => Some(pr),
+            _ => None,
+        }
+    }
+
+    /// The pull request this workspace is fixing, if it is a fix plan.
+    pub fn fixing(&self) -> Option<&crate::PullRequestRef> {
+        match self {
+            WorkspaceMode::PullRequestFix(pr) => Some(pr),
             _ => None,
         }
     }
@@ -505,6 +522,7 @@ impl WorkspaceMode {
             WorkspaceMode::Branch(b) => format!("branch: {b}"),
             WorkspaceMode::InPlace => "in place".to_string(),
             WorkspaceMode::PullRequest(pr) => format!("pull request #{}", pr.number),
+            WorkspaceMode::PullRequestFix(pr) => format!("fixing pull request #{}", pr.number),
         }
     }
 }
@@ -1461,7 +1479,9 @@ impl Plan {
     /// conversation claims to have landed and cannot say where.
     pub fn settle(&mut self, outcome: Outcome) {
         self.status = match &outcome {
-            Outcome::Merged { .. } => PlanStatus::Merged,
+            // The work landed -- on the pull request's branch rather than a
+            // local one, which the outcome's summary says.
+            Outcome::Merged { .. } | Outcome::Pushed { .. } => PlanStatus::Merged,
             // Not a sixth status, for the reason `Attention` is not one: a
             // closed review is over and its work set aside, which is what
             // `Archived` already means to the rail and the map.
@@ -3114,6 +3134,13 @@ pub enum Outcome {
         #[serde(default)]
         patch: Option<String>,
     },
+    /// A fix plan's work was committed and pushed to its pull request's
+    /// branch. `commit` is the new tip of `branch` on GitHub.
+    Pushed {
+        number: u64,
+        branch: String,
+        commit: String,
+    },
 }
 
 impl Outcome {
@@ -3150,6 +3177,11 @@ impl Outcome {
                     short_sha(head)
                 ),
             },
+            Outcome::Pushed {
+                number,
+                branch,
+                commit,
+            } => format!("Pushed to {branch} on #{number} as {}.", short_sha(commit)),
         }
     }
 }
@@ -5119,6 +5151,9 @@ mod pull_request_review_tests {
             head: "fix-login".into(),
             head_sha: "0123456789".into(),
             remote: "origin".into(),
+            from_fork: false,
+            head_repository: None,
+            maintainer_can_modify: false,
         };
         let workspace = Workspace {
             mode: WorkspaceMode::PullRequest(pr),
@@ -5193,6 +5228,37 @@ mod pull_request_review_tests {
         let back: Plan = serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
         assert_eq!(back, plan);
         assert_eq!(back.workspace.mode.label(), "pull request #42");
+    }
+
+    /// A fix plan is not a review: it proposes like any plan, and finishing it
+    /// lands -- on GitHub -- rather than setting anything aside.
+    #[test]
+    fn a_fix_plan_is_an_ordinary_plan_that_lands_by_pushing() {
+        let reviewing = review();
+        let pr = reviewing.workspace.mode.pull_request().unwrap().clone();
+        let mut workspace = reviewing.workspace.clone();
+        workspace.mode = WorkspaceMode::PullRequestFix(pr);
+        let mut plan = Plan::opened(
+            PlanId::new("plan-8"),
+            CityId::new("c1"),
+            "Fix what the review found",
+            &ModelChoice::new("mock", None),
+            workspace,
+            Isolation::Shared,
+        );
+        assert!(!plan.is_review(), "a fix is not a review");
+        assert_eq!(plan.permissions, Permissions::Propose);
+        assert_eq!(plan.workspace.mode.fixing().map(|p| p.number), Some(42));
+        assert_eq!(plan.workspace.mode.label(), "fixing pull request #42");
+
+        let outcome = Outcome::Pushed {
+            number: 42,
+            branch: "fix-login".into(),
+            commit: "abcdef0123456".into(),
+        };
+        assert_eq!(outcome.summary(), "Pushed to fix-login on #42 as abcdef0.");
+        plan.settle(outcome);
+        assert_eq!(plan.status, PlanStatus::Merged);
     }
 }
 

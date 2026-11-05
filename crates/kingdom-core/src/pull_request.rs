@@ -20,6 +20,17 @@
 //! its own type, its own tool (`submit_review`) and its own remit
 //! ([`crate::Permissions::Review`]), and no door from any of them leads to
 //! [`crate::Permissions::Full`].
+//!
+//! # Fixing what a review found
+//!
+//! Acting on findings is a *different plan*: the King asks for it from the
+//! findings card, and it opens as an ordinary proposing plan on the pull
+//! request's own branch ([`crate::WorkspaceMode::PullRequestFix`]), briefed by
+//! [`fix_prompt`]. It earns `Full` the way every plan does, by a proposal the
+//! King approves, and the review it came from stays read-only. Finishing it is
+//! the one time Kingdom writes to GitHub: it pushes the fix to the pull
+//! request's branch, never forced. Nothing is ever posted as a comment or a
+//! review.
 
 use crate::model::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -55,6 +66,14 @@ pub struct PullRequest {
     /// it; filled when a single pull request is read to be reviewed.
     #[serde(default)]
     pub body: String,
+    /// `owner/name` of the repository the head branch is on. Filled when a
+    /// single pull request is read; `None` in a listing.
+    #[serde(default)]
+    pub head_repository: Option<String>,
+    /// Whether a fork lets maintainers push to its branch. Filled when a
+    /// single pull request is read.
+    #[serde(default)]
+    pub maintainer_can_modify: bool,
 }
 
 /// GitHub's `reviewDecision`, for the list's badge.
@@ -123,13 +142,26 @@ pub struct PullRequestRef {
     /// The branch it asks to be merged into, which the changes drawer diffs
     /// against.
     pub base: String,
-    /// The branch the change is on, for display only. Nothing is ever pushed
-    /// to it.
+    /// The branch the change is on. A review never pushes to it; a fix plan
+    /// pushes to it exactly once, when the King finishes it -- see
+    /// [`crate::WorkspaceMode::PullRequestFix`].
     pub head: String,
     /// The commit that was checked out. What the review is *of*.
     pub head_sha: String,
     /// The git remote the pull request was fetched from, e.g. `origin`.
     pub remote: String,
+    /// True when the change lives on a fork rather than on the repository
+    /// itself, so pushing to it means pushing to somebody else's repository.
+    #[serde(default)]
+    pub from_fork: bool,
+    /// `owner/name` of the repository the head branch lives on, when GitHub
+    /// said. Only read for a fork, to know where a fix must be pushed.
+    #[serde(default)]
+    pub head_repository: Option<String>,
+    /// Whether the fork's owner lets maintainers push to the branch. A fork
+    /// that says no cannot take a fix from anyone but its author.
+    #[serde(default)]
+    pub maintainer_can_modify: bool,
 }
 
 impl PullRequestRef {
@@ -144,7 +176,33 @@ impl PullRequestRef {
             head: pull.head.clone(),
             head_sha: pull.head_sha.clone(),
             remote: remote.into(),
+            from_fork: pull.from_fork,
+            head_repository: pull.head_repository.clone(),
+            maintainer_can_modify: pull.maintainer_can_modify,
         }
+    }
+
+    /// Why a fix cannot be pushed to this pull request, when that is already
+    /// known before anything is tried.
+    ///
+    /// Only one case is knowable in advance: a fork whose owner has not allowed
+    /// maintainers to edit it. Everything else -- a protected branch, an
+    /// account without write access -- is only learned by asking GitHub, at
+    /// push time.
+    pub fn unpushable(&self) -> Option<String> {
+        (self.from_fork && !self.maintainer_can_modify).then(|| {
+            format!(
+                "Pull request #{} comes from a fork{} whose author has not allowed \
+                 maintainers to edit it, so a fix cannot be pushed to `{}`. Ask the author \
+                 to tick \"Allow edits by maintainers\", or suggest the changes on GitHub.",
+                self.number,
+                self.head_repository
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default(),
+                self.head,
+            )
+        })
     }
 
     /// The commit, abbreviated the way git does.
@@ -293,6 +351,49 @@ pub fn review_prompt(pull: &PullRequest, notes: &str) -> String {
     out
 }
 
+/// The words that open a plan fixing what a review found.
+///
+/// The findings are carried whole, because this plan is a new conversation and
+/// the review's transcript is not in it. Quoted, for the reason the author's
+/// description is quoted in [`review_prompt`]: a heading in the report must not
+/// pass for structure in the King's own message.
+pub fn fix_prompt(pull: &PullRequestRef, review: &PullRequestReview) -> String {
+    let mut out = format!(
+        "Fix what the review found in pull request #{} \u{2014} \"{}\".\n\n\
+         This checkout is the pull request's own branch, `{}`, at {}. It asks to merge into \
+         `{}`. Address every finding below that is a real problem; if you think one is \
+         wrong, say so in your proposal rather than changing the code for it.\n\n\
+         When I finish this plan, Kingdom commits your work and pushes it to `{}` on GitHub \
+         for me. Do not push, and do not post anything to GitHub yourself.\n\n\
+         ---\n\nThe review's findings ({}):\n\n",
+        pull.number,
+        pull.title.trim(),
+        pull.head,
+        pull.short_sha(),
+        pull.base,
+        pull.head,
+        review.recommendation.label(),
+    );
+    let body = review.body.trim();
+    if body.is_empty() {
+        out.push_str("> ");
+        out.push_str(review.title.trim());
+        out.push('\n');
+    } else {
+        for line in body.lines() {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The title a fix plan opens with, until its proposal renames it.
+pub fn fix_title(pull: &PullRequestRef) -> String {
+    format!("Fix #{}: {}", pull.number, pull.title.trim())
+}
+
 /// The title a review plan is opened with.
 ///
 /// Fixed for the plan's life: unlike a proposal, a review does not rename the
@@ -322,7 +423,57 @@ mod tests {
             decision: None,
             from_fork: false,
             body: "## Why\nThe button did nothing.".into(),
+            head_repository: None,
+            maintainer_can_modify: false,
         }
+    }
+
+    fn findings() -> PullRequestReview {
+        PullRequestReview {
+            title: "Works, with one bug".into(),
+            body: "# Works, with one bug\n\n## Bug\nThe button double-submits.".into(),
+            recommendation: Recommendation::Changes,
+            at: None,
+            revision: 1,
+        }
+    }
+
+    /// The fix plan is a new conversation, so everything the review found must
+    /// travel in its first message -- and it must say who pushes.
+    #[test]
+    fn the_fix_prompt_carries_the_findings_and_says_who_pushes() {
+        let r = PullRequestRef::of(&pull(), "origin");
+        let text = fix_prompt(&r, &findings());
+        assert!(text.contains("#42"));
+        assert!(text.contains("> ## Bug"), "findings are quoted: {text}");
+        assert!(text.contains("> The button double-submits."));
+        assert!(text.contains("Needs changes"));
+        assert!(text.contains("Do not push"));
+        assert!(text.contains("`fix-login`"));
+        assert_eq!(fix_title(&r), "Fix #42: Fix the login form");
+    }
+
+    /// Only a fork that refuses maintainer edits is known to be unpushable
+    /// before trying.
+    #[test]
+    fn a_fork_closed_to_maintainers_is_unpushable_up_front() {
+        let mut r = PullRequestRef::of(&pull(), "origin");
+        assert!(r.unpushable().is_none(), "same repository: try it");
+        r.from_fork = true;
+        r.head_repository = Some("ada/r".into());
+        let why = r.unpushable().expect("a closed fork cannot be pushed to");
+        assert!(why.contains("ada/r") && why.contains("fix-login"), "{why}");
+        r.maintainer_can_modify = true;
+        assert!(r.unpushable().is_none());
+    }
+
+    /// A reference recorded before forks were tracked still loads.
+    #[test]
+    fn an_older_reference_still_loads() {
+        let old = r#"{"number":7,"title":"t","url":"u","base":"main","head":"h",
+                      "head_sha":"abc","remote":"origin"}"#;
+        let r: PullRequestRef = serde_json::from_str(old).unwrap();
+        assert!(!r.from_fork && r.head_repository.is_none() && !r.maintainer_can_modify);
     }
 
     /// The prompt carries everything the model cannot fetch for itself: the

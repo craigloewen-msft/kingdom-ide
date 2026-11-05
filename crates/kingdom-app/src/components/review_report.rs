@@ -2,14 +2,14 @@
 //!
 //! The sibling of [`super::ProposalCard`] and deliberately not a variant of it:
 //! a proposal asks for authority and ends in "Start with this", and nothing
-//! here grants anything. What the King does with findings happens outside
-//! Kingdom -- on GitHub, in his own words -- so the card's only controls are
-//! for reading: the link to the pull request, and the way back to the
-//! conversation that produced it.
+//! here grants anything. The King can act on findings two ways: himself, on
+//! GitHub, or by asking for a fix -- which opens a *new* plan that has to earn
+//! its authority the ordinary way, with a proposal he approves. The review
+//! itself never gains any.
 //!
 //! Like the proposal card, **nothing here talks to the server**. Asking a
-//! follow-up is the chamber's composer, and closing the review is its Done
-//! picker, both already owned by `ConversationBody`.
+//! follow-up is the chamber's composer, closing the review is its Done picker,
+//! and asking for a fix is `on_fix` -- all owned by `ConversationBody`.
 
 use crate::components::Prose;
 use kingdom_core::{PullRequestRef, PullRequestReview};
@@ -20,6 +20,12 @@ pub fn ReviewReport(
     review: PullRequestReview,
     /// The pull request the findings are about, as it was checked out.
     pull: PullRequestRef,
+    /// Asks for a plan that fixes what was found, on the pull request itself.
+    on_fix: Callback<()>,
+    /// True while that plan is being opened, so the button cannot be pressed
+    /// twice into two fixes.
+    #[prop(into)]
+    fixing: Signal<bool>,
 ) -> impl IntoView {
     // Opens full, for the proposal's reason: reading this is the King's one
     // job at this moment. Collapsible, because the deeds behind it -- the
@@ -60,6 +66,16 @@ pub fn ReviewReport(
             <Prose text=without_headline(&review.body) class="proposal-body"/>
 
             <div class="proposal-actions">
+                <button
+                    class="proposal-accept report-fix"
+                    title="Open a new plan that proposes how to fix these findings. Once you \
+                           approve it and the work is done, finishing it pushes the fix to \
+                           the pull request's branch."
+                    disabled=move || fixing.get()
+                    on:click=move |_| on_fix.run(())
+                >
+                    {move || if fixing.get() { "Opening\u{2026}" } else { "Fix these findings" }}
+                </button>
                 <a
                     class="report-open"
                     href=pull.url.clone()
@@ -70,8 +86,8 @@ pub fn ReviewReport(
                     {format!("Open #{} on GitHub \u{2197}", pull.number)}
                 </a>
                 <span class="proposal-hint">
-                    "Nothing has been posted to GitHub. Ask about any of it below, or \
-                     close the review with Done."
+                    "Nothing has been posted to GitHub. Ask about any of it below, have \
+                     the court fix it on the pull request, or close the review with Done."
                 </span>
             </div>
         </div>

@@ -10,7 +10,9 @@
 //!
 //! It never writes to GitHub. The list is read through `gh` on the server, the
 //! review is a plan in Kingdom, and the findings stay here for the King to act
-//! on himself. See `kingdom_app::github` for why that is the whole surface.
+//! on -- himself, or by asking the court for a fix from the findings card,
+//! which is a separate plan whose finished work is pushed to the pull request.
+//! See `kingdom_app::github` for why reading is the whole of this surface.
 //!
 //! # Which model, which fence
 //!

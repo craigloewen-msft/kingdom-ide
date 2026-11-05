@@ -6,8 +6,8 @@
 //! rebuild the conversation exactly.
 
 use crate::api::{
-    annotate_file, annotate_proposal, approve_plan, delete_entry, draft_plan, end_terminal,
-    finish_plan, get_kingdom, plan_briefing, plan_delete_file, plan_write_file, say,
+    annotate_file, annotate_proposal, approve_plan, begin_fix, delete_entry, draft_plan,
+    end_terminal, finish_plan, get_kingdom, plan_briefing, plan_delete_file, plan_write_file, say,
     send_file_notes, send_notes, set_aside_plan, stop_plan, unqueue, withdraw_file_note,
     withdraw_note,
 };
@@ -559,6 +559,9 @@ fn ConversationBody(
     // like the workspace it lives on.
     let pull = StoredValue::new(plan.workspace.mode.pull_request().cloned());
     let reviewing = pull.with_value(Option::is_some);
+    // The pull request this plan is fixing, if it is a fix. Settled at open,
+    // like the review's. Finishing such a plan pushes rather than merges.
+    let fixing = StoredValue::new(plan.workspace.mode.fixing().cloned());
     // What this plan wants of the King, read off the plan itself rather than
     // from `state.attention`. The chamber holds the whole plan, so it has the
     // better source; the cache exists for the rail, which does not.
@@ -691,6 +694,32 @@ fn ConversationBody(
     // else happens.
     let offer_catch_up = Memo::new(move |_| {
         !is_subagent && live.with(|p| p.as_ref().is_some_and(merge_wants_the_court))
+    });
+
+    // Fixing a review's findings opens a new plan beside the review, and the
+    // King is taken straight to it: that is where the proposal will appear.
+    let navigate = leptos_router::hooks::use_navigate();
+    let fix = Action::new(move |review: &PlanId| {
+        let review = review.to_string();
+        let navigate = navigate.clone();
+        async move {
+            match begin_fix(review).await {
+                Ok(plan) => {
+                    state.error.set(None);
+                    let href = format!("/plan/{}", plan.id);
+                    // Inserted rather than refetched, for `PromptBar`'s reason:
+                    // the chamber must find the plan in its own copy of the
+                    // kingdom the moment it lands.
+                    state.kingdom.update(|k| k.insert(plan));
+                    navigate(&href, Default::default());
+                }
+                Err(e) => state.error.set(Some(e.to_string())),
+            }
+        }
+    });
+    let fixing_pending = fix.pending();
+    let on_fix = Callback::new(move |_: ()| {
+        fix.dispatch(id.get_value());
     });
 
     // Accepting a plan makes no model call of its own -- it grants, and then
@@ -1510,9 +1539,17 @@ fn ConversationBody(
                                     class="nudge-btn"
                                     title="Ask the court to merge the latest base branch in \
                                            and settle the conflicts"
-                                    on:click=move |_| decree(catch_up_decree(&base.get_value()))
+                                    on:click=move |_| decree(
+                                        fixing
+                                            .get_value()
+                                            .map(|pr| catch_up_with_pull_request(&pr))
+                                            .unwrap_or_else(|| catch_up_decree(&base.get_value())),
+                                    )
                                 >
-                                    {move || format!("\u{2387} Catch up with {}", base.get_value())}
+                                    {move || match fixing.get_value() {
+                                        Some(pr) => format!("\u{2387} Catch up with #{}", pr.number),
+                                        None => format!("\u{2387} Catch up with {}", base.get_value()),
+                                    }}
                                 </button>
                             </Show>
                         </div>
@@ -1526,7 +1563,12 @@ fn ConversationBody(
                     // its reason. Never both: a review cannot propose.
                     <Show when=move || findings.get().is_some()>
                         {move || findings.get().zip(pull.get_value()).map(|(review, pull)| view! {
-                            <ReviewReport review=review pull=pull/>
+                            <ReviewReport
+                                review=review
+                                pull=pull
+                                on_fix=on_fix
+                                fixing=fixing_pending
+                            />
                         })}
                     </Show>
 
@@ -1675,7 +1717,7 @@ fn ConversationBody(
                         </div>
 
                         // Two rows and no confirmation dialog: both endings are recoverable
-                        // -- one makes a revertable merge commit, the other keeps a patch of
+                        // -- one lands a single revertable commit, the other keeps a patch of
                         // the work -- and a modal would spend the user's attention to
                         // prevent nothing.
                         <Show when={move || showing_done.get()}>
@@ -1715,12 +1757,29 @@ fn ConversationBody(
                                             class="done-row"
                                             on:click=move |_| close_with(Disposition::Merge)
                                         >
+                                            // A fix lands on its pull request, on
+                                            // GitHub, and the row says so: this is
+                                            // the one button in Kingdom that writes
+                                            // there.
                                             <span class="done-name">
-                                                {move || format!("Merge into {}", base.get_value())}
+                                                {move || match fixing.get_value() {
+                                                    Some(pr) => format!("Push to #{}", pr.number),
+                                                    None => format!("Merge into {}", base.get_value()),
+                                                }}
                                             </span>
                                             <span class="done-detail">
-                                                "Lands this work in the project and clears the \
-                                                 worktree. Stops and explains if git refuses."
+                                                {move || match fixing.get_value() {
+                                                    Some(pr) => format!(
+                                                        "Commits this work and pushes it to {} on \
+                                                         GitHub. Never forced; stops and explains \
+                                                         if GitHub refuses.",
+                                                        pr.head
+                                                    ),
+                                                    None => "Lands this work in the project and \
+                                                             clears the worktree. Stops and \
+                                                             explains if git refuses."
+                                                        .to_string(),
+                                                }}
                                             </span>
                                         </button>
                                     </li>
@@ -2429,6 +2488,25 @@ fn catch_up_decree(base: &str) -> String {
          latest {base} into this branch and resolve every conflict, then check \
          that the project still builds and its tests still pass. Tell me when it \
          is ready to merge."
+    )
+}
+
+/// What the "Catch up" button says to a court whose fix could not be pushed
+/// because the pull request moved on under it.
+///
+/// Names the ref to fetch, because the pull request's branch may live on a
+/// fork the checkout has no remote for -- `pull/N/head` is on the base
+/// repository either way, and is exactly what Kingdom replays the fix onto.
+fn catch_up_with_pull_request(pr: &kingdom_core::PullRequestRef) -> String {
+    format!(
+        "Pushing this fix to pull request #{number} was refused: somebody pushed to `{head}` \
+         since this fix began, and the fix does not apply cleanly on top. Run \
+         `git fetch {remote} pull/{number}/head` and merge `FETCH_HEAD` into this branch, \
+         resolve every conflict, then check that the project still builds and its tests \
+         still pass. Do not push. Tell me when it is ready.",
+        number = pr.number,
+        head = pr.head,
+        remote = pr.remote,
     )
 }
 
@@ -3742,6 +3820,29 @@ mod tests {
     /// A plan cut from a release branch and told to merge `main` would be sent
     /// at the wrong history -- and would do it, competently, which is the worst
     /// version of this bug. The workspace records its base; this spends it.
+    #[test]
+    fn catching_up_with_a_pull_request_names_the_ref_to_fetch() {
+        let pr = kingdom_core::PullRequestRef {
+            number: 42,
+            title: "Fix login".into(),
+            url: "https://github.com/o/r/pull/42".into(),
+            base: "main".into(),
+            head: "fix-login".into(),
+            head_sha: "abc".into(),
+            remote: "upstream".into(),
+            from_fork: true,
+            head_repository: Some("ada/r".into()),
+            maintainer_can_modify: true,
+        };
+        let decree = catch_up_with_pull_request(&pr);
+        assert!(
+            decree.contains("git fetch upstream pull/42/head"),
+            "{decree}"
+        );
+        assert!(decree.contains("`fix-login`") && decree.contains("Do not push"));
+        assert!(decree.contains("builds") && decree.contains("tests"));
+    }
+
     #[test]
     fn catching_up_names_the_branch_this_plan_was_cut_from() {
         let decree = catch_up_decree("release/2.1");

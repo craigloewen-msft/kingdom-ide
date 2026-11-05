@@ -156,6 +156,16 @@ pub fn file_plan(root: &Path, plan: &Plan, body: &str) -> std::io::Result<PathBu
             pr.short_sha()
         );
     }
+    if let Some(pr) = plan.workspace.mode.fixing() {
+        let _ = writeln!(
+            out,
+            "- **Fixes pull request**: [#{}]({}) from `{}`, on `{}`",
+            pr.number,
+            pr.url,
+            pr.short_sha(),
+            pr.head
+        );
+    }
     if let Some(review) = &plan.pr_review {
         let _ = writeln!(
             out,

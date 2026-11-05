@@ -11,6 +11,11 @@
 //! from speaking for him in public. A review plan's own commands are cut off
 //! from GitHub as well; see `tools::child_environment`.
 //!
+//! The one write Kingdom makes is not here: finishing a plan that fixes a
+//! pull request pushes its commit to that pull request's branch, with plain
+//! `git push` and the King's own credentials, never forced. That is
+//! `worktree::push_fix`; [`fork_url`] only works out where to.
+//!
 //! Every ordinary absence -- no `gh`, not logged in, no GitHub remote -- is an
 //! [`PullRequestList::Unavailable`] with what to do about it, never an `Err`.
 
@@ -42,6 +47,11 @@ const MOST_LISTED: usize = 100;
 const LIST_FIELDS: &str = "number,title,author,headRefName,baseRefName,headRefOid,url,isDraft,\
                            additions,deletions,changedFiles,updatedAt,reviewDecision,\
                            isCrossRepository";
+
+/// What reading one pull request asks for beyond the listing: the
+/// description, and where its branch lives and who may push to it -- which a
+/// fix needs to know before any work is done on it.
+const VIEW_EXTRA: &str = "body,headRepository,headRepositoryOwner,maintainerCanModify";
 
 /// Every open pull request on the repository this project's remotes point at.
 pub async fn list(city_root: &Path) -> PullRequestList {
@@ -83,7 +93,7 @@ pub async fn list(city_root: &Path) -> PullRequestList {
 /// another.
 pub async fn view(city_root: &Path, number: u64) -> Result<(PullRequest, String), String> {
     let repository = repository(city_root).await?;
-    let fields = format!("{LIST_FIELDS},body");
+    let fields = format!("{LIST_FIELDS},{VIEW_EXTRA}");
     let json = gh(
         city_root,
         &[
@@ -233,7 +243,43 @@ fn parse_pull(v: &Value) -> Option<PullRequest> {
         decision: ReviewDecision::from_github(&text("reviewDecision")),
         from_fork: flag("isCrossRepository"),
         body: text("body"),
+        head_repository: head_repository(v),
+        maintainer_can_modify: flag("maintainerCanModify"),
     })
+}
+
+/// `owner/name` of the head branch's repository, from the two objects `gh`
+/// splits it into. `None` when either is missing -- a listing, or a fork that
+/// has since been deleted.
+fn head_repository(v: &Value) -> Option<String> {
+    let name = v.get("headRepository")?.get("name")?.as_str()?;
+    let owner = v.get("headRepositoryOwner")?.get("login")?.as_str()?;
+    (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
+/// The URL a fork can be pushed to, spelled the way the King's own remote is.
+///
+/// Built from the remote rather than from a fixed `https://github.com/` so the
+/// push uses whatever the King already authenticates with: an ssh remote gets
+/// an ssh URL for the fork, and an https remote an https one. Swaps only the
+/// `owner/name` path, keeping host, user and port. `None` when the remote's
+/// URL is not one this can read.
+pub(crate) fn fork_url(remote_url: &str, repository: &str) -> Option<String> {
+    let url = remote_url.trim().trim_end_matches('/');
+    let suffix = if url.ends_with(".git") { ".git" } else { "" };
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let prefix = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (host, _) = rest.split_once('/')?;
+            format!("{scheme}://{host}/")
+        }
+        None => {
+            let (host, _) = url.rsplit_once(':')?;
+            format!("{host}:")
+        }
+    };
+    slug_of(remote_url)?;
+    Some(format!("{prefix}{}{suffix}", repository.trim()))
 }
 
 /// `git remote -v`, or nothing.
@@ -357,6 +403,56 @@ mod tests {
         ] {
             assert_eq!(slug_of(url).as_deref(), Some("o/r"), "{url}");
         }
+    }
+
+    /// Reading one pull request also learns where its branch lives and
+    /// whether a maintainer may push to it.
+    #[test]
+    fn a_viewed_pull_request_says_where_its_branch_lives() {
+        let v: Value = serde_json::from_str(
+            r#"{"number": 3, "isCrossRepository": true, "maintainerCanModify": true,
+                "headRepository": {"id": "x", "name": "kingdom"},
+                "headRepositoryOwner": {"id": "y", "login": "ada"}}"#,
+        )
+        .unwrap();
+        let pull = parse_pull(&v).unwrap();
+        assert_eq!(pull.head_repository.as_deref(), Some("ada/kingdom"));
+        assert!(pull.from_fork && pull.maintainer_can_modify);
+
+        let listed = parse_pull(&serde_json::json!({"number": 4})).unwrap();
+        assert_eq!(listed.head_repository, None);
+        assert!(!listed.maintainer_can_modify);
+    }
+
+    /// A fork is pushed to in the same scheme the King's remote uses, so his
+    /// existing credentials answer for it.
+    #[test]
+    fn a_forks_url_keeps_the_remotes_own_shape() {
+        for (remote, fork) in [
+            (
+                "https://github.com/Crown/kingdom.git",
+                "https://github.com/ada/kingdom.git",
+            ),
+            (
+                "https://github.com/Crown/kingdom",
+                "https://github.com/ada/kingdom",
+            ),
+            (
+                "git@github.com:Crown/kingdom.git",
+                "git@github.com:ada/kingdom.git",
+            ),
+            (
+                "ssh://git@github.com:22/Crown/kingdom",
+                "ssh://git@github.com:22/ada/kingdom",
+            ),
+        ] {
+            assert_eq!(
+                fork_url(remote, "ada/kingdom").as_deref(),
+                Some(fork),
+                "{remote}"
+            );
+        }
+        assert_eq!(fork_url("/some/local/path", "ada/kingdom"), None);
     }
 
     #[test]
